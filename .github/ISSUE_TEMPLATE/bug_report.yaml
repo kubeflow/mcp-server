@@ -1,6 +1,6 @@
 name: Bug Report
 description: Report a bug in Kubeflow MCP Server
-labels: [bug]
+labels: ["kind/bug", "lifecycle/needs-triage"]
 body:
   - type: textarea
     id: description

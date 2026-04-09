@@ -1,0 +1,27 @@
+name: DCO
+
+on:
+  pull_request_target:
+    branches:
+      - main
+    types:
+      - edited
+      - opened
+      - reopened
+      - synchronize
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  pull-requests: read
+
+jobs:
+  dco:
+    name: DCO
+    runs-on: ubuntu-latest
+    steps:
+      - uses: tisonkun/actions-dco@v1.2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
