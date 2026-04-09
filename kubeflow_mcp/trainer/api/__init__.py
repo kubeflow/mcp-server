@@ -12,29 +12,36 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Trainer API tools.
-
-Maps to kubeflow.trainer.TrainerClient methods.
-"""
+"""Trainer API tools."""
 
 from kubeflow_mcp.trainer.api.discovery import (
     get_runtime,
-    get_runtime_packages,
     get_training_job,
     list_runtimes,
     list_training_jobs,
 )
 from kubeflow_mcp.trainer.api.lifecycle import (
     delete_training_job,
-    resume_training_job,
-    suspend_training_job,
+    update_training_job,
 )
 from kubeflow_mcp.trainer.api.monitoring import (
     get_training_events,
     get_training_logs,
     wait_for_training,
 )
-from kubeflow_mcp.trainer.api.planning import estimate_resources, get_cluster_resources
+from kubeflow_mcp.trainer.api.planning import (
+    check_compatibility,
+    estimate_resources,
+    get_cluster_resources,
+    pre_flight,
+)
+from kubeflow_mcp.trainer.api.platform import (
+    create_runtime,
+    delete_runtime,
+    inspect_controller,
+    inspect_crd,
+    patch_runtime,
+)
 from kubeflow_mcp.trainer.api.training import (
     fine_tune,
     run_container_training,
@@ -42,25 +49,25 @@ from kubeflow_mcp.trainer.api.training import (
 )
 
 __all__ = [
-    # planning.py
+    "pre_flight",
+    "check_compatibility",
     "get_cluster_resources",
     "estimate_resources",
-    # training.py
     "fine_tune",
     "run_custom_training",
     "run_container_training",
-    # discovery.py
     "list_training_jobs",
     "get_training_job",
     "list_runtimes",
     "get_runtime",
-    "get_runtime_packages",
-    # monitoring.py
     "get_training_logs",
     "get_training_events",
     "wait_for_training",
-    # lifecycle.py
     "delete_training_job",
-    "suspend_training_job",
-    "resume_training_job",
+    "update_training_job",
+    "inspect_crd",
+    "inspect_controller",
+    "patch_runtime",
+    "create_runtime",
+    "delete_runtime",
 ]

@@ -14,8 +14,8 @@ We encourage the judicious use of AI/LLM tools; please refer to the [Kubeflow AI
 1. Fork the repository
 2. Clone your fork:
    ```bash
-   git clone https://github.com/<your-username>/kubeflow-mcp-server.git
-   cd kubeflow-mcp-server
+   git clone https://github.com/<your-username>/mcp-server.git
+   cd mcp-server
    ```
 
 3. Set up development environment:

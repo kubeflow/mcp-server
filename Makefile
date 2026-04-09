@@ -14,10 +14,15 @@ uv: ## Install UV
 	}
 
 .PHONY: verify
-verify: ## Run linting, formatting and type checking
+verify: install-dev ## Run linting and formatting checks
 	@uv lock --check
 	@uv run ruff check .
 	@uv run ruff format --check .
+
+.PHONY: format
+format: ## Auto-fix lint and formatting issues
+	@uv run ruff check --fix .
+	@uv run ruff format .
 
 .PHONY: test-python
 test-python: ## Run Python unit tests
@@ -29,3 +34,21 @@ install-dev: uv ## Install dependencies and tools
 	@echo "Syncing dependencies with uv..."
 	@uv sync --all-extras
 	@echo "Environment is ready."
+
+TRANSPORT ?= stdio
+
+.PHONY: inspector
+inspector: install-dev ## Launch MCP Inspector (TRANSPORT=stdio|http|sse)
+ifeq ($(TRANSPORT),stdio)
+	@npx @modelcontextprotocol/inspector uv run kubeflow-mcp serve
+else ifeq ($(TRANSPORT),sse)
+	@echo "Start the server first in another terminal:"
+	@echo "  uv run kubeflow-mcp serve --transport sse"
+	@echo ""
+	@npx @modelcontextprotocol/inspector --transport sse --server-url $(or $(SERVER_URL),http://127.0.0.1:8000/sse)
+else
+	@echo "Start the server first in another terminal:"
+	@echo "  uv run kubeflow-mcp serve --transport http"
+	@echo ""
+	@npx @modelcontextprotocol/inspector --transport http --server-url $(or $(SERVER_URL),http://127.0.0.1:8000/mcp)
+endif

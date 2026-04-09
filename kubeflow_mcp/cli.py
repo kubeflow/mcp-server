@@ -35,35 +35,51 @@ def cli() -> None:
 @click.option(
     "--clients",
     "-c",
-    default="trainer",
-    help="Comma-separated client modules (trainer, optimizer, hub)",
+    default=None,
+    help="Comma-separated client modules (trainer, optimizer, hub). "
+    "Falls back to KUBEFLOW_MCP_CLIENTS env var, config file, then 'trainer'.",
 )
 @click.option(
     "--persona",
     "-p",
-    default="ml-engineer",
+    default=None,
     type=click.Choice(["readonly", "data-scientist", "ml-engineer", "platform-admin"]),
-    help="Persona for tool filtering",
+    help="Persona for tool filtering. "
+    "Falls back to KUBEFLOW_MCP_PERSONA env var, config file, then 'readonly'.",
 )
 @click.option(
     "--transport",
     "-t",
-    default="stdio",
-    type=click.Choice(["stdio", "http"]),
-    help="MCP transport protocol",
+    default=None,
+    type=click.Choice(["stdio", "http", "sse"]),
+    help="MCP transport protocol. Falls back to MCP_TRANSPORT env var, config file, then 'stdio'.",
 )
 @click.option(
     "--log-level",
     "-l",
-    default="INFO",
+    default=None,
     type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR"]),
-    help="Logging level",
+    help="Logging level. Falls back to LOG_LEVEL env var, config file, then 'INFO'.",
+)
+@click.option(
+    "--mode",
+    "-m",
+    default="full",
+    type=click.Choice(["full", "progressive", "semantic"]),
+    help="Tool loading mode: full (all tools), progressive (hierarchical discovery), semantic (embedding search)",
 )
 @click.option(
     "--log-format",
     default=None,
     type=click.Choice(["json", "console"]),
-    help="Log format (auto-detects if not specified)",
+    help="Log format (auto-detects if not specified). Falls back to LOG_FORMAT env var, config file.",
+)
+@click.option(
+    "--instruction-tier",
+    default=None,
+    type=click.Choice(["full", "compact", "minimal"]),
+    help="Instruction verbosity: full (all guidance), compact (no resource refs), minimal (tool names only). "
+    "Falls back to KUBEFLOW_MCP_INSTRUCTION_TIER env var, config file, then 'full'.",
 )
 @click.option(
     "--no-banner",
@@ -71,30 +87,93 @@ def cli() -> None:
     default=False,
     help="Hide FastMCP startup banner",
 )
+@click.option(
+    "--auth-token",
+    default=None,
+    help="Bearer token for HTTP auth (dev/staging). "
+    "Falls back to KUBEFLOW_MCP_AUTH_TOKEN env var, config file. "
+    "Ignored for stdio transport.",
+)
 def serve(
-    clients: str,
-    persona: str,
-    transport: str,
-    log_level: str,
+    clients: str | None,
+    persona: str | None,
+    transport: str | None,
+    mode: str,
+    log_level: str | None,
     log_format: str | None,
+    instruction_tier: str | None,
     no_banner: bool,
+    auth_token: str | None,
 ) -> None:
-    """Start the MCP server."""
+    """Start the MCP server.
+
+    Options fall back to env vars / config file (~/.kubeflow-mcp.yaml) when
+    not provided on the command line.  See ``kubeflow_mcp.core.config`` for the
+    full precedence chain: CLI flag > env var > config file > built-in default.
+    """
+    from kubeflow_mcp.core.auth import build_auth_provider
+    from kubeflow_mcp.core.config import load_config
     from kubeflow_mcp.core.logging import setup_logging
-    from kubeflow_mcp.core.server import create_server
+    from kubeflow_mcp.core.resilience import configure_circuit_breaker
+    from kubeflow_mcp.core.server import configure_resilience, create_server
+
+    cfg = load_config()
+
+    clients = clients or ",".join(cfg.server.clients)
+    persona = persona or cfg.server.persona
+    transport = transport or cfg.server.transport
+    instruction_tier = instruction_tier or cfg.server.instruction_tier
+    log_level = log_level or cfg.logging.level
+    log_format = log_format or cfg.logging.format
+
+    if auth_token:
+        cfg.auth.auth_token = auth_token
 
     logger = setup_logging(level=log_level, format=log_format)
     logger.info(
         "Starting kubeflow-mcp",
-        extra={"clients": clients, "persona": persona, "transport": transport},
+        extra={
+            "clients": clients,
+            "persona": persona,
+            "transport": transport,
+            "mode": mode,
+            "instruction_tier": instruction_tier,
+        },
     )
 
+    configure_resilience(
+        rate_limit=cfg.resilience.rate_limit,
+        rate_capacity=cfg.resilience.rate_capacity,
+    )
+    configure_circuit_breaker(
+        failure_threshold=cfg.resilience.cb_failure_threshold,
+        recovery_timeout=cfg.resilience.cb_recovery_timeout,
+    )
+
+    auth_provider = None
+    if transport != "stdio":
+        auth_provider = build_auth_provider(cfg.auth)
+        if auth_provider is None:
+            logger.warning(
+                "HTTP transport with no auth configured — server is open. "
+                "Set --auth-token or KUBEFLOW_MCP_AUTH_TOKEN for bearer auth, "
+                "or KUBEFLOW_MCP_JWKS_URI for JWT verification."
+            )
+
     client_list = [c.strip() for c in clients.split(",")]
-    server = create_server(clients=client_list, persona=persona)
+    server = create_server(
+        clients=client_list,
+        persona=persona,
+        mode=mode,
+        instruction_tier=instruction_tier,
+        auth_provider=auth_provider,
+    )
 
     show_banner = not no_banner
     if transport == "stdio":
         server.run(show_banner=show_banner)
+    elif transport == "sse":
+        server.run(transport="sse", show_banner=show_banner)
     else:
         server.run(transport="streamable-http", show_banner=show_banner)
 
@@ -127,7 +206,7 @@ def status() -> None:
     "-b",
     default="ollama",
     type=click.Choice(["ollama"]),
-    help="Agent backend (ollama, openai, anthropic)",
+    help="Agent backend",
 )
 @click.option(
     "--model",
@@ -153,7 +232,7 @@ def agent(backend: str, model: str, mode: str, thinking: bool) -> None:
             from kubeflow_mcp.agents.ollama import main as ollama_main
         except ImportError:
             click.echo("Error: Agent dependencies not installed.", err=True)
-            click.echo("Install with: pip install kubeflow-mcp[agents]", err=True)
+            click.echo("Install with: pip install ollama", err=True)
             raise SystemExit(1) from None
 
         import sys

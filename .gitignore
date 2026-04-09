@@ -1,75 +1,32 @@
-# Python
+# IDEs
+.vscode/
+.idea/
+__debug_bin
+.DS_Store
+*.swp
+*~
+
+# Python cache files
 __pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
 *.egg-info/
-.installed.cfg
-*.egg
+
+# Build artifacts
+build/
+dist/
+
+# Testing / coverage
+.coverage
+coverage.xml
+coverage.json
+htmlcov/
+
+# Documentation build
+docs/_build/
+
+# Environment / secrets
+.env
+.env.*
 
 # Virtual environments
 .venv/
 venv/
-ENV/
-env/
-
-# uv
-.uv/
-uv.lock
-
-# IDE
-.idea/
-.vscode/
-__debug_bin
-*.swp
-*.swo
-*~
-
-# Testing
-.pytest_cache/
-.coverage
-htmlcov/
-.tox/
-.nox/
-
-# Type checking
-.mypy_cache/
-.pytype/
-
-# Jupyter
-.ipynb_checkpoints/
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Benchmarks
-benchmark-results.json
-.benchmarks/
-
-# Local dev
-.env
-.env.local
-*.local
-
-# Build artifacts
-*.whl
-
-# Docs build output
-docs/_build/
-
-# Test artifacts
-coverage.json
