@@ -69,7 +69,7 @@ We use [Conventional Commits](https://www.conventionalcommits.org/):
 [optional body]
 ```
 
-**Types:** feat, fix, docs, style, refactor, perf, test, build, ci, chore
+**Types:** feat, fix, revert, chore
 
 **Examples:**
 - `feat(trainer): add create_training_job tool`
