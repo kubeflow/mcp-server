@@ -31,8 +31,12 @@ This MCP server enables LLM agents (Claude, Cursor, etc.) to interact with Kubef
 ## Quick Start
 
 ```bash
-# Install
-pip install kubeflow-mcp[trainer]
+# Install (trainer + optimizer included by default)
+pip install kubeflow-mcp
+
+# Install with hub or spark extras
+pip install kubeflow-mcp[hub]
+pip install kubeflow-mcp[spark]
 
 # Run
 kubeflow-mcp serve --clients trainer
@@ -46,7 +50,7 @@ The project uses `uv` and a `Makefile` to manage the development environment.
 # Setup development environment
 make install-dev
 
-# Run verification (lint, format, type-check)
+# Run verification (lint, format)
 make verify
 
 # Run unit tests

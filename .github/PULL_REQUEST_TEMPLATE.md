@@ -6,16 +6,13 @@
 
 - [ ] feat: New feature
 - [ ] fix: Bug fix
-- [ ] docs: Documentation
-- [ ] refactor: Code refactoring
-- [ ] test: Tests
-- [ ] ci: CI/CD changes
+- [ ] revert: Revert a change
+- [ ] chore: Maintenance / tooling
 
 ## Checklist
 
-- [ ] Tests pass locally (`uv run pytest`)
-- [ ] Linting passes (`uv run ruff check .`)
-- [ ] Types check (`uv run mypy src/`)
+- [ ] Tests pass locally (`make test-python`)
+- [ ] Linting passes (`make verify`)
 - [ ] Documentation updated (if applicable)
 - [ ] Commit messages follow conventional format
 
