@@ -19,13 +19,13 @@ dependencies = [
     "pydantic>=2.0",
     "pyyaml>=6.0",
     "click>=8.0",
+    "kubeflow>=0.4.0",
 ]
 
 [project.optional-dependencies]
-trainer = ["kubeflow>=0.4.0"]
-optimizer = ["kubeflow>=0.4.0"]
 hub = ["kubeflow[hub]>=0.4.0"]
-all = ["kubeflow[hub]>=0.4.0"]
+spark = ["kubeflow[spark]>=0.4.0"]
+all = ["kubeflow[hub]>=0.4.0", "kubeflow[spark]>=0.4.0"]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
