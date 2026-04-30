@@ -17,6 +17,7 @@
 import logging
 import os
 import tempfile
+import uuid
 from collections.abc import Callable
 from typing import Any
 
@@ -114,7 +115,7 @@ def _make_train_func(script: str, func_args: dict[str, Any] | None = None) -> Ca
         wrapped += f"    {line}\n"
 
     script_dir = _get_script_dir()
-    script_path = os.path.join(script_dir, "_mcp_training_script.py")
+    script_path = os.path.join(script_dir, f"_mcp_train_{uuid.uuid4().hex[:8]}.py")
     with open(script_path, "w") as f:
         f.write(wrapped)
 
@@ -137,7 +138,11 @@ def _get_client(namespace: str | None = None) -> Any:
 
 
 def _inject_ownership_label(options: list) -> list:
-    """Append the MCP ownership label to the options list."""
+    """Merge the MCP ownership label into existing Labels or append a new one."""
+    for opt in options:
+        if isinstance(opt, Labels):
+            opt.labels[MCP_MANAGED_LABEL] = MCP_MANAGED_VALUE
+            return options
     options.append(Labels(labels={MCP_MANAGED_LABEL: MCP_MANAGED_VALUE}))
     return options
 

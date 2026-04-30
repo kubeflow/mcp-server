@@ -15,7 +15,6 @@
 """Lifecycle tools for training job management."""
 
 import logging
-import os
 from typing import Any
 
 from kubeflow.trainer.constants import constants as trainer_constants
@@ -29,6 +28,7 @@ from kubeflow_mcp.common.types import (
     exception_details,
     is_k8s_not_found,
 )
+from kubeflow_mcp.core.config import get_effective_persona
 from kubeflow_mcp.core.security import check_namespace_allowed, validate_k8s_name
 
 logger = logging.getLogger(__name__)
@@ -65,8 +65,7 @@ def delete_training_job(
             return ns_err.model_dump()
 
         ns = mcp_utils.get_trainer_effective_namespace(namespace)
-        persona = os.getenv("KUBEFLOW_MCP_PERSONA", "readonly")
-        if persona not in ("platform-admin",):
+        if get_effective_persona() not in ("platform-admin",):
             managed = mcp_utils.is_mcp_managed(name, ns)
             if managed is None:
                 return ToolError(
@@ -153,8 +152,7 @@ def update_training_job(
             return ns_err.model_dump()
 
         ns = mcp_utils.get_trainer_effective_namespace(namespace)
-        persona = os.getenv("KUBEFLOW_MCP_PERSONA", "readonly")
-        if persona not in ("platform-admin",):
+        if get_effective_persona() not in ("platform-admin",):
             managed = mcp_utils.is_mcp_managed(name, ns)
             if managed is None:
                 return ToolError(

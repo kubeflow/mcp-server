@@ -289,3 +289,21 @@ def load_config(config_path: Path | None = None) -> Config:
 def get_config_path() -> Path | None:
     """Get the path to the active config file (if any)."""
     return _find_config_file()
+
+
+# ─── Runtime persona state ──────────────────────────────────────────────────
+# Set once at server startup by create_server(). Tools read this instead of
+# re-reading env vars, ensuring consistency with the CLI/config resolution.
+
+_effective_persona: str = "readonly"
+
+
+def set_effective_persona(persona: str) -> None:
+    """Store the resolved persona at server startup."""
+    global _effective_persona
+    _effective_persona = persona
+
+
+def get_effective_persona() -> str:
+    """Return the persona resolved at server startup."""
+    return _effective_persona

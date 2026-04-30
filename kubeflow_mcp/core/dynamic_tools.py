@@ -36,6 +36,7 @@ from collections.abc import Callable
 from typing import Any
 
 from kubeflow_mcp.common.constants import TOOL_PHASES, TOOL_TO_PHASE, ErrorCode
+from kubeflow_mcp.core.resilience import get_breaker
 
 logger = logging.getLogger(__name__)
 
@@ -169,6 +170,14 @@ def describe_tools(tool_names: list[str]) -> dict[str, Any]:
     return {"tools": results}
 
 
+def _is_infrastructure_error(result: Any) -> bool:
+    """Return True if a tool result indicates a K8s/SDK infrastructure failure."""
+    if not isinstance(result, dict):
+        return False
+    code = result.get("error_code", "")
+    return code in (ErrorCode.KUBERNETES_ERROR, ErrorCode.SDK_ERROR, ErrorCode.TIMEOUT)
+
+
 def execute_tool(tool_name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
     """Execute a discovered tool by name.
 
@@ -184,6 +193,13 @@ def execute_tool(tool_name: str, arguments: dict[str, Any] | None = None) -> dic
     if tool_name not in TOOL_REGISTRY:
         return {"error": f"Tool '{tool_name}' not found", "available": list(TOOL_REGISTRY.keys())}
 
+    breaker = get_breaker(tool_name)
+    if not breaker.can_execute():
+        return {
+            "error": f"Circuit breaker open for '{tool_name}' — K8s API may be degraded. Retries automatically after recovery timeout.",
+            "error_code": ErrorCode.CIRCUIT_OPEN,
+        }
+
     func = TOOL_REGISTRY[tool_name]["func"]
     args = arguments or {}
 
@@ -191,10 +207,15 @@ def execute_tool(tool_name: str, arguments: dict[str, Any] | None = None) -> dic
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=Warning, module="urllib3")
             result = func(**args)
+        if isinstance(result, dict) and _is_infrastructure_error(result):
+            breaker.record_failure()
+        else:
+            breaker.record_success()
         if isinstance(result, dict):
             return result
         return {"result": result}
     except Exception as e:
+        breaker.record_failure()
         return {"error": str(e), "error_code": ErrorCode.SDK_ERROR, "tool": tool_name}
 
 

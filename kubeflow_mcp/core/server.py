@@ -270,6 +270,10 @@ def create_server(  # noqa: C901
     if clients is None:
         clients = ["trainer"]
 
+    from kubeflow_mcp.core.config import set_effective_persona
+
+    set_effective_persona(persona)
+
     # Single import per client — cache module refs for reuse
     loaded_modules: dict[str, Any] = {}
     for client_name in clients:
