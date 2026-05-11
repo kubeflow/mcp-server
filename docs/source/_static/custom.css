@@ -1,0 +1,39 @@
+/* Kubeflow MCP Server docs - minimal custom styling
+ *
+ * This is intentionally lightweight compared to the Kubeflow SDK docs
+ * theme, but follows the same color palette so we can expand later.
+ */
+
+:root {
+  --kf-blue: #4299e1;
+  --kf-blue-dark: #3182ce;
+  --kf-heading: #2d3748;
+  --kf-text: #4a5568;
+  --kf-bg-subtle: #f7fafc;
+}
+
+body {
+  color: var(--kf-text);
+}
+
+h1,
+h2,
+h3,
+h4 {
+  color: var(--kf-heading);
+}
+
+a {
+  color: var(--kf-blue);
+}
+
+a:hover {
+  color: var(--kf-blue-dark);
+}
+
+/* Give code blocks a subtle background to match SDK docs */
+div.highlight pre,
+code.literal {
+  background-color: var(--kf-bg-subtle);
+}
+
