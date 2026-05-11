@@ -11,8 +11,12 @@ Fixes #
 
 - [ ] feat: New feature
 - [ ] fix: Bug fix
+- [ ] docs: Documentation update
+- [ ] test: Tests or benchmarks
+- [ ] ci: CI/CD or tooling
+- [ ] chore: Maintenance
 - [ ] revert: Revert a change
-- [ ] chore: Maintenance / tooling
+- [ ] proposal: Design proposal or KEP
 
 ## Checklist
 

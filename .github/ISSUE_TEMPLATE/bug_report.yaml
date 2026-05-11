@@ -7,6 +7,9 @@ body:
     attributes:
       label: Description
       description: Clear description of the bug
+      placeholder: |
+        What tool or command did you run? What error did you see?
+        e.g. "Running `fine_tune()` with confirmed=True fails with ..."
     validations:
       required: true
 
@@ -16,9 +19,11 @@ body:
       label: Steps to Reproduce
       description: Steps to reproduce the behavior
       placeholder: |
-        1. Run `kubeflow-mcp serve`
-        2. Execute tool X
+        1. Run `kubeflow-mcp serve --clients trainer`
+        2. Call tool X with params Y
         3. See error
+    validations:
+      required: true
 
   - type: textarea
     id: expected
@@ -30,13 +35,15 @@ body:
     id: actual
     attributes:
       label: Actual Behavior
-      description: What actually happened
+      description: What actually happened (include full error/traceback if available)
+    validations:
+      required: true
 
   - type: input
     id: version
     attributes:
-      label: Version
-      placeholder: "0.1.0"
+      label: MCP Server Version
+      placeholder: "e.g. 0.1.0"
 
   - type: dropdown
     id: python
@@ -46,3 +53,34 @@ body:
         - "3.10"
         - "3.11"
         - "3.12"
+
+  - type: input
+    id: kubernetes
+    attributes:
+      label: Kubernetes Version
+      placeholder: "e.g. 1.29"
+
+  - type: dropdown
+    id: mcp_client
+    attributes:
+      label: MCP Client
+      options:
+        - Claude Desktop
+        - Claude Code
+        - Cursor
+        - VS Code Copilot
+        - Custom / Other
+
+  - type: textarea
+    id: references
+    attributes:
+      label: References
+      description: Related issues, PRs, or upstream KEPs
+      placeholder: "e.g. kubeflow/sdk#123, KEP-2779"
+
+  - type: markdown
+    attributes:
+      value: |
+        ---
+        **Impacted by this bug?**
+        Give it a 👍 We prioritize the issues with most 👍

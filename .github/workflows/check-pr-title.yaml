@@ -27,10 +27,12 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           types: |
-            feat
-            fix
-            revert
             chore
+            fix
+            feat
+            revert
+            docs
+            proposal
           scopes: |
             ci
             docs
@@ -40,8 +42,12 @@ jobs:
             trainer
             optimizer
             hub
+            spark
+            pipelines
             examples
             benchmarks
+            test
+            scripts
           requireScope: false
           ignoreLabels: |
             do-not-merge/work-in-progress
