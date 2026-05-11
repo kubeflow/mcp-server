@@ -48,7 +48,6 @@ env/
 
 # uv
 .uv/
-uv.lock
 
 # Jupyter
 .ipynb_checkpoints/
