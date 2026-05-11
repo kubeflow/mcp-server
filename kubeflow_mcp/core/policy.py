@@ -108,9 +108,23 @@ PERSONAS: dict[str, dict[str, Any]] = {
     "platform-admin": {"tools": "*"},
 }
 
-TOOL_CATEGORIES: dict[str, list[str]] = TOOL_PHASES
-
 DESTRUCTIVE_TOOLS = {"delete_training_job", "delete_runtime"}
+
+# ─── Runtime persona ───────────────────────
+# Set once at server startup by create_server(); tools read via get_effective_persona().
+
+_effective_persona: str = "readonly"
+
+
+def set_effective_persona(persona: str) -> None:
+    """Store the resolved persona at server startup."""
+    global _effective_persona
+    _effective_persona = persona
+
+
+def get_effective_persona() -> str:
+    """Return the persona resolved at server startup."""
+    return _effective_persona
 
 
 def _find_policy_file() -> Path | None:
@@ -157,7 +171,7 @@ def _expand_category(category: str) -> list[str]:
     """Expand category:name to list of tools."""
     if category.startswith("category:"):
         cat_name = category[9:]
-        return TOOL_CATEGORIES.get(cat_name, [])
+        return TOOL_PHASES.get(cat_name, [])
     return [category]
 
 

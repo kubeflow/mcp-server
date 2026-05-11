@@ -28,9 +28,18 @@ from typing import Any
 
 from fastmcp import FastMCP
 
-from kubeflow_mcp.common.constants import TOOL_NEXT_HINTS, TOOL_TO_PHASE, ErrorCode
+from kubeflow_mcp.common.constants import (
+    TOOL_NEXT_HINTS,
+    TOOL_TO_PHASE,
+    ErrorCode,
+    is_infrastructure_error,
+)
 from kubeflow_mcp.core.dynamic_tools import get_mode_tools, init_dynamic_tools
-from kubeflow_mcp.core.health import HEALTH_TOOLS
+from kubeflow_mcp.core.health import (
+    HEALTH_TOOL_ANNOTATIONS,
+    HEALTH_TOOL_DESCRIPTIONS,
+    HEALTH_TOOLS,
+)
 from kubeflow_mcp.core.logging import with_correlation_id
 from kubeflow_mcp.core.policy import apply_policy_filters, get_allowed_tools, is_read_only
 from kubeflow_mcp.core.resilience import RateLimiter, get_breaker
@@ -40,18 +49,6 @@ from kubeflow_mcp.core.security import mask_sensitive_data
 logger = logging.getLogger(__name__)
 
 _rate_limiter: RateLimiter | None = None
-
-
-def _is_infrastructure_error(result: Any) -> bool:
-    """Return True if a tool result indicates a K8s/SDK infrastructure failure.
-
-    Only these should trip the circuit breaker — user validation errors
-    (VALIDATION_ERROR, RESOURCE_NOT_FOUND) are not infrastructure problems.
-    """
-    if not isinstance(result, dict):
-        return False
-    code = result.get("error_code", "")
-    return code in (ErrorCode.KUBERNETES_ERROR, ErrorCode.SDK_ERROR, ErrorCode.TIMEOUT)
 
 
 def configure_resilience(
@@ -120,7 +117,7 @@ def _audit_wrap(tool_func):
             )
             if is_success:
                 breaker.record_success()
-            elif _is_infrastructure_error(result):
+            elif is_infrastructure_error(result):
                 breaker.record_failure()
 
             logger.info(
@@ -270,7 +267,7 @@ def create_server(  # noqa: C901
     if clients is None:
         clients = ["trainer"]
 
-    from kubeflow_mcp.core.config import set_effective_persona
+    from kubeflow_mcp.core.policy import set_effective_persona
 
     set_effective_persona(persona)
 
@@ -298,20 +295,22 @@ def create_server(  # noqa: C901
     for module in loaded_modules.values():
         all_descriptions.update(getattr(module, "CLIENT_TOOL_DESCRIPTIONS", {}))
         all_annotations.update(getattr(module, "CLIENT_TOOL_ANNOTATIONS", {}))
+    all_descriptions.update(HEALTH_TOOL_DESCRIPTIONS)
+    all_annotations.update(HEALTH_TOOL_ANNOTATIONS)
 
     # Stage 1: Get tools allowed by persona
     allowed_tools = get_allowed_tools(persona)
 
-    # Collect all available tools from loaded modules + health tools
-    all_tool_funcs: list = []
-    all_tool_names: set[str] = set()
+    # Collect tools from client modules plus server-level health tools
+    # (core.health).
+    tools_by_name: dict[str, Any] = {}
     for module in loaded_modules.values():
         for tool_func in getattr(module, "TOOLS", []):
-            all_tool_names.add(tool_func.__name__)
-            all_tool_funcs.append(tool_func)
+            tools_by_name[tool_func.__name__] = tool_func
     for tool_func in HEALTH_TOOLS:
-        all_tool_names.add(tool_func.__name__)
-        all_tool_funcs.append(tool_func)
+        tools_by_name.setdefault(tool_func.__name__, tool_func)
+    all_tool_names = set(tools_by_name.keys())
+    all_tool_funcs = list(tools_by_name.values())
 
     # Stage 2: Apply policy filters (allow/deny lists from ~/.kf-mcp-policy.yaml)
     if allowed_tools is not None:

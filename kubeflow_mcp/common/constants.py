@@ -21,6 +21,8 @@ This module is the single source of truth for:
 Import from here to ensure consistency across the codebase.
 """
 
+from typing import Any
+
 
 class ErrorCode:
     """Standard error codes for tool responses."""
@@ -34,6 +36,18 @@ class ErrorCode:
     TIMEOUT = "TIMEOUT"
     CIRCUIT_OPEN = "CIRCUIT_OPEN"
     RATE_LIMITED = "RATE_LIMITED"
+
+
+def is_infrastructure_error(result: Any) -> bool:
+    """Return True if a tool result indicates a K8s/SDK infrastructure failure.
+
+    Only these should trip the circuit breaker — user validation errors
+    (VALIDATION_ERROR, RESOURCE_NOT_FOUND) are not infrastructure problems.
+    """
+    if not isinstance(result, dict):
+        return False
+    code = result.get("error_code", "")
+    return code in (ErrorCode.KUBERNETES_ERROR, ErrorCode.SDK_ERROR, ErrorCode.TIMEOUT)
 
 
 class JobStatus:

@@ -20,7 +20,6 @@ Structure mirrors kubeflow/trainer/:
 └── constants/     # Constants
 """
 
-from kubeflow_mcp.core.health import get_server_logs, health_check
 from kubeflow_mcp.trainer.api.discovery import (
     get_runtime,
     get_training_job,
@@ -83,8 +82,6 @@ TOOLS = [
     patch_runtime,
     create_runtime,
     delete_runtime,
-    health_check,
-    get_server_logs,
 ]
 
 # ─── Tool metadata (owned by this client module) ───────────────────────────
@@ -123,8 +120,6 @@ CLIENT_TOOL_DESCRIPTIONS: dict[str, str] = {
     "patch_runtime": "Strategic merge patch on a ClusterTrainingRuntime. Set confirmed=True to apply.",
     "create_runtime": "Create a new ClusterTrainingRuntime. Set confirmed=True to create.",
     "delete_runtime": "[DESTRUCTIVE] Delete a ClusterTrainingRuntime. Lists dependent jobs first. Set confirmed=True.",
-    "health_check": "Check server health and K8s connectivity.",
-    "get_server_logs": "Get recent server logs for debugging. Filter by level.",
 }
 
 CLIENT_TOOL_ANNOTATIONS: dict[str, dict] = {
@@ -295,22 +290,6 @@ CLIENT_TOOL_ANNOTATIONS: dict[str, dict] = {
         "idempotentHint": True,
         "openWorldHint": True,
         "tags": ["platform", "runtime", "admin"],
-    },
-    "health_check": {
-        "title": "Health Check",
-        "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": False,
-        "tags": ["health", "monitoring"],
-    },
-    "get_server_logs": {
-        "title": "Get Server Logs",
-        "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": False,
-        "tags": ["health", "monitoring", "debug"],
     },
 }
 

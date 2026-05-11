@@ -21,6 +21,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from kubeflow_mcp.common.constants import TOOL_PHASES, TOOL_TO_PHASE
+from kubeflow_mcp.core.health import HEALTH_TOOL_ANNOTATIONS, HEALTH_TOOL_DESCRIPTIONS, HEALTH_TOOLS
 from kubeflow_mcp.core.policy import DESTRUCTIVE_TOOLS, get_allowed_tools
 from kubeflow_mcp.core.server import (
     _build_server_instructions,
@@ -53,7 +54,21 @@ class TestToolMetadataConsistency:
     def test_all_tools_in_tool_phases(self):
         tool_names = {t.__name__ for t in TOOLS}
         phased_tools = set(TOOL_TO_PHASE.keys())
-        assert tool_names == phased_tools
+        orphan = tool_names - phased_tools
+        assert not orphan, f"Trainer TOOLS entries missing phase map: {orphan}"
+
+        # Server-level tools (registered via HEALTH_TOOLS) must still align with globals.
+        for f in HEALTH_TOOLS:
+            assert f.__name__ in phased_tools
+
+    def test_health_tool_metadata_defined_on_server_layer(self):
+        assert set(HEALTH_TOOL_DESCRIPTIONS.keys()) == {t.__name__ for t in HEALTH_TOOLS}
+        assert set(HEALTH_TOOL_ANNOTATIONS.keys()) == {t.__name__ for t in HEALTH_TOOLS}
+
+    def test_health_tools_not_duplicated_in_trainer_tools_list(self):
+        trainer_names = {t.__name__ for t in TOOLS}
+        health_names = {t.__name__ for t in HEALTH_TOOLS}
+        assert health_names.isdisjoint(trainer_names)
 
     def test_annotation_schema(self):
         required_keys = {"title", "readOnlyHint", "destructiveHint", "idempotentHint", "tags"}

@@ -114,3 +114,28 @@ def get_server_logs(
 
 
 HEALTH_TOOLS = [health_check, get_server_logs]
+
+# MCP registrations for health tools live here (server-level), not client modules.
+HEALTH_TOOL_DESCRIPTIONS: dict[str, str] = {
+    "health_check": "Check server health and K8s connectivity.",
+    "get_server_logs": "Get recent server logs for debugging. Filter by level.",
+}
+
+HEALTH_TOOL_ANNOTATIONS: dict[str, dict] = {
+    "health_check": {
+        "title": "Health Check",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+        "tags": ["health", "monitoring"],
+    },
+    "get_server_logs": {
+        "title": "Get Server Logs",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+        "tags": ["health", "monitoring", "debug"],
+    },
+}

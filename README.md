@@ -10,10 +10,13 @@ The Kubeflow MCP Server exposes Kubeflow Training operations as [Model Context P
 
 ### Benefits
 
-- **Agent-Native**: 23 tools auto-discovered via MCP — no manual API wiring
+- **Agent-Native**: Tools auto-discovered via MCP — no manual API wiring
 - **Guided Workflow**: Phase ordering with next-step hints (Plan → Discover → Train → Monitor)
-- **Safe by Default**: Preview-before-submit, persona gating, namespace enforcement, input validation
+- **Preview-Before-Submit**: Every mutating operation requires explicit confirmation
+- **Security-First**: Persona gating, namespace enforcement, input validation, bearer/JWT auth
+- **Multi-Platform**: Auto-detects OpenShift, EKS, GKE with platform-specific guidance
 - **Token-Efficient**: Progressive/semantic modes compress 23 tools into 2-3 meta-tools
+- **Extensible**: Plugin architecture for additional Kubeflow clients (TODO: optimizer, hub)
 
 ## Get Started
 
@@ -181,8 +184,7 @@ make inspector TRANSPORT=sse      # Inspector + SSE (start server separately)
 
 ## Documentation
 
-- **[ROADMAP](ROADMAP.md)**: Phased delivery plan and graduation criteria
-- **[SECURITY](SECURITY.md)**: Threat model, trust boundaries, and vulnerability reporting
+
 - **[CONTRIBUTING](CONTRIBUTING.md)**: Development workflow and PR guidelines
 - **[KEP-936](https://github.com/kubeflow/community/tree/master/proposals/936-kubeflow-mcp-server)**: Design proposal
 

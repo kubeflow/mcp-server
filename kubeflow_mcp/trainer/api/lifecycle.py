@@ -28,7 +28,7 @@ from kubeflow_mcp.common.types import (
     exception_details,
     is_k8s_not_found,
 )
-from kubeflow_mcp.core.config import get_effective_persona
+from kubeflow_mcp.core.policy import get_effective_persona
 from kubeflow_mcp.core.security import check_namespace_allowed, validate_k8s_name
 
 logger = logging.getLogger(__name__)
