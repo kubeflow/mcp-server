@@ -9,7 +9,6 @@ on:
       - opened
 
 permissions:
-  contents: write
   issues: write
   pull-requests: write
 
@@ -27,12 +26,12 @@ jobs:
 
             **Here's what happens next:**
 
-            - Our team will review your issue soon! cc @kubeflow/kubeflow-sdk-team
+            - Our team will review your issue soon!
             - If you'd like to contribute to this issue, check out our [Contributing Guide](https://github.com/kubeflow/mcp-server/blob/main/CONTRIBUTING.md) for repo-specific guidelines and the [Kubeflow Contributor Guide](https://www.kubeflow.org/docs/about/contributing/) for general community standards
 
             **Join the community:**
             - **Slack**: Join [#kubeflow-ml-experience](https://www.kubeflow.org/docs/about/community/#slack-channels) on CNCF Slack
-            - **Meetings**: Attend the [Training WG](https://bit.ly/2PWVCkV) bi-weekly meetings
+            - **Meetings**: Attend the [ML Experience WG](https://bit.ly/kf-ml-experience) bi-weekly meetings
 
             Feel free to ask questions in the comments if you need any help!
             Thanks again for contributing to Kubeflow! 🙏
@@ -49,7 +48,7 @@ jobs:
 
             **Join the community:**
             - **Slack**: Join [#kubeflow-ml-experience](https://www.kubeflow.org/docs/about/community/#slack-channels) on CNCF Slack
-            - **Meetings**: Attend the [Training WG](https://bit.ly/2PWVCkV) bi-weekly meetings
+            - **Meetings**: Attend the [ML Experience WG](https://bit.ly/kf-ml-experience) bi-weekly meetings
 
             Feel free to ask questions in the comments if you need any help!
             Thanks again for contributing to Kubeflow! 🙏
