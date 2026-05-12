@@ -31,7 +31,7 @@ uv: ## Install uv
 	}
 
 install-dev: uv ## Install all development dependencies
-	@uv sync --all-extras
+	@uv sync --all-extras --group dev
 	@uv run pre-commit install
 
 ##@ Quality
@@ -48,15 +48,15 @@ format: ## Auto-format and fix lint issues
 ##@ Testing
 
 test-python: ## Run unit tests
-	@uv sync --all-extras
+	@uv sync --all-extras --group dev
 	@uv run pytest --cov=kubeflow_mcp --cov-report=$(or $(report),term)
 
 test: ## Run all tests (unit + integration)
-	@uv sync --all-extras
+	@uv sync --all-extras --group dev
 	@uv run pytest tests/ kubeflow_mcp/ -v --tb=short
 
 test-cov: ## Run tests with HTML coverage report
-	@uv sync --all-extras
+	@uv sync --all-extras --group dev
 	@uv run pytest --cov=kubeflow_mcp --cov-report=term-missing --cov-report=html
 	@echo "Coverage report: htmlcov/index.html"
 

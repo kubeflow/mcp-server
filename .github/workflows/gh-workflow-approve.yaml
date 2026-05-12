@@ -1,9 +1,5 @@
 name: Approve Workflow Runs
 
-permissions:
-  actions: write
-  contents: read
-
 on:
   pull_request_target:
     types:
@@ -13,6 +9,10 @@ on:
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event.number }}
   cancel-in-progress: true
+
+permissions:
+  actions: write
+  contents: read
 
 jobs:
   ok-to-test:

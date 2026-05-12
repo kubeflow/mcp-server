@@ -80,7 +80,7 @@
   description: "Google Summer of Code"
 
 # ── lifecycle/* ────────────────────────────────────────────────────────────────
-- name: lifecycle/needs-triage
+- name: needs-triage
   color: "BB2E03"
   description: "Needs triage"
 
@@ -143,10 +143,6 @@
 - name: ok-to-test
   color: "74bb61"
   description: "Approve CI for external contributors"
-
-- name: needs-triage
-  color: "ededed"
-  description: ""
 
 - name: good first issue
   color: "7057ff"
