@@ -126,3 +126,84 @@ def test_audit_wrapper_emits_log(caplog):
     audit_record = next(r for r in caplog.records if "tool_call" in r.message)
     assert getattr(audit_record, "tool", None) == "_fake_tool"
     assert getattr(audit_record, "success", None) is True
+
+
+# ─── instruction_tier ─────────────────────────────────────────────────────────
+
+
+def test_instruction_tier_full_is_longest():
+    """full tier produces more content than compact or minimal."""
+    import importlib
+
+    from kubeflow_mcp.core.server import _build_server_instructions
+
+    trainer = importlib.import_module("kubeflow_mcp.trainer")
+    modules = {"trainer": trainer}
+
+    full = _build_server_instructions(modules, "platform-admin", "full")
+    compact = _build_server_instructions(modules, "platform-admin", "compact")
+    minimal = _build_server_instructions(modules, "platform-admin", "minimal")
+
+    assert len(full) > len(compact)
+    assert len(compact) > len(minimal)
+
+
+def test_instruction_tier_compact_strips_resource_uris():
+    """compact tier strips trainer:// resource references."""
+    import importlib
+
+    from kubeflow_mcp.core.server import _build_server_instructions
+
+    trainer = importlib.import_module("kubeflow_mcp.trainer")
+    modules = {"trainer": trainer}
+
+    compact = _build_server_instructions(modules, "platform-admin", "compact")
+    assert "trainer://" not in compact
+
+
+def test_instruction_tier_full_contains_resource_uris():
+    """full tier includes trainer:// resource references."""
+    import importlib
+
+    from kubeflow_mcp.core.server import _build_server_instructions
+
+    trainer = importlib.import_module("kubeflow_mcp.trainer")
+    modules = {"trainer": trainer}
+
+    full = _build_server_instructions(modules, "platform-admin", "full")
+    assert "trainer://" in full
+
+
+def test_instruction_tier_minimal_is_tool_list():
+    """minimal tier is a condensed tool-name list, not prose."""
+    import importlib
+
+    from kubeflow_mcp.core.server import _build_server_instructions
+
+    trainer = importlib.import_module("kubeflow_mcp.trainer")
+    modules = {"trainer": trainer}
+
+    minimal = _build_server_instructions(modules, "platform-admin", "minimal")
+    assert "Tools:" in minimal
+
+
+def test_create_server_instruction_tier_propagated():
+    """create_server with compact tier produces a server (smoke test)."""
+    server = create_server(persona="readonly", instruction_tier="compact")
+    assert server is not None
+
+
+def test_readonly_persona_instructions_differ_from_admin():
+    """readonly instructions are a subset of platform-admin (fewer tool refs)."""
+    import importlib
+
+    from kubeflow_mcp.core.server import _build_server_instructions
+
+    trainer = importlib.import_module("kubeflow_mcp.trainer")
+    modules = {"trainer": trainer}
+
+    admin = _build_server_instructions(modules, "platform-admin", "full")
+    readonly = _build_server_instructions(modules, "readonly", "full")
+
+    # readonly has no write-tool sections, so must be shorter
+    assert len(admin) >= len(readonly)

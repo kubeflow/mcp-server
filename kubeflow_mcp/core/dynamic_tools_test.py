@@ -228,3 +228,109 @@ class TestEdgeCases:
         assert len(TOOL_REGISTRY) == 0
         result = list_tools()
         assert all(count == 0 for count in result["category_tools"].values())
+
+    def test_execute_tool_unknown_name(self):
+        result = execute_tool("this_tool_does_not_exist")
+        assert "error" in result
+        assert "this_tool_does_not_exist" in result["error"]
+        assert "available" in result
+
+    def test_execute_tool_func_raises_records_failure_and_returns_error(self):
+        from unittest.mock import MagicMock
+
+        from kubeflow_mcp.core.resilience import reset_breakers
+
+        reset_breakers()
+        mock_fn = MagicMock(side_effect=RuntimeError("boom"))
+        TOOL_REGISTRY["_raise_tool"] = {
+            "name": "_raise_tool",
+            "func": mock_fn,
+            "description": "test",
+            "full_doc": "test",
+            "category": "testing",
+        }
+        result = execute_tool("_raise_tool", {})
+        assert "error" in result
+        assert "boom" in result["error"]
+        assert result.get("error_code") == "SDK_ERROR"
+        del TOOL_REGISTRY["_raise_tool"]
+        reset_breakers()
+
+    def test_execute_tool_circuit_open_returns_error(self):
+        from unittest.mock import MagicMock
+
+        from kubeflow_mcp.core.resilience import get_breaker, reset_breakers
+
+        reset_breakers()
+        TOOL_REGISTRY["_cb_tool"] = {
+            "name": "_cb_tool",
+            "func": MagicMock(return_value={"data": "ok"}),
+            "description": "test",
+            "full_doc": "test",
+            "category": "testing",
+        }
+        breaker = get_breaker("_cb_tool")
+        # Force circuit open by tripping it beyond threshold
+        for _ in range(breaker.failure_threshold + 1):
+            breaker.record_failure()
+
+        result = execute_tool("_cb_tool", {})
+        assert "error" in result
+        assert result.get("error_code") == "CIRCUIT_OPEN"
+        del TOOL_REGISTRY["_cb_tool"]
+        reset_breakers()
+
+
+class TestFindTools:
+    def setup_method(self):
+        _init_registry()
+
+    def test_all_alias_returns_full_registry(self):
+        for alias in ("all", "*", "list all", "available tools"):
+            result = find_tools(alias)
+            assert result["total"] == len(TOOL_REGISTRY), f"Failed for alias: {alias!r}"
+
+    def test_keyword_fallback_matches_relevant_tools(self):
+        """Without embeddings loaded, _keyword_search is the fallback."""
+        result = find_tools("fine-tune language model training")
+        assert "tools" in result
+        names = [t["name"] for t in result["tools"]]
+        # At least one training-related tool should surface
+        assert any("train" in n or "fine_tune" in n or "run" in n for n in names)
+
+    def test_keyword_fallback_mode_flag_present(self):
+        """_keyword_search always tags the response with mode=keyword_fallback."""
+        from kubeflow_mcp.core.dynamic_tools import _keyword_search
+
+        result = _keyword_search("logs monitoring")
+        assert result.get("mode") == "keyword_fallback"
+
+    def test_keyword_search_ranks_exact_name_match_highly(self):
+        from kubeflow_mcp.core.dynamic_tools import _keyword_search
+
+        result = _keyword_search("fine_tune")
+        names = [t["name"] for t in result["tools"]]
+        assert names[0] == "fine_tune"
+
+    def test_query_too_long_returns_error(self):
+        from kubeflow_mcp.core.dynamic_tools import MAX_QUERY_LENGTH
+
+        result = find_tools("x" * (MAX_QUERY_LENGTH + 1))
+        assert "error" in result
+        assert "too long" in result["error"].lower()
+
+    def test_top_k_capped_at_maximum(self):
+        from kubeflow_mcp.core.dynamic_tools import MAX_TOP_K, _keyword_search
+
+        result = _keyword_search("training", top_k=99999)
+        assert len(result["tools"]) <= MAX_TOP_K
+
+    def test_no_match_returns_empty_tools_list(self):
+        from kubeflow_mcp.core.dynamic_tools import _keyword_search
+
+        result = _keyword_search("xyzzy_nonexistent_gibberish")
+        assert result["tools"] == []
+
+    def test_hint_present_in_result(self):
+        result = find_tools("cluster resources")
+        assert "hint" in result

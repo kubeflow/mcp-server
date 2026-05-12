@@ -1,5 +1,7 @@
 """Tests for resilience patterns."""
 
+import asyncio
+
 import pytest
 
 from kubeflow_mcp.core.resilience import (
@@ -162,3 +164,122 @@ def test_with_circuit_breaker_auto_naming_uses_function_name():
         return "ok"
 
     assert another_tool() == "ok"  # unaffected by auto_named_tool's open circuit
+
+
+# ─── retry_with_backoff_async ─────────────────────────────────────────────────
+
+
+def test_retry_with_backoff_async_succeeds_first_try():
+    from kubeflow_mcp.core.resilience import retry_with_backoff_async
+
+    async def _run():
+        async def succeed():
+            return 42
+
+        return await retry_with_backoff_async(succeed, base_delay=0)
+
+    assert asyncio.run(_run()) == 42
+
+
+def test_retry_with_backoff_async_retries_then_succeeds():
+    from kubeflow_mcp.core.resilience import retry_with_backoff_async
+
+    call_count = 0
+
+    async def _run():
+        nonlocal call_count
+
+        async def flaky():
+            nonlocal call_count
+            call_count += 1
+            if call_count < 3:
+                raise ValueError("transient")
+            return "ok"
+
+        return await retry_with_backoff_async(flaky, max_retries=3, base_delay=0)
+
+    assert asyncio.run(_run()) == "ok"
+    assert call_count == 3
+
+
+def test_retry_with_backoff_async_raises_after_exhaustion():
+    from kubeflow_mcp.core.resilience import retry_with_backoff_async
+
+    async def _run():
+        async def always_fail():
+            raise RuntimeError("always")
+
+        return await retry_with_backoff_async(always_fail, max_retries=2, base_delay=0)
+
+    with pytest.raises(RuntimeError, match="always"):
+        asyncio.run(_run())
+
+
+# ─── RateLimiter ──────────────────────────────────────────────────────────────
+
+
+def test_rate_limiter_allows_initial_burst():
+    from kubeflow_mcp.core.resilience import RateLimiter
+
+    rl = RateLimiter(rate=10.0, capacity=10.0)
+    for _ in range(10):
+        assert rl.acquire() is True
+
+
+def test_rate_limiter_denies_when_empty():
+    from kubeflow_mcp.core.resilience import RateLimiter
+
+    rl = RateLimiter(rate=1.0, capacity=1.0)
+    rl.acquire()  # consume the single token
+    assert rl.acquire() is False
+
+
+def test_rate_limiter_partial_tokens():
+    from kubeflow_mcp.core.resilience import RateLimiter
+
+    rl = RateLimiter(rate=10.0, capacity=5.0)
+    assert rl.acquire(tokens=3.0) is True
+    assert rl.acquire(tokens=3.0) is False  # only 2 remain
+
+
+# ─── SessionManager ───────────────────────────────────────────────────────────
+
+
+def test_session_manager_not_stale_initially():
+    from kubeflow_mcp.core.resilience import SessionManager
+
+    sm = SessionManager(max_age=300.0)
+    assert sm.is_stale() is False
+
+
+def test_session_manager_stale_after_max_age():
+    import time
+
+    from kubeflow_mcp.core.resilience import SessionManager
+
+    sm = SessionManager(max_age=0.01)
+    sm.record_activity()
+    time.sleep(0.05)
+    assert sm.is_stale() is True
+
+
+def test_session_manager_not_stale_after_recent_activity():
+    from kubeflow_mcp.core.resilience import SessionManager
+
+    sm = SessionManager(max_age=300.0)
+    sm.record_activity()
+    assert sm.is_stale() is False
+
+
+# ─── configure_circuit_breaker ────────────────────────────────────────────────
+
+
+def test_configure_circuit_breaker_affects_new_breakers():
+    from kubeflow_mcp.core.resilience import configure_circuit_breaker, get_breaker, reset_breakers
+
+    reset_breakers()
+    configure_circuit_breaker(failure_threshold=2, recovery_timeout=5.0)
+    breaker = get_breaker("configured-tool")
+    assert breaker.failure_threshold == 2
+    assert breaker.recovery_timeout == 5.0
+    reset_breakers()

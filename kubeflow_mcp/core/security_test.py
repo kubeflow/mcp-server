@@ -1,10 +1,16 @@
 """Tests for security validation."""
 
+from unittest.mock import patch
+
 from kubeflow_mcp.core.security import (
+    check_namespace_allowed,
     is_safe_python_code,
     mask_sensitive_data,
+    truncate_log_output,
     validate_k8s_name,
+    validate_namespace,
     validate_resource_limits,
+    validate_training_bounds,
 )
 
 
@@ -84,3 +90,129 @@ def test_mask_sensitive_data_nested():
     masked = mask_sensitive_data(data)
     assert masked["config"]["api_key"] == "***"
     assert masked["config"]["url"] == "http://example.com"
+
+
+# ─── validate_namespace ────────────────────────────────────────────────────────
+
+
+def test_validate_namespace_valid():
+    assert validate_namespace("default") is None
+    assert validate_namespace("ml-team") is None
+
+
+def test_validate_namespace_invalid():
+    err = validate_namespace("MY NAMESPACE")
+    assert err is not None
+    assert err.error_code == "VALIDATION_ERROR"
+
+
+# ─── check_namespace_allowed ──────────────────────────────────────────────────
+
+
+def test_check_namespace_allowed_no_policy():
+    """When no namespace policy is set, all namespaces are allowed."""
+    with patch("kubeflow_mcp.core.policy.get_allowed_namespaces", return_value=None):
+        assert check_namespace_allowed("any-namespace") is None
+        assert check_namespace_allowed(None) is None
+
+
+def test_check_namespace_allowed_explicit_allowed():
+    with patch("kubeflow_mcp.core.policy.get_allowed_namespaces", return_value=["ml", "prod"]):
+        assert check_namespace_allowed("ml") is None
+        assert check_namespace_allowed("prod") is None
+
+
+def test_check_namespace_allowed_explicit_denied():
+    with patch("kubeflow_mcp.core.policy.get_allowed_namespaces", return_value=["ml"]):
+        err = check_namespace_allowed("default")
+        assert err is not None
+        assert err.error_code == "PERMISSION_DENIED"
+        assert "default" in err.error
+
+
+def test_check_namespace_allowed_none_resolves_effective():
+    """None namespace resolves via get_trainer_effective_namespace."""
+    with (
+        patch("kubeflow_mcp.core.policy.get_allowed_namespaces", return_value=["ml"]),
+        patch(
+            "kubeflow_mcp.common.utils.get_trainer_effective_namespace",
+            return_value="default",
+        ),
+    ):
+        err = check_namespace_allowed(None)
+        assert err is not None
+        assert "default" in err.error
+
+
+# ─── validate_training_bounds ─────────────────────────────────────────────────
+
+
+def test_validate_training_bounds_all_valid():
+    assert validate_training_bounds(batch_size=4, epochs=3, num_nodes=2, gpu_per_node=1) is None
+
+
+def test_validate_training_bounds_batch_size_too_large():
+    err = validate_training_bounds(batch_size=99999)
+    assert err is not None
+    assert "batch_size" in err.error
+
+
+def test_validate_training_bounds_epochs_zero():
+    err = validate_training_bounds(epochs=0)
+    assert err is not None
+    assert "epochs" in err.error
+
+
+def test_validate_training_bounds_lora_dropout_out_of_range():
+    err = validate_training_bounds(lora_dropout=1.5)
+    assert err is not None
+    assert "lora_dropout" in err.error
+
+
+def test_validate_training_bounds_empty_script():
+    err = validate_training_bounds(script="   ")
+    assert err is not None
+    assert "Script" in err.error
+
+
+def test_validate_training_bounds_none_values_ok():
+    """All None inputs are valid (no constraint to check)."""
+    assert validate_training_bounds() is None
+
+
+# ─── truncate_log_output ──────────────────────────────────────────────────────
+
+
+def test_truncate_log_output_short_string_unchanged():
+    text = "hello world"
+    assert truncate_log_output(text) == text
+
+
+def test_truncate_log_output_truncates_long_string():
+    long_text = "x" * 20000
+    result = truncate_log_output(long_text, max_length=100)
+    assert len(result) < len(long_text)
+    assert "truncated" in result.lower() or len(result) <= 200
+
+
+def test_truncate_log_output_custom_max():
+    text = "a" * 500
+    result = truncate_log_output(text, max_length=100)
+    assert len(result) <= 200
+
+
+# ─── mask_sensitive_data list recursion ───────────────────────────────────────
+
+
+def test_mask_sensitive_data_list_of_dicts():
+    data = {"configs": [{"hf_token": "tok1"}, {"url": "http://x"}]}
+    masked = mask_sensitive_data(data)
+    assert masked["configs"][0]["hf_token"] == "***"
+    assert masked["configs"][1]["url"] == "http://x"
+
+
+def test_mask_sensitive_data_safe_keys_not_masked():
+    data = {"public_key": "pk-abc", "key_name": "my-key"}
+    masked = mask_sensitive_data(data)
+    assert masked["public_key"] == "pk-abc"
+    assert masked["key_name"] == "my-key"

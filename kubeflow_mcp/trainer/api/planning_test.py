@@ -278,3 +278,158 @@ class TestEstimateFromParams:
         assert "overhead_gb" in bd
         assert bd["weights_gb"] > 0
         assert bd["lora_adapters_gb"] > 0
+
+
+# ─── check_compatibility ──────────────────────────────────────────────────────
+
+
+class TestCheckCompatibility:
+    @patch("kubeflow_mcp.common.utils.get_version_api")
+    @patch("kubeflow_mcp.common.utils.get_custom_objects_api")
+    @patch("kubeflow_mcp.common.utils.get_core_v1_api")
+    def test_compatible_environment(self, mock_core, mock_custom, mock_version):
+        from kubeflow_mcp.trainer.api.planning import check_compatibility
+
+        mock_version_api = MagicMock()
+        mock_version_api.get_code.return_value.git_version = "v1.28.0"
+        mock_version.return_value = mock_version_api
+
+        mock_custom_api = MagicMock()
+        mock_crd = MagicMock()
+        mock_crd.metadata.name = "trainjobs.trainer.kubeflow.org"
+        mock_ver = MagicMock()
+        mock_ver.name = "v1alpha1"
+        mock_ver.served = True
+        mock_crd.spec.versions = [mock_ver]
+        mock_custom_api.list_custom_resource_definition.return_value.items = [mock_crd]
+        mock_custom.return_value = mock_custom_api
+
+        mock_core_api = MagicMock()
+        mock_core_api.list_node.return_value.items = []
+        mock_core.return_value = mock_core_api
+
+        result = check_compatibility()
+
+        assert result["success"] is True
+        assert "compatible" in result["data"]
+        assert "checks" in result["data"]
+        assert "platform" in result["data"]
+
+    @patch("kubeflow_mcp.common.utils.get_version_api")
+    @patch("kubeflow_mcp.common.utils.get_custom_objects_api")
+    @patch("kubeflow_mcp.common.utils.get_core_v1_api")
+    def test_returns_blockers_when_crd_missing(self, mock_core, mock_custom, mock_version):
+        from kubeflow_mcp.trainer.api.planning import check_compatibility
+
+        mock_version_api = MagicMock()
+        mock_version_api.get_code.return_value.git_version = "v1.28.0"
+        mock_version.return_value = mock_version_api
+
+        mock_custom_api = MagicMock()
+        mock_custom_api.list_custom_resource_definition.return_value.items = []
+        mock_custom.return_value = mock_custom_api
+
+        mock_core_api = MagicMock()
+        mock_core_api.list_node.return_value.items = []
+        mock_core.return_value = mock_core_api
+
+        result = check_compatibility()
+
+        assert result["success"] is True
+        assert result["data"]["compatible"] is False
+        assert len(result["data"]["blockers"]) > 0
+
+    @patch("kubeflow_mcp.common.utils.get_version_api")
+    @patch("kubeflow_mcp.common.utils.get_custom_objects_api")
+    @patch("kubeflow_mcp.common.utils.get_core_v1_api")
+    def test_k8s_api_error_recorded_as_blocker(self, mock_core, mock_custom, mock_version):
+        """K8s version check failures are recorded as blockers, not exceptions."""
+        from kubeflow_mcp.trainer.api.planning import check_compatibility
+
+        mock_version.side_effect = Exception("connection refused")
+        mock_custom.return_value.list_custom_resource_definition.return_value.items = []
+        mock_core.return_value.list_node.return_value.items = []
+
+        result = check_compatibility()
+
+        assert result["success"] is True
+        assert result["data"]["compatible"] is False
+        assert len(result["data"]["blockers"]) > 0
+
+
+# ─── pre_flight ───────────────────────────────────────────────────────────────
+
+
+class TestPreFlight:
+    @patch("kubeflow_mcp.trainer.api.planning.check_compatibility")
+    @patch("kubeflow_mcp.trainer.api.planning.get_cluster_resources")
+    @patch("kubeflow_mcp.trainer.api.discovery.list_runtimes")
+    def test_returns_all_sections(self, mock_runtimes, mock_cluster, mock_compat):
+        from kubeflow_mcp.trainer.api.planning import pre_flight
+
+        mock_compat.return_value = {
+            "success": True,
+            "data": {"compatible": True, "blockers": [], "platform": "kubernetes", "checks": {}},
+        }
+        mock_cluster.return_value = {
+            "success": True,
+            "data": {"gpu_total": 4, "nodes_with_gpu": 2, "node_count": 2, "nodes": []},
+        }
+        mock_runtimes.return_value = {
+            "success": True,
+            "data": {"runtimes": [{"name": "torchtune-llama3"}], "count": 1},
+        }
+
+        result = pre_flight()
+
+        assert result["success"] is True
+        data = result["data"]
+        assert "compatibility" in data
+        assert "cluster" in data
+        assert "runtimes" in data
+        assert "next_steps" in data
+
+    @patch("kubeflow_mcp.trainer.api.planning.check_compatibility")
+    def test_stops_early_on_blockers(self, mock_compat):
+        from kubeflow_mcp.trainer.api.planning import pre_flight
+
+        mock_compat.return_value = {
+            "success": True,
+            "data": {
+                "compatible": False,
+                "blockers": ["Trainer CRD not installed"],
+                "platform": "kubernetes",
+                "checks": {},
+            },
+        }
+
+        result = pre_flight()
+
+        assert result["success"] is True
+        data = result["data"]
+        assert "cluster" not in data
+        assert any("Blocker" in s for s in data["next_steps"])
+
+    @patch("kubeflow_mcp.trainer.api.planning.check_compatibility")
+    @patch("kubeflow_mcp.trainer.api.planning.get_cluster_resources")
+    @patch("kubeflow_mcp.trainer.api.planning.estimate_resources")
+    @patch("kubeflow_mcp.trainer.api.discovery.list_runtimes")
+    def test_includes_estimate_when_model_given(
+        self, mock_runtimes, mock_estimate, mock_cluster, mock_compat
+    ):
+        from kubeflow_mcp.trainer.api.planning import pre_flight
+
+        mock_compat.return_value = {
+            "data": {"compatible": True, "blockers": [], "platform": "kubernetes", "checks": {}}
+        }
+        mock_cluster.return_value = {"data": {"gpu_total": 2, "nodes_with_gpu": 1, "nodes": []}}
+        mock_estimate.return_value = {
+            "data": {"params_billions": 1.0, "gpu_memory_gb": 3.0, "breakdown": {}}
+        }
+        mock_runtimes.return_value = {"data": {"runtimes": [], "count": 0}}
+
+        result = pre_flight(model="meta-llama/Llama-3.2-1B")
+
+        assert result["success"] is True
+        assert "estimate" in result["data"]
+        mock_estimate.assert_called_once()

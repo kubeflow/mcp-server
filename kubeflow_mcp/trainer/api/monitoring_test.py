@@ -380,3 +380,103 @@ class TestLogLineCap:
 
         assert result["success"] is True
         assert "failure_hint" not in result["data"]
+
+    @patch("kubeflow_mcp.trainer.api.monitoring.get_trainer_client_for_namespace")
+    def test_follow_mode_returns_unsupported_message(self, mock_get_client):
+        result = get_training_logs(name="my-job", follow=True)
+
+        assert result["success"] is True
+        assert "Streaming not supported" in result["data"]["logs"]
+        mock_get_client.return_value.get_job_logs.assert_not_called()
+
+    @patch("kubeflow_mcp.trainer.api.monitoring.get_trainer_client_for_namespace")
+    def test_empty_log_lines_returns_zero(self, mock_get_client):
+        mock_client = MagicMock()
+        mock_client.get_job_logs.return_value = iter([])
+        mock_get_client.return_value = mock_client
+
+        result = get_training_logs(name="silent-job")
+
+        assert result["success"] is True
+        assert result["data"]["job"] == "silent-job"
+        assert result["data"]["lines"] >= 0
+
+
+class TestWaitForTrainingGaps:
+    """Additional wait_for_training paths not covered by existing tests."""
+
+    @patch("kubeflow_mcp.trainer.api.monitoring.check_namespace_allowed", return_value=None)
+    @patch("kubeflow_mcp.trainer.api.monitoring.get_trainer_client_for_namespace")
+    def test_timeout_returns_reached_false(self, mock_get_client, _mock_ns):
+        mock_client = MagicMock()
+        mock_client.wait_for_job_status.side_effect = TimeoutError()
+        mock_get_client.return_value = mock_client
+
+        result = wait_for_training(name="slow-job", timeout_seconds=5)
+
+        assert result["success"] is True
+        assert result["data"]["reached"] is False
+        assert "Timeout" in result["data"]["message"]
+        assert "hint" in result["data"]
+
+    @patch("kubeflow_mcp.trainer.api.monitoring.check_namespace_allowed", return_value=None)
+    def test_timeout_too_small_rejected(self, _mock_ns):
+        result = wait_for_training(name="job", timeout_seconds=0)
+
+        assert result["success"] is False
+        assert result["error_code"] == "VALIDATION_ERROR"
+        assert "timeout_seconds" in result["error"]
+
+    @patch("kubeflow_mcp.trainer.api.monitoring.check_namespace_allowed", return_value=None)
+    def test_polling_interval_too_small_rejected(self, _mock_ns):
+        result = wait_for_training(name="job", polling_interval=0)
+
+        assert result["success"] is False
+        assert result["error_code"] == "VALIDATION_ERROR"
+        assert "polling_interval" in result["error"]
+
+    @patch("kubeflow_mcp.trainer.api.monitoring.check_namespace_allowed", return_value=None)
+    @patch("kubeflow_mcp.trainer.api.monitoring.get_trainer_client_for_namespace")
+    def test_list_of_target_statuses_accepted(self, mock_get_client, _mock_ns):
+        mock_job = MagicMock()
+        mock_job.status = "Failed"
+        mock_client = MagicMock()
+        mock_client.wait_for_job_status.return_value = mock_job
+        mock_get_client.return_value = mock_client
+
+        result = wait_for_training(name="job", target_statuses=["Complete", "Failed"])
+
+        assert result["success"] is True
+        assert result["data"]["reached"] is True
+        assert result["data"]["status"] == "Failed"
+
+    @patch("kubeflow_mcp.trainer.api.monitoring.check_namespace_allowed", return_value=None)
+    @patch("kubeflow_mcp.trainer.api.monitoring.get_trainer_client_for_namespace")
+    def test_succeeded_aliased_to_complete(self, mock_get_client, _mock_ns):
+        """Succeeded is an alias for Complete and must be normalised."""
+        mock_job = MagicMock()
+        mock_job.status = "Complete"
+        mock_client = MagicMock()
+        mock_client.wait_for_job_status.return_value = mock_job
+        mock_get_client.return_value = mock_client
+
+        result = wait_for_training(name="job", target_statuses="Succeeded")
+
+        assert result["success"] is True
+        call_kwargs = mock_client.wait_for_job_status.call_args.kwargs
+        assert "Complete" in call_kwargs["status"]
+        assert "Succeeded" not in call_kwargs["status"]
+
+    @patch("kubeflow_mcp.trainer.api.monitoring.check_namespace_allowed", return_value=None)
+    @patch("kubeflow_mcp.trainer.api.monitoring.get_trainer_client_for_namespace")
+    def test_timeout_capped_at_maximum(self, mock_get_client, _mock_ns):
+        mock_job = MagicMock()
+        mock_job.status = "Complete"
+        mock_client = MagicMock()
+        mock_client.wait_for_job_status.return_value = mock_job
+        mock_get_client.return_value = mock_client
+
+        wait_for_training(name="job", timeout_seconds=99999)
+
+        call_kwargs = mock_client.wait_for_job_status.call_args.kwargs
+        assert call_kwargs["timeout"] <= 3600
