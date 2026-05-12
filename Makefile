@@ -28,7 +28,7 @@ format: ## Auto-fix lint and formatting issues
 .PHONY: test-python
 test-python: ## Run Python unit tests
 	@uv sync --all-extras
-	@uv run pytest --cov=kubeflow_mcp --cov-report=$(or $(report),term)
+	@uv run pytest --cov=kubeflow_mcp --cov-report=$(or $(report),term) --cov-report=lcov
 
 .PHONY: install-dev
 install-dev: uv ## Install dependencies and tools
