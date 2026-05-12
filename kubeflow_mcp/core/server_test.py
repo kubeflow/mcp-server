@@ -108,7 +108,6 @@ def test_hub_module_is_stub():
     assert hub.MODULE_INFO["status"] == "stub"
 
 
-
 def test_audit_wrapper_emits_log(caplog):
     """Audit wrapper logs tool invocations with structured fields."""
     import logging

@@ -13,10 +13,16 @@ from kubeflow_mcp.trainer.api.lifecycle import (
 def _patch_lifecycle_deps(namespace="default"):
     """Context managers to mock out K8s-dependent helpers in lifecycle."""
     return [
-        patch("kubeflow_mcp.trainer.api.lifecycle.mcp_utils.get_trainer_effective_namespace", return_value=namespace),
+        patch(
+            "kubeflow_mcp.trainer.api.lifecycle.mcp_utils.get_trainer_effective_namespace",
+            return_value=namespace,
+        ),
         patch("kubeflow_mcp.trainer.api.lifecycle.mcp_utils.is_mcp_managed", return_value=True),
         patch("kubeflow_mcp.trainer.api.lifecycle.check_namespace_allowed", return_value=None),
-        patch("kubeflow_mcp.trainer.api.lifecycle.get_effective_persona", return_value="platform-admin"),
+        patch(
+            "kubeflow_mcp.trainer.api.lifecycle.get_effective_persona",
+            return_value="platform-admin",
+        ),
     ]
 
 
@@ -25,12 +31,24 @@ class TestDeleteTrainingJob:
 
     def test_delete_returns_preview_without_confirmed(self):
         """Without confirmed=True, should return preview."""
-        with patch("kubeflow_mcp.trainer.api.lifecycle.mcp_utils.get_trainer_effective_namespace", return_value="default"), \
-             patch("kubeflow_mcp.trainer.api.lifecycle.check_namespace_allowed", return_value=None), \
-             patch("kubeflow_mcp.trainer.api.lifecycle.get_effective_persona", return_value="platform-admin"):
+        with (
+            patch(
+                "kubeflow_mcp.trainer.api.lifecycle.mcp_utils.get_trainer_effective_namespace",
+                return_value="default",
+            ),
+            patch("kubeflow_mcp.trainer.api.lifecycle.check_namespace_allowed", return_value=None),
+            patch(
+                "kubeflow_mcp.trainer.api.lifecycle.get_effective_persona",
+                return_value="platform-admin",
+            ),
+        ):
             result = delete_training_job(name="my-job")
 
-        assert "preview" in result or result.get("confirmed") is False or "confirmed=True" in str(result)
+        assert (
+            "preview" in result
+            or result.get("confirmed") is False
+            or "confirmed=True" in str(result)
+        )
 
     def test_delete_success(self):
         """Test successful job deletion with confirmed=True."""
@@ -38,8 +56,16 @@ class TestDeleteTrainingJob:
         mock_client.delete_job.return_value = None
 
         patches = _patch_lifecycle_deps()
-        with patches[0], patches[1], patches[2], patches[3], \
-             patch("kubeflow_mcp.trainer.api.lifecycle.mcp_utils.get_trainer_client_for_namespace", return_value=mock_client):
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3],
+            patch(
+                "kubeflow_mcp.trainer.api.lifecycle.mcp_utils.get_trainer_client_for_namespace",
+                return_value=mock_client,
+            ),
+        ):
             result = delete_training_job(name="my-job", confirmed=True)
 
         assert result["success"] is True
@@ -53,8 +79,16 @@ class TestDeleteTrainingJob:
         mock_client.delete_job.side_effect = RuntimeError("TrainJob 'missing' not found")
 
         patches = _patch_lifecycle_deps()
-        with patches[0], patches[1], patches[2], patches[3], \
-             patch("kubeflow_mcp.trainer.api.lifecycle.mcp_utils.get_trainer_client_for_namespace", return_value=mock_client):
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3],
+            patch(
+                "kubeflow_mcp.trainer.api.lifecycle.mcp_utils.get_trainer_client_for_namespace",
+                return_value=mock_client,
+            ),
+        ):
             result = delete_training_job(name="missing", confirmed=True)
 
         assert result["success"] is False
@@ -66,8 +100,16 @@ class TestDeleteTrainingJob:
         mock_client.delete_job.side_effect = RuntimeError("Permission denied")
 
         patches = _patch_lifecycle_deps()
-        with patches[0], patches[1], patches[2], patches[3], \
-             patch("kubeflow_mcp.trainer.api.lifecycle.mcp_utils.get_trainer_client_for_namespace", return_value=mock_client):
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3],
+            patch(
+                "kubeflow_mcp.trainer.api.lifecycle.mcp_utils.get_trainer_client_for_namespace",
+                return_value=mock_client,
+            ),
+        ):
             result = delete_training_job(name="my-job", confirmed=True)
 
         assert result["success"] is False
