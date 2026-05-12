@@ -72,11 +72,11 @@ def test_validate_resource_limits_invalid():
 
 
 def test_mask_sensitive_data():
-    data = {"user": "admin", "password": "secret123", "token": "abc"}
+    data = {"user": "admin", "password": "secret123", "access_token": "abc"}
     masked = mask_sensitive_data(data)
     assert masked["user"] == "admin"
     assert masked["password"] == "***"
-    assert masked["token"] == "***"
+    assert masked["access_token"] == "***"
 
 
 def test_mask_sensitive_data_nested():

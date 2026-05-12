@@ -103,6 +103,8 @@ def test_serve_passes_clients_and_persona():
         clients=["trainer", "optimizer"],
         persona="data-scientist",
         mode="full",
+        instruction_tier="full",
+        auth_provider=None,
     )
     mock_server.run.assert_called_once()
 
@@ -129,6 +131,8 @@ def test_serve_progressive_mode():
         clients=["trainer"],
         persona="readonly",
         mode="progressive",
+        instruction_tier="full",
+        auth_provider=None,
     )
     mock_server.run.assert_called_once()
 
@@ -144,6 +148,8 @@ def test_serve_semantic_mode():
         clients=["trainer"],
         persona="readonly",
         mode="semantic",
+        instruction_tier="full",
+        auth_provider=None,
     )
 
 

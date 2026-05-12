@@ -18,6 +18,10 @@ jobs:
             fix
             revert
             chore
+            test
+            refactor
+            perf
+            ci
           requireScope: false
           subjectPattern: ^[a-z].+$
           subjectPatternError: |

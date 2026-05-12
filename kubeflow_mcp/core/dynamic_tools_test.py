@@ -12,7 +12,8 @@ from kubeflow_mcp.core.dynamic_tools import (
     init_dynamic_tools,
     list_tools,
 )
-from kubeflow_mcp.core.server import TOOL_DESCRIPTIONS, create_server
+from kubeflow_mcp.core.server import create_server
+from kubeflow_mcp.trainer import CLIENT_TOOL_DESCRIPTIONS as TOOL_DESCRIPTIONS
 
 
 def _registered_tool_names(server) -> set[str]:
@@ -155,7 +156,6 @@ class TestServerModeIntegration:
         assert "describe_tools" in names
         assert "execute_tool" in names
         assert "fine_tune" not in names
-        assert "health_check" in names
 
     def test_semantic_mode_registers_meta_tools(self):
         server = create_server(mode="semantic", persona="platform-admin")
@@ -163,7 +163,6 @@ class TestServerModeIntegration:
         assert "find_tools" in names
         assert "execute_tool" in names
         assert "fine_tune" not in names
-        assert "health_check" in names
 
     def test_progressive_mode_fewer_tools_than_full(self):
         full = _registered_tool_names(create_server(mode="full", persona="platform-admin"))

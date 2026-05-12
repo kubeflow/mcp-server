@@ -85,7 +85,7 @@ class TestFineTuneWorkflow:
         # Step 5: Wait for completion — pass the actual job_name from step 4
         mock_client.wait_for_job_status.return_value = MagicMock(status="Complete")
         with patch(
-            "kubeflow_mcp.trainer.api.monitoring.get_trainer_client",
+            "kubeflow_mcp.trainer.api.monitoring.get_trainer_client_for_namespace",
             return_value=mock_client,
         ):
             wait_result = wait_for_training(name=job_name)
@@ -95,7 +95,7 @@ class TestFineTuneWorkflow:
         # Step 6: Get logs using the same job_name
         mock_client.get_job_logs.return_value = iter(["Epoch 1/1: loss=2.34", "Training complete"])
         with patch(
-            "kubeflow_mcp.trainer.api.monitoring.get_trainer_client",
+            "kubeflow_mcp.trainer.api.monitoring.get_trainer_client_for_namespace",
             return_value=mock_client,
         ):
             logs = get_training_logs(name=job_name)
@@ -108,15 +108,16 @@ class TestCustomTrainingWithFailureHints:
     """Custom training workflow: preview (with warnings) → submit → logs with failure hint."""
 
     @patch("kubeflow_mcp.trainer.api.training.get_trainer_client")
+    @patch.dict("os.environ", {"KUBEFLOW_MCP_UNSAFE_SCRIPTS": "true"})
     def test_unsafe_script_preview_then_submit_then_oom(self, mock_train_client):
-        script = "import os\nprint(os.environ.get('LR', '1e-4'))"
+        script = "import os\nos.system('echo hi')\nprint(os.environ.get('LR', '1e-4'))"
 
         # Step 1: Preview — gets safety warnings (not blocking)
         preview = run_custom_training(script=script, confirmed=False)
         assert preview["status"] == "preview"
         assert len(preview["config"]["safety_warnings"]) > 0
 
-        # Step 2: Agent decides to submit anyway
+        # Step 2: Agent decides to submit anyway (unsafe override enabled)
         mock_client = MagicMock()
         mock_client.train.return_value = "custom-oom-job"
         mock_train_client.return_value = mock_client
@@ -137,7 +138,7 @@ class TestCustomTrainingWithFailureHints:
             ]
         )
         with patch(
-            "kubeflow_mcp.trainer.api.monitoring.get_trainer_client",
+            "kubeflow_mcp.trainer.api.monitoring.get_trainer_client_for_namespace",
             return_value=mock_client,
         ):
             logs = get_training_logs(name=job_name)
@@ -182,7 +183,7 @@ class TestIterativeEnvTuning:
             ]
         )
         with patch(
-            "kubeflow_mcp.trainer.api.monitoring.get_trainer_client",
+            "kubeflow_mcp.trainer.api.monitoring.get_trainer_client_for_namespace",
             return_value=mock_client,
         ):
             logs = get_training_logs(name="iter-2")

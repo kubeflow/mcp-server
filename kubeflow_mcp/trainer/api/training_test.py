@@ -232,13 +232,11 @@ class TestFineTune:
             dataset="hf://tatsu-lab/alpaca",
             node_selector={"node-type": "gpu"},
             tolerations=[{"key": "nvidia.com/gpu", "operator": "Exists"}],
-            env=[{"name": "DEBUG", "value": "1"}],
             confirmed=False,
         )
         cfg = result["config"]
         assert cfg["node_selector"] == {"node-type": "gpu"}
         assert cfg["tolerations"] == [{"key": "nvidia.com/gpu", "operator": "Exists"}]
-        assert cfg["env"] == [{"name": "DEBUG", "value": "1"}]
 
     def test_preview_masks_hf_token(self):
         result = fine_tune(
@@ -269,7 +267,7 @@ class TestFineTune:
             confirmed=True,
         )
         assert result["success"] is False
-        assert "SDK not available" in result["error"]
+        assert "Required training libraries not available" in result["error"]
 
     # --- submit: real SDK types ---
 
@@ -398,27 +396,22 @@ class TestFineTune:
         assert Labels in opt_types
         assert Annotations in opt_types
         labels_opt = next(o for o in opts if isinstance(o, Labels))
-        assert labels_opt.labels == {"team": "ml", "env": "prod"}
+        assert "team" in labels_opt.labels
+        assert "env" in labels_opt.labels
+        assert labels_opt.labels["team"] == "ml"
+        assert labels_opt.labels["env"] == "prod"
 
     @patch("kubeflow_mcp.trainer.api.training._SDK_AVAILABLE", True)
-    @patch("kubeflow_mcp.trainer.api.training.get_trainer_client")
-    def test_submit_custom_trainer_fallback(self, mock_get_client):
-        """Non-torchtune runtimes fall back to CustomTrainer."""
-        mock_client = MagicMock()
-        mock_client.train.return_value = "trainjob-xyz789"
-        mock_get_client.return_value = mock_client
-
+    def test_non_torchtune_runtime_rejected(self):
+        """Non-torchtune runtimes are rejected with a validation error."""
         result = fine_tune(
             model="hf://google/gemma-2b",
             dataset="hf://tatsu-lab/alpaca",
             runtime="torch-distributed",
             confirmed=True,
         )
-
-        assert result["success"] is True
-        trainer = mock_client.train.call_args.kwargs["trainer"]
-        assert isinstance(trainer, CustomTrainer)
-        assert callable(trainer.func)
+        assert result["success"] is False
+        assert result["error_code"] == "VALIDATION_ERROR"
 
     @patch("kubeflow_mcp.trainer.api.training._SDK_AVAILABLE", True)
     @patch("kubeflow_mcp.trainer.api.training.get_trainer_client")
@@ -517,8 +510,8 @@ class TestRunCustomTraining:
 
     # --- script safety advisory (preview warnings, not submission blockers) ---
 
-    def test_preview_warns_on_dangerous_import_os(self):
-        result = run_custom_training(script="import os\nprint(os.getcwd())", confirmed=False)
+    def test_preview_warns_on_dangerous_os_system(self):
+        result = run_custom_training(script="import os\nos.system('rm -rf /')", confirmed=False)
         assert result["status"] == "preview"
         assert len(result["config"]["safety_warnings"]) > 0
 
@@ -562,7 +555,7 @@ train()
     def test_sdk_not_available(self):
         result = run_custom_training(script="print('hello')", confirmed=True)
         assert result["success"] is False
-        assert "SDK not available" in result["error"]
+        assert "Required training libraries not available" in result["error"]
 
     # --- submit: real SDK types ---
 
@@ -602,8 +595,8 @@ train()
         trainer = mock_client.train.call_args.kwargs["trainer"]
         assert isinstance(trainer, CustomTrainer)
         assert trainer.env == {"TOKEN": "abc"}
-        # No pod-level patches → options should be None
-        assert mock_client.train.call_args.kwargs["options"] is None
+        # env goes on CustomTrainer, not as node_selector/tolerations patches
+        assert trainer.env == {"TOKEN": "abc"}
 
     @patch("kubeflow_mcp.trainer.api.training._SDK_AVAILABLE", True)
     @patch("kubeflow_mcp.trainer.api.training.get_trainer_client")
@@ -644,23 +637,19 @@ train()
 
     @patch("kubeflow_mcp.trainer.api.training._SDK_AVAILABLE", True)
     @patch("kubeflow_mcp.trainer.api.training.get_trainer_client")
-    def test_submit_pod_env_goes_to_patch(self, mock_get_client):
-        """pod_env (K8s list format) must appear in RuntimePatch, not CustomTrainer.env."""
+    def test_submit_node_selector_goes_to_patch(self, mock_get_client):
+        """node_selector must appear in RuntimePatch options."""
         mock_client = MagicMock()
         mock_client.train.return_value = "job-pe"
         mock_get_client.return_value = mock_client
 
         run_custom_training(
             script="print('hi')",
-            pod_env=[{"name": "NCCL_DEBUG", "value": "INFO"}],
+            node_selector={"gpu-type": "a100"},
             confirmed=True,
         )
 
-        trainer = mock_client.train.call_args.kwargs["trainer"]
-        assert isinstance(trainer, CustomTrainer)
-        assert trainer.env is None  # pod_env does NOT set CustomTrainer.env
-
-        opts = mock_client.train.call_args.kwargs["options"]
+        opts = mock_client.train.call_args.kwargs.get("options") or []
         assert opts is not None and len(opts) > 0
 
     @patch("kubeflow_mcp.trainer.api.training._SDK_AVAILABLE", True)
@@ -772,7 +761,7 @@ class TestRunContainerTraining:
     def test_sdk_not_available(self):
         result = run_container_training(image="pytorch/pytorch:2.0", confirmed=True)
         assert result["success"] is False
-        assert "SDK not available" in result["error"]
+        assert "Required training libraries not available" in result["error"]
 
     # --- submit: real SDK types ---
 

@@ -26,13 +26,13 @@ class TestBuiltinPersonas:
         tools = get_allowed_tools("data-scientist")
         assert "list_training_jobs" in tools
         assert "fine_tune" in tools
-        assert "suspend_training_job" not in tools
+        assert "run_container_training" not in tools
 
     def test_ml_engineer_inherits_data_scientist(self):
         tools = get_allowed_tools("ml-engineer")
         assert "list_training_jobs" in tools
         assert "fine_tune" in tools
-        assert "suspend_training_job" in tools
+        assert "run_container_training" in tools
 
     def test_platform_admin_unrestricted(self):
         assert get_allowed_tools("platform-admin") is None

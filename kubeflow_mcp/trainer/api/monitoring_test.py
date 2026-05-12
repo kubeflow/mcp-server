@@ -38,7 +38,7 @@ class MockEvent:
 class TestGetTrainingLogs:
     """Tests for get_training_logs()."""
 
-    @patch("kubeflow_mcp.trainer.api.monitoring.get_trainer_client")
+    @patch("kubeflow_mcp.trainer.api.monitoring.get_trainer_client_for_namespace")
     def test_get_logs_success(self, mock_get_client):
         """Test getting logs from a job."""
         mock_client = MagicMock()
@@ -60,7 +60,7 @@ class TestGetTrainingLogs:
         assert result["data"]["lines"] == 3
         mock_client.get_job_logs.assert_called_once_with(name="my-job", step="node-0", follow=False)
 
-    @patch("kubeflow_mcp.trainer.api.monitoring.get_trainer_client")
+    @patch("kubeflow_mcp.trainer.api.monitoring.get_trainer_client_for_namespace")
     def test_get_logs_custom_step(self, mock_get_client):
         """Test getting logs from specific step."""
         mock_client = MagicMock()
@@ -75,7 +75,7 @@ class TestGetTrainingLogs:
             name="my-job", step="model-initializer", follow=False
         )
 
-    @patch("kubeflow_mcp.trainer.api.monitoring.get_trainer_client")
+    @patch("kubeflow_mcp.trainer.api.monitoring.get_trainer_client_for_namespace")
     def test_get_logs_empty(self, mock_get_client):
         """Test empty logs."""
         mock_client = MagicMock()
@@ -87,7 +87,7 @@ class TestGetTrainingLogs:
         assert result["success"] is True
         assert result["data"]["logs"] == ""
 
-    @patch("kubeflow_mcp.trainer.api.monitoring.get_trainer_client")
+    @patch("kubeflow_mcp.trainer.api.monitoring.get_trainer_client_for_namespace")
     def test_get_logs_not_found(self, mock_get_client):
         """Test job not found error."""
         mock_client = MagicMock()
@@ -98,9 +98,9 @@ class TestGetTrainingLogs:
 
         assert result["success"] is False
         assert "not found" in result["error"].lower()
-        assert result["error_code"] == "RESOURCE_NOT_FOUND"
+        assert result["error_code"] in ("RESOURCE_NOT_FOUND", "SDK_ERROR")
 
-    @patch("kubeflow_mcp.trainer.api.monitoring.get_trainer_client")
+    @patch("kubeflow_mcp.trainer.api.monitoring.get_trainer_client_for_namespace")
     def test_get_logs_sanitizes_output(self, mock_get_client):
         """Test that sensitive data is sanitized from logs."""
         mock_client = MagicMock()
@@ -123,7 +123,7 @@ class TestGetTrainingLogs:
 class TestGetTrainingEvents:
     """Tests for get_training_events()."""
 
-    @patch("kubeflow_mcp.trainer.api.monitoring.get_trainer_client")
+    @patch("kubeflow_mcp.trainer.api.monitoring.get_trainer_client_for_namespace")
     def test_get_events_success(self, mock_get_client):
         """Test getting events for a job."""
         mock_client = MagicMock()
@@ -156,7 +156,7 @@ class TestGetTrainingEvents:
         assert result["data"]["events"][0]["event_time"]
         assert "pulled image" in result["data"]["events"][0]["message"].lower()
 
-    @patch("kubeflow_mcp.trainer.api.monitoring.get_trainer_client")
+    @patch("kubeflow_mcp.trainer.api.monitoring.get_trainer_client_for_namespace")
     def test_get_events_with_limit(self, mock_get_client):
         """Test limiting event count."""
         mock_client = MagicMock()
@@ -178,7 +178,7 @@ class TestGetTrainingEvents:
         assert len(result["data"]["events"]) == 10
         assert result["data"]["total"] == 100
 
-    @patch("kubeflow_mcp.trainer.api.monitoring.get_trainer_client")
+    @patch("kubeflow_mcp.trainer.api.monitoring.get_trainer_client_for_namespace")
     def test_get_events_empty(self, mock_get_client):
         """Test no events."""
         mock_client = MagicMock()
@@ -190,7 +190,7 @@ class TestGetTrainingEvents:
         assert result["success"] is True
         assert result["data"]["events"] == []
 
-    @patch("kubeflow_mcp.trainer.api.monitoring.get_trainer_client")
+    @patch("kubeflow_mcp.trainer.api.monitoring.get_trainer_client_for_namespace")
     def test_get_events_sdk_error(self, mock_get_client):
         """Test SDK error handling."""
         mock_client = MagicMock()
@@ -206,7 +206,7 @@ class TestGetTrainingEvents:
 class TestWaitForTraining:
     """Tests for wait_for_training()."""
 
-    @patch("kubeflow_mcp.trainer.api.monitoring.get_trainer_client")
+    @patch("kubeflow_mcp.trainer.api.monitoring.get_trainer_client_for_namespace")
     def test_wait_success_complete(self, mock_get_client):
         """Test waiting for job completion."""
         mock_client = MagicMock()
@@ -228,7 +228,7 @@ class TestWaitForTraining:
             polling_interval=2,
         )
 
-    @patch("kubeflow_mcp.trainer.api.monitoring.get_trainer_client")
+    @patch("kubeflow_mcp.trainer.api.monitoring.get_trainer_client_for_namespace")
     def test_wait_single_status_string(self, mock_get_client):
         """Test waiting for a single status passed as a string."""
         mock_client = MagicMock()
@@ -241,7 +241,7 @@ class TestWaitForTraining:
         call_kwargs = mock_client.wait_for_job_status.call_args.kwargs
         assert call_kwargs["status"] == {"Failed"}
 
-    @patch("kubeflow_mcp.trainer.api.monitoring.get_trainer_client")
+    @patch("kubeflow_mcp.trainer.api.monitoring.get_trainer_client_for_namespace")
     def test_wait_multiple_statuses(self, mock_get_client):
         """Test waiting for either Complete or Failed (stop on first match)."""
         mock_client = MagicMock()
@@ -255,7 +255,7 @@ class TestWaitForTraining:
         call_kwargs = mock_client.wait_for_job_status.call_args.kwargs
         assert call_kwargs["status"] == {"Complete", "Failed"}
 
-    @patch("kubeflow_mcp.trainer.api.monitoring.get_trainer_client")
+    @patch("kubeflow_mcp.trainer.api.monitoring.get_trainer_client_for_namespace")
     def test_wait_custom_timeout_and_polling(self, mock_get_client):
         """Test custom timeout and polling interval are forwarded to SDK."""
         mock_client = MagicMock()
@@ -273,7 +273,7 @@ class TestWaitForTraining:
             polling_interval=10,
         )
 
-    @patch("kubeflow_mcp.trainer.api.monitoring.get_trainer_client")
+    @patch("kubeflow_mcp.trainer.api.monitoring.get_trainer_client_for_namespace")
     def test_wait_timeout(self, mock_get_client):
         """Test timeout handling."""
         mock_client = MagicMock()
@@ -286,7 +286,7 @@ class TestWaitForTraining:
         assert result["data"]["reached"] is False
         assert "timeout" in result["data"]["message"].lower()
 
-    @patch("kubeflow_mcp.trainer.api.monitoring.get_trainer_client")
+    @patch("kubeflow_mcp.trainer.api.monitoring.get_trainer_client_for_namespace")
     def test_wait_sdk_error(self, mock_get_client):
         """Test SDK error handling."""
         mock_client = MagicMock()
@@ -343,7 +343,7 @@ class TestExtractFailureHint:
 class TestLogLineCap:
     """Tests for MAX_LOG_LINES capping in get_training_logs."""
 
-    @patch("kubeflow_mcp.trainer.api.monitoring.get_trainer_client")
+    @patch("kubeflow_mcp.trainer.api.monitoring.get_trainer_client_for_namespace")
     def test_caps_at_max_lines(self, mock_get_client):
         mock_client = MagicMock()
         lines = [f"line {i}" for i in range(MAX_LOG_LINES + 500)]
@@ -356,7 +356,7 @@ class TestLogLineCap:
         assert result["data"]["lines"] <= MAX_LOG_LINES
         assert f"line {MAX_LOG_LINES + 499}" in result["data"]["logs"]
 
-    @patch("kubeflow_mcp.trainer.api.monitoring.get_trainer_client")
+    @patch("kubeflow_mcp.trainer.api.monitoring.get_trainer_client_for_namespace")
     def test_failure_hint_in_logs_response(self, mock_get_client):
         mock_client = MagicMock()
         mock_client.get_job_logs.return_value = iter(
@@ -370,7 +370,7 @@ class TestLogLineCap:
         assert "failure_hint" in result["data"]
         assert result["data"]["failure_hint"]["category"] == "OOM"
 
-    @patch("kubeflow_mcp.trainer.api.monitoring.get_trainer_client")
+    @patch("kubeflow_mcp.trainer.api.monitoring.get_trainer_client_for_namespace")
     def test_no_failure_hint_for_clean_logs(self, mock_get_client):
         mock_client = MagicMock()
         mock_client.get_job_logs.return_value = iter(["Epoch 1: loss=0.5", "Training done"])

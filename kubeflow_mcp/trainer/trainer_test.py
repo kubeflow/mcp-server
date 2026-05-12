@@ -11,9 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for trainer module exports and get_tools."""
+"""Tests for trainer module exports."""
 
-from kubeflow_mcp.trainer import MODULE_INFO, TOOL_CATEGORIES, TOOLS, get_tools
+from kubeflow_mcp.trainer import MODULE_INFO, TOOLS
 
 
 class TestModuleInfo:
@@ -23,7 +23,7 @@ class TestModuleInfo:
     def test_has_required_keys(self):
         assert "name" in MODULE_INFO
         assert "description" in MODULE_INFO
-        assert "sdk_client" in MODULE_INFO
+        assert "status" in MODULE_INFO
 
     def test_name_is_trainer(self):
         assert MODULE_INFO["name"] == "trainer"
@@ -57,60 +57,10 @@ class TestToolsList:
             "get_training_job",
             "list_runtimes",
             "get_runtime",
-            "get_runtime_packages",
             "get_training_logs",
             "get_training_events",
             "wait_for_training",
             "delete_training_job",
-            "suspend_training_job",
-            "resume_training_job",
+            "update_training_job",
         }
         assert expected.issubset(names)
-
-
-class TestToolCategories:
-    def test_has_expected_categories(self):
-        expected = {"core", "planning", "training", "discovery", "monitoring", "lifecycle"}
-        assert set(TOOL_CATEGORIES.keys()) == expected
-
-    def test_all_category_tools_are_in_tools(self):
-        tool_names = {t.__name__ for t in TOOLS}
-        for cat, cat_tools in TOOL_CATEGORIES.items():
-            for tool in cat_tools:
-                assert tool.__name__ in tool_names, f"{tool.__name__} in '{cat}' not in TOOLS"
-
-    def test_core_is_subset_of_all(self):
-        core_names = {t.__name__ for t in TOOL_CATEGORIES["core"]}
-        all_names = {t.__name__ for t in TOOLS}
-        assert core_names.issubset(all_names)
-
-
-class TestGetTools:
-    def test_none_returns_all(self):
-        result = get_tools(categories=None)
-        assert result is TOOLS
-
-    def test_single_category(self):
-        result = get_tools(categories=["planning"])
-        names = {t.__name__ for t in result}
-        assert "get_cluster_resources" in names
-        assert "estimate_resources" in names
-
-    def test_multiple_categories(self):
-        result = get_tools(categories=["planning", "monitoring"])
-        names = {t.__name__ for t in result}
-        assert "get_cluster_resources" in names
-        assert "get_training_logs" in names
-
-    def test_deduplication(self):
-        result = get_tools(categories=["core", "planning"])
-        names = [t.__name__ for t in result]
-        assert names.count("get_cluster_resources") == 1
-
-    def test_unknown_category_returns_empty(self):
-        result = get_tools(categories=["nonexistent"])
-        assert result == []
-
-    def test_empty_categories_returns_empty(self):
-        result = get_tools(categories=[])
-        assert result == []

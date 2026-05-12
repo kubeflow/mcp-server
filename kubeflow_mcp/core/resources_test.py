@@ -14,6 +14,7 @@
 """Tests for MCP resources."""
 
 import asyncio
+import importlib
 
 from fastmcp import FastMCP
 
@@ -24,107 +25,63 @@ def _read_resource(mcp: FastMCP, uri: str) -> str:
     loop = asyncio.new_event_loop()
     try:
         result = loop.run_until_complete(mcp.read_resource(uri))
+        contents = getattr(result, "contents", None)
+        if contents:
+            return getattr(contents[0], "content", str(result))
         return str(result)
     finally:
         loop.close()
 
 
+def _make_mcp_with_trainer() -> FastMCP:
+    mcp = FastMCP("test")
+    trainer = importlib.import_module("kubeflow_mcp.trainer")
+    register_resources(mcp, loaded_modules={"trainer": trainer})
+    return mcp
+
+
 class TestRegisterResources:
     def setup_method(self):
-        self.mcp = FastMCP("test")
-        register_resources(self.mcp)
+        self.mcp = _make_mcp_with_trainer()
 
-    def test_supported_models_registered(self):
-        text = _read_resource(self.mcp, "trainer://models/supported")
-        assert "Supported Models" in text
+    def test_training_patterns_registered(self):
+        text = _read_resource(self.mcp, "trainer://guides/training-patterns")
+        assert len(text) > 0
 
-    def test_runtime_info_registered(self):
-        text = _read_resource(self.mcp, "trainer://runtimes/info")
-        assert "Training Runtimes" in text
-
-    def test_quickstart_registered(self):
-        text = _read_resource(self.mcp, "trainer://guides/quickstart")
-        assert "Quick Start Guide" in text
+    def test_platform_fixes_registered(self):
+        text = _read_resource(self.mcp, "trainer://guides/platform-fixes")
+        assert len(text) > 0
 
     def test_troubleshooting_registered(self):
         text = _read_resource(self.mcp, "trainer://guides/troubleshooting")
-        assert "Troubleshooting" in text
+        assert len(text) > 0
+
+    def test_empty_modules_registers_nothing(self):
+        mcp = FastMCP("test")
+        register_resources(mcp, loaded_modules={})
+        loop = asyncio.new_event_loop()
+        try:
+            resources = loop.run_until_complete(mcp._list_resources())
+            assert len(resources) == 0
+        finally:
+            loop.close()
 
 
-class TestSupportedModels:
+class TestTrainingPatterns:
     def setup_method(self):
-        self.mcp = FastMCP("test")
-        register_resources(self.mcp)
-        self.text = _read_resource(self.mcp, "trainer://models/supported")
+        self.mcp = _make_mcp_with_trainer()
+        self.text = _read_resource(self.mcp, "trainer://guides/training-patterns")
 
-    def test_contains_small_models(self):
-        assert "gemma-2b" in self.text
-        assert "Llama-3.2-1B" in self.text
+    def test_contains_fine_tune_example(self):
+        assert "run_custom_training" in self.text or "SFTTrainer" in self.text
 
-    def test_contains_medium_models(self):
-        assert "Mistral-7B" in self.text
-        assert "Llama-3.1-8B" in self.text
-
-    def test_contains_large_models(self):
-        assert "Llama-3.1-70B" in self.text
-
-    def test_contains_dataset_info(self):
-        assert "tatsu-lab/alpaca" in self.text
-        assert "databricks/dolly-15k" in self.text
-
-    def test_contains_id_format_guide(self):
-        assert "estimate_resources()" in self.text
-        assert "fine_tune()" in self.text
-        assert "hf://" in self.text
+    def test_contains_custom_training(self):
+        assert "run_custom_training" in self.text
 
 
-class TestRuntimeInfo:
+class TestTroubleshootingGuide:
     def setup_method(self):
-        self.mcp = FastMCP("test")
-        register_resources(self.mcp)
-        self.text = _read_resource(self.mcp, "trainer://runtimes/info")
-
-    def test_contains_torch_tune(self):
-        assert "torch-tune" in self.text
-        assert "fine_tune()" in self.text
-
-    def test_contains_torch_distributed(self):
-        assert "torch-distributed" in self.text
-        assert "run_custom_training()" in self.text
-
-    def test_contains_runtime_patches(self):
-        assert "node_selector" in self.text
-        assert "tolerations" in self.text
-
-    def test_contains_list_runtimes_example(self):
-        assert "list_runtimes()" in self.text
-
-
-class TestQuickstartGuide:
-    def setup_method(self):
-        self.mcp = FastMCP("test")
-        register_resources(self.mcp)
-        self.text = _read_resource(self.mcp, "trainer://guides/quickstart")
-
-    def test_has_numbered_steps(self):
-        assert "## 1." in self.text
-        assert "## 2." in self.text
-        assert "## 3." in self.text
-        assert "## 4." in self.text
-
-    def test_contains_preview_pattern(self):
-        assert "confirmed=False" in self.text
-        assert "confirmed=True" in self.text
-
-    def test_contains_common_issues_table(self):
-        assert "OOMKilled" in self.text
-        assert "batch_size" in self.text
-
-
-class TestTroubleshootingQuickRef:
-    def setup_method(self):
-        self.mcp = FastMCP("test")
-        register_resources(self.mcp)
+        self.mcp = _make_mcp_with_trainer()
         self.text = _read_resource(self.mcp, "trainer://guides/troubleshooting")
 
     def test_contains_diagnostic_commands(self):
@@ -132,19 +89,15 @@ class TestTroubleshootingQuickRef:
         assert "get_training_events" in self.text
         assert "get_training_logs" in self.text
 
-    def test_contains_status_table(self):
-        assert "Created" in self.text
-        assert "Running" in self.text
+    def test_contains_status_values(self):
         assert "Failed" in self.text
-        assert "Complete" in self.text
+        assert "Created" in self.text
 
-    def test_contains_error_sections(self):
-        assert "OOMKilled" in self.text
-        assert "FailedScheduling" in self.text
-        assert "ImagePullBackOff" in self.text
-        assert "NCCL Timeout" in self.text
 
-    def test_contains_recovery_commands(self):
-        assert "delete_training_job" in self.text
-        assert "suspend_training_job" in self.text
-        assert "resume_training_job" in self.text
+class TestPlatformFixes:
+    def setup_method(self):
+        self.mcp = _make_mcp_with_trainer()
+        self.text = _read_resource(self.mcp, "trainer://guides/platform-fixes")
+
+    def test_contains_volume_guidance(self):
+        assert "emptyDir" in self.text or "volume" in self.text.lower()

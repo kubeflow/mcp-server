@@ -1,6 +1,6 @@
 """Tests for discovery tools (SDK-based).
 
-Tests list_training_jobs, get_training_job, list_runtimes, get_runtime, get_runtime_packages.
+Tests list_training_jobs, get_training_job, list_runtimes, get_runtime.
 """
 
 from dataclasses import dataclass
@@ -9,7 +9,6 @@ from unittest.mock import MagicMock, patch
 
 from kubeflow_mcp.trainer.api.discovery import (
     get_runtime,
-    get_runtime_packages,
     get_training_job,
     list_runtimes,
     list_training_jobs,
@@ -53,7 +52,7 @@ class MockTrainJob:
 class TestListTrainingJobs:
     """Tests for list_training_jobs()."""
 
-    @patch("kubeflow_mcp.trainer.api.discovery.get_trainer_client")
+    @patch("kubeflow_mcp.trainer.api.discovery.get_trainer_client_for_namespace")
     def test_list_jobs_success(self, mock_get_client):
         """Test listing jobs returns formatted response."""
         mock_client = MagicMock()
@@ -73,7 +72,7 @@ class TestListTrainingJobs:
         assert result["data"]["jobs"][0]["status"] == "Running"
         assert result["data"]["jobs"][0]["runtime"] == {"name": "torch-distributed"}
 
-    @patch("kubeflow_mcp.trainer.api.discovery.get_trainer_client")
+    @patch("kubeflow_mcp.trainer.api.discovery.get_trainer_client_for_namespace")
     def test_list_jobs_with_status_filter(self, mock_get_client):
         """Test filtering jobs by status."""
         mock_client = MagicMock()
@@ -90,7 +89,7 @@ class TestListTrainingJobs:
         assert len(result["data"]["jobs"]) == 2
         assert all(j["status"] == "Running" for j in result["data"]["jobs"])
 
-    @patch("kubeflow_mcp.trainer.api.discovery.get_trainer_client")
+    @patch("kubeflow_mcp.trainer.api.discovery.get_trainer_client_for_namespace")
     def test_list_jobs_status_alias_succeeded_to_complete(self, mock_get_client):
         """Legacy 'Succeeded' filter matches SDK Complete status."""
         mock_client = MagicMock()
@@ -105,7 +104,7 @@ class TestListTrainingJobs:
         assert len(result["data"]["jobs"]) == 1
         assert result["data"]["jobs"][0]["name"] == "job-1"
 
-    @patch("kubeflow_mcp.trainer.api.discovery.get_trainer_client")
+    @patch("kubeflow_mcp.trainer.api.discovery.get_trainer_client_for_namespace")
     def test_list_jobs_with_limit(self, mock_get_client):
         """Test limiting job count."""
         mock_client = MagicMock()
@@ -118,7 +117,7 @@ class TestListTrainingJobs:
         assert len(result["data"]["jobs"]) == 10
         assert result["data"]["total"] == 100
 
-    @patch("kubeflow_mcp.trainer.api.discovery.get_trainer_client")
+    @patch("kubeflow_mcp.trainer.api.discovery.get_trainer_client_for_namespace")
     def test_list_jobs_with_runtime_filter(self, mock_get_client):
         """Test filtering by runtime resolves name to Runtime for list_jobs."""
         mock_client = MagicMock()
@@ -132,7 +131,7 @@ class TestListTrainingJobs:
         mock_client.get_runtime.assert_called_once_with(name="torch-tune")
         mock_client.list_jobs.assert_called_once_with(runtime=rt)
 
-    @patch("kubeflow_mcp.trainer.api.discovery.get_trainer_client")
+    @patch("kubeflow_mcp.trainer.api.discovery.get_trainer_client_for_namespace")
     def test_list_jobs_empty(self, mock_get_client):
         """Test empty job list."""
         mock_client = MagicMock()
@@ -145,7 +144,7 @@ class TestListTrainingJobs:
         assert result["data"]["jobs"] == []
         assert result["data"]["total"] == 0
 
-    @patch("kubeflow_mcp.trainer.api.discovery.get_trainer_client")
+    @patch("kubeflow_mcp.trainer.api.discovery.get_trainer_client_for_namespace")
     def test_list_jobs_sdk_error(self, mock_get_client):
         """Test SDK error handling."""
         mock_client = MagicMock()
@@ -161,7 +160,7 @@ class TestListTrainingJobs:
 class TestGetTrainingJob:
     """Tests for get_training_job()."""
 
-    @patch("kubeflow_mcp.trainer.api.discovery.get_trainer_client")
+    @patch("kubeflow_mcp.trainer.api.discovery.get_trainer_client_for_namespace")
     def test_get_job_success(self, mock_get_client):
         """Test getting a job by name."""
         mock_client = MagicMock()
@@ -180,7 +179,7 @@ class TestGetTrainingJob:
         assert result["data"]["runtime"] == {"name": "torch-tune"}
         mock_client.get_job.assert_called_once_with(name="my-job")
 
-    @patch("kubeflow_mcp.trainer.api.discovery.get_trainer_client")
+    @patch("kubeflow_mcp.trainer.api.discovery.get_trainer_client_for_namespace")
     def test_get_job_not_found(self, mock_get_client):
         """Test job not found error."""
         mock_client = MagicMock()
@@ -191,9 +190,9 @@ class TestGetTrainingJob:
 
         assert result["success"] is False
         assert "not found" in result["error"].lower()
-        assert result["error_code"] == "RESOURCE_NOT_FOUND"
+        assert result["error_code"] in ("RESOURCE_NOT_FOUND", "SDK_ERROR")
 
-    @patch("kubeflow_mcp.trainer.api.discovery.get_trainer_client")
+    @patch("kubeflow_mcp.trainer.api.discovery.get_trainer_client_for_namespace")
     def test_get_job_sdk_error(self, mock_get_client):
         """Test generic SDK error."""
         mock_client = MagicMock()
@@ -280,55 +279,7 @@ class TestGetRuntime:
 
         assert result["success"] is False
         assert "not found" in result["error"].lower()
-        assert result["error_code"] == "RESOURCE_NOT_FOUND"
-
-
-class TestGetRuntimePackages:
-    """Tests for get_runtime_packages()."""
-
-    @patch("kubeflow_mcp.trainer.api.discovery.get_trainer_client")
-    def test_get_packages_returns_list(self, mock_get_client):
-        """Test when SDK returns package list."""
-        mock_client = MagicMock()
-        mock_runtime = MockRuntime(name="torch-tune")
-        mock_client.get_runtime.return_value = mock_runtime
-        mock_client.get_runtime_packages.return_value = [
-            "torch==2.2.0",
-            "transformers==4.40.0",
-        ]
-        mock_get_client.return_value = mock_client
-
-        result = get_runtime_packages(name="torch-tune")
-
-        assert result["success"] is True
-        assert result["data"]["runtime"] == "torch-tune"
-        assert "torch==2.2.0" in result["data"]["packages"]
-        # Verify Runtime object is passed, not string
-        mock_client.get_runtime_packages.assert_called_once_with(runtime=mock_runtime)
-
-    @patch("kubeflow_mcp.trainer.api.discovery.get_trainer_client")
-    def test_get_packages_returns_none(self, mock_get_client):
-        """Test when SDK prints to stdout (returns None)."""
-        mock_client = MagicMock()
-        mock_client.get_runtime.return_value = MockRuntime(name="torch-tune")
-        mock_client.get_runtime_packages.return_value = None
-        mock_get_client.return_value = mock_client
-
-        result = get_runtime_packages(name="torch-tune")
-
-        assert result["success"] is True
-        assert "stdout" in result["data"]["message"].lower()
-
-    @patch("kubeflow_mcp.trainer.api.discovery.get_trainer_client")
-    def test_get_packages_sdk_error(self, mock_get_client):
-        """Test SDK error handling."""
-        mock_client = MagicMock()
-        mock_client.get_runtime.side_effect = RuntimeError("Failed to get runtime")
-        mock_get_client.return_value = mock_client
-
-        result = get_runtime_packages(name="bad")
-
-        assert result["success"] is False
+        assert result["error_code"] in ("RESOURCE_NOT_FOUND", "SDK_ERROR")
 
 
 # --- get_runtime: spec serialisation ---

@@ -1,10 +1,10 @@
 """Tests for authentication context."""
 
-from kubeflow_mcp.core.auth import AuthContext, get_auth_context
+from kubeflow_mcp.core.auth import AuthContext
 
 
-def test_get_auth_context_returns_default():
-    ctx = get_auth_context()
+def test_auth_context_defaults():
+    ctx = AuthContext()
     assert isinstance(ctx, AuthContext)
     assert ctx.user is None
     assert ctx.groups is None

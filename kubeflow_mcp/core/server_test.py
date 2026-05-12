@@ -3,11 +3,15 @@
 import asyncio
 from unittest.mock import patch
 
-from kubeflow_mcp.core.prompts import register_prompts
-from kubeflow_mcp.core.server import CLIENT_MODULES, TOOL_ANNOTATIONS, create_server
+from kubeflow_mcp.core.server import CLIENT_MODULES, create_server
+from kubeflow_mcp.trainer import CLIENT_TOOL_ANNOTATIONS
 
-WRITE_TOOLS = {name for name, ann in TOOL_ANNOTATIONS.items() if not ann.get("readOnlyHint", True)}
-READ_TOOLS = {name for name, ann in TOOL_ANNOTATIONS.items() if ann.get("readOnlyHint", True)}
+WRITE_TOOLS = {
+    name for name, ann in CLIENT_TOOL_ANNOTATIONS.items() if not ann.get("readOnlyHint", True)
+}
+READ_TOOLS = {
+    name for name, ann in CLIENT_TOOL_ANNOTATIONS.items() if ann.get("readOnlyHint", True)
+}
 
 
 def _registered_tool_names(server) -> set[str]:
@@ -31,7 +35,7 @@ def test_create_server_default_registers_all_trainer_tools():
     """Default persona (platform-admin) registers every trainer tool."""
     server = create_server(persona="platform-admin")
     names = _registered_tool_names(server)
-    for tool_name in TOOL_ANNOTATIONS:
+    for tool_name in CLIENT_TOOL_ANNOTATIONS:
         assert tool_name in names, f"{tool_name} missing for platform-admin"
 
 
@@ -103,24 +107,6 @@ def test_hub_module_is_stub():
     assert len(hub.TOOLS) == 0
     assert hub.MODULE_INFO["status"] == "stub"
 
-
-def test_prompts_registered():
-    """Server registers MCP prompts for workflows."""
-    from fastmcp import FastMCP
-
-    from kubeflow_mcp.common.constants import PROMPT_METADATA
-
-    mcp = FastMCP("test")
-    register_prompts(mcp)
-    loop = asyncio.new_event_loop()
-    try:
-        prompts = loop.run_until_complete(mcp._list_prompts())
-        prompt_names = {p.name for p in prompts}
-        assert len(prompt_names) > 0, "No prompts registered"
-        for name in PROMPT_METADATA:
-            assert name in prompt_names, f"Prompt '{name}' not registered"
-    finally:
-        loop.close()
 
 
 def test_audit_wrapper_emits_log(caplog):

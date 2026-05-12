@@ -77,7 +77,7 @@ def test_server_config_defaults():
     cfg = ServerConfig()
     assert cfg.clients == ["trainer"]
     assert cfg.persona == "readonly"
-    assert cfg.namespaces is None
+    assert cfg.transport == "stdio"
 
 
 def test_config_is_pydantic_model():
