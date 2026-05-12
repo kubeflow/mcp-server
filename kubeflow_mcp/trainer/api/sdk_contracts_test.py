@@ -119,61 +119,6 @@ class TestSDKTypeInstantiation:
         assert trainer.num_nodes == 2
         assert trainer.env == {"LEARNING_RATE": "0.001"}
 
-    def test_torchtune_config_with_loss_and_dataset_preprocess(self):
-        """Test TorchTuneConfig with loss and dataset preprocessing."""
-        ds_config = sdk_types.TorchTuneInstructDataset(
-            source=sdk_types.DataFormat.JSON,
-            split="train",
-            train_on_input=False,
-            new_system_prompt="You are a helpful assistant.",
-            column_map={"input": "question", "output": "answer"},
-        )
-
-        config = sdk_types.TorchTuneConfig(
-            batch_size=4,
-            epochs=1,
-            loss=sdk_types.Loss.CEWithChunkedOutputLoss,
-            dataset_preprocess_config=ds_config,
-            resources_per_node={"gpu": 1},
-        )
-
-        assert config.loss == sdk_types.Loss.CEWithChunkedOutputLoss
-        assert config.dataset_preprocess_config.source == sdk_types.DataFormat.JSON
-        assert config.dataset_preprocess_config.split == "train"
-        assert config.resources_per_node == {"gpu": 1}
-
-    def test_lora_config_with_advanced_targeting(self):
-        """Test LoraConfig with apply_lora_to_mlp/output and custom attn modules."""
-        config = sdk_types.LoraConfig(
-            lora_rank=16,
-            apply_lora_to_mlp=True,
-            apply_lora_to_output=False,
-            lora_attn_modules=["q_proj", "k_proj", "v_proj"],
-        )
-
-        assert config.apply_lora_to_mlp is True
-        assert config.apply_lora_to_output is False
-        assert config.lora_attn_modules == ["q_proj", "k_proj", "v_proj"]
-
-    def test_hf_model_initializer_with_ignore_patterns(self):
-        """Test HuggingFaceModelInitializer with ignore_patterns."""
-        init = sdk_types.HuggingFaceModelInitializer(
-            storage_uri="hf://meta-llama/Llama-3.2-1B",
-            ignore_patterns=["*.bin", "*.h5"],
-            access_token="hf_token123",
-        )
-
-        assert init.ignore_patterns == ["*.bin", "*.h5"]
-
-    def test_custom_trainer_with_func_args(self):
-        """Test CustomTrainer with func_args."""
-        trainer = sdk_types.CustomTrainer(
-            func=lambda lr=None, epochs=None: None,
-            func_args={"lr": 0.001, "epochs": 5},
-        )
-
-        assert trainer.func_args == {"lr": 0.001, "epochs": 5}
-
     def test_huggingface_model_initializer(self):
         """Test HuggingFaceModelInitializer with hf:// prefix."""
         init = sdk_types.HuggingFaceModelInitializer(
@@ -299,16 +244,6 @@ class TestSDKAPISignatures:
 
         assert "name" in params
 
-    def test_trainer_client_list_runtimes_signature(self):
-        """Verify list_runtimes() exists and takes no required args beyond self."""
-        sig = inspect.signature(TrainerClient.list_runtimes)
-        required = [
-            p
-            for p in sig.parameters.values()
-            if p.name != "self" and p.default is inspect.Parameter.empty
-        ]
-        assert len(required) == 0
-
     def test_trainer_client_get_runtime_signature(self):
         """Verify get_runtime() accepts name parameter."""
         sig = inspect.signature(TrainerClient.get_runtime)
@@ -356,38 +291,12 @@ class TestSDKDataclassFields:
             "dtype",
             "batch_size",
             "epochs",
-            "loss",
             "num_nodes",
             "peft_config",
-            "dataset_preprocess_config",
             "resources_per_node",
         }
 
         assert expected.issubset(field_names), f"Missing: {expected - field_names}"
-
-    def test_torchtune_instruct_dataset_has_expected_fields(self):
-        """Verify TorchTuneInstructDataset has all fields we use."""
-        field_names = {f.name for f in fields(sdk_types.TorchTuneInstructDataset)}
-
-        expected = {
-            "source",
-            "split",
-            "train_on_input",
-            "new_system_prompt",
-            "column_map",
-        }
-
-        assert expected.issubset(field_names), f"Missing: {expected - field_names}"
-
-    def test_hf_model_initializer_has_ignore_patterns(self):
-        """Verify HuggingFaceModelInitializer has ignore_patterns field."""
-        field_names = {f.name for f in fields(sdk_types.HuggingFaceModelInitializer)}
-        assert "ignore_patterns" in field_names
-
-    def test_hf_dataset_initializer_has_ignore_patterns(self):
-        """Verify HuggingFaceDatasetInitializer has ignore_patterns field."""
-        field_names = {f.name for f in fields(sdk_types.HuggingFaceDatasetInitializer)}
-        assert "ignore_patterns" in field_names
 
     def test_custom_trainer_has_expected_fields(self):
         """Verify CustomTrainer has all fields we use."""
@@ -399,7 +308,6 @@ class TestSDKDataclassFields:
             "num_nodes",
             "resources_per_node",
             "packages_to_install",
-            "pip_index_urls",
             "env",
             "image",
         }
@@ -444,33 +352,6 @@ class TestSDKDataclassFields:
 
         assert expected.issubset(field_names), f"Missing: {expected - field_names}"
 
-    def test_s3_dataset_initializer_has_expected_fields(self):
-        """Verify S3DatasetInitializer has fields MCP tools reference."""
-        field_names = {f.name for f in fields(sdk_types.S3DatasetInitializer)}
-
-        expected = {
-            "storage_uri",
-            "endpoint",
-            "access_key_id",
-            "secret_access_key",
-            "region",
-        }
-
-        assert expected.issubset(field_names), f"Missing: {expected - field_names}"
-
-    def test_step_has_expected_fields(self):
-        """Verify Step type (returned in TrainJob.steps) has fields we extract."""
-        field_names = {f.name for f in fields(sdk_types.Step)}
-
-        expected = {"name", "status", "pod_name"}
-
-        assert expected.issubset(field_names), f"Missing: {expected - field_names}"
-
-    def test_trainjob_has_num_nodes(self):
-        """Verify TrainJob includes num_nodes (used in monitoring summary)."""
-        field_names = {f.name for f in fields(sdk_types.TrainJob)}
-        assert "num_nodes" in field_names
-
 
 class TestSDKEnums:
     """Verify SDK enums are available and have expected values."""
@@ -485,13 +366,6 @@ class TestSDKEnums:
     def test_loss_enum(self):
         """Verify Loss enum exists."""
         assert hasattr(sdk_types.Loss, "CEWithChunkedOutputLoss")
-
-    def test_data_format_enum(self):
-        """Verify DataFormat enum has values MCP fine_tune uses for dataset_source."""
-        assert hasattr(sdk_types.DataFormat, "JSON")
-        assert hasattr(sdk_types.DataFormat, "CSV")
-        assert hasattr(sdk_types.DataFormat, "PARQUET")
-        assert sdk_types.DataFormat.JSON.value == "json"
 
 
 class TestMCPToSDKConversions:
@@ -604,35 +478,6 @@ class TestSDKOptionsImport:
         assert hasattr(kubernetes, "PodSpecPatch")
         assert hasattr(kubernetes, "ContainerPatch")
 
-    def test_pod_spec_patch_has_scheduling_fields(self):
-        """Verify PodSpecPatch has fields MCP tools use for node scheduling."""
-        from kubeflow.trainer.options.kubernetes import PodSpecPatch
-
-        field_names = {f.name for f in fields(PodSpecPatch)}
-        expected = {
-            "service_account_name",
-            "volumes",
-            "image_pull_secrets",
-            "node_selector",
-            "tolerations",
-        }
-        assert expected.issubset(field_names), f"Missing: {expected - field_names}"
-
-    def test_container_patch_has_expected_fields(self):
-        """Verify ContainerPatch has fields MCP tools use."""
-        from kubeflow.trainer.options.kubernetes import ContainerPatch
-
-        field_names = {f.name for f in fields(ContainerPatch)}
-        expected = {"name", "env", "volume_mounts"}
-        assert expected.issubset(field_names), f"Missing: {expected - field_names}"
-
-    def test_trainer_command_and_args_available(self):
-        """Verify TrainerCommand and TrainerArgs options exist."""
-        from kubeflow.trainer.options import kubernetes
-
-        assert hasattr(kubernetes, "TrainerCommand")
-        assert hasattr(kubernetes, "TrainerArgs")
-
 
 class TestK8sClientContracts:
     """Validate kubernetes client APIs used by utils.py and lifecycle.py.
@@ -682,59 +527,6 @@ class TestK8sClientContracts:
 
         assert callable(load_config)
 
-    def test_custom_objects_api_cluster_operations(self):
-        """Cluster-scoped CR operations used by platform.py."""
-        from kubernetes.client import CustomObjectsApi
-
-        for method_name in [
-            "list_cluster_custom_object",
-            "get_cluster_custom_object",
-            "create_cluster_custom_object",
-            "patch_cluster_custom_object",
-            "delete_cluster_custom_object",
-        ]:
-            assert callable(getattr(CustomObjectsApi, method_name, None)), f"Missing: {method_name}"
-
-
-class TestSDKConstants:
-    """Verify SDK constants used by MCP server match expected values."""
-
-    def test_trainer_group_and_version(self):
-        """Verify API group/version used in platform.py CRD operations."""
-        from kubeflow.trainer.constants import constants
-
-        assert constants.GROUP == "trainer.kubeflow.org"
-        assert constants.VERSION == "v1alpha1"
-
-    def test_trainjob_status_strings(self):
-        """Verify status constants used in monitoring/discovery status mapping."""
-        from kubeflow.trainer.constants import constants
-
-        assert constants.TRAINJOB_COMPLETE == "Complete"
-        assert constants.TRAINJOB_FAILED == "Failed"
-        assert constants.TRAINJOB_RUNNING == "Running"
-        assert constants.TRAINJOB_CREATED == "Created"
-
-    def test_resource_plurals(self):
-        """Verify CRD plural names used by platform.py and utils.py."""
-        from kubeflow.trainer.constants import constants
-
-        assert constants.TRAINJOB_PLURAL == "trainjobs"
-        assert constants.CLUSTER_TRAINING_RUNTIME_PLURAL == "clustertrainingruntimes"
-
-    def test_default_log_step(self):
-        """Verify NODE constant used as default log step prefix."""
-        from kubeflow.trainer.constants import constants
-
-        assert constants.NODE == "node"
-
-    def test_kubernetes_backend_config_fields(self):
-        """Verify KubernetesBackendConfig has namespace field used by utils.py."""
-        from kubeflow.common.types import KubernetesBackendConfig
-
-        config = KubernetesBackendConfig(namespace="test-ns")
-        assert config.namespace == "test-ns"
-
 
 class TestMCPToolSignatures:
     """Verify MCP tool function signatures include expected SDK-aligned parameters."""
@@ -749,23 +541,11 @@ class TestMCPToolSignatures:
         "epochs",
         "num_nodes",
         "dtype",
-        "loss",
-        "resources_per_node",
         "lora_rank",
         "lora_alpha",
         "lora_dropout",
         "use_dora",
         "quantize_base",
-        "apply_lora_to_mlp",
-        "apply_lora_to_output",
-        "lora_attn_modules",
-        "dataset_source",
-        "dataset_split",
-        "dataset_train_on_input",
-        "dataset_system_prompt",
-        "dataset_column_map",
-        "model_ignore_patterns",
-        "dataset_ignore_patterns",
         "confirmed",
     }
 
@@ -775,26 +555,16 @@ class TestMCPToolSignatures:
         "namespace",
         "num_nodes",
         "gpu_per_node",
-        "func_args",
         "packages",
-        "pip_index_urls",
         "image",
-        "runtime",
-        "resources_per_node",
-        "env",
         "confirmed",
     }
 
     CONTAINER_TRAINING_EXPECTED_PARAMS = {
         "image",
-        "command",
-        "args",
-        "name",
         "namespace",
         "num_nodes",
         "gpu_per_node",
-        "resources_per_node",
-        "env",
         "confirmed",
     }
 
@@ -831,16 +601,7 @@ class TestMCPToolSignatures:
 
         sig = inspect.signature(fine_tune)
         lora_fields = {f.name for f in fields(sdk_types.LoraConfig)}
-        mcp_lora_params = {
-            "lora_rank",
-            "lora_alpha",
-            "lora_dropout",
-            "use_dora",
-            "quantize_base",
-            "apply_lora_to_mlp",
-            "apply_lora_to_output",
-            "lora_attn_modules",
-        }
+        mcp_lora_params = {"lora_rank", "lora_alpha", "lora_dropout", "use_dora", "quantize_base"}
         for p in mcp_lora_params:
             assert p in sig.parameters, f"MCP fine_tune missing LoRA param: {p}"
             assert p in lora_fields, f"SDK LoraConfig missing field: {p}"

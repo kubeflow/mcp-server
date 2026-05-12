@@ -1,5 +1,7 @@
 # IDEs
 .vscode/
+.claude
+.cursor
 .idea/
 __debug_bin
 .DS_Store
@@ -17,6 +19,7 @@ dist/
 # Testing / coverage
 .coverage
 coverage.xml
+coverage.lcov
 coverage.json
 htmlcov/
 

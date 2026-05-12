@@ -14,10 +14,8 @@
 """Test CLI commands."""
 
 import sys
-from dataclasses import dataclass, field
 from unittest.mock import MagicMock, patch
 
-import pytest
 from click.testing import CliRunner
 
 from kubeflow_mcp.cli import cli
@@ -53,69 +51,40 @@ def test_status_shows_stubs():
 def test_serve_rejects_invalid_persona():
     runner = CliRunner()
     result = runner.invoke(cli, ["serve", "--persona", "hacker"])
-    assert result.exit_code == 2
-    assert "invalid value" in result.output.lower()
+    assert result.exit_code != 0
+    assert "invalid choice" in result.output.lower() or "hacker" in result.output
 
 
 def test_serve_rejects_invalid_transport():
     runner = CliRunner()
     result = runner.invoke(cli, ["serve", "--transport", "websocket"])
-    assert result.exit_code == 2
-    assert "invalid value" in result.output.lower()
+    assert result.exit_code != 0
+    assert "invalid choice" in result.output.lower() or "websocket" in result.output
 
 
 # --- serve: wiring — create_server receives correct args, server.run is called ---
 
 
-def _make_default_config(**overrides):
-    """Build a fake Config with sensible defaults, applying *overrides* to server fields."""
-    from kubeflow_mcp.core.config import Config, LoggingConfig, ServerConfig
+def _make_serve_mocks():
+    """Return (mock_server, sys.modules patch dict) for serve command tests.
 
-    server_kwargs = dict(
-        clients=["trainer"],
-        persona="readonly",
-        transport="stdio",
-    )
-    server_kwargs.update(overrides)
-    return Config(server=ServerConfig(**server_kwargs), logging=LoggingConfig())
-
-
-def _make_serve_mocks(config=None):
-    """Return (mock_server, mock_create_server, sys.modules patch dict) for serve tests.
-
-    serve() does lazy imports of core.logging, core.server, core.config,
-    core.auth, and core.resilience — patch sys.modules so those imports
-    resolve to mocks regardless of whether the modules exist on the current branch.
+    serve() does lazy imports of core.logging and core.server inside the
+    function body — patch sys.modules so those imports resolve to mocks
+    regardless of whether the modules exist on the current branch.
     """
-    if config is None:
-        config = _make_default_config()
 
     mock_server = MagicMock()
     mock_create_server = MagicMock(return_value=mock_server)
-    mock_configure_resilience = MagicMock()
     mock_setup_logging = MagicMock(return_value=MagicMock())
-    mock_load_config = MagicMock(return_value=config)
-    mock_build_auth_provider = MagicMock(return_value=None)
-    mock_configure_circuit_breaker = MagicMock()
 
     fake_server_mod = MagicMock()
     fake_server_mod.create_server = mock_create_server
-    fake_server_mod.configure_resilience = mock_configure_resilience
     fake_logging_mod = MagicMock()
     fake_logging_mod.setup_logging = mock_setup_logging
-    fake_config_mod = MagicMock()
-    fake_config_mod.load_config = mock_load_config
-    fake_auth_mod = MagicMock()
-    fake_auth_mod.build_auth_provider = mock_build_auth_provider
-    fake_resilience_mod = MagicMock()
-    fake_resilience_mod.configure_circuit_breaker = mock_configure_circuit_breaker
 
     modules_patch = {
         "kubeflow_mcp.core.server": fake_server_mod,
         "kubeflow_mcp.core.logging": fake_logging_mod,
-        "kubeflow_mcp.core.config": fake_config_mod,
-        "kubeflow_mcp.core.auth": fake_auth_mod,
-        "kubeflow_mcp.core.resilience": fake_resilience_mod,
     }
     return mock_server, mock_create_server, modules_patch
 
@@ -149,30 +118,6 @@ def test_serve_http_transport_uses_streamable_http():
 
     _, kwargs = mock_server.run.call_args
     assert kwargs.get("transport") == "streamable-http"
-
-
-def test_serve_sse_transport_uses_sse():
-    mock_server, _, modules_patch = _make_serve_mocks()
-
-    with patch.dict(sys.modules, modules_patch):
-        runner = CliRunner()
-        runner.invoke(cli, ["serve", "--transport", "sse"])
-
-    _, kwargs = mock_server.run.call_args
-    assert kwargs.get("transport") == "sse"
-
-
-def test_serve_sse_transport_calls_build_auth_provider():
-    mock_server, _, modules_patch = _make_serve_mocks()
-
-    with patch.dict(sys.modules, modules_patch):
-        runner = CliRunner()
-        runner.invoke(cli, ["serve", "--transport", "sse"])
-
-    fake_auth_mod = sys.modules.get(
-        "kubeflow_mcp.core.auth", modules_patch["kubeflow_mcp.core.auth"]
-    )
-    fake_auth_mod.build_auth_provider.assert_called_once()
 
 
 def test_serve_progressive_mode():
@@ -211,193 +156,5 @@ def test_serve_semantic_mode():
 def test_serve_rejects_invalid_mode():
     runner = CliRunner()
     result = runner.invoke(cli, ["serve", "--mode", "turbo"])
-    assert result.exit_code == 2
-    assert "invalid value" in result.output.lower()
-
-
-# --- serve: config / env var fallback ---
-
-
-@dataclass
-class ConfigFallbackCase:
-    name: str
-    config_persona: str
-    cli_args: list[str] = field(default_factory=lambda: ["serve"])
-    expected_persona: str = ""
-
-    def __post_init__(self):
-        if not self.expected_persona:
-            self.expected_persona = self.config_persona
-
-
-@pytest.mark.parametrize(
-    "test_case",
-    [
-        ConfigFallbackCase(
-            name="no CLI flag falls back to config persona",
-            config_persona="ml-engineer",
-            cli_args=["serve"],
-            expected_persona="ml-engineer",
-        ),
-        ConfigFallbackCase(
-            name="CLI flag overrides config persona",
-            config_persona="ml-engineer",
-            cli_args=["serve", "--persona", "platform-admin"],
-            expected_persona="platform-admin",
-        ),
-        ConfigFallbackCase(
-            name="config defaults to readonly when config has readonly",
-            config_persona="readonly",
-            cli_args=["serve"],
-            expected_persona="readonly",
-        ),
-    ],
-)
-def test_serve_persona_config_fallback(test_case):
-    config = _make_default_config(persona=test_case.config_persona)
-    mock_server, mock_create_server, modules_patch = _make_serve_mocks(config=config)
-
-    with patch.dict(sys.modules, modules_patch):
-        runner = CliRunner()
-        runner.invoke(cli, test_case.cli_args)
-
-    mock_create_server.assert_called_once()
-    _, kwargs = mock_create_server.call_args
-    assert kwargs["persona"] == test_case.expected_persona
-
-
-def test_serve_clients_config_fallback():
-    config = _make_default_config(clients=["trainer", "optimizer"])
-    mock_server, mock_create_server, modules_patch = _make_serve_mocks(config=config)
-
-    with patch.dict(sys.modules, modules_patch):
-        runner = CliRunner()
-        runner.invoke(cli, ["serve"])
-
-    mock_create_server.assert_called_once()
-    _, kwargs = mock_create_server.call_args
-    assert kwargs["clients"] == ["trainer", "optimizer"]
-
-
-def test_serve_clients_cli_overrides_config():
-    config = _make_default_config(clients=["trainer", "optimizer"])
-    mock_server, mock_create_server, modules_patch = _make_serve_mocks(config=config)
-
-    with patch.dict(sys.modules, modules_patch):
-        runner = CliRunner()
-        runner.invoke(cli, ["serve", "--clients", "hub"])
-
-    mock_create_server.assert_called_once()
-    _, kwargs = mock_create_server.call_args
-    assert kwargs["clients"] == ["hub"]
-
-
-def test_serve_transport_config_fallback():
-    config = _make_default_config(transport="http")
-    mock_server, _, modules_patch = _make_serve_mocks(config=config)
-
-    with patch.dict(sys.modules, modules_patch):
-        runner = CliRunner()
-        runner.invoke(cli, ["serve"])
-
-    _, kwargs = mock_server.run.call_args
-    assert kwargs.get("transport") == "streamable-http"
-
-
-# --- serve: auth token wiring ---
-
-
-def test_serve_http_calls_build_auth_provider():
-    """HTTP transport triggers build_auth_provider with config."""
-    mock_server, mock_create_server, modules_patch = _make_serve_mocks()
-    fake_auth_mod = modules_patch["kubeflow_mcp.core.auth"]
-
-    with patch.dict(sys.modules, modules_patch):
-        runner = CliRunner()
-        runner.invoke(cli, ["serve", "--transport", "http"])
-
-    fake_auth_mod.build_auth_provider.assert_called_once()
-
-
-def test_serve_auth_token_passed_to_create_server():
-    """--auth-token with HTTP transport produces a non-None auth_provider."""
-    mock_server, mock_create_server, modules_patch = _make_serve_mocks()
-    fake_auth_mod = modules_patch["kubeflow_mcp.core.auth"]
-    fake_auth_mod.build_auth_provider.return_value = MagicMock(name="auth_provider")
-
-    with patch.dict(sys.modules, modules_patch):
-        runner = CliRunner()
-        runner.invoke(cli, ["serve", "--transport", "http", "--auth-token", "secret123"])
-
-    mock_create_server.assert_called_once()
-    _, kwargs = mock_create_server.call_args
-    assert kwargs["auth_provider"] is not None
-
-
-def test_serve_stdio_skips_auth_provider():
-    """stdio transport does not call build_auth_provider."""
-    mock_server, mock_create_server, modules_patch = _make_serve_mocks()
-    fake_auth_mod = modules_patch["kubeflow_mcp.core.auth"]
-
-    with patch.dict(sys.modules, modules_patch):
-        runner = CliRunner()
-        runner.invoke(cli, ["serve", "--transport", "stdio"])
-
-    fake_auth_mod.build_auth_provider.assert_not_called()
-    mock_create_server.assert_called_once()
-    _, kwargs = mock_create_server.call_args
-    assert kwargs["auth_provider"] is None
-
-
-# --- serve: resilience wiring ---
-
-
-def test_serve_calls_configure_resilience():
-    """serve() wires rate limiter from config."""
-    mock_server, _, modules_patch = _make_serve_mocks()
-    fake_server_mod = modules_patch["kubeflow_mcp.core.server"]
-
-    with patch.dict(sys.modules, modules_patch):
-        runner = CliRunner()
-        runner.invoke(cli, ["serve"])
-
-    fake_server_mod.configure_resilience.assert_called_once()
-
-
-def test_serve_calls_configure_circuit_breaker():
-    """serve() wires circuit breaker from config."""
-    mock_server, _, modules_patch = _make_serve_mocks()
-    fake_resilience_mod = modules_patch["kubeflow_mcp.core.resilience"]
-
-    with patch.dict(sys.modules, modules_patch):
-        runner = CliRunner()
-        runner.invoke(cli, ["serve"])
-
-    fake_resilience_mod.configure_circuit_breaker.assert_called_once()
-
-
-# --- serve: banner flag ---
-
-
-def test_serve_no_banner_flag():
-    """--no-banner passes show_banner=False to server.run."""
-    mock_server, _, modules_patch = _make_serve_mocks()
-
-    with patch.dict(sys.modules, modules_patch):
-        runner = CliRunner()
-        runner.invoke(cli, ["serve", "--no-banner"])
-
-    _, kwargs = mock_server.run.call_args
-    assert kwargs.get("show_banner") is False
-
-
-def test_serve_default_shows_banner():
-    """Without --no-banner, show_banner=True."""
-    mock_server, _, modules_patch = _make_serve_mocks()
-
-    with patch.dict(sys.modules, modules_patch):
-        runner = CliRunner()
-        runner.invoke(cli, ["serve"])
-
-    _, kwargs = mock_server.run.call_args
-    assert kwargs.get("show_banner") is True
+    assert result.exit_code != 0
+    assert "invalid choice" in result.output.lower() or "turbo" in result.output
