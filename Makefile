@@ -15,7 +15,7 @@
 SHELL = /usr/bin/env bash -o pipefail
 .SHELLFLAGS = -ec
 
-.PHONY: help uv install-dev verify format test-python test test-cov clean inspector docs docs-clean docs-serve
+.PHONY: help uv install-dev verify format test-python test test-cov clean inspector
 
 PROJECT_DIR := $(shell dirname $(abspath $(lastword $(MAKEFILE_LIST))))
 
@@ -79,20 +79,6 @@ else
 	@npx @modelcontextprotocol/inspector --transport http --server-url $(or $(SERVER_URL),http://127.0.0.1:8000/mcp)
 endif
 
-##@ Documentation
-
-docs: ## Build HTML documentation
-	@uv sync --group docs
-	@uv run sphinx-build -b html docs/source docs/_build/html
-
-docs-clean: ## Clean documentation build artifacts
-	@rm -rf docs/_build
-
-docs-serve: ## Build and serve docs with live reload
-	@uv sync --group docs
-	@uv run pip install sphinx-autobuild
-	@uv run sphinx-autobuild docs/source docs/_build/html
-
 ##@ Cleanup
 
 clean: ## Remove all build and cache artifacts
@@ -102,16 +88,3 @@ clean: ## Remove all build and cache artifacts
 	find . -type f -name "*.pyc" -delete 2>/dev/null || true
 	@echo "Cleaned build artifacts"
 
-##@ Documentation
-
-docs: ## Build HTML documentation
-	@uv sync --group docs
-	@uv run sphinx-build -b html docs/source docs/_build/html
-
-docs-clean: ## Clean documentation build artifacts
-	@rm -rf docs/_build
-
-docs-serve: ## Build and serve docs with live reload
-	@uv sync --group docs
-	@uv run pip install sphinx-autobuild
-	@uv run sphinx-autobuild docs/source docs/_build/html

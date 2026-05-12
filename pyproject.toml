@@ -34,12 +34,6 @@ dev = [
     "ruff>=0.9",
     "pip-audit>=2.7",
 ]
-docs = [
-    "sphinx>=7.0",
-    "furo>=2024.1.29",
-    "sphinx-copybutton>=0.5",
-    "sphinx-design>=0.5",
-]
 
 [dependency-groups]
 dev = [
@@ -49,12 +43,6 @@ dev = [
     "pytest-benchmark>=4.0",
     "ruff>=0.9",
     "huggingface-hub>=0.20",
-]
-docs = [
-    "sphinx>=7.0",
-    "furo>=2024.1.29",
-    "sphinx-copybutton>=0.5",
-    "sphinx-design>=0.5",
 ]
 
 [project.scripts]
