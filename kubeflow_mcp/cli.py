@@ -15,6 +15,7 @@
 """Kubeflow MCP Server CLI."""
 
 import warnings
+from typing import Any
 
 import click
 
@@ -200,56 +201,62 @@ def status() -> None:
             click.echo(f"  {name}: not installed")
 
 
+def _provider_entry_point_map() -> dict[str, Any]:
+    from importlib.metadata import entry_points
+
+    eps = entry_points()
+    selected = eps.select(group="kubeflow_mcp.providers")  # type: ignore[union-attr]
+    return {ep.name: ep for ep in selected}
+
+
 @cli.command()
 @click.option(
-    "--backend",
-    "-b",
+    "--provider",
+    "-p",
     default="ollama",
-    type=click.Choice(["ollama"]),
-    help="Agent backend",
+    help="Agent provider (see entry-points group kubeflow_mcp.providers)",
 )
 @click.option(
     "--model",
     "-m",
-    default="qwen3:8b",
-    help="Model name for the agent",
+    default=None,
+    help="Model name (provider default if omitted)",
 )
 @click.option(
     "--mode",
     default="full",
-    type=click.Choice(["full", "progressive", "semantic", "static", "mcp"]),
-    help="Tool loading mode (static/mcp are legacy aliases for full)",
+    type=click.Choice(["full", "progressive", "semantic"]),
+    help="Tool loading mode: same choices as serve --mode (ollama; ignored by minimal providers)",
 )
 @click.option(
     "--thinking/--no-thinking",
     default=False,
-    help="Enable thinking output for supported models",
+    help="Enable thinking output for supported models (ollama)",
 )
-def agent(backend: str, model: str, mode: str, thinking: bool) -> None:
-    """Run an interactive AI agent."""
-    if backend == "ollama":
-        try:
-            from kubeflow_mcp.agents.ollama import main as ollama_main
-        except ImportError:
-            click.echo("Error: Agent dependencies not installed.", err=True)
-            click.echo("Install with: pip install ollama", err=True)
-            raise SystemExit(1) from None
-
-        import sys
-
-        sys.argv = [
-            "kubeflow-mcp-agent",
-            "--model",
-            model,
-            "--mode",
-            mode,
-        ]
-        if thinking:
-            sys.argv.append("--thinking")
-        ollama_main()
-    else:
-        click.echo(f"Backend '{backend}' not yet implemented.", err=True)
+@click.option(
+    "--url",
+    default=None,
+    help="Ollama base URL (ollama provider only; default http://localhost:11434)",
+)
+def agent(provider: str, model: str | None, mode: str, thinking: bool, url: str | None) -> None:
+    """Run an interactive AI agent backed by a registered provider."""
+    eps = _provider_entry_point_map()
+    if provider not in eps:
+        available = ", ".join(sorted(eps)) or "none installed"
+        click.echo(f"Unknown provider '{provider}'. Available: {available}", err=True)
         raise SystemExit(1)
+
+    try:
+        provider_cls = eps[provider].load()
+    except ImportError as e:
+        click.echo(f"Provider '{provider}' dependencies missing: {e}", err=True)
+        raise SystemExit(1) from None
+
+    instance = provider_cls()
+    kwargs: dict[str, Any] = {"thinking": thinking}
+    if url is not None:
+        kwargs["url"] = url
+    instance.run(model=model or instance.default_model, mode=mode, **kwargs)
 
 
 if __name__ == "__main__":

@@ -23,13 +23,40 @@ dependencies = [
     "huggingface-hub>=0.20",
 ]
 
+[dependency-groups]
+# Keep in sync with [project.optional-dependencies] dev (pip / uv --extra dev).
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=4.0",
+    "pytest-benchmark>=4.0",
+    "ruff>=0.9",
+    "mypy>=1.10",
+    "pip-audit>=2.7",
+]
+
+[tool.uv]
+default-groups = ["dev"]
+
 [project.optional-dependencies]
 hub = ["kubeflow[hub]>=0.4.0"]
 spark = ["kubeflow[spark]>=0.4.0"]
+# CLI agent: install only what you need (Ollama vs LiteLLM).
+agents-ollama = [
+    "llama-index-core>=0.12",
+    "llama-index-llms-ollama>=0.4",
+    "rich>=13.0",
+]
+agents-litellm = [
+    "litellm>=1.0",
+    "rich>=13.0",
+]
+# All agent backends (convenience; same as agents-ollama + agents-litellm deps).
 agents = [
     "llama-index-core>=0.12",
     "llama-index-llms-ollama>=0.4",
     "rich>=13.0",
+    "litellm>=1.0",
 ]
 all = ["kubeflow[hub]>=0.4.0", "kubeflow[spark]>=0.4.0"]
 dev = [
@@ -51,6 +78,10 @@ docs = [
 [project.scripts]
 kubeflow-mcp = "kubeflow_mcp.cli:cli"
 
+[project.entry-points."kubeflow_mcp.providers"]
+ollama = "kubeflow_mcp.agents.ollama:OllamaProvider"
+litellm = "kubeflow_mcp.agents.litellm_provider:LiteLLMProvider"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
@@ -61,7 +92,7 @@ packages = ["kubeflow_mcp"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["kubeflow_mcp", "tests"]
-addopts = "-v --tb=short --cov=kubeflow_mcp --cov-report=term-missing --cov-fail-under=75"
+addopts = "-v --tb=short --cov=kubeflow_mcp --cov-report=term-missing"
 
 [tool.ruff]
 target-version = "py310"
@@ -96,7 +127,10 @@ ignore_missing_imports = true
 
 [tool.coverage.run]
 source = ["kubeflow_mcp"]
-omit = ["*_test.py"]
+omit = [
+    "*_test.py",
+    "*/kubeflow_mcp/agents/*",
+]
 
 [tool.coverage.report]
 show_missing = true

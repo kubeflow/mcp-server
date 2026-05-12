@@ -15,8 +15,10 @@
 """Ollama agent using LlamaIndex FunctionAgent with native tool calling.
 
 Requires optional dependencies:
-    uv sync --extra agents
-    pip install kubeflow-mcp[agents]
+    uv sync --extra agents-ollama
+    pip install 'kubeflow-mcp[agents-ollama]'
+
+For all agent backends (Ollama + LiteLLM): ``uv sync --extra agents``.
 
 Usage:
     ollama serve
@@ -35,6 +37,7 @@ from typing import Any
 # Suppress noisy loggers
 logging.getLogger("httpx").setLevel(logging.ERROR)
 logging.getLogger("llama_index").setLevel(logging.ERROR)
+logger = logging.getLogger(__name__)
 
 # Check if being imported by Sphinx for documentation
 _SPHINX_BUILD = "sphinx" in sys.modules
@@ -44,24 +47,14 @@ try:
     from llama_index.core.memory import ChatMemoryBuffer
     from llama_index.core.tools import FunctionTool
     from llama_index.llms.ollama import Ollama
-    from rich.console import Console
-    from rich.markdown import Markdown
-    from rich.panel import Panel
-    from rich.table import Table
-    from rich.text import Text
 except ImportError:
     if not _SPHINX_BUILD:
-        sys.exit("Error: required packages not installed\nRun: uv sync --extra agents")
+        sys.exit("Error: required packages not installed\nRun: uv sync --extra agents-ollama")
     # Allow import to continue for autodoc even without dependencies
     FunctionAgent = None  # type: ignore[misc, assignment]
     ChatMemoryBuffer = None  # type: ignore[misc, assignment]
     FunctionTool = None  # type: ignore[misc, assignment]
     Ollama = None  # type: ignore[misc, assignment]
-    Console = None  # type: ignore[misc, assignment]
-    Markdown = None  # type: ignore[misc, assignment]
-    Panel = None  # type: ignore[misc, assignment]
-    Table = None  # type: ignore[misc, assignment]
-    Text = None  # type: ignore[misc, assignment]
 
 from kubeflow_mcp.agents.dynamic_tools import (  # noqa: E402
     PROGRESSIVE_TOOLS,
@@ -71,7 +64,13 @@ from kubeflow_mcp.agents.dynamic_tools import (  # noqa: E402
 )
 
 try:
-    from kubeflow_mcp.core.server import SERVER_INSTRUCTIONS, TOOL_DESCRIPTIONS  # noqa: E402
+    from kubeflow_mcp.core.server import (  # noqa: E402
+        build_agent_instruction_text,
+        get_merged_client_tool_descriptions,
+    )
+
+    TOOL_DESCRIPTIONS = get_merged_client_tool_descriptions()
+    SERVER_INSTRUCTIONS = build_agent_instruction_text()
 except ImportError:
     SERVER_INSTRUCTIONS = "You are a Kubeflow training assistant."
     TOOL_DESCRIPTIONS: dict[str, str] = {}  # type: ignore[assignment]
@@ -79,8 +78,6 @@ try:
     from kubeflow_mcp.trainer import TOOLS  # noqa: E402
 except ImportError:
     TOOLS = []  # type: ignore[assignment]  # trainer API not available (skeleton branch)
-
-console = Console()
 
 # Agent configuration defaults
 DEFAULT_MODEL = "qwen3:8b"
@@ -121,7 +118,7 @@ SYSTEM_PROMPT = SERVER_INSTRUCTIONS + AGENT_HINTS
 def _create_tools(mode: str = "full") -> list[FunctionTool]:
     """Create LlamaIndex FunctionTools for the given mode.
 
-    Uses compact TOOL_DESCRIPTIONS from server.py for full mode (~200 tokens)
+    Uses compact descriptions from ``get_merged_client_tool_descriptions()`` for full mode (~200 tokens)
     instead of raw docstrings (~5K tokens).
 
     Args:
@@ -149,19 +146,6 @@ def _create_tools(mode: str = "full") -> list[FunctionTool]:
             )
         )
     return tools
-
-
-def _format_tool_result(result: Any, max_lines: int = 15) -> str:
-    """Format tool result for display, truncating if needed."""
-    if isinstance(result, dict):
-        formatted = json.dumps(result, indent=2, default=str)
-    else:
-        formatted = str(result)
-
-    lines = formatted.split("\n")
-    if len(lines) > max_lines:
-        return "\n".join(lines[:max_lines]) + f"\n... ({len(lines) - max_lines} more lines)"
-    return formatted
 
 
 class OllamaAgent:
@@ -200,7 +184,7 @@ class OllamaAgent:
         self.llm = None
 
         # Set system prompt based on mode
-        if tool_mode in ("progressive", "semantic"):
+        if self.tool_mode in ("progressive", "semantic"):
             self._system_prompt = get_dynamic_system_prompt(tool_mode)
         else:
             # For static and mcp modes, use full prompt (mcp may override)
@@ -381,7 +365,7 @@ class OllamaAgent:
         """
         import asyncio
 
-        def run_chat(msg: str) -> tuple[str, list[dict]]:
+        def _poll_chat_async_result(msg: str) -> tuple[str, list[dict]]:
             future = asyncio.run_coroutine_threadsafe(
                 self._chat_async(msg, on_thinking, on_tool_call, on_tool_result),
                 self._loop,
@@ -395,7 +379,7 @@ class OllamaAgent:
                     future.cancel()
                     raise
 
-        response, tool_calls = run_chat(message)
+        response, tool_calls = _poll_chat_async_result(message)
 
         # Track whether agent just showed a preview (confirmed=False tool call)
         if tool_calls:
@@ -405,7 +389,7 @@ class OllamaAgent:
                 self._awaiting_confirmation = not last_args.get("confirmed", False)
 
         if not response.strip() and not tool_calls:
-            console.print("[dim yellow]⚠ Empty response, retrying...[/dim yellow]")
+            logger.warning("Empty response from model, retrying")
 
             # Thinking mode causes qwen3/deepseek to reason but not emit a tool call.
             # Disable it first so the model outputs an action on the retry.
@@ -419,10 +403,10 @@ class OllamaAgent:
                     f"You know what to do. Call execute_tool() now. Original request: {message}"
                 )
 
-            response, tool_calls = run_chat(retry_msg)
+            response, tool_calls = _poll_chat_async_result(retry_msg)
 
             if not response.strip() and not tool_calls:
-                response, tool_calls = run_chat(f"Execute the action now: {message}")
+                response, tool_calls = _poll_chat_async_result(f"Execute the action now: {message}")
 
         if not response.strip() and not tool_calls:
             response = (
@@ -473,355 +457,26 @@ def _check_ollama_model(model: str, url: str) -> tuple[bool, str]:
 def run_chat(
     model: str = DEFAULT_MODEL,
     url: str = DEFAULT_URL,
-    tool_mode: str = "static",
-):
-    """Run interactive chat loop with rich UI.
+    tool_mode: str = "full",
+    thinking: bool = False,
+) -> None:
+    """Run interactive Ollama agent (Rich). Delegates to :mod:`kubeflow_mcp.agents.ollama_repl`."""
+    from kubeflow_mcp.agents.ollama_repl import run_ollama_chat
 
-    Args:
-        model: Ollama model name
-        url: Ollama server URL
-        tool_mode: Tool loading mode:
-            - "full": All tools loaded (~200 tokens) - default
-            - "progressive": 3 meta-tools, hierarchical discovery (~85 tokens)
-            - "semantic": 2 meta-tools, embedding search (~69 tokens)
-    """
-    # Welcome panel
-    welcome = Table.grid(padding=(0, 1))
-    welcome.add_column(justify="left")
-    welcome.add_row(Text("Kubeflow AI Agent", style="bold bright_cyan"))
-    welcome.add_row(Text(f"Model: {model}", style="bright_green"))
-    welcome.add_row(Text(f"Ollama: {url}", style="bright_white"))
-    mode_desc = TOOL_MODES.get(tool_mode, tool_mode)
-    welcome.add_row(Text(f"Tools: {mode_desc}", style="bright_yellow"))
-    welcome.add_row()
-    welcome.add_row(Text("Commands:", style="bright_yellow"))
-    welcome.add_row(Text("  /tools       - List available tools", style="white"))
-    welcome.add_row(
-        Text("  /mode        - Switch tool mode (static/progressive/semantic)", style="white")
-    )
-    welcome.add_row(Text("  /think       - Toggle thinking output", style="white"))
-    welcome.add_row(Text("  /file <path> - Read file and analyze it", style="white"))
-    welcome.add_row(Text("  /clear       - Clear conversation memory", style="white"))
-    welcome.add_row(Text("  exit         - Quit the agent", style="white"))
+    run_ollama_chat(model=model, url=url, tool_mode=tool_mode, thinking=thinking)
 
-    console.print()
-    console.print(
-        Panel(
-            welcome,
-            title="[bold bright_white]🚀 Ollama Agent[/bold bright_white]",
-            border_style="bright_blue",
-            padding=(1, 2),
-        )
-    )
 
-    # Check model availability
-    console.print("[bright_cyan]Checking model...[/bright_cyan]", end="\r")
-    model_ok, model_msg = _check_ollama_model(model, url)
-    if model_ok:
-        console.print(f"[bright_green]✓ {model_msg}[/bright_green]          ")
-    else:
-        console.print(f"[bright_red]✗ {model_msg}[/bright_red]")
-        return
+class OllamaProvider:
+    """Entry-point provider for `kubeflow-mcp agent --provider ollama`."""
 
-    agent = OllamaAgent(model=model, base_url=url, tool_mode=tool_mode)
+    name = "ollama"
+    default_model = DEFAULT_MODEL
+    requires = ["llama-index-core", "llama-index-llms-ollama", "rich"]
 
-    # Pre-load agent
-    console.print("[bright_cyan]Loading tools...[/bright_cyan]", end="\r")
-    try:
-        agent._ensure_agent()
-        tools_count = len(agent._tools) if agent._tools else 0
-        console.print(f"[bright_green]✓ Loaded {tools_count} tools[/bright_green]")
-    except Exception as e:
-        console.print(f"[bright_red]✗ Failed to initialize: {e}[/bright_red]")
-        return
-
-    console.print()
-    console.print(
-        "[bright_yellow]💡 Try: 'list training jobs' or 'check cluster resources'[/bright_yellow]"
-    )
-
-    # Enable readline for command history (up/down arrow navigation)
-    try:
-        import atexit
-        import os
-        import readline  # noqa: F401 - import enables history for input()
-
-        # Optional: persist history across sessions
-        history_file = os.path.expanduser("~/.kubeflow_mcp_history")
-        try:
-            readline.read_history_file(history_file)
-        except FileNotFoundError:
-            pass
-        atexit.register(readline.write_history_file, history_file)
-    except ImportError:
-        pass  # readline not available on some platforms
-
-    # State - thinking OFF by default, auto-enables after first message if model supports it
-    show_thinking = False
-    thinking_buffer: list[str] = []
-
-    while True:
-        try:
-            console.print()
-            console.print("[bold bright_blue]You →[/bold bright_blue] ", end="")
-            user_input = input().strip()  # Use raw input() for readline history support
-
-            if not user_input:
-                continue
-
-            if user_input.lower() in ("exit", "quit", "q"):
-                agent.close()
-                console.print("[dim italic]Goodbye![/dim italic]")
-                break
-
-            if user_input.lower() == "/tools":
-                tools = agent._tools or []
-                console.print(f"\n[bold]Available tools ({len(tools)}):[/bold]")
-                for t in tools:
-                    console.print(f"  [bright_cyan]{t.metadata.name}[/bright_cyan]")
-                continue
-
-            if user_input.lower() == "/think":
-                show_thinking = not show_thinking
-                agent.set_thinking_mode(show_thinking)
-                status = "ON" if show_thinking else "OFF"
-                console.print(f"[bright_yellow]Thinking mode: {status}[/bright_yellow]")
-                if show_thinking:
-                    console.print("[dim]Model reasoning will be shown during responses.[/dim]")
-                continue
-
-            if user_input.lower() == "/clear":
-                if agent.memory:
-                    agent.memory.reset()
-                    agent._awaiting_confirmation = False
-                    console.print("[bright_green]✓ Conversation memory cleared[/bright_green]")
-                    console.print("[dim]Context reset - start fresh![/dim]")
-                else:
-                    console.print("[dim]No memory to clear[/dim]")
-                if show_thinking:
-                    console.print(
-                        "[dim]Note: Only reasoning models (deepseek-r1, qwq, etc.) show thinking output[/dim]"
-                    )
-                continue
-
-            if user_input.lower().startswith("/mode"):
-                parts = user_input.split()
-                if len(parts) == 1:
-                    # Show current mode and options
-                    console.print(f"\n[bold]Current mode:[/bold] {agent.tool_mode}")
-                    console.print("\n[bold]Available modes:[/bold]")
-                    for mode_name, mode_desc in TOOL_MODES.items():
-                        marker = "→" if mode_name == agent.tool_mode else " "
-                        console.print(
-                            f"  {marker} [bright_cyan]{mode_name}[/bright_cyan]: {mode_desc}"
-                        )
-                    console.print("\n[dim]Usage: /mode <name>[/dim]")
-                else:
-                    new_mode = parts[1].lower()
-                    try:
-                        console.print(f"[bright_cyan]Switching to {new_mode} mode...[/bright_cyan]")
-                        num_tools = agent.set_mode(new_mode)
-                        console.print(
-                            f"[bright_green]✓ Switched to {new_mode} ({num_tools} tools)[/bright_green]"
-                        )
-                    except ValueError as e:
-                        console.print(f"[bright_red]✗ {e}[/bright_red]")
-                continue
-
-            # /file command - read local file and include in message
-            if user_input.lower().startswith("/file"):
-                # Handle /file without path
-                if user_input.lower() == "/file" or user_input[5:].strip() == "":
-                    console.print("[bright_yellow]Usage: /file <path>[/bright_yellow]")
-                    console.print("[dim]Example: /file examples/mnist_train.py[/dim]")
-                    console.print("[dim]         /file ~/scripts/train.py[/dim]")
-                    continue
-
-                file_path = user_input[5:].strip()
-                # Remove leading space if present
-                if file_path.startswith(" "):
-                    file_path = file_path[1:]
-
-                try:
-                    from pathlib import Path
-
-                    path = Path(file_path).expanduser()
-                    if not path.exists():
-                        console.print(f"[bright_red]✗ File not found: {file_path}[/bright_red]")
-                        console.print("[dim]Check the path and try again[/dim]")
-                        continue
-
-                    if not path.is_file():
-                        console.print(f"[bright_red]✗ Not a file: {file_path}[/bright_red]")
-                        continue
-
-                    content = path.read_text()
-                    lines = len(content.splitlines())
-                    console.print(
-                        f"[bright_green]✓ Read {path.name} ({lines} lines)[/bright_green]"
-                    )
-
-                    # Detect file type for syntax highlighting
-                    ext = path.suffix.lower()
-                    lang = {
-                        "py": "python",
-                        "js": "javascript",
-                        "ts": "typescript",
-                        "yaml": "yaml",
-                        "yml": "yaml",
-                        "json": "json",
-                    }.get(ext.lstrip("."), "")
-
-                    # Include file content in next message
-                    user_input = f"Here is the contents of `{path.name}`:\n\n```{lang}\n{content}\n```\n\nPlease analyze this file and tell me what it does."
-                    # Fall through to normal processing
-                except Exception as e:
-                    console.print(f"[bright_red]Error reading file: {e}[/bright_red]")
-                    continue
-
-            # Show user message
-            console.print()
-            console.print(
-                Panel(
-                    Text(user_input, style="white"),
-                    title="[bold bright_blue]You[/bold bright_blue]",
-                    border_style="bright_blue",
-                    padding=(0, 1),
-                )
-            )
-
-            # Processing indicator
-            console.print("[bright_cyan]⏳ Thinking...[/bright_cyan]", end="\r")
-            thinking_buffer.clear()
-            first_output = [True]
-
-            def on_thinking(delta):
-                if show_thinking and delta:  # noqa: B023
-                    if first_output[0]:  # noqa: B023
-                        console.print(" " * 20, end="\r")  # Clear status
-                        first_output[0] = False  # noqa: B023
-                    thinking_buffer.append(delta)
-                    console.print(
-                        f"[bright_magenta italic]{delta}[/bright_magenta italic]",
-                        end="",
-                        highlight=False,
-                    )
-
-            def on_tool_call(tool_info):
-                if first_output[0]:  # noqa: B023
-                    console.print(" " * 20, end="\r")  # Clear "Thinking..."
-                    first_output[0] = False  # noqa: B023
-                if thinking_buffer:
-                    console.print()  # Newline after thinking
-                    thinking_buffer.clear()
-                console.print()
-
-                tool_name = tool_info.get("name", "unknown")
-                tool_args = tool_info.get("args") or {}
-
-                # Always show tool name
-                console.print(f"  [bright_yellow]🔧 {tool_name}[/bright_yellow]")
-
-                # Show arguments
-                if tool_args:
-                    args_str = json.dumps(tool_args, indent=2, default=str)
-                    for line in args_str.split("\n"):
-                        console.print(f"     [bright_white]{line}[/bright_white]")
-                else:
-                    console.print("     [dim](no arguments)[/dim]")
-
-                console.print("[bright_cyan]  ⏳ Executing...[/bright_cyan]", end="\r")
-
-            def on_tool_result(result_info):
-                console.print(" " * 30, end="\r")  # Clear "Executing..."
-                if result_info.get("result"):
-                    result_str = _format_tool_result(result_info["result"])
-                    console.print(
-                        Panel(
-                            Text(result_str, style="white"),
-                            title="[bright_green]Result[/bright_green]",
-                            border_style="green",
-                            padding=(0, 1),
-                        )
-                    )
-
-            try:
-                response, _ = agent.chat(
-                    user_input,
-                    on_thinking=on_thinking if show_thinking else None,
-                    on_tool_call=on_tool_call,
-                    on_tool_result=on_tool_result,
-                )
-            except Exception as e:
-                console.print()
-                error_msg = str(e)
-                console.print(
-                    Panel(
-                        Text(f"{type(e).__name__}: {error_msg}", style="bright_red"),
-                        title="[bright_red bold]❌ Error[/bright_red bold]",
-                        border_style="red",
-                        padding=(0, 1),
-                    )
-                )
-                # Show helpful hints based on error type
-                if "does not support tools" in error_msg:
-                    console.print(
-                        "[yellow]💡 This model doesn't support function calling.[/yellow]"
-                    )
-                    console.print(
-                        "[yellow]   Try: qwen2.5:7b, llama3.2, or mistral (with tools, no thinking)[/yellow]"
-                    )
-                    console.print("[yellow]   Or: qwq:32b (has both thinking AND tools)[/yellow]")
-                elif "connection" in error_msg.lower():
-                    console.print("[yellow]💡 Check if Ollama is running: ollama serve[/yellow]")
-                elif "timeout" in error_msg.lower():
-                    console.print("[yellow]💡 Request timed out. Try a simpler query.[/yellow]")
-                continue
-
-            # Clear any pending status
-            console.print(" " * 40, end="\r")
-
-            # Notify user if thinking is available (but don't auto-enable - keeps output clean)
-            if agent._thinking_supported is True and not agent._thinking_notified:
-                agent._thinking_notified = True
-                console.print(
-                    "[dim]💭 Thinking supported. Use /think to see model reasoning.[/dim]"
-                )
-
-            # Newline after thinking
-            if thinking_buffer:
-                console.print()
-
-            # Only show assistant panel if there's actual response content
-            if response and response.strip():
-                console.print()
-                console.print(
-                    Panel(
-                        Markdown(response),
-                        title="[bold bright_green]Assistant[/bold bright_green]",
-                        border_style="bright_green",
-                        padding=(0, 2),
-                    )
-                )
-
-        except KeyboardInterrupt:
-            console.print(
-                "\n[yellow]Interrupted. Press Ctrl+C again to quit, or continue typing.[/yellow]"
-            )
-            try:
-                # Wait briefly for another Ctrl+C
-                import time
-
-                time.sleep(0.5)
-            except KeyboardInterrupt:
-                agent.close()
-                console.print("[dim italic]Goodbye![/dim italic]")
-                break
-            continue
-        except EOFError:
-            agent.close()
-            console.print("\n[dim italic]Goodbye![/dim italic]")
-            break
+    def run(self, model: str, mode: str, **kwargs: Any) -> None:
+        url = str(kwargs.get("url", DEFAULT_URL))
+        thinking = bool(kwargs.get("thinking", False))
+        run_chat(model=model, url=url, tool_mode=mode, thinking=thinking)
 
 
 def main():
@@ -861,9 +516,14 @@ Examples:
         default="full",
         help="Tool loading mode: full (all tools), progressive (hierarchical), semantic (embedding search)",
     )
+    parser.add_argument(
+        "--thinking",
+        action="store_true",
+        help="Enable thinking output for supported models from startup",
+    )
     args = parser.parse_args()
 
-    run_chat(model=args.model, url=args.url, tool_mode=args.mode)
+    run_chat(model=args.model, url=args.url, tool_mode=args.mode, thinking=args.thinking)
 
 
 if __name__ == "__main__":
