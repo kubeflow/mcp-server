@@ -162,6 +162,7 @@ kubeflow-mcp serve \
   --instruction-tier full \       # full | compact | minimal
   --transport stdio \             # stdio | http | sse
   --auth-token SECRET \           # bearer token for HTTP auth (dev/staging)
+  --otel-endpoint URL \           # OTLP HTTP endpoint (optional tracing)
   --log-level INFO \              # DEBUG | INFO | WARNING | ERROR
   --log-format console \          # console | json (auto-detected if omitted)
   --no-banner                     # suppress startup banner
@@ -205,6 +206,23 @@ kubeflow-mcp agent \
 ```
 
 </details>
+
+## Observability
+
+OpenTelemetry tracing is optional and can be enabled without changing tool code.
+
+- Install optional dependencies: `pip install ".[otel]"`
+- Enable tracing with CLI flag or env var:
+
+```bash
+kubeflow-mcp serve --otel-endpoint http://localhost:4318/v1/traces
+# or
+export KUBEFLOW_MCP_OTEL_ENDPOINT=http://localhost:4318/v1/traces
+kubeflow-mcp serve
+```
+
+Each tool invocation emits a span with attributes:
+`tool.name`, `tool.success`, `tool.duration_ms`, `kubeflow.persona`, and `correlation_id`.
 
 ## Development
 

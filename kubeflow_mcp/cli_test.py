@@ -97,6 +97,7 @@ def _make_serve_mocks(config=None):
     mock_load_config = MagicMock(return_value=config)
     mock_build_auth_provider = MagicMock(return_value=None)
     mock_configure_circuit_breaker = MagicMock()
+    mock_setup_tracing = MagicMock(return_value=False)
 
     fake_server_mod = MagicMock()
     fake_server_mod.create_server = mock_create_server
@@ -109,6 +110,8 @@ def _make_serve_mocks(config=None):
     fake_auth_mod.build_auth_provider = mock_build_auth_provider
     fake_resilience_mod = MagicMock()
     fake_resilience_mod.configure_circuit_breaker = mock_configure_circuit_breaker
+    fake_telemetry_mod = MagicMock()
+    fake_telemetry_mod.setup_tracing = mock_setup_tracing
 
     modules_patch = {
         "kubeflow_mcp.core.server": fake_server_mod,
@@ -116,6 +119,7 @@ def _make_serve_mocks(config=None):
         "kubeflow_mcp.core.config": fake_config_mod,
         "kubeflow_mcp.core.auth": fake_auth_mod,
         "kubeflow_mcp.core.resilience": fake_resilience_mod,
+        "kubeflow_mcp.core.telemetry": fake_telemetry_mod,
     }
     return mock_server, mock_create_server, modules_patch
 
@@ -401,3 +405,40 @@ def test_serve_default_shows_banner():
 
     _, kwargs = mock_server.run.call_args
     assert kwargs.get("show_banner") is True
+
+
+def test_serve_calls_setup_tracing_with_config_endpoint():
+    from kubeflow_mcp.core.config import ObservabilityConfig
+
+    config = _make_default_config()
+    config.observability = ObservabilityConfig(otel_endpoint="http://otel-collector:4318/v1/traces")
+    mock_server, _, modules_patch = _make_serve_mocks(config=config)
+    fake_telemetry_mod = modules_patch["kubeflow_mcp.core.telemetry"]
+
+    with patch.dict(sys.modules, modules_patch):
+        runner = CliRunner()
+        runner.invoke(cli, ["serve"])
+
+    fake_telemetry_mod.setup_tracing.assert_called_once_with(
+        endpoint="http://otel-collector:4318/v1/traces"
+    )
+
+
+def test_serve_otel_endpoint_cli_overrides_config():
+    from kubeflow_mcp.core.config import ObservabilityConfig
+
+    config = _make_default_config()
+    config.observability = ObservabilityConfig(otel_endpoint="http://old-endpoint:4318/v1/traces")
+    mock_server, _, modules_patch = _make_serve_mocks(config=config)
+    fake_telemetry_mod = modules_patch["kubeflow_mcp.core.telemetry"]
+
+    with patch.dict(sys.modules, modules_patch):
+        runner = CliRunner()
+        runner.invoke(
+            cli,
+            ["serve", "--otel-endpoint", "http://new-endpoint:4318/v1/traces"],
+        )
+
+    fake_telemetry_mod.setup_tracing.assert_called_once_with(
+        endpoint="http://new-endpoint:4318/v1/traces"
+    )
