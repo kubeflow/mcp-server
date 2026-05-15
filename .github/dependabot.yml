@@ -11,7 +11,6 @@ updates:
       prefix: "chore(deps)"
     labels:
       - "dependencies"
-      - "python"
     groups:
       python-minor:
         patterns:
@@ -31,7 +30,7 @@ updates:
       prefix: "chore(ci)"
     labels:
       - "dependencies"
-      - "ci"
+      - "area/engprod"
     groups:
       actions:
         patterns:

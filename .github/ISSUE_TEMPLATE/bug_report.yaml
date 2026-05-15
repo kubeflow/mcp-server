@@ -2,6 +2,10 @@ name: Bug Report
 description: Report a bug in Kubeflow MCP Server
 labels: ["kind/bug", "needs-triage"]
 body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to fill out this Kubeflow MCP Server bug report!
   - type: textarea
     id: description
     attributes:
@@ -30,6 +34,8 @@ body:
     attributes:
       label: Expected Behavior
       description: What you expected to happen
+    validations:
+      required: true
 
   - type: textarea
     id: actual

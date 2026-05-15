@@ -7,17 +7,6 @@
 <!-- Link to the issue this PR addresses -->
 Fixes #
 
-## Type of Change
-
-- [ ] feat: New feature
-- [ ] fix: Bug fix
-- [ ] docs: Documentation update
-- [ ] test: Tests or benchmarks
-- [ ] ci: CI/CD or tooling
-- [ ] chore: Maintenance
-- [ ] revert: Revert a change
-- [ ] proposal: Design proposal or KEP
-
 ## Checklist
 
 - [ ] I have read the [CONTRIBUTING](../CONTRIBUTING.md) guide
@@ -28,9 +17,9 @@ Fixes #
 
 ## Testing
 
-<!-- How was this tested? -->
+<!-- Describe how this was tested. Check all that apply. -->
 
-```bash
-make verify
-make test-python
-```
+- [ ] Unit tests
+- [ ] Integration tests
+- [ ] E2E tests
+- [ ] Manually tested (describe below)

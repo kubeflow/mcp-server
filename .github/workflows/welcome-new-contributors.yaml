@@ -8,11 +8,8 @@ on:
     types:
       - opened
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
 permissions:
+  contents: read
   issues: write
   pull-requests: write
 
@@ -20,7 +17,7 @@ jobs:
   welcome:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/first-interaction@v1
+      - uses: actions/first-interaction@v3
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
           issue_message: |
@@ -30,14 +27,14 @@ jobs:
 
             **Here's what happens next:**
 
-            - Our team will review your issue soon!
+            - Our team will review your issue soon! cc @kubeflow/kubeflow-sdk-team
             - If you'd like to contribute to this issue, check out our [Contributing Guide](https://github.com/kubeflow/mcp-server/blob/main/CONTRIBUTING.md) for repo-specific guidelines and the [Kubeflow Contributor Guide](https://www.kubeflow.org/docs/about/contributing/) for general community standards
 
             **Join the community:**
-            - **Slack**: Join [#kubeflow-ml-experience](https://www.kubeflow.org/docs/about/community/#slack-channels) on CNCF Slack
-            - **Meetings**: Attend the [ML Experience WG](https://bit.ly/kf-ml-experience) bi-weekly meetings
+            - **Slack**: Join our [#kubeflow-ml-experience](https://www.kubeflow.org/docs/about/community/#kubeflow-slack-channels) Slack channel
+            - **Meetings**: Attend the [Kubeflow SDK and ML Experience](https://bit.ly/kf-ml-experience) bi-weekly meetings
 
-            Feel free to ask questions in the comments if you need any help!
+            Feel free to ask questions in the comments if you need any help or clarification!
             Thanks again for contributing to Kubeflow! 🙏
 
           pr_message: |
@@ -48,11 +45,11 @@ jobs:
             **Here's what happens next:**
 
             - If you haven't already, please check out our [Contributing Guide](https://github.com/kubeflow/mcp-server/blob/main/CONTRIBUTING.md) for repo-specific guidelines and the [Kubeflow Contributor Guide](https://www.kubeflow.org/docs/about/contributing/) for general community standards
-            - Our team will review your PR soon!
+            - Our team will review your PR soon! cc @kubeflow/kubeflow-sdk-team
 
             **Join the community:**
-            - **Slack**: Join [#kubeflow-ml-experience](https://www.kubeflow.org/docs/about/community/#slack-channels) on CNCF Slack
-            - **Meetings**: Attend the [ML Experience WG](https://bit.ly/kf-ml-experience) bi-weekly meetings
+            - **Slack**: Join our [#kubeflow-ml-experience](https://www.kubeflow.org/docs/about/community/#kubeflow-slack-channels) Slack channel
+            - **Meetings**: Attend the [Kubeflow SDK and ML Experience](https://bit.ly/kf-ml-experience) bi-weekly meetings
 
-            Feel free to ask questions in the comments if you need any help!
+            Feel free to ask questions in the comments if you need any help or clarification!
             Thanks again for contributing to Kubeflow! 🙏

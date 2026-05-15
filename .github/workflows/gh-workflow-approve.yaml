@@ -43,7 +43,7 @@ jobs:
             }
 
       - name: Approve Pending Workflow Runs
-        if: steps.membership-check.outputs.is_member == 'true' || contains(github.event.pull_request.labels.*.name, 'ok-to-test')
+        if: steps.membership-check.outputs.is_member == 'true' && contains(github.event.pull_request.labels.*.name, 'ok-to-test')
         uses: actions/github-script@v8
         with:
           retries: 3

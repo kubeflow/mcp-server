@@ -1430,13 +1430,6 @@ dependencies = [
 all = [
     { name = "kubeflow", extra = ["hub", "spark"] },
 ]
-dev = [
-    { name = "pip-audit" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "pytest-cov" },
-    { name = "ruff" },
-]
 hub = [
     { name = "kubeflow", extra = ["hub"] },
 ]
@@ -1446,7 +1439,7 @@ spark = [
 
 [package.dev-dependencies]
 dev = [
-    { name = "huggingface-hub" },
+    { name = "pip-audit" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-benchmark" },
@@ -1464,19 +1457,14 @@ requires-dist = [
     { name = "kubeflow", extras = ["hub"], marker = "extra == 'hub'", specifier = ">=0.4.0" },
     { name = "kubeflow", extras = ["spark"], marker = "extra == 'all'", specifier = ">=0.4.0" },
     { name = "kubeflow", extras = ["spark"], marker = "extra == 'spark'", specifier = ">=0.4.0" },
-    { name = "pip-audit", marker = "extra == 'dev'", specifier = ">=2.7" },
     { name = "pydantic", specifier = ">=2.0" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
-    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=4.0" },
     { name = "pyyaml", specifier = ">=6.0" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.9" },
 ]
-provides-extras = ["hub", "spark", "all", "dev"]
+provides-extras = ["hub", "spark", "all"]
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "huggingface-hub", specifier = ">=0.20" },
+    { name = "pip-audit", specifier = ">=2.7" },
     { name = "pytest", specifier = ">=8.0" },
     { name = "pytest-asyncio", specifier = ">=0.23" },
     { name = "pytest-benchmark", specifier = ">=4.0" },

@@ -2,6 +2,10 @@ name: Feature Request
 description: Suggest a new feature for Kubeflow MCP Server
 labels: ["kind/feature", "needs-triage"]
 body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to fill out this Kubeflow MCP Server feature request!
   - type: textarea
     id: description
     attributes:
