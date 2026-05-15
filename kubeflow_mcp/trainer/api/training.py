@@ -14,6 +14,7 @@
 
 """Training submission tools: fine_tune, run_custom_training, run_container_training."""
 
+import ast
 import logging
 import os
 import tempfile
@@ -104,15 +105,44 @@ def _make_train_func(script: str, func_args: dict[str, Any] | None = None) -> Ca
     keyword parameters so the trainer can pass them at runtime.
     """
     func_name = "train"
-    lines = script.strip().splitlines()
+    
+    try:
+        tree = ast.parse(script)
+    except SyntaxError:
+        tree = None
 
-    if func_args:
-        params = ", ".join(f"{k}=None" for k in func_args)
-        wrapped = f"def {func_name}({params}):\n"
+    has_train_func = False
+    if tree is not None:
+        for node in tree.body:
+            if isinstance(node, ast.FunctionDef) and node.name == func_name:
+                has_train_func = True
+                if func_args:
+                    arg_names = {arg.arg for arg in node.args.args}
+                    arg_names.update({arg.arg for arg in node.args.kwonlyargs})
+                    has_kwargs = node.args.kwarg is not None
+                    
+                    if not has_kwargs:
+                        missing = set(func_args.keys()) - arg_names
+                        if missing:
+                            raise ValueError(
+                                f"Script defines a top-level '{func_name}' function but it is missing "
+                                f"parameters required by func_args: {', '.join(missing)}."
+                            )
+                break
+
+    if has_train_func:
+        wrapped = script
+        if not wrapped.endswith("\n"):
+            wrapped += "\n"
     else:
-        wrapped = f"def {func_name}():\n"
-    for line in lines:
-        wrapped += f"    {line}\n"
+        lines = script.strip().splitlines()
+        if func_args:
+            params = ", ".join(f"{k}=None" for k in func_args)
+            wrapped = f"def {func_name}({params}):\n"
+        else:
+            wrapped = f"def {func_name}():\n"
+        for line in lines:
+            wrapped += f"    {line}\n"
 
     script_dir = _get_script_dir()
     script_path = os.path.join(script_dir, f"_mcp_train_{uuid.uuid4().hex[:8]}.py")
