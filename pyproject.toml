@@ -27,18 +27,14 @@ dependencies = [
 hub = ["kubeflow[hub]>=0.4.0"]
 spark = ["kubeflow[spark]>=0.4.0"]
 all = ["kubeflow[hub]>=0.4.0", "kubeflow[spark]>=0.4.0"]
+
+[dependency-groups]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "pytest-cov>=4.0",
     "ruff>=0.9",
     "pip-audit>=2.7",
-]
-docs = [
-    "sphinx>=7.0",
-    "furo>=2024.1.29",
-    "sphinx-copybutton>=0.5",
-    "sphinx-design>=0.5",
 ]
 
 [project.scripts]

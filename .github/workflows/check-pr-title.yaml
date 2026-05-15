@@ -1,25 +1,60 @@
 name: Check PR Title
 
 on:
-  pull_request:
-    types: [opened, edited, synchronize]
+  pull_request_target:
+    branches:
+      - main
+    types:
+      - edited
+      - opened
+      - reopened
+      - synchronize
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  pull-requests: read
 
 jobs:
   check:
+    name: Check PR Title
     runs-on: ubuntu-latest
     steps:
-      - name: Check conventional commit format
-        uses: amannn/action-semantic-pull-request@v5
+      - uses: amannn/action-semantic-pull-request@v6.1.1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           types: |
-            feat
-            fix
-            revert
             chore
+            fix
+            feat
+            revert
+            docs
+            test
+            proposal
+          scopes: |
+            ci
+            docs
+            deps
+            agents
+            core
+            trainer
+            optimizer
+            hub
+            spark
+            pipelines
+            examples
+            benchmarks
+            test
+            scripts
           requireScope: false
+          ignoreLabels: |
+            do-not-merge/work-in-progress
+            dependencies
+            area/release
           subjectPattern: ^[a-z].+$
           subjectPatternError: |
-            PR title must start with lowercase letter.
+            PR title must start with a lowercase letter.
             Example: "feat: add training job tool"
