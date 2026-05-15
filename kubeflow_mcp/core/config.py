@@ -50,6 +50,9 @@ Example config file (~/.kubeflow-mcp.yaml):
             level: INFO
             format: json
 
+        observability:
+            otel_endpoint: http://localhost:4318/v1/traces
+
 Namespace restrictions are enforced via ``~/.kf-mcp-policy.yaml``
 (``policy.namespaces``), not through server config.
 """
@@ -135,6 +138,12 @@ class LoggingConfig(BaseModel):
     format: str | None = Field(default=None)
 
 
+class ObservabilityConfig(BaseModel):
+    """Observability configuration."""
+
+    otel_endpoint: str | None = Field(default=None)
+
+
 class Config(BaseModel):
     """Root configuration."""
 
@@ -144,6 +153,7 @@ class Config(BaseModel):
     trainer: TrainerConfig = Field(default_factory=TrainerConfig)
     optimizer: OptimizerConfig = Field(default_factory=OptimizerConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
+    observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
 
 
 def _find_config_file() -> Path | None:
@@ -229,6 +239,14 @@ def load_config(config_path: Path | None = None) -> Config:
         format=os.getenv("LOG_FORMAT", logging_file.get("format")),
     )
 
+    observability_file = file_config.get("observability", {})
+    observability = ObservabilityConfig(
+        otel_endpoint=os.getenv(
+            "KUBEFLOW_MCP_OTEL_ENDPOINT",
+            observability_file.get("otel_endpoint"),
+        )
+    )
+
     # Build client-specific configs
     trainer_file = file_config.get("trainer", {})
     trainer = TrainerConfig(
@@ -283,6 +301,7 @@ def load_config(config_path: Path | None = None) -> Config:
         trainer=trainer,
         optimizer=optimizer,
         logging=logging_config,
+        observability=observability,
     )
 
 

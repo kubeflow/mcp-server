@@ -40,6 +40,10 @@ docs = [
     "sphinx-copybutton>=0.5",
     "sphinx-design>=0.5",
 ]
+otel = [
+    "opentelemetry-exporter-otlp>=1.25.0",
+    "opentelemetry-sdk>=1.25.0",
+]
 
 [project.scripts]
 kubeflow-mcp = "kubeflow_mcp.cli:cli"
