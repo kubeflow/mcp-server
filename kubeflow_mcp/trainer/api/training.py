@@ -102,8 +102,57 @@ def _make_train_func(script: str, func_args: dict[str, Any] | None = None) -> Ca
 
     When *func_args* is provided, the generated function signature includes matching
     keyword parameters so the trainer can pass them at runtime.
+
+    If the script already defines a top-level ``def train()``, that function is
+    used directly — avoiding silent training skips from double-wrapping.
     """
+    import ast
+
     func_name = "train"
+
+    # Check if the script already defines a top-level train() function.
+    try:
+        tree = ast.parse(script)
+    except SyntaxError:
+        tree = None
+
+    user_train = None
+    if tree is not None:
+        for node in ast.iter_child_nodes(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == func_name:
+                user_train = node
+                break
+
+    if user_train is not None:
+        # The user already defined train() — use it directly instead of wrapping.
+        if func_args:
+            user_params = {arg.arg for arg in user_train.args.args}
+            required = set(func_args.keys())
+            missing = required - user_params
+            if missing:
+                raise ValueError(
+                    f"func_args requires parameters {sorted(missing)} but "
+                    f"the script's train() function does not include them. "
+                    f"Add these parameters to your train() signature: "
+                    f"{sorted(missing)}"
+                )
+
+        script_dir = _get_script_dir()
+        script_path = os.path.join(script_dir, f"_mcp_train_{uuid.uuid4().hex[:8]}.py")
+        with open(script_path, "w") as f:
+            f.write(script)
+
+        code = compile(script, script_path, "exec")
+        ns: dict[str, Any] = {}
+        exec(code, ns)  # noqa: S102
+        if func_name not in ns:
+            raise ValueError(
+                f"The script defines 'def {func_name}()' but it was not found "
+                f"after execution. Ensure the function is defined at module level."
+            )
+        return ns[func_name]
+
+    # No user-defined train() — wrap the script body.
     lines = script.strip().splitlines()
 
     if func_args:
