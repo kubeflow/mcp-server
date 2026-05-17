@@ -36,6 +36,47 @@ kubeflow-mcp serve
 
 > Once published to PyPI, install with `pip install kubeflow-mcp`.
 
+### Run with Docker
+
+Pre-built multi-arch images are published to GHCR on every release:
+
+```bash
+docker run --rm -p 8000:8000 \
+  -e KUBEFLOW_MCP_AUTH_TOKEN=my-secret-token \
+  ghcr.io/kubeflow/mcp-server:latest
+```
+
+The server listens on `http://localhost:8000/mcp`.
+
+**Environment variables**
+
+| Variable | Default | Description |
+|---|---|---|
+| `MCP_TRANSPORT` | `http` | Transport protocol (`http`, `sse`, `stdio`) |
+| `KUBEFLOW_MCP_AUTH_TOKEN` | _(none)_ | Bearer token for HTTP auth |
+| `KUBEFLOW_MCP_JWKS_URI` | _(none)_ | JWKS endpoint for JWT verification (production) |
+| `KUBEFLOW_MCP_JWT_ISSUER` | _(none)_ | Expected JWT issuer |
+| `KUBEFLOW_MCP_JWT_AUDIENCE` | _(none)_ | Expected JWT audience |
+| `KUBEFLOW_MCP_CLIENTS` | `trainer` | Comma-separated client modules to load |
+| `KUBEFLOW_MCP_PERSONA` | `readonly` | Tool persona (`readonly`, `data-scientist`, `ml-engineer`, `platform-admin`) |
+| `KUBEFLOW_MCP_LOG_FORMAT` | `json` | Log format (`json`, `console`) |
+| `LOG_LEVEL` | `INFO` | Log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
+
+**MCP client config (HTTP transport)**
+
+```json
+{
+  "mcpServers": {
+    "kubeflow": {
+      "url": "http://localhost:8000/mcp",
+      "headers": { "Authorization": "Bearer my-secret-token" }
+    }
+  }
+}
+```
+
+For in-cluster deployments, replace `localhost:8000` with the Kubernetes Service address and mount `KUBEFLOW_MCP_AUTH_TOKEN` from a Secret.
+
 ### Example: Fine-tune a model via AI agent
 
 Once connected, your AI agent can run a complete training workflow through natural language:
