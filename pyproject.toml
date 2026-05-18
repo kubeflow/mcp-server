@@ -30,6 +30,7 @@ all = ["kubeflow[hub]>=0.4.0", "kubeflow[spark]>=0.4.0"]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
+    "pytest-benchmark>=5.2.3",
     "pytest-cov>=4.0",
     "ruff>=0.9",
     "pip-audit>=2.7",
