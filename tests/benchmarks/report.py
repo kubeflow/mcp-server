@@ -433,14 +433,6 @@ def generate_report(results_dir: Path = RESULTS_DIR) -> Path:
     return output_path
 
 
-def generate_html_report(latency_results_path: Path) -> Path:
-    """Generate the HTML report from the latency benchmark JSON path."""
-    latency_payload = _load_json(latency_results_path)
-    output_path = latency_results_path.parent / "index.html"
-    output_path.write_text(_render_html([latency_payload]))
-    return output_path
-
-
 def load_benchmark_payloads(results_dir: Path = RESULTS_DIR) -> list[dict[str, Any]]:
     """Load known benchmark suite JSON files in report order."""
     suite_files = [
