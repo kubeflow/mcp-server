@@ -1,11 +1,11 @@
 # Benchmarks
 
-This project has a custom benchmark suite under `tests/benchmarks/`.
+This project has a pytest-based benchmark suite under `tests/benchmarks/`.
 
 Run:
 
 ```bash
-make benchmark
+uv run pytest tests/benchmarks/
 ```
 
 This writes local output to:
@@ -15,11 +15,11 @@ benchmark-results/latency.json
 benchmark-results/index.html
 ```
 
-`benchmark-results/` is generated output. It should be overwritten on each run and should not be committed unless otherwise noted
+`benchmark-results/` is generated output. It should be overwritten on each run and should not be committed unless otherwise noted.
 
 ## Current Scope
 
-The current benchmark suite measures latency only.
+The current benchmark suite measures latency only. Latency uses `pytest-benchmark` for warmup, repeated rounds, and timing collection. The project writes a small normalized JSON file so the HTML report can use the same format when future benchmark suites are added.
 
 Covered latency cases:
 
@@ -114,4 +114,3 @@ Recommended tools:
 - memory profile: Python `tracemalloc`
 
 Keep dependencies minimal. Add external profiling dependencies only if stdlib tools are not enough.
-
