@@ -78,6 +78,10 @@ conformance: install-dev ## Run MCP protocol conformance suite against a local H
 	    --suite active \
 	    --expected-failures tests/conformance/expected-failures.yaml
 
+.PHONY: benchmark
+benchmark: install-dev ## Run benchmarks
+	@uv run python -m tests.benchmarks.benchmarks_runner
+
 TRANSPORT ?= stdio
 
 inspector: install-dev ## Launch MCP Inspector (TRANSPORT=stdio|http|sse)
