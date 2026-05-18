@@ -41,7 +41,7 @@ docs = [
     "sphinx-design>=0.5",
 ]
 otel = [
-    "opentelemetry-exporter-otlp>=1.25.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.25.0",
     "opentelemetry-sdk>=1.25.0",
 ]
 
