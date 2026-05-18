@@ -1,7 +1,10 @@
-import time , json
-from pathlib import Path
-from collections.abc import Callable
+"""Latency benchmarks for trainer MCP tools."""
+
 import inspect
+from collections.abc import Callable
+
+import pytest
+
 from kubeflow_mcp.core.dynamic_tools import (
     describe_tools,
     find_tools,
@@ -22,88 +25,54 @@ from kubeflow_mcp.trainer.api.training import (
     run_custom_training,
 )
 
-DEFAULT_ITERATIONS = 100
-DEFAULT_WARMUP = 5
-OUTPUT_DIR = Path("benchmark-results")
 
-def measure_latency_ms(func: Callable[[], object] , iterations = DEFAULT_ITERATIONS , warmup = DEFAULT_WARMUP) -> dict[str,float]:
-    for _ in range(warmup):
-        func()
-    samples = []
-    for _ in range(iterations):
-        start = time.perf_counter_ns()
-        func()
-        samples.append((time.perf_counter_ns() - start )/ 1_000_000)
-    samples.sort()
+@pytest.mark.parametrize("mode", ["full", "progressive", "semantic"])
+def test_server_init_latency(
+    record_latency_benchmark: Callable[[str, Callable[[], object]], None], mode: str
+) -> None:
+    def create_trainer_server() -> object:
+        return create_server(
+            clients=["trainer"],
+            persona="readonly",
+            mode=mode,
+        )
 
-    return {
-        "p50": percentile(samples,50),
-        "p95": percentile(samples,95),
-        "p99": percentile(samples,99),
-        "min": samples[0],
-        "max": samples[-1],
-    }
+    record_latency_benchmark(f"server_init_{mode}", create_trainer_server)
 
 
-def latency_result(name:str,measurements:dict[str,float]) -> dict[str,object]:
-    return {
-        "name":name,
-        "unit":"ms",
-        **measurements,
-    }
-
-def percentile(sorted_samples: list[float], value: int) -> float:
-    index = round((value / 100) * (len(sorted_samples) - 1))
-    return sorted_samples[index]
-
-
-def benchmark_server_init(iterations: int = DEFAULT_ITERATIONS, warmup: int = DEFAULT_WARMUP) -> list[dict[str,object]]:
-
-    results = []
-    for mode in ("full", "progressive", "semantic"):
-        def create_trainer_server(mode: str = mode) -> object:
-            return create_server(
-                clients=["trainer"],
-                persona="readonly",
-                mode=mode,
-            )
-
-        measurements = measure_latency_ms(create_trainer_server, iterations, warmup)
-        results.append(latency_result(f"server_init_{mode}", measurements))
-
-    return results
-
-def benchmark_dynamic_tool_registry_init(iterations: int = DEFAULT_ITERATIONS, warmup: int = DEFAULT_WARMUP) -> list[dict[str, object]]:
+def test_dynamic_tool_registry_init_latency(
+    record_latency_benchmark: Callable[[str, Callable[[], object]], None],
+) -> None:
     def initialize_registry() -> None:
         init_dynamic_tools(TOOLS, CLIENT_TOOL_DESCRIPTIONS)
 
-    return [
-        latency_result(
-            "dynamic_tool_registry_init",
-            measure_latency_ms(initialize_registry, iterations, warmup),
-        )
-    ]
+    record_latency_benchmark("dynamic_tool_registry_init", initialize_registry)
 
 
-def benchmark_dynamic_discovery_tools(iterations: int = DEFAULT_ITERATIONS, warmup: int = DEFAULT_WARMUP) -> list[dict[str, object]]:
-    init_dynamic_tools(TOOLS, CLIENT_TOOL_DESCRIPTIONS)
-
-    cases: list[tuple[str, Callable[[], object]]] = [
+@pytest.mark.parametrize(
+    ("name", "benchmark_func"),
+    [
         ("dynamic_list_tools", lambda: list_tools()),
         (
             "dynamic_describe_tools",
             lambda: describe_tools(["fine_tune", "run_custom_training", "get_training_logs"]),
         ),
         ("dynamic_find_tools_keyword", lambda: find_tools("fine tune a model", top_k=5)),
-    ]
+    ],
+)
+def test_dynamic_discovery_tools_latency(
+    record_latency_benchmark: Callable[[str, Callable[[], object]], None],
+    name: str,
+    benchmark_func: Callable[[], object],
+) -> None:
+    init_dynamic_tools(TOOLS, CLIENT_TOOL_DESCRIPTIONS)
 
-    return [
-        latency_result(name, measure_latency_ms(func, iterations, warmup))
-        for name, func in cases
-    ]
+    record_latency_benchmark(name, benchmark_func)
 
 
-def benchmark_trainer_schema_metadata_scan(iterations: int = DEFAULT_ITERATIONS, warmup: int = DEFAULT_WARMUP) -> list[dict[str, object]]:
+def test_trainer_schema_metadata_scan_latency(
+    record_latency_benchmark: Callable[[str, Callable[[], object]], None],
+) -> None:
     def scan_metadata() -> None:
         for tool in TOOLS:
             tool_name = tool.__name__
@@ -111,16 +80,12 @@ def benchmark_trainer_schema_metadata_scan(iterations: int = DEFAULT_ITERATIONS,
             CLIENT_TOOL_DESCRIPTIONS[tool_name]
             CLIENT_TOOL_ANNOTATIONS[tool_name]
 
-    return [
-        latency_result(
-            "trainer_schema_metadata_scan",
-            measure_latency_ms(scan_metadata, iterations, warmup),
-        )
-    ]
+    record_latency_benchmark("trainer_schema_metadata_scan", scan_metadata)
 
 
-def benchmark_security_validation(iterations: int = DEFAULT_ITERATIONS, warmup: int = DEFAULT_WARMUP) -> list[dict[str, object]]:
-    cases: list[tuple[str, Callable[[], object]]] = [
+@pytest.mark.parametrize(
+    ("name", "benchmark_func"),
+    [
         ("validate_k8s_name", lambda: validate_k8s_name("valid-training-job")),
         (
             "validate_resource_limits",
@@ -130,85 +95,64 @@ def benchmark_security_validation(iterations: int = DEFAULT_ITERATIONS, warmup: 
             "is_safe_python_code",
             lambda: is_safe_python_code("def train():\n    return 1\n"),
         ),
-    ]
+    ],
+)
+def test_security_validation_latency(
+    record_latency_benchmark: Callable[[str, Callable[[], object]], None],
+    name: str,
+    benchmark_func: Callable[[], object],
+) -> None:
+    record_latency_benchmark(name, benchmark_func)
 
-    return [
-        latency_result(name, measure_latency_ms(func, iterations, warmup))
-        for name, func in cases
-    ]
+
+def preview_fine_tune() -> dict[str, object]:
+    return fine_tune(
+        model="hf://google/gemma-2b",
+        dataset="hf://tatsu-lab/alpaca",
+        runtime="torchtune-llama3.2-1b",
+        name="bench-fine-tune",
+        confirmed=False,
+    )
 
 
-def benchmark_preview_tools(iterations: int = DEFAULT_ITERATIONS, warmup: int = DEFAULT_WARMUP) -> list[dict[str, object]]:
-    def preview_fine_tune() -> dict[str, object]:
-        return fine_tune(
-            model="hf://google/gemma-2b",
-            dataset="hf://tatsu-lab/alpaca",
-            runtime="torchtune-llama3.2-1b",
-            name="bench-fine-tune",
-            confirmed=False,
-        )
+def preview_custom_training() -> dict[str, object]:
+    return run_custom_training(
+        script="print('training')",
+        runtime="torch-distributed",
+        name="bench-custom-training",
+        gpu_per_node=0,
+        confirmed=False,
+    )
 
-    def preview_custom_training() -> dict[str, object]:
-        return run_custom_training(
-            script="print('training')",
-            runtime="torch-distributed",
-            name="bench-custom-training",
-            gpu_per_node=0,
-            confirmed=False,
-        )
 
-    def preview_container_training() -> dict[str, object]:
-        return run_container_training(
-            image="pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime",
-            command=["python", "-c"],
-            args=["print('training')"],
-            name="bench-container-training",
-            runtime="torch-distributed",
-            gpu_per_node=0,
-            confirmed=False,
-        )
+def preview_container_training() -> dict[str, object]:
+    return run_container_training(
+        image="pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime",
+        command=["python", "-c"],
+        args=["print('training')"],
+        name="bench-container-training",
+        runtime="torch-distributed",
+        gpu_per_node=0,
+        confirmed=False,
+    )
 
+
+@pytest.mark.parametrize(
+    ("name", "benchmark_func"),
+    [
+        ("preview_fine_tune", preview_fine_tune),
+        ("preview_custom_training", preview_custom_training),
+        ("preview_container_training", preview_container_training),
+    ],
+)
+def test_preview_tools_latency(
+    record_latency_benchmark: Callable[[str, Callable[[], object]], None],
+    name: str,
+    benchmark_func: Callable[[], object],
+) -> None:
     original_gpu_check = training._check_gpu_available
     training._check_gpu_available = lambda: None
     try:
-        cases: list[tuple[str, Callable[[], object]]] = [
-            ("preview_fine_tune", preview_fine_tune),
-            ("preview_custom_training", preview_custom_training),
-            ("preview_container_training", preview_container_training),
-        ]
-        return [
-            latency_result(name, measure_latency_ms(func, iterations, warmup))
-            for name, func in cases
-        ]
+        record_latency_benchmark(name, benchmark_func)
     finally:
         training._check_gpu_available = original_gpu_check
-
-def run_latency_benchmarks(
-    output_dir: Path = OUTPUT_DIR,
-    iterations: int = DEFAULT_ITERATIONS,
-    warmup: int = DEFAULT_WARMUP,
-    ) -> Path:
-
-    output_dir.mkdir(exist_ok=True)
-    results = [] # list[dict[str,object]]
-    results.extend(benchmark_server_init(iterations, warmup))
-    results.extend(benchmark_dynamic_tool_registry_init(iterations, warmup))
-    results.extend(benchmark_dynamic_discovery_tools(iterations, warmup))
-    results.extend(benchmark_trainer_schema_metadata_scan(iterations, warmup))
-    results.extend(benchmark_preview_tools(iterations, warmup))
-    results.extend(benchmark_security_validation(iterations, warmup))
-    info = {
-        "suite": "latency",
-        "iterations": iterations,
-        "warmup": warmup,
-        "results": results,
-    }
-    
-    output_path = output_dir / "latency.json"
-    output_path.write_text(json.dumps(info, indent=2) + "\n")
-    return output_path
-
-
-if __name__ == "__main__":
-    output = run_latency_benchmarks()
-    print(f"Results written to: {output}")
