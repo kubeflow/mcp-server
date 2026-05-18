@@ -78,7 +78,7 @@ def _latency_summary(payload: dict[str, Any]) -> str:
     return (
         '<div class="summary-grid">'
         + "".join(
-            "<div class=\"metric-card\">"
+            '<div class="metric-card">'
             f"<span>{_escape(label)}</span>"
             f"<strong>{_escape(value)}</strong>"
             f"<em>{_escape(detail)}</em>"
@@ -101,19 +101,19 @@ def _render_latency_table(payload: dict[str, Any]) -> str:
         tail_class = " tail-warning" if tail_ratio and tail_ratio >= 3 else ""
         rows.append(
             "<tr>"
-            f"<td><span class=\"benchmark-name\">{_escape(result.get('name', '-'))}</span></td>"
+            f'<td><span class="benchmark-name">{_escape(result.get("name", "-"))}</span></td>'
             f"<td>{_escape(result.get('unit', 'ms'))}</td>"
             f"<td>{_format_ms(p50)}</td>"
             f"<td>{_format_ms(p95)}</td>"
             f"<td>{_format_ms(p99)}</td>"
             f"<td>{_format_ms(result.get('min'))}</td>"
             f"<td>{_format_ms(result.get('max'))}</td>"
-            f"<td class=\"{tail_class.strip()}\">{_format_ratio(tail_ratio)}</td>"
+            f'<td class="{tail_class.strip()}">{_format_ratio(tail_ratio)}</td>'
             "<td>"
-            "<div class=\"bar-track\">"
-            f"<span class=\"bar bar-p50\" style=\"width: {_bar_width(p50, max_p99)}\"></span>"
-            f"<span class=\"bar bar-p95\" style=\"width: {_bar_width(p95, max_p99)}\"></span>"
-            f"<span class=\"bar bar-p99\" style=\"width: {_bar_width(p99, max_p99)}\"></span>"
+            '<div class="bar-track">'
+            f'<span class="bar bar-p50" style="width: {_bar_width(p50, max_p99)}"></span>'
+            f'<span class="bar bar-p95" style="width: {_bar_width(p95, max_p99)}"></span>'
+            f'<span class="bar bar-p99" style="width: {_bar_width(p99, max_p99)}"></span>'
             "</div>"
             "</td>"
             "</tr>"
@@ -155,7 +155,7 @@ def _render_latency_table(payload: dict[str, Any]) -> str:
               </tr>
             </thead>
             <tbody>
-              {''.join(rows)}
+              {"".join(rows)}
             </tbody>
           </table>
         </section>
@@ -191,7 +191,7 @@ def _render_placeholder_table(payload: dict[str, Any]) -> str:
               </tr>
             </thead>
             <tbody>
-              {''.join(rows)}
+              {"".join(rows)}
             </tbody>
           </table>
         </section>
