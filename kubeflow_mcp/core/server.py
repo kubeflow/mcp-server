@@ -41,10 +41,16 @@ from kubeflow_mcp.core.health import (
     HEALTH_TOOLS,
 )
 from kubeflow_mcp.core.logging import with_correlation_id
-from kubeflow_mcp.core.policy import apply_policy_filters, get_allowed_tools, is_read_only
+from kubeflow_mcp.core.policy import (
+    apply_policy_filters,
+    get_allowed_tools,
+    get_effective_persona,
+    is_read_only,
+)
 from kubeflow_mcp.core.resilience import RateLimiter, get_breaker
 from kubeflow_mcp.core.resources import register_resources
 from kubeflow_mcp.core.security import mask_sensitive_data
+from kubeflow_mcp.core.telemetry import get_tracer
 
 logger = logging.getLogger(__name__)
 
@@ -88,66 +94,84 @@ def _audit_wrap(tool_func):
     @functools.wraps(tool_func)
     def wrapper(**kwargs):
         tool_name = tool_func.__name__
-
-        if _rate_limiter is not None and not _rate_limiter.acquire():
-            logger.warning("rate_limited", extra={"tool": tool_name})
-            return {
-                "error": "Rate limit exceeded. Retry after a brief pause.",
-                "error_code": ErrorCode.RATE_LIMITED,
-            }
-
-        breaker = get_breaker(tool_name)
-        if not breaker.can_execute():
-            logger.warning("circuit_open", extra={"tool": tool_name})
-            return {
-                "error": f"Circuit breaker open for '{tool_name}' — K8s API may be degraded. Retries automatically after recovery timeout.",
-                "error_code": ErrorCode.CIRCUIT_OPEN,
-            }
-
         cid = with_correlation_id()
-        masked = mask_sensitive_data(kwargs) if kwargs else {}
+        tracer = get_tracer("kubeflow_mcp.tools")
+        persona = get_effective_persona()
         start = time.monotonic()
-        try:
-            result = tool_func(**kwargs)
-            duration_ms = int((time.monotonic() - start) * 1000)
-            is_success = (
-                "error_code" not in result and "error" not in result
-                if isinstance(result, dict)
-                else True
-            )
-            if is_success:
-                breaker.record_success()
-            elif is_infrastructure_error(result):
-                breaker.record_failure()
 
-            logger.info(
-                "tool_call",
-                extra={
-                    "audit": True,
-                    "correlation_id": cid,
-                    "tool": tool_name,
-                    "parameters": masked,
-                    "success": is_success,
-                    "duration_ms": duration_ms,
-                },
-            )
-            return _inject_meta(result, tool_name)
-        except Exception:
-            duration_ms = int((time.monotonic() - start) * 1000)
-            breaker.record_failure()
-            logger.error(
-                "tool_call_failed",
-                extra={
-                    "audit": True,
-                    "correlation_id": cid,
-                    "tool": tool_name,
-                    "parameters": masked,
-                    "success": False,
-                    "duration_ms": duration_ms,
-                },
-                exc_info=True,
-            )
-            raise
+        with tracer.start_as_current_span(f"tool:{tool_name}") as span:
+            span.set_attribute("tool.name", tool_name)
+            span.set_attribute("kubeflow.persona", persona)
+            span.set_attribute("correlation_id", cid)
+
+            if _rate_limiter is not None and not _rate_limiter.acquire():
+                duration_ms = int((time.monotonic() - start) * 1000)
+                span.set_attribute("tool.success", False)
+                span.set_attribute("tool.duration_ms", duration_ms)
+                logger.warning("rate_limited", extra={"tool": tool_name})
+                return {
+                    "error": "Rate limit exceeded. Retry after a brief pause.",
+                    "error_code": ErrorCode.RATE_LIMITED,
+                }
+
+            breaker = get_breaker(tool_name)
+            if not breaker.can_execute():
+                duration_ms = int((time.monotonic() - start) * 1000)
+                span.set_attribute("tool.success", False)
+                span.set_attribute("tool.duration_ms", duration_ms)
+                logger.warning("circuit_open", extra={"tool": tool_name})
+                return {
+                    "error": f"Circuit breaker open for '{tool_name}' — K8s API may be degraded. Retries automatically after recovery timeout.",
+                    "error_code": ErrorCode.CIRCUIT_OPEN,
+                }
+
+            masked = mask_sensitive_data(kwargs) if kwargs else {}
+            try:
+                result = tool_func(**kwargs)
+                duration_ms = int((time.monotonic() - start) * 1000)
+                is_success = (
+                    "error_code" not in result and "error" not in result
+                    if isinstance(result, dict)
+                    else True
+                )
+                span.set_attribute("tool.success", is_success)
+                span.set_attribute("tool.duration_ms", duration_ms)
+                if is_success:
+                    breaker.record_success()
+                elif is_infrastructure_error(result):
+                    breaker.record_failure()
+
+                logger.info(
+                    "tool_call",
+                    extra={
+                        "audit": True,
+                        "correlation_id": cid,
+                        "tool": tool_name,
+                        "parameters": masked,
+                        "success": is_success,
+                        "duration_ms": duration_ms,
+                    },
+                )
+                return _inject_meta(result, tool_name)
+            except Exception as exc:
+                duration_ms = int((time.monotonic() - start) * 1000)
+                breaker.record_failure()
+                span.set_attribute("tool.success", False)
+                span.set_attribute("tool.duration_ms", duration_ms)
+                span.record_exception(exc)
+                logger.error(
+                    "tool_call_failed",
+                    extra={
+                        "audit": True,
+                        "correlation_id": cid,
+                        "tool": tool_name,
+                        "parameters": masked,
+                        "success": False,
+                        "duration_ms": duration_ms,
+                    },
+                    exc_info=True,
+                )
+                raise
 
     return wrapper
 
