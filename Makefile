@@ -35,6 +35,10 @@ install-dev: uv ## Install dependencies and tools
 	@uv sync --all-extras
 	@echo "Environment is ready."
 
+.PHONY: benchmark
+benchmark: install-dev ## Run benchmarks
+	@uv run python -m tests.benchmarks.benchmarks_runner
+
 TRANSPORT ?= stdio
 
 .PHONY: inspector
