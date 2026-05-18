@@ -2,13 +2,24 @@ import time , json
 from pathlib import Path
 from collections.abc import Callable
 import inspect
-from kubeflow_mcp.core.server import create_server
-from kubeflow_mcp.trainer import CLIENT_TOOL_ANNOTATIONS, CLIENT_TOOL_DESCRIPTIONS, TOOLS
-from kubeflow_mcp.core.dynamic_tools import init_dynamic_tools
+from kubeflow_mcp.core.dynamic_tools import (
+    describe_tools,
+    find_tools,
+    init_dynamic_tools,
+    list_tools,
+)
 from kubeflow_mcp.core.security import (
     is_safe_python_code,
     validate_k8s_name,
     validate_resource_limits,
+)
+from kubeflow_mcp.core.server import create_server
+from kubeflow_mcp.trainer import CLIENT_TOOL_ANNOTATIONS, CLIENT_TOOL_DESCRIPTIONS, TOOLS
+from kubeflow_mcp.trainer.api import training
+from kubeflow_mcp.trainer.api.training import (
+    fine_tune,
+    run_container_training,
+    run_custom_training,
 )
 
 DEFAULT_ITERATIONS = 100
@@ -18,7 +29,6 @@ OUTPUT_DIR = Path("benchmark-results")
 def measure_latency_ms(func: Callable[[], object] , iterations = DEFAULT_ITERATIONS , warmup = DEFAULT_WARMUP) -> dict[str,float]:
     for _ in range(warmup):
         func()
-    
     samples = []
     for _ in range(iterations):
         start = time.perf_counter_ns()
@@ -47,8 +57,8 @@ def percentile(sorted_samples: list[float], value: int) -> float:
     return sorted_samples[index]
 
 
-def benchmark_server_init() -> list[dict[str,object]]:
-    
+def benchmark_server_init(iterations: int = DEFAULT_ITERATIONS, warmup: int = DEFAULT_WARMUP) -> list[dict[str,object]]:
+
     results = []
     for mode in ("full", "progressive", "semantic"):
         def create_trainer_server(mode: str = mode) -> object:
@@ -58,24 +68,42 @@ def benchmark_server_init() -> list[dict[str,object]]:
                 mode=mode,
             )
 
-        measurements = measure_latency_ms(create_trainer_server)
+        measurements = measure_latency_ms(create_trainer_server, iterations, warmup)
         results.append(latency_result(f"server_init_{mode}", measurements))
 
     return results
 
-def benchmark_dynamic_tool_registry_init() -> list[dict[str, object]]:
+def benchmark_dynamic_tool_registry_init(iterations: int = DEFAULT_ITERATIONS, warmup: int = DEFAULT_WARMUP) -> list[dict[str, object]]:
     def initialize_registry() -> None:
         init_dynamic_tools(TOOLS, CLIENT_TOOL_DESCRIPTIONS)
 
     return [
         latency_result(
             "dynamic_tool_registry_init",
-            measure_latency_ms(initialize_registry),
+            measure_latency_ms(initialize_registry, iterations, warmup),
         )
     ]
 
 
-def benchmark_trainer_schema_metadata_scan() -> list[dict[str, object]]:
+def benchmark_dynamic_discovery_tools(iterations: int = DEFAULT_ITERATIONS, warmup: int = DEFAULT_WARMUP) -> list[dict[str, object]]:
+    init_dynamic_tools(TOOLS, CLIENT_TOOL_DESCRIPTIONS)
+
+    cases: list[tuple[str, Callable[[], object]]] = [
+        ("dynamic_list_tools", lambda: list_tools()),
+        (
+            "dynamic_describe_tools",
+            lambda: describe_tools(["fine_tune", "run_custom_training", "get_training_logs"]),
+        ),
+        ("dynamic_find_tools_keyword", lambda: find_tools("fine tune a model", top_k=5)),
+    ]
+
+    return [
+        latency_result(name, measure_latency_ms(func, iterations, warmup))
+        for name, func in cases
+    ]
+
+
+def benchmark_trainer_schema_metadata_scan(iterations: int = DEFAULT_ITERATIONS, warmup: int = DEFAULT_WARMUP) -> list[dict[str, object]]:
     def scan_metadata() -> None:
         for tool in TOOLS:
             tool_name = tool.__name__
@@ -86,12 +114,12 @@ def benchmark_trainer_schema_metadata_scan() -> list[dict[str, object]]:
     return [
         latency_result(
             "trainer_schema_metadata_scan",
-            measure_latency_ms(scan_metadata),
+            measure_latency_ms(scan_metadata, iterations, warmup),
         )
     ]
 
 
-def benchmark_security_validation() -> list[dict[str, object]]:
+def benchmark_security_validation(iterations: int = DEFAULT_ITERATIONS, warmup: int = DEFAULT_WARMUP) -> list[dict[str, object]]:
     cases: list[tuple[str, Callable[[], object]]] = [
         ("validate_k8s_name", lambda: validate_k8s_name("valid-training-job")),
         (
@@ -105,23 +133,70 @@ def benchmark_security_validation() -> list[dict[str, object]]:
     ]
 
     return [
-        latency_result(name, measure_latency_ms(func))
+        latency_result(name, measure_latency_ms(func, iterations, warmup))
         for name, func in cases
     ]
+
+
+def benchmark_preview_tools(iterations: int = DEFAULT_ITERATIONS, warmup: int = DEFAULT_WARMUP) -> list[dict[str, object]]:
+    def preview_fine_tune() -> dict[str, object]:
+        return fine_tune(
+            model="hf://google/gemma-2b",
+            dataset="hf://tatsu-lab/alpaca",
+            runtime="torchtune-llama3.2-1b",
+            name="bench-fine-tune",
+            confirmed=False,
+        )
+
+    def preview_custom_training() -> dict[str, object]:
+        return run_custom_training(
+            script="print('training')",
+            runtime="torch-distributed",
+            name="bench-custom-training",
+            gpu_per_node=0,
+            confirmed=False,
+        )
+
+    def preview_container_training() -> dict[str, object]:
+        return run_container_training(
+            image="pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime",
+            command=["python", "-c"],
+            args=["print('training')"],
+            name="bench-container-training",
+            runtime="torch-distributed",
+            gpu_per_node=0,
+            confirmed=False,
+        )
+
+    original_gpu_check = training._check_gpu_available
+    training._check_gpu_available = lambda: None
+    try:
+        cases: list[tuple[str, Callable[[], object]]] = [
+            ("preview_fine_tune", preview_fine_tune),
+            ("preview_custom_training", preview_custom_training),
+            ("preview_container_training", preview_container_training),
+        ]
+        return [
+            latency_result(name, measure_latency_ms(func, iterations, warmup))
+            for name, func in cases
+        ]
+    finally:
+        training._check_gpu_available = original_gpu_check
 
 def run_latency_benchmarks(
     output_dir: Path = OUTPUT_DIR,
     iterations: int = DEFAULT_ITERATIONS,
     warmup: int = DEFAULT_WARMUP,
     ) -> Path:
-    
+
     output_dir.mkdir(exist_ok=True)
     results = [] # list[dict[str,object]]
-    results.extend(benchmark_server_init())
-    results.extend(benchmark_dynamic_tool_registry_init())
-    results.extend(benchmark_trainer_schema_metadata_scan())    
-    results.extend(benchmark_security_validation())
-    
+    results.extend(benchmark_server_init(iterations, warmup))
+    results.extend(benchmark_dynamic_tool_registry_init(iterations, warmup))
+    results.extend(benchmark_dynamic_discovery_tools(iterations, warmup))
+    results.extend(benchmark_trainer_schema_metadata_scan(iterations, warmup))
+    results.extend(benchmark_preview_tools(iterations, warmup))
+    results.extend(benchmark_security_validation(iterations, warmup))
     info = {
         "suite": "latency",
         "iterations": iterations,
