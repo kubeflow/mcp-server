@@ -99,7 +99,7 @@ def _audit_wrap(tool_func):
         persona = get_effective_persona()
         start = time.monotonic()
 
-        with tracer.start_as_current_span("tool_call") as span:
+        with tracer.start_as_current_span(f"tool:{tool_name}") as span:
             span.set_attribute("tool.name", tool_name)
             span.set_attribute("kubeflow.persona", persona)
             span.set_attribute("correlation_id", cid)

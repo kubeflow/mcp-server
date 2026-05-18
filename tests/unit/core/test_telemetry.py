@@ -40,9 +40,11 @@ class _FakeSpan:
 class _FakeTracer:
     def __init__(self, span: _FakeSpan) -> None:
         self._span = span
+        self.last_span_name: str | None = None
 
     @contextmanager
-    def start_as_current_span(self, _name: str):
+    def start_as_current_span(self, name: str):
+        self.last_span_name = name
         yield self._span
 
 
@@ -188,11 +190,12 @@ def test_audit_wrap_sets_span_attributes_on_success(monkeypatch: pytest.MonkeyPa
     import kubeflow_mcp.core.server as server_mod
 
     span = _FakeSpan()
+    tracer = _FakeTracer(span)
     breaker = _FakeBreaker()
     monkeypatch.setattr(server_mod, "_rate_limiter", None)
     monkeypatch.setattr(server_mod, "with_correlation_id", lambda: "cid-123")
     monkeypatch.setattr(server_mod, "get_effective_persona", lambda: "ml-engineer")
-    monkeypatch.setattr(server_mod, "get_tracer", lambda _name: _FakeTracer(span))
+    monkeypatch.setattr(server_mod, "get_tracer", lambda _name: tracer)
     monkeypatch.setattr(server_mod, "get_breaker", lambda _tool: breaker)
 
     def sample_tool(**_kwargs):
@@ -202,6 +205,7 @@ def test_audit_wrap_sets_span_attributes_on_success(monkeypatch: pytest.MonkeyPa
     wrapped()
 
     assert span.attributes["tool.name"] == "sample_tool"
+    assert tracer.last_span_name == "tool:sample_tool"
     assert span.attributes["correlation_id"] == "cid-123"
     assert span.attributes["kubeflow.persona"] == "ml-engineer"
     assert span.attributes["tool.success"] is True
