@@ -59,7 +59,7 @@ The server listens on `http://localhost:8000/mcp`.
 | `KUBEFLOW_MCP_JWT_AUDIENCE` | _(none)_ | Expected JWT audience |
 | `KUBEFLOW_MCP_CLIENTS` | `trainer` | Comma-separated client modules to load |
 | `KUBEFLOW_MCP_PERSONA` | `readonly` | Tool persona (`readonly`, `data-scientist`, `ml-engineer`, `platform-admin`) |
-| `KUBEFLOW_MCP_LOG_FORMAT` | `json` | Log format (`json`, `console`) |
+| `LOG_FORMAT` | `json` | Log format (`json`, `console`) |
 | `LOG_LEVEL` | `INFO` | Log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
 
 **MCP client config (HTTP transport)**
