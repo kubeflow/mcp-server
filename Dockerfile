@@ -14,7 +14,7 @@
 
 FROM python:3.12-slim AS builder
 
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+COPY --from=ghcr.io/astral-sh/uv:0.11.14 /uv /usr/local/bin/uv
 
 WORKDIR /app
 
@@ -34,10 +34,14 @@ WORKDIR /app
 
 COPY --from=builder /app/.venv /app/.venv
 
+ARG VERSION=dev
+LABEL org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.title="kubeflow-mcp" \
+      org.opencontainers.image.source="https://github.com/kubeflow/mcp-server"
+
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    # Sensible defaults for in-cluster operation; override at deploy time
     MCP_TRANSPORT=http \
     KUBEFLOW_MCP_LOG_FORMAT=json
 
@@ -45,4 +49,4 @@ EXPOSE 8000
 
 USER 65532:65532
 
-ENTRYPOINT ["kubeflow-mcp", "serve", "--transport", "http"]
+ENTRYPOINT ["sh", "-c", "exec kubeflow-mcp serve --transport ${MCP_TRANSPORT}"]
