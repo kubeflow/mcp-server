@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-FROM python:3.12-slim AS builder
+FROM python:3.12.13-slim AS builder
 
 COPY --from=ghcr.io/astral-sh/uv:0.11.14 /uv /usr/local/bin/uv
 
@@ -25,7 +25,7 @@ COPY README.md ./
 COPY kubeflow_mcp ./kubeflow_mcp
 RUN uv sync --frozen --no-dev --no-editable
 
-FROM python:3.12-slim AS runtime
+FROM python:3.12.13-slim AS runtime
 
 RUN groupadd --gid 65532 kubeflow-mcp \
  && useradd  --uid 65532 --gid 65532 --no-create-home --shell /sbin/nologin kubeflow-mcp

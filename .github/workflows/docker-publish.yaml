@@ -4,6 +4,9 @@ on:
   push:
     tags:
       - "v*.*.*"
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
 
 env:
@@ -42,7 +45,7 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
-            type=raw,value=latest
+            type=raw,value=latest,enable=${{ github.ref_type == 'tag' && !contains(github.ref_name, '-') }}
 
       - name: Build and push
         id: build
@@ -50,7 +53,7 @@ jobs:
         with:
           context: .
           platforms: linux/amd64,linux/arm64
-          push: true
+          push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: VERSION=${{ steps.meta.outputs.version }}
@@ -59,8 +62,9 @@ jobs:
 
       - name: Scan image for critical CVEs (Trivy)
         uses: aquasecurity/trivy-action@0.30.0
+        if: github.event_name != 'pull_request'
         with:
-          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
           format: table
           exit-code: 1
           severity: CRITICAL
