@@ -1,22 +1,9 @@
 name: Release
 
 on:
-  push:
-    branches:
-      - main
-      - 'release-*'
-    paths:
-      - pyproject.toml
-      - kubeflow_mcp/__init__.py
+  workflow_dispatch:
   release:
     types: [published]
-  workflow_dispatch:
-    inputs:
-      test_pypi:
-        description: "Publish to Test PyPI instead of PyPI (dry-run)"
-        required: false
-        type: boolean
-        default: false
 
 permissions:
   contents: write
@@ -25,25 +12,18 @@ permissions:
 jobs:
   prepare:
     name: Prepare release
-    if: ${{ github.repository == 'kubeflow/mcp-server' && !(github.event_name == 'push' && startsWith(github.ref, 'refs/heads/release-') && github.actor == 'github-actions[bot]') }}
     runs-on: ubuntu-latest
     outputs:
       artifact-name: ${{ steps.vars.outputs.artifact-name }}
-      branch: ${{ steps.vars.outputs.branch }}
-      is-prerelease: ${{ steps.vars.outputs.is-prerelease }}
       package-name: ${{ steps.vars.outputs.package-name }}
       target-ref: ${{ steps.vars.outputs.target-ref }}
+      is-prerelease: ${{ steps.vars.outputs.is-prerelease }}
       version: ${{ steps.vars.outputs.version }}
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-
-      - name: Configure git user
-        if: github.event_name == 'push'
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          ref: ${{ github.event_name == 'release' && github.event.release.tag_name || github.ref }}
 
       - name: Check version and release target
         id: vars
@@ -87,11 +67,6 @@ jobs:
           if project_version != code_version:
               raise SystemExit("Version mismatch between pyproject.toml and kubeflow_mcp/__init__.py")
 
-          if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(rc[0-9]+)?", project_version):
-              raise SystemExit("Version must use PEP 440 release format X.Y.Z or X.Y.ZrcN")
-
-          major_minor = ".".join(project_version.split(".")[:2])
-          branch = f"release-{major_minor}"
           event_name = os.environ["GITHUB_EVENT_NAME"]
           release_tag = os.environ.get("RELEASE_TAG", "")
 
@@ -100,15 +75,14 @@ jobs:
               if release_tag != project_version:
                   raise SystemExit("Release tag must match the package version exactly")
               target_ref = release_tag
-          elif event_name == "push":
-              target_ref = branch
           else:
               target_ref = os.environ["GITHUB_REF"]
 
+          is_prerelease = bool(re.search(r"(?:dev|rc)", project_version, re.IGNORECASE))
+
           outputs = {
               "artifact-name": f"dist-{project_version}",
-              "branch": branch,
-              "is-prerelease": str("rc" in project_version).lower(),
+              "is-prerelease": str(is_prerelease).lower(),
               "package-name": package_name,
               "target-ref": target_ref,
               "version": project_version,
@@ -117,35 +91,6 @@ jobs:
               for key, value in outputs.items():
                   print(f"{key}={value}", file=output_file)
           PY
-
-      - name: Ensure release branch exists and contains version bump
-        if: github.event_name == 'push'
-        run: |
-          set -euo pipefail
-
-          BRANCH="${{ steps.vars.outputs.branch }}"
-          MAIN_SHA="${{ github.sha }}"
-
-          if [[ "${GITHUB_REF_NAME}" == "$BRANCH" ]]; then
-            echo "Triggered on $BRANCH. Skipping cherry-pick from main."
-            exit 0
-          fi
-
-          if git ls-remote --heads origin "$BRANCH" | grep -q "refs/heads/$BRANCH"; then
-            echo "Using existing branch: $BRANCH"
-            git fetch origin "$BRANCH:$BRANCH"
-            git checkout "$BRANCH"
-            if git merge-base --is-ancestor "$MAIN_SHA" "$BRANCH"; then
-              echo "Commit $MAIN_SHA already exists in $BRANCH. Skipping cherry-pick."
-            else
-              git cherry-pick -x "$MAIN_SHA"
-            fi
-          else
-            echo "Creating new branch: $BRANCH from main@$MAIN_SHA"
-            git checkout -B "$BRANCH" "$MAIN_SHA"
-          fi
-
-          git push origin "$BRANCH"
 
   build:
     name: Build package
@@ -221,34 +166,10 @@ jobs:
           name: ${{ needs.prepare.outputs.artifact-name }}
           path: dist/
 
-  create-tag:
-    name: Create and push tag
-    needs: [prepare, build]
-    if: github.event_name == 'push'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-          ref: ${{ needs.prepare.outputs.branch }}
-
-      - name: Create tag
-        run: |
-          set -euo pipefail
-
-          VERSION="${{ needs.prepare.outputs.version }}"
-          if git ls-remote --tags origin "$VERSION" | grep -q "refs/tags/$VERSION"; then
-            echo "Tag $VERSION already exists. Skipping."
-            exit 0
-          fi
-
-          git tag "$VERSION"
-          git push origin "$VERSION"
-
   publish-test-pypi:
     name: Publish to Test PyPI
     needs: [prepare, build]
-    if: github.event_name == 'workflow_dispatch' && inputs.test_pypi
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     environment:
       name: test-pypi
@@ -268,8 +189,8 @@ jobs:
 
   publish-pypi:
     name: Publish to PyPI
-    needs: [prepare, build, create-tag]
-    if: always() && needs.build.result == 'success' && (github.event_name == 'release' || (github.event_name == 'push' && needs.create-tag.result == 'success'))
+    needs: [prepare, build]
+    if: github.event_name == 'release' && needs.prepare.outputs.is-prerelease != 'true'
     runs-on: ubuntu-latest
     environment:
       name: release
@@ -288,8 +209,8 @@ jobs:
 
   github-release:
     name: Create GitHub Release
-    needs: [prepare, build, create-tag, publish-pypi]
-    if: always() && github.event_name == 'push' && needs.publish-pypi.result == 'success'
+    needs: [prepare, build, publish-pypi]
+    if: always() && github.event_name == 'release' && needs.build.result == 'success' && (needs.publish-pypi.result == 'success' || needs.publish-pypi.result == 'skipped')
     runs-on: ubuntu-latest
     environment:
       name: release
