@@ -52,6 +52,15 @@ from kubeflow_mcp.core.resources import register_resources
 from kubeflow_mcp.core.security import mask_sensitive_data
 from kubeflow_mcp.core.telemetry import get_tracer
 
+try:
+    from opentelemetry.trace import SpanKind
+    from opentelemetry.trace import Status as _Status
+    from opentelemetry.trace import StatusCode as _StatusCode
+except ImportError:  # pragma: no cover
+    SpanKind = None  # type: ignore[assignment,misc]
+    _Status = None  # type: ignore[assignment,misc]
+    _StatusCode = None  # type: ignore[assignment,misc]
+
 logger = logging.getLogger(__name__)
 
 _rate_limiter: RateLimiter | None = None
@@ -90,16 +99,22 @@ def _inject_meta(result: Any, tool_name: str) -> Any:
 
 def _audit_wrap(tool_func):
     """Wrap a tool function with rate limiting, circuit breaking, audit logging, and response metadata."""
+    tracer = get_tracer("kubeflow_mcp.tools")
 
     @functools.wraps(tool_func)
     def wrapper(**kwargs):
         tool_name = tool_func.__name__
         cid = with_correlation_id()
-        tracer = get_tracer("kubeflow_mcp.tools")
         persona = get_effective_persona()
         start = time.monotonic()
 
-        with tracer.start_as_current_span(f"tool:{tool_name}") as span:
+        span_kwargs: dict[str, Any] = {}
+        if SpanKind is not None:
+            span_kwargs["kind"] = SpanKind.CLIENT
+
+        with tracer.start_as_current_span(
+            f"tool:{tool_name}", **span_kwargs
+        ) as span:
             span.set_attribute("tool.name", tool_name)
             span.set_attribute("kubeflow.persona", persona)
             span.set_attribute("correlation_id", cid)
@@ -158,7 +173,8 @@ def _audit_wrap(tool_func):
                 breaker.record_failure()
                 span.set_attribute("tool.success", False)
                 span.set_attribute("tool.duration_ms", duration_ms)
-                span.record_exception(exc)
+                if _StatusCode is not None:
+                    span.set_status(_Status(_StatusCode.ERROR, str(exc)))
                 logger.error(
                     "tool_call_failed",
                     extra={

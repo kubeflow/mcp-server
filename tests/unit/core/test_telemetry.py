@@ -29,6 +29,8 @@ class _FakeSpan:
     def __init__(self) -> None:
         self.attributes: dict[str, object] = {}
         self.exceptions: list[BaseException] = []
+        self.status_code: object | None = None
+        self.status_description: str | None = None
 
     def set_attribute(self, key: str, value: object) -> None:
         self.attributes[key] = value
@@ -36,15 +38,21 @@ class _FakeSpan:
     def record_exception(self, exception: BaseException) -> None:
         self.exceptions.append(exception)
 
+    def set_status(self, code: object, description: str | None = None) -> None:
+        self.status_code = code
+        self.status_description = description
+
 
 class _FakeTracer:
     def __init__(self, span: _FakeSpan) -> None:
         self._span = span
         self.last_span_name: str | None = None
+        self.last_span_kwargs: dict[str, object] = {}
 
     @contextmanager
-    def start_as_current_span(self, name: str):
+    def start_as_current_span(self, name: str, **kwargs):
         self.last_span_name = name
+        self.last_span_kwargs = kwargs
         yield self._span
 
 
@@ -211,6 +219,11 @@ def test_audit_wrap_sets_span_attributes_on_success(monkeypatch: pytest.MonkeyPa
     assert span.attributes["tool.success"] is True
     assert "tool.duration_ms" in span.attributes
     assert breaker.successes == 1
+    # Verify SpanKind.CLIENT is passed when OTel is available
+    from kubeflow_mcp.core.server import SpanKind as _SpanKind
+
+    if _SpanKind is not None:
+        assert tracer.last_span_kwargs.get("kind") == _SpanKind.CLIENT
 
 
 def test_audit_wrap_records_exception_on_failure(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -233,6 +246,13 @@ def test_audit_wrap_records_exception_on_failure(monkeypatch: pytest.MonkeyPatch
 
     assert span.attributes["tool.success"] is False
     assert "tool.duration_ms" in span.attributes
-    assert len(span.exceptions) == 1
-    assert isinstance(span.exceptions[0], RuntimeError)
     assert breaker.failures == 1
+    # record_exception is no longer called manually; start_as_current_span
+    # auto-records it.  Instead, set_status(ERROR) must be called.
+    assert len(span.exceptions) == 0
+    from kubeflow_mcp.core.server import _StatusCode
+
+    if _StatusCode is not None:
+        status = span.status_code
+        assert status.status_code == _StatusCode.ERROR
+        assert status.description == "boom"

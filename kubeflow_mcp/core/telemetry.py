@@ -41,14 +41,18 @@ class _NoopSpan:
     def set_attribute(self, key: str, value: Any) -> None:
         return None
 
-    def record_exception(self, exception: BaseException) -> None:
+    def record_exception(self, exception: BaseException, **kwargs: Any) -> None:
+        return None
+
+    def set_status(self, status: Any, description: str | None = None) -> None:
         return None
 
 
 class _NoopTracer:
     @contextmanager
-    def start_as_current_span(self, name: str) -> Generator[_NoopSpan, None, None]:
-        del name
+    def start_as_current_span(
+        self, name: str, **kwargs: Any
+    ) -> Generator[_NoopSpan, None, None]:
         yield _NoopSpan()
 
 
