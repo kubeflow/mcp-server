@@ -38,12 +38,12 @@ install-dev: uv ## Install all development dependencies
 
 verify: ## Run linting and formatting checks
 	@uv lock --check
-	@uv run ruff check .
-	@uv run ruff format --check .
+	@uv run --group dev ruff check .
+	@uv run --group dev ruff format --check .
 
 format: ## Auto-format and fix lint issues
-	@uv run ruff check --fix .
-	@uv run ruff format .
+	@uv run --group dev ruff check --fix .
+	@uv run --group dev ruff format .
 
 ##@ Testing
 
