@@ -21,10 +21,6 @@ dependencies = [
     "click>=8.0",
     "kubeflow>=0.4.0",
     "huggingface-hub>=0.20",
-    # CVE-2026-45409
-    "idna>=3.15",
-    # PYSEC-2026-161
-    "starlette>=1.0.1",
 ]
 
 [project.optional-dependencies]
@@ -55,6 +51,12 @@ packages = ["kubeflow_mcp"]
 asyncio_mode = "auto"
 testpaths = ["kubeflow_mcp", "tests"]
 addopts = "-v --tb=short"
+
+[tool.uv]
+constraint-dependencies = [
+    "idna>=3.15",       # CVE-2026-45409
+    "starlette>=1.0.1", # PYSEC-2026-161
+]
 
 [tool.ruff]
 target-version = "py310"

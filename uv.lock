@@ -14,6 +14,12 @@ resolution-markers = [
     "python_full_version < '3.11'",
 ]
 
+[manifest]
+constraints = [
+    { name = "idna", specifier = ">=3.15" },
+    { name = "starlette", specifier = ">=1.0.1" },
+]
+
 [[package]]
 name = "aiofile"
 version = "3.9.0"
@@ -1421,11 +1427,9 @@ dependencies = [
     { name = "click" },
     { name = "fastmcp" },
     { name = "huggingface-hub" },
-    { name = "idna" },
     { name = "kubeflow" },
     { name = "pydantic" },
     { name = "pyyaml" },
-    { name = "starlette" },
 ]
 
 [package.optional-dependencies]
@@ -1453,7 +1457,6 @@ requires-dist = [
     { name = "click", specifier = ">=8.0" },
     { name = "fastmcp", specifier = ">=2.0.0" },
     { name = "huggingface-hub", specifier = ">=0.20" },
-    { name = "idna", specifier = ">=3.15" },
     { name = "kubeflow", specifier = ">=0.4.0" },
     { name = "kubeflow", extras = ["hub"], marker = "extra == 'all'", specifier = ">=0.4.0" },
     { name = "kubeflow", extras = ["hub"], marker = "extra == 'hub'", specifier = ">=0.4.0" },
@@ -1461,7 +1464,6 @@ requires-dist = [
     { name = "kubeflow", extras = ["spark"], marker = "extra == 'spark'", specifier = ">=0.4.0" },
     { name = "pydantic", specifier = ">=2.0" },
     { name = "pyyaml", specifier = ">=6.0" },
-    { name = "starlette", specifier = ">=1.0.1" },
 ]
 provides-extras = ["hub", "spark", "all"]
 
