@@ -6,7 +6,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-RESULTS_DIR = Path("benchmark-results")
+RESULTS_DIR = Path(__file__).parent.parent.parent / "benchmark-results"
 
 SectionRenderer = Callable[[dict[str, Any]], str]
 
