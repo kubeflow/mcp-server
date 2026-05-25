@@ -150,6 +150,9 @@ def test_preview_tools_latency(
     name: str,
     benchmark_func: Callable[[], object],
 ) -> None:
+    assert hasattr(training, "_check_gpu_available"), (
+        "_check_gpu_available renamed — update benchmark patch"
+    )
     original_gpu_check = training._check_gpu_available
     training._check_gpu_available = lambda: None
     try:
