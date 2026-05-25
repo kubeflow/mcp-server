@@ -242,7 +242,7 @@ def load_config(config_path: Path | None = None) -> Config:
     observability_file = file_config.get("observability", {})
     observability = ObservabilityConfig(
         otel_endpoint=os.getenv(
-            "KUBEFLOW_MCP_OTEL_ENDPOINT",
+            "OTEL_EXPORTER_OTLP_ENDPOINT",
             observability_file.get("otel_endpoint"),
         )
     )

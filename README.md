@@ -217,7 +217,7 @@ OpenTelemetry tracing is optional and can be enabled without changing tool code.
 ```bash
 kubeflow-mcp serve --otel-endpoint http://localhost:4318/v1/traces
 # or
-export KUBEFLOW_MCP_OTEL_ENDPOINT=http://localhost:4318/v1/traces
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318/v1/traces
 kubeflow-mcp serve
 ```
 

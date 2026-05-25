@@ -98,7 +98,7 @@ def cli() -> None:
     "--otel-endpoint",
     default=None,
     help="OpenTelemetry OTLP HTTP endpoint for tracing. "
-    "Falls back to KUBEFLOW_MCP_OTEL_ENDPOINT env var, config file.",
+    "Falls back to OTEL_EXPORTER_OTLP_ENDPOINT env var, config file.",
 )
 def serve(
     clients: str | None,
