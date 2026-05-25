@@ -11,7 +11,7 @@ from tests.benchmarks.report import generate_report
 
 DEFAULT_ITERATIONS = 100
 DEFAULT_WARMUP = 5
-OUTPUT_DIR = Path("benchmark-results")
+OUTPUT_DIR = Path(__file__).parent.parent.parent / "benchmark-results"
 LATENCY_RESULTS: list[dict[str, object]] = []
 
 
@@ -44,7 +44,7 @@ def record_latency_benchmark(
             warmup_rounds=DEFAULT_WARMUP,
             iterations=1,
         )
-        samples_ms = [sample * 1_000 for sample in benchmark.stats.stats.data]
+        samples_ms = [sample * 1_000 for sample in benchmark.stats["data"]]
         LATENCY_RESULTS.append(_latency_result(name, samples_ms))
 
     yield run
