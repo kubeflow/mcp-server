@@ -24,7 +24,7 @@ body:
       description: Steps to reproduce the behavior
       placeholder: |
         1. Run `kubeflow-mcp serve --clients trainer`
-        2. Call tool X with params Y
+        2. Call tool X with parameters Y
         3. See error
     validations:
       required: true

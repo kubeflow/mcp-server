@@ -99,11 +99,11 @@
 
 # ── do-not-merge/* ─────────────────────────────────────────────────────────────
 - name: do-not-merge/hold
-  color: "ffa500"
+  color: "e11d48"
   description: "Blocked — do not merge"
 
 - name: do-not-merge/work-in-progress
-  color: "ffa500"
+  color: "e11d48"
   description: "Work in progress"
 
 # ── size/* (managed by prow/bot) ───────────────────────────────────────────────
@@ -133,12 +133,12 @@
 
 # ── misc ───────────────────────────────────────────────────────────────────────
 - name: approved
-  color: "03db12"
-  description: ""
+  color: "0ffa16"
+  description: "Approved by an approver in OWNERS"
 
 - name: lgtm
-  color: "2efca4"
-  description: ""
+  color: "e2e669"
+  description: "Looks good to me — approved by a reviewer"
 
 - name: ok-to-test
   color: "74bb61"
