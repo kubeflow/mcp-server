@@ -4,8 +4,6 @@
 
 Proposal: [KEP-936](https://github.com/kubeflow/community/tree/master/proposals/936-kubeflow-mcp-server) · [ROADMAP](ROADMAP.md) · [SECURITY](SECURITY.md) · [CONTRIBUTING](CONTRIBUTING.md)
 
-> ⚠️ **Note:** This project is in early development. We currently accept PRs only after prior discussion on Slack — join `#kubeflow-ml-experience` on the [CNCF Slack](https://www.kubeflow.org/docs/about/community/). For more discussion, join the bi-weekly ML Experience WG call on Wednesdays.
-
 ## Overview
 
 The Kubeflow MCP Server exposes Kubeflow Training operations as [Model Context Protocol](https://modelcontextprotocol.io/) tools, enabling AI agents (Claude, Cursor, Claude Code, or any custom agents etc.) to plan, submit, monitor, and manage training jobs through natural language — without users needing to learn Kubernetes or the Kubeflow SDK directly.
