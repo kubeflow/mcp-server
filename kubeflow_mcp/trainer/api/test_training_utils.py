@@ -1,12 +1,14 @@
-import pytest
 import textwrap
 
+import pytest
+
+
 class TestMakeTrainFunc:
-    
+
     def test_wrapped_script_executes(self):
-        from kubeflow_mcp.trainer.api.training import _make_train_func
         import builtins
-        import textwrap
+
+        from kubeflow_mcp.trainer.api.training import _make_train_func
 
         builtins._marker = []
 
@@ -21,10 +23,10 @@ class TestMakeTrainFunc:
         assert builtins._marker == ["ran"]
 
     def test_async_train_executes(self):
-        from kubeflow_mcp.trainer.api.training import _make_train_func
-        import builtins
         import asyncio
-        import textwrap
+        import builtins
+
+        from kubeflow_mcp.trainer.api.training import _make_train_func
 
         builtins._marker = []
 
@@ -43,9 +45,9 @@ class TestMakeTrainFunc:
 
 
     def test_func_args_are_used(self):
-        from kubeflow_mcp.trainer.api.training import _make_train_func
         import builtins
-        import textwrap
+
+        from kubeflow_mcp.trainer.api.training import _make_train_func
         builtins._marker = []
 
         script =textwrap.dedent("""
@@ -61,9 +63,9 @@ class TestMakeTrainFunc:
         assert builtins._marker == [0.1]
 
     def test_plain_script_with_args(self):
-        from kubeflow_mcp.trainer.api.training import _make_train_func
         import builtins
-        import textwrap
+
+        from kubeflow_mcp.trainer.api.training import _make_train_func
 
         builtins._marker = []
 
@@ -79,7 +81,6 @@ class TestMakeTrainFunc:
 
     def test_missing_params_raises_value_error(self):
         from kubeflow_mcp.trainer.api.training import _make_train_func
-        import textwrap
 
         script = textwrap.dedent("""
             def train():
