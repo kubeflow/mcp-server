@@ -18,6 +18,7 @@ import ast
 import logging
 import os
 import tempfile
+import textwrap
 import uuid
 from collections.abc import Callable
 from typing import Any
@@ -104,19 +105,17 @@ def _make_train_func(script: str, func_args: dict[str, Any] | None = None) -> Ca
     When *func_args* is provided, the generated function signature includes matching
     keyword parameters so the trainer can pass them at runtime.
     """
-    tree = ast.parse(script)
+    # Normalize indentation to handle triple-quoted strings
+    script = textwrap.dedent(script)
 
+    tree = ast.parse(script)
     func_name = "train"
     lines = script.strip().splitlines()
 
     has_train = False
     train_node = None
     for node in tree.body:
-        if isinstance(node, ast.FunctionDef) and node.name == "train":
-            has_train = True
-            train_node = node
-            break
-        if isinstance(node, ast.AsyncFunctionDef) and node.name == "train":
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "train":
             has_train = True
             train_node = node
             break
@@ -124,16 +123,22 @@ def _make_train_func(script: str, func_args: dict[str, Any] | None = None) -> Ca
     if not has_train:
         if func_args:
             params = ", ".join(f"{k}=None" for k in func_args)
-            wrapped = f"def {func_name}({params}):\n"
+            wrapped_lines = [f"def {func_name}({params}):\n"]
         else:
-            wrapped = f"def {func_name}():\n"
+            wrapped_lines = [f"def {func_name}():\n"]
         for line in lines:
-            wrapped += f"    {line}\n"
+            wrapped_lines.append(f"    {line}\n")
+        wrapped = "".join(wrapped_lines)
     else:
-        param_names = [arg.arg for arg in train_node.args.args]
-        if func_args:
-            expected_params = list(func_args)
-            missing = [p for p in expected_params if p not in param_names]
+        # Build complete param list from all arg types
+        param_names = (
+            [arg.arg for arg in train_node.args.posonlyargs]
+            + [arg.arg for arg in train_node.args.args]
+            + [arg.arg for arg in train_node.args.kwonlyargs]
+        )
+        # If **kwargs present, skip validation — accepts anything
+        if not train_node.args.kwarg and func_args:
+            missing = [p for p in func_args if p not in param_names]
             if missing:
                 raise ValueError(f"train() missing required params: {missing}")
         wrapped = script
