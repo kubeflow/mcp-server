@@ -20,6 +20,7 @@ import tempfile
 import uuid
 from collections.abc import Callable
 from typing import Any
+import ast
 
 from kubeflow.trainer.constants.constants import DEFAULT_PIP_INDEX_URLS
 
@@ -103,16 +104,39 @@ def _make_train_func(script: str, func_args: dict[str, Any] | None = None) -> Ca
     When *func_args* is provided, the generated function signature includes matching
     keyword parameters so the trainer can pass them at runtime.
     """
+    tree = ast.parse(script)
+
     func_name = "train"
     lines = script.strip().splitlines()
 
-    if func_args:
-        params = ", ".join(f"{k}=None" for k in func_args)
-        wrapped = f"def {func_name}({params}):\n"
+    has_train = False
+    train_node = None
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == "train":
+            has_train = True
+            train_node = node
+            break
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "train":
+            has_train = True
+            train_node = node
+            break
+
+    if not has_train:
+        if func_args:
+            params = ", ".join(f"{k}=None" for k in func_args)
+            wrapped = f"def {func_name}({params}):\n"
+        else:
+            wrapped = f"def {func_name}():\n"
+        for line in lines:
+            wrapped += f"    {line}\n"
     else:
-        wrapped = f"def {func_name}():\n"
-    for line in lines:
-        wrapped += f"    {line}\n"
+        param_names = [arg.arg for arg in train_node.args.args]
+        if func_args:
+            expected_params = list(func_args)
+            missing = [p for p in expected_params if p not in param_names]
+            if missing:
+                raise ValueError(f"train() missing required params: {missing}")
+        wrapped = script
 
     script_dir = _get_script_dir()
     script_path = os.path.join(script_dir, f"_mcp_train_{uuid.uuid4().hex[:8]}.py")
