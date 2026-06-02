@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import atexit
 import logging
 import threading
 from collections.abc import Generator
@@ -72,8 +73,12 @@ def _normalize_and_validate_endpoint(endpoint: str | None) -> str:
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise ValueError(
             "Invalid OpenTelemetry endpoint. Use a full HTTP(S) URL, "
-            "for example: http://localhost:4318/v1/traces"
+            "for example: http://localhost:4318"
         )
+    # Append the standard OTLP trace path when only a base URL is provided,
+    # matching the OTel SDK convention for OTEL_EXPORTER_OTLP_ENDPOINT.
+    if not parsed.path or parsed.path == "/":
+        normalized_endpoint = normalized_endpoint.rstrip("/") + "/v1/traces"
     return normalized_endpoint
 
 
@@ -116,6 +121,7 @@ def setup_tracing(endpoint: str | None, service_name: str = "kubeflow-mcp") -> b
             provider = TracerProvider(resource=resource)
             provider.add_span_processor(processor)
             _otel_trace.set_tracer_provider(provider)
+            atexit.register(provider.shutdown)
 
         _tracing_initialized = True
         _configured_endpoint = normalized_endpoint
