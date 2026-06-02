@@ -1,7 +1,7 @@
 version: 2
 updates:
-  # Python dependencies from pyproject.toml
-  - package-ecosystem: "uv"
+  # Python dependencies from pyproject.toml (uv is not supported; pip reads pyproject.toml)
+  - package-ecosystem: "pip"
     directory: "/"
     schedule:
       interval: "weekly"
