@@ -215,14 +215,17 @@ OpenTelemetry tracing is optional and can be enabled without changing tool code.
 - Enable tracing with CLI flag or env var:
 
 ```bash
-kubeflow-mcp serve --otel-endpoint http://localhost:4318/v1/traces
+kubeflow-mcp serve --otel-endpoint http://localhost:4318
 # or
-export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318/v1/traces
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
 kubeflow-mcp serve
 ```
 
 Each tool invocation emits a span with attributes:
-`tool.name`, `tool.success`, `tool.duration_ms`, `kubeflow.persona`, and `correlation_id`.
+`tool.name`, `tool.args_preview`, `tool.success`, `tool.duration_ms`, `kubeflow.persona`, and `correlation_id`.
+
+> **Note:** `kubeflow-mcp agent --otel-endpoint ...` emits spans under a separate
+> `kubeflow-mcp-agent` service in Jaeger, distinct from the `kubeflow-mcp` server spans.
 
 ## Development
 

@@ -51,7 +51,7 @@ Example config file (~/.kubeflow-mcp.yaml):
             format: json
 
         observability:
-            otel_endpoint: http://localhost:4318/v1/traces
+            otel_endpoint: http://localhost:4318
 
 Namespace restrictions are enforced via ``~/.kf-mcp-policy.yaml``
 (``policy.namespaces``), not through server config.

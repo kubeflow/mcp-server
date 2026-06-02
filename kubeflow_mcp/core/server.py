@@ -21,6 +21,7 @@ Designed for extensibility:
 
 import functools
 import importlib
+import json
 import logging
 import re
 import time
@@ -118,6 +119,11 @@ def _audit_wrap(tool_func):
             span.set_attribute("tool.name", tool_name)
             span.set_attribute("kubeflow.persona", persona)
             span.set_attribute("correlation_id", cid)
+            masked = mask_sensitive_data(kwargs) if kwargs else {}
+            span.set_attribute(
+                "tool.args_preview",
+                json.dumps(masked, default=str)[:300],
+            )
 
             if _rate_limiter is not None and not _rate_limiter.acquire():
                 duration_ms = int((time.monotonic() - start) * 1000)
@@ -140,7 +146,6 @@ def _audit_wrap(tool_func):
                     "error_code": ErrorCode.CIRCUIT_OPEN,
                 }
 
-            masked = mask_sensitive_data(kwargs) if kwargs else {}
             try:
                 result = tool_func(**kwargs)
                 duration_ms = int((time.monotonic() - start) * 1000)

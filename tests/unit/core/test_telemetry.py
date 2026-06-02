@@ -98,6 +98,9 @@ def test_setup_tracing_configures_provider_when_available(monkeypatch: pytest.Mo
             self._processors.append(processor)
             calls["processor"] = processor
 
+        def shutdown(self) -> None:
+            pass
+
     class _FakeResource:
         @staticmethod
         def create(data: dict[str, str]) -> dict[str, str]:
@@ -218,6 +221,7 @@ def test_audit_wrap_sets_span_attributes_on_success(monkeypatch: pytest.MonkeyPa
     assert span.attributes["kubeflow.persona"] == "ml-engineer"
     assert span.attributes["tool.success"] is True
     assert "tool.duration_ms" in span.attributes
+    assert span.attributes["tool.args_preview"] == "{}"
     assert breaker.successes == 1
     # Verify SpanKind.CLIENT is passed when OTel is available
     from kubeflow_mcp.core.server import SpanKind as _SpanKind
@@ -256,3 +260,28 @@ def test_audit_wrap_records_exception_on_failure(monkeypatch: pytest.MonkeyPatch
         status = span.status_code
         assert status.status_code == _StatusCode.ERROR
         assert status.description == "boom"
+
+
+def test_audit_wrap_circuit_breaker_open(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Circuit-open path sets tool.success=False on the span before the early return."""
+    import kubeflow_mcp.core.server as server_mod
+
+    span = _FakeSpan()
+    tracer = _FakeTracer(span)
+    breaker = _FakeBreaker(can_execute=False)
+    monkeypatch.setattr(server_mod, "_rate_limiter", None)
+    monkeypatch.setattr(server_mod, "with_correlation_id", lambda: "cid-456")
+    monkeypatch.setattr(server_mod, "get_effective_persona", lambda: "readonly")
+    monkeypatch.setattr(server_mod, "get_tracer", lambda _name: tracer)
+    monkeypatch.setattr(server_mod, "get_breaker", lambda _tool: breaker)
+
+    def sample_tool(**_kwargs):
+        return {"ok": True}
+
+    wrapped = _audit_wrap(sample_tool)
+    result = wrapped()
+
+    assert span.attributes["tool.success"] is False
+    assert "tool.duration_ms" in span.attributes
+    assert "error" in result
+    assert result["error_code"] == "CIRCUIT_OPEN"
