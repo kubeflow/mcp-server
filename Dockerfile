@@ -47,6 +47,9 @@ ENV PATH="/app/.venv/bin:$PATH" \
 
 EXPOSE 8000
 
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"
+
 USER 65532:65532
 
 ENTRYPOINT ["sh", "-c", "exec kubeflow-mcp serve --transport ${MCP_TRANSPORT}"]
