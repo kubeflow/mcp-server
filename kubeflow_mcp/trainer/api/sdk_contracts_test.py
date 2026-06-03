@@ -844,3 +844,146 @@ class TestMCPToolSignatures:
         for p in mcp_lora_params:
             assert p in sig.parameters, f"MCP fine_tune missing LoRA param: {p}"
             assert p in lora_fields, f"SDK LoraConfig missing field: {p}"
+
+
+class TestMakeTrainFunc:
+    """Tests for _make_train_func script detection and validation."""
+
+    def test_wrapped_script_executes(self):
+        """Plain script gets wrapped in a callable train()."""
+        import builtins
+        import textwrap
+
+        from kubeflow_mcp.trainer.api.training import _make_train_func
+
+        builtins._marker = []
+        script = textwrap.dedent("""
+            import builtins
+            builtins._marker.append("ran")
+        """)
+        func = _make_train_func(script)
+        func()
+        assert builtins._marker == ["ran"]
+
+    def test_async_train_executes(self):
+        """Async train() is detected and executable."""
+        import asyncio
+        import builtins
+        import textwrap
+
+        from kubeflow_mcp.trainer.api.training import _make_train_func
+
+        builtins._marker = []
+        script = textwrap.dedent("""
+            import builtins
+            async def train():
+                builtins._marker.append("ran")
+        """)
+        func = _make_train_func(script)
+        asyncio.run(func())
+        assert builtins._marker == ["ran"]
+
+    def test_func_args_are_passed(self):
+        """Matching func_args work correctly with existing train()."""
+        import builtins
+        import textwrap
+
+        from kubeflow_mcp.trainer.api.training import _make_train_func
+
+        builtins._marker = []
+        script = textwrap.dedent("""
+            import builtins
+            def train(lr=None):
+                builtins._marker.append(lr)
+        """)
+        func = _make_train_func(script, {"lr": 0.1})
+        func(lr=0.1)
+        assert builtins._marker == [0.1]
+
+    def test_plain_script_with_args_wraps_correctly(self):
+        """Plain script with func_args gets wrapped with correct signature."""
+        import builtins
+        import textwrap
+
+        from kubeflow_mcp.trainer.api.training import _make_train_func
+
+        builtins._marker = []
+        script = textwrap.dedent("""
+            import builtins
+            builtins._marker.append("wrapped")
+        """)
+        func = _make_train_func(script, {"lr": 0.1})
+        func(lr=0.1)
+        assert builtins._marker == ["wrapped"]
+
+    def test_unexpected_params_raises_value_error(self):
+        """func_args with params train() doesn't accept raises ValueError."""
+        import textwrap
+
+        from kubeflow_mcp.trainer.api.training import _make_train_func
+
+        script = textwrap.dedent("""
+            def train():
+                print("training")
+        """)
+        with pytest.raises(ValueError, match="does not accept params"):
+            _make_train_func(script, {"lr": 0.01})
+
+    def test_train_with_kwargs_skips_validation(self):
+        """train(**kwargs) accepts any func_args without raising."""
+        import textwrap
+
+        from kubeflow_mcp.trainer.api.training import _make_train_func
+
+        script = textwrap.dedent("""
+            def train(**kwargs):
+                print(kwargs)
+        """)
+        func = _make_train_func(script, {"lr": 0.01})
+        assert callable(func)
+        assert func.__name__ == "train"
+
+    def test_train_with_keyword_only_args(self):
+        """train(*, lr=None) keyword-only args are accepted correctly."""
+        import textwrap
+
+        from kubeflow_mcp.trainer.api.training import _make_train_func
+
+        script = textwrap.dedent("""
+            def train(*, lr=None):
+                print(lr)
+        """)
+        func = _make_train_func(script, {"lr": 0.01})
+        assert callable(func)
+        assert func.__name__ == "train"
+
+    def test_empty_script_does_not_raise_syntax_error(self):
+        """Empty script gets a pass body, not a SyntaxError."""
+        from kubeflow_mcp.trainer.api.training import _make_train_func
+
+        func = _make_train_func(" ")
+        assert callable(func)
+
+    def test_invalid_syntax_raises_clear_error(self):
+        """Syntactically broken script raises SyntaxError with clear message."""
+        from kubeflow_mcp.trainer.api.training import _make_train_func
+
+        with pytest.raises(SyntaxError, match="Invalid Python script"):
+            _make_train_func("def train(: broken")
+
+    def test_module_level_side_effects_at_creation_time(self):
+        """Module-level statements execute at _make_train_func() time, not call time."""
+        import builtins
+        import textwrap
+
+        from kubeflow_mcp.trainer.api.training import _make_train_func
+
+        builtins._marker = []
+        script = textwrap.dedent("""
+            import builtins
+            builtins._marker.append("module-level")
+            def train():
+                builtins._marker.append("call-time")
+        """)
+        _make_train_func(script)
+        assert builtins._marker == ["module-level"]
