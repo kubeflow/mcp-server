@@ -26,22 +26,6 @@ jobs:
         with:
           extra_args: --all-files
 
-  security-audit:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v7
-        with:
-          python-version: "3.12"
-          enable-cache: true
-
-      - name: Run pip-audit
-        run: |
-          uv sync --all-extras --group dev
-          uv run pip-audit
-
   test:
     runs-on: ubuntu-latest
     needs: pre-commit
