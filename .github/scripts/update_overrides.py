@@ -104,15 +104,17 @@ def main():
         # Remove old override-dependencies section (handles both single-line and multi-line)
         # Single-line: override-dependencies = ["pkg==1.0"]
         # Multi-line: override-dependencies = [\n    "pkg",\n]
+        # Leading [ \t]* so an indented key (valid TOML) is still matched and
+        # removed; otherwise the old block survives and we emit a duplicate key.
         content = re.sub(
-            r"^override-dependencies\s*=\s*\[.*?\]",
+            r"^[ \t]*override-dependencies\s*=\s*\[.*?\]",
             "",
             content,
             flags=re.MULTILINE | re.DOTALL,
         )
         # Also remove any orphaned comments before override-dependencies
         content = re.sub(
-            r"^# Security overrides.*?\n(?:[ \t]*\n)?",
+            r"^[ \t]*# Security overrides.*?\n(?:[ \t]*\n)?",
             "",
             content,
             flags=re.MULTILINE,
