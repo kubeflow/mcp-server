@@ -10,7 +10,9 @@ Tests validate:
 - Ensure dataclass fields match our usage
 """
 
+import builtins
 import inspect
+import textwrap
 from dataclasses import fields
 from typing import get_type_hints
 
@@ -547,11 +549,11 @@ class TestMCPToSDKConversions:
 
     def test_custom_training_script_to_callable(self):
         """Test that script string can become a callable for CustomTrainer."""
-        script = """
-def train_func():
-    import torch
-    print("Training...")
-"""
+        script = textwrap.dedent("""
+                def train_func():
+                    import torch
+                    print("Training...")
+                """)
         local_vars = {}
         exec(script, {}, local_vars)
         train_func = local_vars["train_func"]
@@ -563,6 +565,81 @@ def train_func():
         )
 
         assert callable(trainer.func)
+
+    def _run_wrapped_train(
+        self,
+        script: str,
+        func_args: dict | None = None,
+        **kwargs,
+    ):
+        from kubeflow_mcp.trainer.api.training import _make_train_func
+
+        builtins._kubeflow_mcp_train_marker = []
+        try:
+            train_func = _make_train_func(script, func_args=func_args)
+            train_func(**kwargs)
+            return builtins._kubeflow_mcp_train_marker
+        finally:
+            del builtins._kubeflow_mcp_train_marker
+
+    def test_make_train_func_calls_user_defined_train(self):
+        """A script-defined train() should run when the generated wrapper runs."""
+        marker = self._run_wrapped_train(
+            """
+                import builtins
+                def train():
+                    builtins._kubeflow_mcp_train_marker.append("ran")
+            """
+        )
+
+        assert marker == ["ran"]
+
+    def test_make_train_func_does_not_double_call_user_defined_train(self):
+        """A script that already calls train() should not run twice."""
+        marker = self._run_wrapped_train(
+            """
+                import builtins
+                def train():
+                    builtins._kubeflow_mcp_train_marker.append("ran")
+                train()
+            """
+        )
+
+        assert marker == ["ran"]
+
+    @pytest.mark.parametrize(
+        "train_call",
+        [
+            "result = train()",
+            "if True:\n    train()",
+            "print(train())",
+        ],
+    )
+    def test_make_train_func_detects_existing_train_calls(self, train_call):
+        """Existing train() calls in module-level code should not be duplicated."""
+        script = textwrap.dedent("""
+                import builtins
+                def train():
+                    builtins._kubeflow_mcp_train_marker.append("ran")
+        """) + train_call + "\n"
+        marker = self._run_wrapped_train(script)
+
+        assert marker == ["ran"]
+
+    def test_make_train_func_forwards_func_args_to_user_defined_train(self):
+        """Generated train() should forward matching func_args to a user-defined train()."""
+        marker = self._run_wrapped_train(
+            """
+                import builtins
+                def train(lr=None, epochs=None):
+                    builtins._kubeflow_mcp_train_marker.append((lr, epochs))
+            """,
+            func_args={"lr": 0.01, "epochs": 3},
+            lr=0.01,
+            epochs=3,
+        )
+
+        assert marker == [(0.01, 3)]
 
     def test_resources_dict_format(self):
         """Test resources_per_node dict format is valid for SDK."""

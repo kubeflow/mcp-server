@@ -14,9 +14,11 @@
 
 """Training submission tools: fine_tune, run_custom_training, run_container_training."""
 
+import ast
 import logging
 import os
 import tempfile
+import textwrap
 import uuid
 from collections.abc import Callable
 from typing import Any
@@ -104,7 +106,8 @@ def _make_train_func(script: str, func_args: dict[str, Any] | None = None) -> Ca
     keyword parameters so the trainer can pass them at runtime.
     """
     func_name = "train"
-    lines = script.strip().splitlines()
+    stripped_script = textwrap.dedent(script).strip()
+    lines = stripped_script.splitlines()
 
     if func_args:
         params = ", ".join(f"{k}=None" for k in func_args)
@@ -113,6 +116,10 @@ def _make_train_func(script: str, func_args: dict[str, Any] | None = None) -> Ca
         wrapped = f"def {func_name}():\n"
     for line in lines:
         wrapped += f"    {line}\n"
+
+    train_call = _uncalled_train_call(stripped_script, func_args)
+    if train_call:
+        wrapped += f"    {train_call}\n"
 
     script_dir = _get_script_dir()
     script_path = os.path.join(script_dir, f"_mcp_train_{uuid.uuid4().hex[:8]}.py")
@@ -124,6 +131,69 @@ def _make_train_func(script: str, func_args: dict[str, Any] | None = None) -> Ca
     exec(code, ns)  # noqa: S102
     return ns[func_name]
 
+def _uncalled_train_call(script: str, func_args: dict[str, Any] | None = None) -> str | None:
+    """Return the train call to append when a script defines but does not call train."""
+    try:
+        tree = ast.parse(script)
+    except SyntaxError:
+        return None
+
+    train_defs = (
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+        and node.name == "train"
+    )
+    train_def = next(train_defs, None)
+    if train_def is None or _has_train_call(tree.body):
+        return None
+
+    forwarded_args = _forwarded_train_args(train_def, func_args)
+    call_str = f"train({forwarded_args})" if forwarded_args else "train()"
+
+    if isinstance(train_def, ast.AsyncFunctionDef):
+        return f"import asyncio\n    asyncio.run({call_str})"
+    return call_str
+
+
+def _has_train_call(nodes: list[ast.stmt]) -> bool:
+    """Return True when module-level code calls ``train`` directly or indirectly."""
+    for node in nodes:
+        # Only module-level execution can run before the generated wrapper returns.
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+            continue
+        for child in ast.walk(node):
+            if (
+                isinstance(child, ast.Call)
+                and isinstance(child.func, ast.Name)
+                and child.func.id == "train"
+            ):
+                return True
+    return False
+
+
+def _forwarded_train_args(
+    train_def: ast.FunctionDef | ast.AsyncFunctionDef,
+    func_args: dict[str, Any] | None,
+) -> str:
+    """Build keyword forwarding for user-defined train parameters."""
+    if not func_args:
+        return ""
+
+    if train_def.args.kwarg is not None:
+        forwarded = func_args
+    else:
+        accepted_names = {
+            arg.arg for arg in [*train_def.args.args, *train_def.args.kwonlyargs]
+        }
+        unaccepted = [key for key in func_args if key not in accepted_names]
+        if unaccepted:
+            raise ValueError(
+                "User-defined train() signature does not accept provided func_args: "
+                f"{', '.join(unaccepted)}"
+            )
+        forwarded = func_args
+
+    return ", ".join(f"{key}={key}" for key in forwarded)
 
 def _get_client(namespace: str | None = None) -> Any:
     """Return a client targeting the given namespace.
