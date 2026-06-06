@@ -641,6 +641,29 @@ class TestMCPToSDKConversions:
 
         assert marker == [(0.01, 3)]
 
+    def test_make_train_func_skips_call_for_required_params(self):
+        """train(required_param) with no func_args must NOT auto-append a call."""
+        marker = self._run_wrapped_train(
+            """
+                import builtins
+                def train(required_param):
+                    builtins._kubeflow_mcp_train_marker.append("ran")
+            """
+        )
+        # train() was NOT called because required_param cannot be supplied
+        assert marker == []
+
+    def test_make_train_func_async_train_executes(self):
+        """async def train() should be invoked via asyncio.run()."""
+        marker = self._run_wrapped_train(
+            """
+                import builtins
+                async def train():
+                    builtins._kubeflow_mcp_train_marker.append("async_ran")
+            """
+        )
+        assert marker == ["async_ran"]
+
     def test_resources_dict_format(self):
         """Test resources_per_node dict format is valid for SDK."""
         resources = {"gpu": 2, "cpu": 8, "memory": "32Gi"}

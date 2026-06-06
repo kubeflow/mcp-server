@@ -117,9 +117,9 @@ def _make_train_func(script: str, func_args: dict[str, Any] | None = None) -> Ca
     for line in lines:
         wrapped += f"    {line}\n"
 
-    train_call = _uncalled_train_call(stripped_script, func_args)
-    if train_call:
-        wrapped += f"    {train_call}\n"
+    train_lines = _uncalled_train_call(stripped_script, func_args)
+    for tl in train_lines:
+        wrapped += f"    {tl}\n"
 
     script_dir = _get_script_dir()
     script_path = os.path.join(script_dir, f"_mcp_train_{uuid.uuid4().hex[:8]}.py")
@@ -131,35 +131,48 @@ def _make_train_func(script: str, func_args: dict[str, Any] | None = None) -> Ca
     exec(code, ns)  # noqa: S102
     return ns[func_name]
 
-def _uncalled_train_call(script: str, func_args: dict[str, Any] | None = None) -> str | None:
-    """Return the train call to append when a script defines but does not call train."""
+def _uncalled_train_call(
+    script: str, func_args: dict[str, Any] | None = None
+) -> list[str]:
+    """Return lines to append when a script defines but does not call train.
+
+    Returns an empty list when no call needs to be appended.
+    """
     try:
         tree = ast.parse(script)
     except SyntaxError:
-        return None
+        return []
 
     train_defs = (
-        node for node in tree.body
-        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+        node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
         and node.name == "train"
     )
     train_def = next(train_defs, None)
     if train_def is None or _has_train_call(tree.body):
-        return None
+        return []
+
+    # Guard: if train() has required params and no func_args are provided,
+    # we cannot safely generate a call skip auto-append.
+    if not func_args and _has_required_params(train_def):
+        return []
 
     forwarded_args = _forwarded_train_args(train_def, func_args)
-    call_str = f"train({forwarded_args})" if forwarded_args else "train()"
+    call_str = (
+        f"train({forwarded_args})" if forwarded_args else "train()"
+    )
 
     if isinstance(train_def, ast.AsyncFunctionDef):
-        return f"import asyncio\n    asyncio.run({call_str})"
-    return call_str
+        return ["import asyncio", f"asyncio.run({call_str})"]
+    return [call_str]
 
 
 def _has_train_call(nodes: list[ast.stmt]) -> bool:
-    """Return True when module-level code calls ``train`` directly or indirectly."""
+    """Return True when module-level code calls ``train()`` directly."""
     for node in nodes:
         # Only module-level execution can run before the generated wrapper returns.
-        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             continue
         for child in ast.walk(node):
             if (
@@ -168,6 +181,22 @@ def _has_train_call(nodes: list[ast.stmt]) -> bool:
                 and child.func.id == "train"
             ):
                 return True
+    return False
+
+
+def _has_required_params(
+    train_def: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> bool:
+    """Return True when ``train()`` has parameters without defaults."""
+    args_node = train_def.args
+    num_args = len(args_node.args)
+    num_defaults = len(args_node.defaults)
+    if num_args > num_defaults:
+        return True
+    # keyword-only args without defaults
+    for _, kwonly in enumerate(args_node.kw_defaults):
+        if kwonly is None:
+            return True
     return False
 
 
@@ -183,13 +212,16 @@ def _forwarded_train_args(
         forwarded = func_args
     else:
         accepted_names = {
-            arg.arg for arg in [*train_def.args.args, *train_def.args.kwonlyargs]
+            arg.arg
+            for arg in [*train_def.args.args, *train_def.args.kwonlyargs]
         }
-        unaccepted = [key for key in func_args if key not in accepted_names]
+        unaccepted = [
+            key for key in func_args if key not in accepted_names
+        ]
         if unaccepted:
             raise ValueError(
-                "User-defined train() signature does not accept provided func_args: "
-                f"{', '.join(unaccepted)}"
+                "User-defined train() signature does not accept "
+                f"provided func_args: {', '.join(unaccepted)}"
             )
         forwarded = func_args
 
