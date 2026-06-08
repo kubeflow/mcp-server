@@ -27,7 +27,8 @@ import re
 import time
 from typing import Any
 
-from fastmcp import FastMCP
+from fastmcp import Context, FastMCP
+from fastmcp.dependencies import CurrentContext
 
 from kubeflow_mcp.common.constants import (
     TOOL_NEXT_HINTS,
@@ -61,6 +62,14 @@ except ImportError:  # pragma: no cover
     SpanKind = None  # type: ignore[assignment,misc]
     _Status = None  # type: ignore[assignment,misc]
     _StatusCode = None  # type: ignore[assignment,misc]
+
+# MCP protocol version from the SDK (used as span attribute)
+try:
+    from mcp.types import LATEST_PROTOCOL_VERSION as _MCP_PROTOCOL_VERSION
+except ImportError:  # pragma: no cover
+    _MCP_PROTOCOL_VERSION = None
+
+_MCP_CTX_DEFAULT = CurrentContext()
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +112,7 @@ def _audit_wrap(tool_func):
     tracer = get_tracer("kubeflow_mcp.tools")
 
     @functools.wraps(tool_func)
-    def wrapper(**kwargs):
+    def wrapper(ctx: Context | None = _MCP_CTX_DEFAULT, **kwargs):
         tool_name = tool_func.__name__
         cid = with_correlation_id()
         persona = get_effective_persona()
@@ -111,12 +120,31 @@ def _audit_wrap(tool_func):
 
         span_kwargs: dict[str, Any] = {}
         if SpanKind is not None:
-            span_kwargs["kind"] = SpanKind.CLIENT
+            span_kwargs["kind"] = SpanKind.SERVER
 
-        with tracer.start_as_current_span(
-            f"tool:{tool_name}", **span_kwargs
-        ) as span:
-            span.set_attribute("tool.name", tool_name)
+        with tracer.start_as_current_span(f"tools/call {tool_name}", **span_kwargs) as span:
+            # OTel MCP semantic conventions (Development status)
+            # https://opentelemetry.io/docs/specs/semconv/gen-ai/mcp/
+            span.set_attribute("mcp.method.name", "tools/call")
+            span.set_attribute("gen_ai.tool.name", tool_name)
+            span.set_attribute("gen_ai.operation.name", "execute_tool")
+            if _MCP_PROTOCOL_VERSION:
+                span.set_attribute("mcp.protocol.version", _MCP_PROTOCOL_VERSION)
+
+            # MCP session/request context (populated by FastMCP at runtime)
+            if isinstance(ctx, Context):
+                try:
+                    if ctx.session_id:
+                        span.set_attribute("mcp.session.id", str(ctx.session_id))
+                except Exception:
+                    pass
+                try:
+                    if ctx.request_id is not None:
+                        span.set_attribute("mcp.request.id", str(ctx.request_id))
+                except Exception:
+                    pass
+
+            # Custom Kubeflow enrichment
             span.set_attribute("kubeflow.persona", persona)
             span.set_attribute("correlation_id", cid)
             masked = mask_sensitive_data(kwargs) if kwargs else {}
@@ -178,6 +206,7 @@ def _audit_wrap(tool_func):
                 breaker.record_failure()
                 span.set_attribute("tool.success", False)
                 span.set_attribute("tool.duration_ms", duration_ms)
+                span.set_attribute("error.type", type(exc).__qualname__)
                 if _StatusCode is not None:
                     span.set_status(_Status(_StatusCode.ERROR, str(exc)))
                 logger.error(
