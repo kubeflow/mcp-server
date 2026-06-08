@@ -76,15 +76,23 @@ natively into `kubeflow-mcp serve`:
 - **Feast** — [kubeflow/sdk#239](https://github.com/kubeflow/sdk/issues/239)
 - **Notebooks & UI**: notebook tools, VS Code extension, and Slack/ChatOps integrations
 
-## Graduation Criteria
+## Maturity Status
 
 The MCP Server currently holds **Development** status per the
-[Kubeflow subproject maturity levels](https://github.com/kubeflow/community/blob/master/subprojects/maturity_requirements.md).
+[Kubeflow subproject maturity levels](https://github.com/kubeflow/community/blob/master/subprojects/maturity_requirements.md)
+(proposed in [community#965](https://github.com/kubeflow/community/pull/965)).
 
-- **Development** (current) — Phase 1 complete; Phase 2 in active development; Phase 3 not started. Not recommended for production; configuration options may change without notice.
-- **Stable** — Phases 2 and 3 complete with production-ready CI, observability, and validated
-  gateway patterns; eligible for inclusion in the Kubeflow Community Distribution. Phases 4–6
-  continue as follow-on work.
+- **Development** (current) — Phase 1 complete; Phase 2 in active development; Phase 3 not started.
+  The project SHOULD NOT be used in production. Configuration options may change without notice.
+  The project MAY be removed without prior notice.
+
+- **Stable** — Phases 2 and 3 complete with production-ready CI, observability, and agent runtime.
+  The project is ready for general availability and MUST be included in the Kubeflow Community
+  Distribution. Phases 4–6 continue as follow-on work.
+
+> Individual APIs and features MAY have their own stability levels independent of the overall
+> subproject status. For example, the 23 Trainer client tools are considered stable and supported;
+> Phase 3 agent runtime APIs are subject to change.
 
 See also the [Kubeflow SDK ROADMAP](https://github.com/kubeflow/sdk/blob/main/ROADMAP.md)
 for complementary SDK work that this MCP server depends on, and [ARCHITECTURE.md](ARCHITECTURE.md)
