@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import builtins
 from contextlib import contextmanager
 from types import SimpleNamespace
 
@@ -23,6 +24,14 @@ import pytest
 
 from kubeflow_mcp.core import telemetry
 from kubeflow_mcp.core.server import _audit_wrap
+
+
+class _MockMCPContext:
+    """Minimal mock that passes isinstance(ctx, Context) check."""
+
+    def __init__(self, session_id: str | None = None, request_id: object = None) -> None:
+        self.session_id = session_id
+        self.request_id = request_id
 
 
 class _FakeSpan:
@@ -215,19 +224,64 @@ def test_audit_wrap_sets_span_attributes_on_success(monkeypatch: pytest.MonkeyPa
     wrapped = _audit_wrap(sample_tool)
     wrapped()
 
-    assert span.attributes["tool.name"] == "sample_tool"
-    assert tracer.last_span_name == "tool:sample_tool"
+    # OTel MCP semantic conventions
+    assert span.attributes["gen_ai.tool.name"] == "sample_tool"
+    assert span.attributes["mcp.method.name"] == "tools/call"
+    assert span.attributes["gen_ai.operation.name"] == "execute_tool"
+    assert tracer.last_span_name == "tools/call sample_tool"
+    # mcp.protocol.version from SDK
+    from kubeflow_mcp.core.server import _MCP_PROTOCOL_VERSION
+
+    if _MCP_PROTOCOL_VERSION:
+        assert span.attributes["mcp.protocol.version"] == _MCP_PROTOCOL_VERSION
+    # Custom Kubeflow enrichment
     assert span.attributes["correlation_id"] == "cid-123"
     assert span.attributes["kubeflow.persona"] == "ml-engineer"
     assert span.attributes["tool.success"] is True
     assert "tool.duration_ms" in span.attributes
     assert span.attributes["tool.args_preview"] == "{}"
     assert breaker.successes == 1
-    # Verify SpanKind.CLIENT is passed when OTel is available
+    # Verify SpanKind.SERVER is passed when OTel is available
     from kubeflow_mcp.core.server import SpanKind as _SpanKind
 
     if _SpanKind is not None:
-        assert tracer.last_span_kwargs.get("kind") == _SpanKind.CLIENT
+        assert tracer.last_span_kwargs.get("kind") == _SpanKind.SERVER
+
+
+def test_audit_wrap_sets_mcp_context_attributes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When a FastMCP Context is passed, mcp.session.id and mcp.request.id are set."""
+    from fastmcp import Context
+
+    import kubeflow_mcp.core.server as server_mod
+
+    span = _FakeSpan()
+    tracer = _FakeTracer(span)
+    breaker = _FakeBreaker()
+    monkeypatch.setattr(server_mod, "_rate_limiter", None)
+    monkeypatch.setattr(server_mod, "with_correlation_id", lambda: "cid-ctx")
+    monkeypatch.setattr(server_mod, "get_effective_persona", lambda: "readonly")
+    monkeypatch.setattr(server_mod, "get_tracer", lambda _name: tracer)
+    monkeypatch.setattr(server_mod, "get_breaker", lambda _tool: breaker)
+
+    # Patch isinstance to accept our mock as Context
+    mock_ctx = _MockMCPContext(session_id="sess-abc", request_id=42)
+    original_isinstance = builtins.isinstance
+
+    def _patched_isinstance(obj, cls):
+        if cls is Context and type(obj) is _MockMCPContext:
+            return True
+        return original_isinstance(obj, cls)
+
+    monkeypatch.setattr(builtins, "isinstance", _patched_isinstance)
+
+    def sample_tool(**_kwargs):
+        return {"ok": True}
+
+    wrapped = _audit_wrap(sample_tool)
+    wrapped(ctx=mock_ctx)
+
+    assert span.attributes["mcp.session.id"] == "sess-abc"
+    assert span.attributes["mcp.request.id"] == "42"
 
 
 def test_audit_wrap_records_exception_on_failure(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -250,6 +304,7 @@ def test_audit_wrap_records_exception_on_failure(monkeypatch: pytest.MonkeyPatch
 
     assert span.attributes["tool.success"] is False
     assert "tool.duration_ms" in span.attributes
+    assert span.attributes["error.type"] == "RuntimeError"
     assert breaker.failures == 1
     # record_exception is no longer called manually; start_as_current_span
     # auto-records it.  Instead, set_status(ERROR) must be called.

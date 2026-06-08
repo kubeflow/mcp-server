@@ -51,9 +51,7 @@ class _NoopSpan:
 
 class _NoopTracer:
     @contextmanager
-    def start_as_current_span(
-        self, name: str, **kwargs: Any
-    ) -> Generator[_NoopSpan, None, None]:
+    def start_as_current_span(self, name: str, **kwargs: Any) -> Generator[_NoopSpan, None, None]:
         yield _NoopSpan()
 
 
