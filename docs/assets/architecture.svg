@@ -43,8 +43,8 @@
   <text class="nt" x="445" y="95">Orchestrator Agents</text>
   <text class="ns" x="445" y="113">LangGraph &#183; OpenAI Agents SDK</text>
 
-  <rect class="nd" x="600" y="70" width="240" height="70" rx="5"/>
-  <text class="nt" x="720" y="90">CLI</text>
+  <rect class="nds" x="600" y="70" width="240" height="70" rx="5"/>
+  <text class="nt" x="720" y="90">CLI (Planned: Phase 3)</text>
   <text class="ns" x="720" y="105">kubeflow-mcp agent</text>
   <text class="ns" x="720" y="120">--provider litellm | ollama</text>
 
@@ -68,27 +68,27 @@
   <text class="ns" x="1140" y="438">Ollama &#183; vLLM &#183; Cloud APIs &#183; auto-fallback</text>
 
   <!-- ?? Gateway/Auth Boundary ???????????????????????????????? -->
-  <rect class="sg" x="70" y="420" width="700" height="470" rx="6"/>
-  <text class="sgl" x="84" y="438">Gateway/Auth Boundary &#8212; Optional</text>
+  <rect class="sg" x="70" y="390" width="700" height="470" rx="6"/>
+  <text class="sgl" x="84" y="408">Gateway/Auth Boundary &#8212; Optional</text>
 
-  <rect class="sg" x="100" y="470" width="640" height="408" rx="6"/>
-  <text class="sgl" x="114" y="488">Gateway Layer</text>
+  <rect class="sg" x="100" y="440" width="640" height="408" rx="6"/>
+  <text class="sgl" x="114" y="458">Gateway Layer</text>
 
-  <rect class="nd" x="160" y="530" width="230" height="72" rx="5"/>
-  <text class="nt" x="275" y="555">Identity Provider</text>
-  <text class="ns" x="275" y="574">Keycloak &#183; Dex &#183; OAuth 2.1</text>
+  <rect class="nd" x="160" y="500" width="230" height="72" rx="5"/>
+  <text class="nt" x="275" y="525">Identity Provider</text>
+  <text class="ns" x="275" y="544">Keycloak &#183; Dex &#183; OAuth 2.1</text>
 
-  <rect class="nd" x="230" y="670" width="330" height="84" rx="5"/>
-  <text class="nt" x="395" y="698">agentgateway</text>
-  <text class="ns" x="395" y="718">RBAC &#183; OTel &#183; A2A &#183; MCP</text>
+  <rect class="nd" x="230" y="640" width="330" height="84" rx="5"/>
+  <text class="nt" x="395" y="668">agentgateway</text>
+  <text class="ns" x="395" y="688">RBAC &#183; OTel &#183; A2A &#183; MCP</text>
 
-  <rect class="nd" x="230" y="780" width="330" height="82" rx="5"/>
-  <text class="nt" x="395" y="808">LiteLLM Proxy</text>
-  <text class="ns" x="395" y="828">Stable: routing + budget + audit</text>
-  <text class="ph" x="395" y="846">Optional/Beta MCP-proxy behavior</text>
+  <rect class="nd" x="230" y="750" width="330" height="82" rx="5"/>
+  <text class="nt" x="395" y="778">LiteLLM Proxy</text>
+  <text class="ns" x="395" y="798">Stable: routing + budget + audit</text>
+  <text class="ph" x="395" y="816">Optional/Beta MCP-proxy behavior</text>
 
   <!-- ?? kubeflow-mcp serve ??????????????????????????????????? -->
-  <rect class="sg" x="160" y="910" width="500" height="140" rx="6"/>
+  <rect class="sg" x="160" y="910" width="500" height="140" rx="6" style="stroke: #4a7090; stroke-width: 2.5;"/>
   <text class="sgl" x="174" y="928">kubeflow-mcp serve</text>
   <rect class="nd" x="220" y="950" width="380" height="84" rx="5"/>
   <text class="nt" x="410" y="976">FastMCP</text>
@@ -152,25 +152,25 @@
   <text class="ns" x="495" y="1577">Local &#183; Kubernetes &#183; OpenShift &#183; EKS &#183; GKE</text>
 
   <!-- ?? Eval Pipeline ??????????????????????????????????????? -->
-  <rect class="sg" x="980" y="890" width="300" height="500" rx="6"/>
-  <text class="sgl" x="994" y="908">Eval Pipeline &#8212; CI/Offline Only</text>
+  <rect class="sg" x="1020" y="890" width="300" height="500" rx="6"/>
+  <text class="sgl" x="1034" y="908">Eval Pipeline &#8212; CI/Offline Only</text>
 
-  <rect class="nd" x="1020" y="940" width="220" height="72" rx="5"/>
-  <text class="nt" x="1130" y="962">GitHub Actions</text>
-  <text class="ns" x="1130" y="978">make eval-ci</text>
-  <text class="ns" x="1130" y="993">protocol conformance</text>
+  <rect class="nd" x="1060" y="940" width="220" height="72" rx="5"/>
+  <text class="nt" x="1170" y="962">GitHub Actions</text>
+  <text class="ns" x="1170" y="978">make eval-ci</text>
+  <text class="ns" x="1170" y="993">protocol conformance</text>
 
-  <rect class="nd" x="1020" y="1030" width="220" height="72" rx="5"/>
-  <text class="nt" x="1130" y="1058">Golden Dataset</text>
-  <text class="ns" x="1130" y="1077">golden_prompts.jsonl</text>
+  <rect class="nd" x="1060" y="1030" width="220" height="72" rx="5"/>
+  <text class="nt" x="1170" y="1058">Golden Dataset</text>
+  <text class="ns" x="1170" y="1077">golden_prompts.jsonl</text>
 
-  <rect class="nd" x="1020" y="1120" width="220" height="72" rx="5"/>
-  <text class="nt" x="1130" y="1148">Batch Eval</text>
-  <text class="ns" x="1130" y="1167">LLM-as-judge &#183; DeepEval</text>
+  <rect class="nd" x="1060" y="1120" width="220" height="72" rx="5"/>
+  <text class="nt" x="1170" y="1148">Batch Eval</text>
+  <text class="ns" x="1170" y="1167">LLM-as-judge &#183; DeepEval</text>
 
-  <rect class="nd" x="1020" y="1210" width="220" height="92" rx="5"/>
-  <text class="nt" x="1130" y="1240">Score Report</text>
-  <text class="ns" x="1130" y="1260">PR gate on regression</text>
+  <rect class="nd" x="1060" y="1210" width="220" height="92" rx="5"/>
+  <text class="nt" x="1170" y="1240">Score Report</text>
+  <text class="ns" x="1170" y="1260">GHA artifact &#183; nightly regression</text>
 
   <!-- ?? Observability ??????????????????????????????????????? -->
   <rect class="sg" x="220" y="1626" width="1110" height="200" rx="6"/>
@@ -187,7 +187,7 @@
   <text class="nt" x="630" y="1765">Jaeger &#183; Prometheus &#183; Grafana</text>
 
   <rect class="nd" x="930" y="1739" width="240" height="64" rx="5"/>
-  <text class="nt" x="1050" y="1765">MLflow</text>
+  <text class="nt" x="1050" y="1765">MLflow (optional)</text>
   <text class="ns" x="1050" y="1783">Experiments &#183; Eval results</text>
 
   <!-- ?? CLI ? CLI Agent Runtime (drives) ??????????????????? -->
@@ -195,12 +195,12 @@
   <text class="al" x="854" y="313">drives</text>
 
   <!-- ?? Consumer ? agentgateway ???????????????????????????? -->
-  <path class="a" d="M190,143 L190,712 L230,712"/>
-  <path class="a" d="M445,143 L445,670"/>
-  <path class="a" d="M700,143 L700,684 L560,684"/>
-  <text class="al" x="102" y="375">Streamable HTTP</text>
-  <text class="al" x="416" y="385">A2A</text>
-  <text class="al" x="660" y="395">Streamable HTTP</text>
+  <path class="a" d="M190,143 L190,682 L230,682"/>
+  <path class="a" d="M445,143 L445,640"/>
+  <path class="a" d="M700,143 L700,654 L560,654"/>
+  <text class="al" x="102" y="348">Streamable HTTP</text>
+  <text class="al" x="416" y="358">A2A</text>
+  <text class="al" x="660" y="368">Streamable HTTP</text>
 
   <!-- ?? stdio direct paths (local/dev) ????????????????????? -->
   <path class="a" d="M130,143 L40,143 L40,965 L220,965"/>
@@ -209,18 +209,18 @@
   <text class="al" x="888" y="490">stdio (local/dev only)</text>
 
   <!-- ?? Gateway internals ??????????????????????????????????? -->
-  <path class="ad" d="M275,602 L275,670"/>
-  <text class="al" x="300" y="640">JWKS</text>
-  <path class="ad" d="M395,754 L395,780"/>
-  <text class="al" x="468" y="770">policy/routing lookup</text>
+  <path class="ad" d="M275,572 L275,640"/>
+  <text class="al" x="300" y="610">JWKS</text>
+  <path class="ad" d="M395,724 L395,750"/>
+  <text class="al" x="468" y="740">policy/routing lookup</text>
 
   <!-- ?? agentgateway ? FastMCP ?????????????????????????????? -->
-  <path class="a" d="M560,730 L582,730 L582,1015 L600,1015"/>
-  <text class="al" x="596" y="875">Streamable HTTP (MCP)</text>
+  <path class="a" d="M560,700 L582,700 L582,1015 L600,1015"/>
+  <text class="al" x="596" y="858">Streamable HTTP (MCP)</text>
 
   <!-- ?? IdP ? FastMCP (JWT config, dashed) ????????????????? -->
-  <path class="ad" d="M160,566 L136,566 L136,1005 L220,1005"/>
-  <text class="al" x="116" y="778">JWT validation config (HTTP path only)</text>
+  <path class="ad" d="M160,536 L136,536 L136,1005 L220,1005"/>
+  <text class="al" x="116" y="763">JWT validation config (HTTP path only)</text>
 
   <!-- ?? Agent Runtime internals ????????????????????????????? -->
   <path class="a" d="M1140,358 L1140,390"/>
@@ -234,7 +234,7 @@
   <text class="al" x="1208" y="600">direct route</text>
 
   <!-- ?? LLM Router ? LiteLLM Proxy (optional, dashed) ?????? -->
-  <path class="ad" d="M960,432 L800,432 L800,821 L560,821"/>
+  <path class="ad" d="M960,432 L800,432 L800,791 L560,791"/>
   <text class="al" x="806" y="620">optional org policy route</text>
 
   <!-- ?? CLI Agent Runtime ? FastMCP (MCP tool calls via stdio) -->
@@ -282,21 +282,21 @@
   <path class="a" d="M760,1709 L760,1713 L1050,1713 L1050,1739"/>
 
   <!-- ?? Eval Pipeline flow ?????????????????????????????????? -->
-  <path class="a" d="M1130,1012 L1130,1030"/>
-  <path class="a" d="M1130,1102 L1130,1120"/>
-  <path class="a" d="M1130,1192 L1130,1210"/>
+  <path class="a" d="M1170,1012 L1170,1030"/>
+  <path class="a" d="M1170,1102 L1170,1120"/>
+  <path class="a" d="M1170,1192 L1170,1210"/>
 
-  <!-- ?? Score Report ? MLflow (results) ???????????????????? -->
-  <path class="a" d="M1130,1302 L1130,1370 L1270,1370 L1270,1771 L1170,1771"/>
-  <text class="al" x="1278" y="1362">results</text>
+  <!-- ?? Score Report ? MLflow (results, optional) ?????????? -->
+  <path class="ad" d="M1170,1302 L1170,1370 L1310,1370 L1310,1771 L1170,1771"/>
+  <text class="al" x="1318" y="1362">results (opt)</text>
 
   <!-- ?? LiteLLM Proxy ? MLflow (LLM call logs, optional dashed) ?? -->
-  <path class="ad" d="M560,830 L1300,830 L1300,1771 L1170,1771"/>
-  <text class="al" x="900" y="820">LLM call logs (opt)</text>
+  <path class="ad" d="M560,800 L1300,800 L1300,1771 L1170,1771"/>
+  <text class="al" x="900" y="790">LLM call logs (opt)</text>
 
   <!-- ?? OTel ? Golden Dataset (failing traces, dashed) ?????? -->
-  <path class="ad" d="M780,1665 L965,1665 L965,1074 L1020,1074"/>
-  <text class="al" x="970" y="1370">failing traces sample</text>
+  <path class="ad" d="M780,1665 L1005,1665 L1005,1074 L1060,1074"/>
+  <text class="al" x="1010" y="1370">failing traces sample</text>
 
   <!-- ?? Legend ?????????????????????????????????????????????? -->
   <g transform="translate(20,1876)">
