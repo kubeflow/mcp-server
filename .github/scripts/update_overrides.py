@@ -20,11 +20,7 @@ from pathlib import Path
 
 
 def parse_existing_overrides(content):
-    """Parse existing [tool.uv] override-dependencies into {pkg_name: (spec, comment)}.
-
-    Handles both single-line (`override-dependencies = ["pkg==1.0"]`) and
-    multi-line array formats. Returns an empty dict when no overrides exist.
-    """
+    """Parse existing [tool.uv] override-dependencies into {pkg_name: (spec, comment)}."""
     overrides = {}
     if "override-dependencies" not in content:
         return overrides
@@ -94,9 +90,7 @@ def main():
 
     # Rebuild pyproject.toml
     if not has_tool_uv:
-        # Add a bare [tool.uv] section at the end; the header comment and
-        # override-dependencies array are inserted by the logic below. (Adding
-        # the header here too would duplicate the whole block -> invalid TOML.)
+        # Add the [tool.uv] section; the header and array are inserted below.
         content += "\n[tool.uv]\n"
         has_tool_uv = True
 
@@ -104,8 +98,6 @@ def main():
         # Remove old override-dependencies section (handles both single-line and multi-line)
         # Single-line: override-dependencies = ["pkg==1.0"]
         # Multi-line: override-dependencies = [\n    "pkg",\n]
-        # Leading [ \t]* so an indented key (valid TOML) is still matched and
-        # removed; otherwise the old block survives and we emit a duplicate key.
         content = re.sub(
             r"^[ \t]*override-dependencies\s*=\s*\[.*?\]",
             "",
