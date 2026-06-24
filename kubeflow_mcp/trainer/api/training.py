@@ -754,6 +754,16 @@ def fine_tune(
         if name:
             options.append(Name(name=name))
 
+        # Workaround for SDK bug where top-level HF datasets construct
+        # invalid torchtune dataset.data_dir=/workspace/dataset/.
+        # We override the torchtune CLI args directly via TrainerArgs.
+        if dataset.startswith("hf://") and len(dataset[5:].split("/")) <= 2:
+            options.append(
+                TrainerArgs(
+                    args=["dataset.source=/workspace/dataset", "dataset.data_dir=null"]
+                )
+            )
+
         client = _get_client(namespace)
         initializer = _build_initializer(
             model=model,
