@@ -82,7 +82,11 @@ def _get_model_info_from_hf(model: str) -> dict[str, Any] | None:
         }
 
     except Exception as e:
-        return {"error": str(e)}
+        error: dict[str, Any] = {"error": str(e)}
+        suggestions = _suggest_hf_model_ids(model)
+        if suggestions:
+            error["suggestions"] = suggestions
+        return error
 
 
 QUANTIZATION_BYTES: dict[str, float] = {

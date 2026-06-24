@@ -19,6 +19,7 @@ from unittest.mock import patch
 from kubeflow_mcp.trainer.api.planning import (
     _get_model_info_from_hf,
     _suggest_hf_model_ids,
+    estimate_resources,
 )
 
 
@@ -82,3 +83,29 @@ def test_invalid_model_id_omits_suggestions_when_none_found():
 
     assert result is not None
     assert "suggestions" not in result
+
+
+def test_unknown_but_well_formed_id_includes_suggestions():
+    """A well-formed ID that fails the Hub lookup still returns suggestions."""
+    with (
+        patch("huggingface_hub.model_info", side_effect=RuntimeError("not found")),
+        patch("huggingface_hub.list_models") as mock_list,
+    ):
+        mock_list.return_value = _fake_models("meta-llama/Llama-3.2-1B")
+        result = _get_model_info_from_hf("meta-lama/Llama-3")
+
+    assert result is not None
+    assert result["suggestions"] == ["meta-llama/Llama-3.2-1B"]
+
+
+def test_estimate_resources_surfaces_suggestions_in_details():
+    """estimate_resources() forwards suggestions via ToolError.details for an unknown model."""
+    with (
+        patch("huggingface_hub.model_info", side_effect=RuntimeError("404 Client Error")),
+        patch("huggingface_hub.list_models") as mock_list,
+    ):
+        mock_list.return_value = _fake_models("meta-llama/Llama-3.2-1B")
+        result = estimate_resources("meta-lama/Llama-3")
+
+    assert result["success"] is False
+    assert result["details"]["suggestions"] == ["meta-llama/Llama-3.2-1B"]
