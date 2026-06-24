@@ -31,11 +31,35 @@ logger = logging.getLogger(__name__)
 _HF_MODEL_ID_RE = re.compile(r"^[a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+$")
 
 
+def _suggest_hf_model_ids(model: str, limit: int = 3) -> list[str]:
+    """Suggest valid HuggingFace model IDs for a malformed input.
+
+    Normalises common malformed inputs — ``hf://`` prefix, Ollama-style tags
+    (``qwen3:8b``), and ``/`` separators — into a plain search term, then
+    queries the HuggingFace Hub. Returns an empty list on lookup failure so
+    suggestions remain strictly optional and never mask the original error.
+    """
+    term = model.removeprefix("hf://").split(":", 1)[0].replace("/", " ").strip()
+    if not term:
+        return []
+    try:
+        from huggingface_hub import list_models
+
+        return [m.id for m in list_models(search=term, limit=limit, full=False)]
+    except Exception as e:  # noqa: BLE001 - best-effort lookup, never fatal
+        logger.debug("HF model suggestion lookup failed for %r: %s", model, e)
+        return []
+
+
 def _get_model_info_from_hf(model: str) -> dict[str, Any] | None:
     """Fetch model info from HuggingFace Hub."""
     try:
         if not _HF_MODEL_ID_RE.match(model):
-            return {"error": f"Invalid HuggingFace model ID format: '{model}'"}
+            error: dict[str, Any] = {"error": f"Invalid HuggingFace model ID format: '{model}'"}
+            suggestions = _suggest_hf_model_ids(model)
+            if suggestions:
+                error["suggestions"] = suggestions
+            return error
 
         from huggingface_hub import model_info
 
@@ -58,7 +82,11 @@ def _get_model_info_from_hf(model: str) -> dict[str, Any] | None:
         }
 
     except Exception as e:
-        return {"error": str(e)}
+        error: dict[str, Any] = {"error": str(e)}
+        suggestions = _suggest_hf_model_ids(model)
+        if suggestions:
+            error["suggestions"] = suggestions
+        return error
 
 
 QUANTIZATION_BYTES: dict[str, float] = {
@@ -476,10 +504,15 @@ def estimate_resources(
 
         if not hf_info or "error" in hf_info:
             error_msg = hf_info.get("error", "Unknown error") if hf_info else "API failed"
+            details: dict[str, Any] = {
+                "hint": "Ensure model path is correct (e.g., 'meta-llama/Llama-3.2-1B')"
+            }
+            if hf_info and hf_info.get("suggestions"):
+                details["suggestions"] = hf_info["suggestions"]
             return ToolError(
                 error=f"Could not fetch model info from HuggingFace: {error_msg}",
                 error_code=ErrorCode.SDK_ERROR,
-                details={"hint": "Ensure model path is correct (e.g., 'meta-llama/Llama-3.2-1B')"},
+                details=details,
             ).model_dump()
 
         params = hf_info.get("params")
