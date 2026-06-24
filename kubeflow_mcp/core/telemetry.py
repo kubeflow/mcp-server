@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import atexit
 import logging
+import os
 import threading
 from collections.abc import Generator
 from contextlib import contextmanager
@@ -80,12 +81,16 @@ def _normalize_and_validate_endpoint(endpoint: str | None) -> str:
     return normalized_endpoint
 
 
-def setup_tracing(endpoint: str | None, service_name: str = "kubeflow-mcp") -> bool:
+def setup_tracing(endpoint: str | None = None, service_name: str = "kubeflow-mcp-server") -> bool:
     """Configure OpenTelemetry tracing.
 
     Returns True when tracing is configured, False when disabled/unavailable.
     """
     global _configured_endpoint, _tracing_initialized
+
+    # Fall back to standard OTel env var when no explicit endpoint is provided
+    if not endpoint or not endpoint.strip():
+        endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
 
     normalized_endpoint = _normalize_and_validate_endpoint(endpoint)
     if not normalized_endpoint:
@@ -108,8 +113,11 @@ def setup_tracing(endpoint: str | None, service_name: str = "kubeflow-mcp") -> b
                 )
             return True
 
-        exporter = OTLPSpanExporter(endpoint=normalized_endpoint)
-        processor = BatchSpanProcessor(exporter)
+        exporter = OTLPSpanExporter(
+            endpoint=normalized_endpoint,
+            timeout=2000,
+        )
+        processor = BatchSpanProcessor(exporter, export_timeout_millis=2000)
         current_provider = _otel_trace.get_tracer_provider()
 
         if hasattr(current_provider, "add_span_processor"):
