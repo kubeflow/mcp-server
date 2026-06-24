@@ -43,6 +43,12 @@ docs/_build/
 # Virtual environments
 .venv/
 venv/
+<<<<<<< trainer/benchmark-suite
+
+
+# benchmarks
+benchmark-results/
+=======
 ENV/
 env/
 
@@ -55,3 +61,4 @@ env/
 # OS
 .DS_Store
 Thumbs.db
+>>>>>>> main
