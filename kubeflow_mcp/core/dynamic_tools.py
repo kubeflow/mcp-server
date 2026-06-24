@@ -24,9 +24,8 @@ Implements two approaches from https://www.speakeasy.com/blog/100x-token-reducti
    Agent calls find_tools("natural language") → execute_tool().
    Initial token cost: ~69 tokens (vs ~200 for full mode).
 
-Both modes register onto the MCP server like normal tools, so any MCP
-client (Claude, Cursor, VS Code, MCP Inspector) benefits from reduced
-tool schema overhead.
+Both modes are registered on the MCP server for remote clients and share the
+same implementation with the in-process CLI agent (LlamaIndex).
 """
 
 import inspect
@@ -50,6 +49,74 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {}
 TOOL_HIERARCHY: dict[str, list[str]] = {}
 
 
+def _format_friendly_error(result: dict[str, Any]) -> dict[str, Any]:
+    """Augment failed tool dicts with human-oriented hints (CLI / local agents)."""
+    if result.get("success") is not False:
+        return result
+
+    error = result.get("error", "")
+    error_code = result.get("error_code", "")
+    details = result.get("details") or {}
+    detail_str = " ".join(str(v) for v in details.values())
+    combined = f"{error} {detail_str}"
+
+    if "401" in combined or "Unauthorized" in combined:
+        result["friendly_error"] = "Not authorized to access the cluster. Check your kubeconfig."
+        result["hint"] = "Run: kubectl config current-context && kubectl auth can-i list trainjobs"
+    elif "403" in combined or "Forbidden" in combined:
+        result["friendly_error"] = "Permission denied. Your account lacks RBAC access."
+        result["hint"] = "Check RBAC: kubectl auth can-i list trainjobs -n <namespace>"
+    elif "404" in combined or "not found" in combined.lower():
+        result["friendly_error"] = "Resource not found."
+    elif "Connection refused" in combined or "connection refused" in combined.lower():
+        result["friendly_error"] = "Cannot connect to Kubernetes cluster."
+        result["hint"] = "Is the cluster running? Check: kubectl cluster-info"
+    elif "timeout" in combined.lower():
+        result["friendly_error"] = "Request timed out. The cluster may be slow or unreachable."
+    elif error_code == ErrorCode.SDK_ERROR and "HuggingFace" in combined:
+        result["friendly_error"] = "Could not fetch model info from HuggingFace."
+        result["hint"] = "Check the model ID format (e.g., 'meta-llama/Llama-3.2-1B')"
+
+    return result
+
+
+class _EmbeddingCache:
+    """Lazy-loaded embedding cache for semantic search."""
+
+    def __init__(self):
+        self._embeddings: dict[str, list[float]] | None = None
+        self._model = None
+
+    def get(self) -> tuple[dict[str, list[float]] | None, Any]:
+        if self._embeddings is not None:
+            return self._embeddings, self._model
+
+        try:
+            from sentence_transformers import SentenceTransformer
+
+            self._model = SentenceTransformer("all-MiniLM-L6-v2")
+            descriptions = [
+                f"{info['description']}. Category: {info['category']}. {info['full_doc'][:200]}"
+                for info in TOOL_REGISTRY.values()
+            ]
+            embeddings = self._model.encode(descriptions)
+            self._embeddings = {
+                name: emb.tolist()
+                for name, emb in zip(TOOL_REGISTRY.keys(), embeddings, strict=True)
+            }
+            return self._embeddings, self._model
+        except ImportError:
+            logger.debug("sentence-transformers not installed, falling back to keyword search")
+            return None, None
+
+    def reset(self) -> None:
+        self._embeddings = None
+        self._model = None
+
+
+_embedding_cache = _EmbeddingCache()
+
+
 def init_dynamic_tools(
     tool_funcs: list[Callable],
     descriptions: dict[str, str],
@@ -59,6 +126,7 @@ def init_dynamic_tools(
     Must be called before any meta-tool is invoked. Typically called by
     create_server() after collecting tools from client modules.
     """
+    _embedding_cache.reset()
     TOOL_REGISTRY.clear()
     TOOL_HIERARCHY.clear()
 
@@ -204,6 +272,8 @@ def execute_tool(tool_name: str, arguments: dict[str, Any] | None = None) -> dic
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=Warning, module="urllib3")
             result = func(**args)
+        if isinstance(result, dict):
+            result = _format_friendly_error(result)
         if isinstance(result, dict) and is_infrastructure_error(result):
             breaker.record_failure()
         else:
@@ -222,43 +292,6 @@ PROGRESSIVE_TOOLS: list[Callable] = [list_tools, describe_tools, execute_tool]
 # =============================================================================
 # Semantic mode: find_tools → execute_tool
 # =============================================================================
-
-
-class _EmbeddingCache:
-    """Lazy-loaded embedding cache for semantic search."""
-
-    def __init__(self):
-        self._embeddings: dict[str, list[float]] | None = None
-        self._model = None
-
-    def get(self) -> tuple[dict[str, list[float]] | None, Any]:
-        if self._embeddings is not None:
-            return self._embeddings, self._model
-
-        try:
-            from sentence_transformers import SentenceTransformer
-
-            self._model = SentenceTransformer("all-MiniLM-L6-v2")
-            descriptions = [
-                f"{info['description']}. Category: {info['category']}. {info['full_doc'][:200]}"
-                for info in TOOL_REGISTRY.values()
-            ]
-            embeddings = self._model.encode(descriptions)
-            self._embeddings = {
-                name: emb.tolist()
-                for name, emb in zip(TOOL_REGISTRY.keys(), embeddings, strict=True)
-            }
-            return self._embeddings, self._model
-        except ImportError:
-            logger.debug("sentence-transformers not installed, falling back to keyword search")
-            return None, None
-
-    def reset(self) -> None:
-        self._embeddings = None
-        self._model = None
-
-
-_embedding_cache = _EmbeddingCache()
 
 
 MAX_QUERY_LENGTH = 500
@@ -399,3 +432,7 @@ def get_mode_tools(mode: str) -> list[Callable]:
     if mode == "progressive":
         return PROGRESSIVE_TOOLS
     raise ValueError(f"Unknown dynamic mode: {mode}. Use 'progressive' or 'semantic'.")
+
+
+# Alias for agent code and docs that speak in terms of "dynamic" meta-tools.
+get_dynamic_tools = get_mode_tools

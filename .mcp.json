@@ -1,9 +1,8 @@
 {
   "mcpServers": {
-    "kubeflow-mcp-dev": {
+    "kubeflow": {
       "command": "uv",
-      "args": ["run", "kubeflow-mcp", "serve"],
-      "env": {}
+      "args": ["run", "kubeflow-mcp", "serve"]
     }
   }
 }

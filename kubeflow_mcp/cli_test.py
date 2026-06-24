@@ -401,3 +401,51 @@ def test_serve_default_shows_banner():
 
     _, kwargs = mock_server.run.call_args
     assert kwargs.get("show_banner") is True
+
+
+def test_agent_unknown_provider():
+    runner = CliRunner()
+    result = runner.invoke(cli, ["agent", "--provider", "nonexistent-xyz"])
+    assert result.exit_code == 1
+    assert "Unknown provider" in result.output
+    assert "ollama" in result.output or "litellm" in result.output
+
+
+def test_agent_invokes_registered_provider():
+    mock_provider = MagicMock()
+    mock_cls = MagicMock(return_value=mock_provider)
+    fake_ep = MagicMock()
+    fake_ep.name = "fake"
+    fake_ep.load = MagicMock(return_value=mock_cls)
+
+    with patch("kubeflow_mcp.cli._provider_entry_point_map", return_value={"fake": fake_ep}):
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            ["agent", "--provider", "fake", "--model", "m1", "--mode", "full"],
+        )
+
+    assert result.exit_code == 0
+    mock_cls.assert_called_once_with()
+    mock_provider.run.assert_called_once()
+    call_kw = mock_provider.run.call_args.kwargs
+    assert call_kw["model"] == "m1"
+    assert call_kw["mode"] == "full"
+    assert call_kw["thinking"] is False
+
+
+def test_agent_passes_url_to_provider():
+    mock_provider = MagicMock()
+    mock_cls = MagicMock(return_value=mock_provider)
+    fake_ep = MagicMock()
+    fake_ep.load = MagicMock(return_value=mock_cls)
+
+    with patch("kubeflow_mcp.cli._provider_entry_point_map", return_value={"fake": fake_ep}):
+        runner = CliRunner()
+        runner.invoke(
+            cli,
+            ["agent", "--provider", "fake", "--url", "http://ollama:11434"],
+        )
+
+    kwargs = mock_provider.run.call_args.kwargs
+    assert kwargs["url"] == "http://ollama:11434"

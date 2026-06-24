@@ -28,6 +28,21 @@ cd mcp-server
 pip install .
 ```
 
+### Optional: interactive `kubeflow-mcp agent` (local LLM)
+
+Extras are split so you do not need LiteLLM for the Ollama agent:
+
+| Extra | Installs |
+|-------|----------|
+| `agents-ollama` | LlamaIndex + Ollama + Rich (default for `--provider ollama`) |
+| `agents-litellm` | LiteLLM + Rich (`--provider litellm`) |
+| `agents` | Both (convenience) |
+
+```bash
+uv sync --extra agents-ollama
+# or: pip install 'kubeflow-mcp[agents-ollama]'
+```
+
 ### Run the server
 
 ```bash
@@ -198,10 +213,10 @@ Without auth configured, the server logs a warning that the HTTP endpoint is ope
 
 ```bash
 kubeflow-mcp agent \
-  --backend ollama \              # ollama (default; more backends planned)
-  --model qwen3:8b \              # model name for the backend
-  --mode full \                   # full | progressive | semantic
-  --thinking                      # enable thinking output (supported models)
+  --provider ollama \             # ollama | litellm (entry-point registry)
+  --model qwen3:8b \              # model name (provider default if omitted)
+  --mode full \                   # full (default) | progressive | semantic — same as serve --mode
+  --thinking                      # enable thinking output (ollama; supported models)
 ```
 
 </details>

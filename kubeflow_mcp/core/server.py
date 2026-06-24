@@ -241,6 +241,56 @@ def _build_server_instructions(
     return result
 
 
+def get_merged_client_tool_descriptions(clients: list[str] | None = None) -> dict[str, str]:
+    """Merge ``CLIENT_TOOL_DESCRIPTIONS`` from client modules plus health tools.
+
+    Used by in-process CLI agents so ``FunctionTool`` blurbs match ``serve`` for
+    the same client set (default: trainer only).
+    """
+    if clients is None:
+        clients = ["trainer"]
+    merged: dict[str, str] = {}
+    for client_name in clients:
+        if client_name not in CLIENT_MODULES:
+            continue
+        try:
+            mod = importlib.import_module(CLIENT_MODULES[client_name])
+        except ImportError:
+            continue
+        merged.update(getattr(mod, "CLIENT_TOOL_DESCRIPTIONS", {}))
+    merged.update(HEALTH_TOOL_DESCRIPTIONS)
+    return merged
+
+
+def build_agent_instruction_text(
+    *,
+    clients: list[str] | None = None,
+    persona: str = "readonly",
+    instruction_tier: str = "full",
+) -> str:
+    """Build the same instruction preamble as ``create_server`` without FastMCP.
+
+    Sets the effective persona for ``get_allowed_tools`` / section filtering,
+    then composes text from ``INSTRUCTION_SECTIONS`` (mirrors ``create_server``).
+    """
+    from kubeflow_mcp.core.policy import set_effective_persona
+
+    if clients is None:
+        clients = ["trainer"]
+    set_effective_persona(persona)
+    loaded_modules: dict[str, Any] = {}
+    for client_name in clients:
+        if client_name not in CLIENT_MODULES:
+            continue
+        try:
+            loaded_modules[client_name] = importlib.import_module(CLIENT_MODULES[client_name])
+        except ImportError as e:
+            logger.warning(
+                "Failed to import client '%s' for agent instructions: %s", client_name, e
+            )
+    return _build_server_instructions(loaded_modules, persona, instruction_tier)
+
+
 def create_server(  # noqa: C901
     clients: list[str] | None = None,
     persona: str = "readonly",

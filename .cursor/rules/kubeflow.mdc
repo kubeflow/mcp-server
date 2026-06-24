@@ -1,0 +1,13 @@
+---
+description: Kubeflow MCP server — training tools and workflows
+globs:
+  - "**/*"
+---
+
+# Kubeflow MCP
+
+This repo implements the **Kubeflow MCP server** (`kubeflow-mcp serve`). Prefer MCP tools for cluster checks, training job lifecycle, and previews before mutating (`confirmed=false` then user confirmation).
+
+- CLI: `uv run kubeflow-mcp serve` (stdio default). See `README.md` for HTTP/SSE and auth.
+- Interactive local agent: `uv run kubeflow-mcp agent --provider ollama` (install `uv sync --extra agents-ollama`; use `--extra agents` for all backends; default `--mode full`; `--mode progressive` for meta-tools).
+- Design: `docs/design/agent-provider-architecture.md`.
