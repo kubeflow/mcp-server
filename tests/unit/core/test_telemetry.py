@@ -16,7 +16,6 @@
 
 from __future__ import annotations
 
-import builtins
 from contextlib import contextmanager
 from types import SimpleNamespace
 
@@ -24,14 +23,6 @@ import pytest
 
 from kubeflow_mcp.core import telemetry
 from kubeflow_mcp.core.server import _audit_wrap
-
-
-class _MockMCPContext:
-    """Minimal mock that passes isinstance(ctx, Context) check."""
-
-    def __init__(self, session_id: str | None = None, request_id: object = None) -> None:
-        self.session_id = session_id
-        self.request_id = request_id
 
 
 class _FakeSpan:
@@ -116,11 +107,11 @@ def test_setup_tracing_configures_provider_when_available(monkeypatch: pytest.Mo
             return data
 
     class _FakeBatchProcessor:
-        def __init__(self, exporter: object) -> None:
+        def __init__(self, exporter: object, **kwargs) -> None:
             self.exporter = exporter
 
     class _FakeExporter:
-        def __init__(self, endpoint: str) -> None:
+        def __init__(self, endpoint: str, **kwargs) -> None:
             self.endpoint = endpoint
             calls["endpoint"] = endpoint
 
@@ -163,6 +154,52 @@ def test_setup_tracing_treats_whitespace_endpoint_as_disabled(
     assert telemetry.setup_tracing("   ") is False
 
 
+def test_setup_tracing_falls_back_to_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
+    """setup_tracing() reads OTEL_EXPORTER_OTLP_ENDPOINT when endpoint is None."""
+    calls: dict[str, object] = {}
+
+    class _FakeBatchProcessor:
+        def __init__(self, exporter: object, **kwargs) -> None:
+            self.exporter = exporter
+
+    class _FakeExporter:
+        def __init__(self, endpoint: str, **kwargs) -> None:
+            calls["endpoint"] = endpoint
+
+    class _FakeProvider:
+        def __init__(self, resource: object) -> None:
+            pass
+
+        def add_span_processor(self, processor: object) -> None:
+            pass
+
+        def shutdown(self) -> None:
+            pass
+
+    class _FakeResource:
+        @staticmethod
+        def create(data: dict[str, str]) -> dict[str, str]:
+            return data
+
+    fake_trace = SimpleNamespace()
+    fake_trace.set_tracer_provider = lambda _p: None
+    fake_trace.get_tracer = lambda _name: "tracer"
+    fake_trace.get_tracer_provider = lambda: object()
+
+    monkeypatch.setattr(telemetry, "_OTEL_AVAILABLE", True)
+    monkeypatch.setattr(telemetry, "_tracing_initialized", False)
+    monkeypatch.setattr(telemetry, "_configured_endpoint", None, raising=False)
+    monkeypatch.setattr(telemetry, "Resource", _FakeResource, raising=False)
+    monkeypatch.setattr(telemetry, "TracerProvider", _FakeProvider, raising=False)
+    monkeypatch.setattr(telemetry, "BatchSpanProcessor", _FakeBatchProcessor, raising=False)
+    monkeypatch.setattr(telemetry, "OTLPSpanExporter", _FakeExporter, raising=False)
+    monkeypatch.setattr(telemetry, "_otel_trace", fake_trace, raising=False)
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://env-collector:4318")
+
+    assert telemetry.setup_tracing(endpoint=None) is True
+    assert calls["endpoint"] == "http://env-collector:4318/v1/traces"
+
+
 def test_setup_tracing_rejects_invalid_endpoint() -> None:
     with pytest.raises(ValueError, match="Invalid OpenTelemetry endpoint"):
         telemetry.setup_tracing("localhost:4318/v1/traces")
@@ -180,11 +217,11 @@ def test_setup_tracing_reuses_existing_provider(monkeypatch: pytest.MonkeyPatch)
             calls["processor"] = processor
 
     class _FakeBatchProcessor:
-        def __init__(self, exporter: object) -> None:
+        def __init__(self, exporter: object, **kwargs) -> None:
             self.exporter = exporter
 
     class _FakeExporter:
-        def __init__(self, endpoint: str) -> None:
+        def __init__(self, endpoint: str, **kwargs) -> None:
             calls["endpoint"] = endpoint
 
     provider = _ExistingProvider()
@@ -249,9 +286,8 @@ def test_audit_wrap_sets_span_attributes_on_success(monkeypatch: pytest.MonkeyPa
 
 
 def test_audit_wrap_sets_mcp_context_attributes(monkeypatch: pytest.MonkeyPatch) -> None:
-    """When a FastMCP Context is passed, mcp.session.id and mcp.request.id are set."""
-    from fastmcp import Context
-
+    """ContextVars populated by middleware are reflected as span attributes."""
+    import kubeflow_mcp.core.middleware as mw_mod
     import kubeflow_mcp.core.server as server_mod
 
     span = _FakeSpan()
@@ -263,25 +299,26 @@ def test_audit_wrap_sets_mcp_context_attributes(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(server_mod, "get_tracer", lambda _name: tracer)
     monkeypatch.setattr(server_mod, "get_breaker", lambda _tool: breaker)
 
-    # Patch isinstance to accept our mock as Context
-    mock_ctx = _MockMCPContext(session_id="sess-abc", request_id=42)
-    original_isinstance = builtins.isinstance
-
-    def _patched_isinstance(obj, cls):
-        if cls is Context and type(obj) is _MockMCPContext:
-            return True
-        return original_isinstance(obj, cls)
-
-    monkeypatch.setattr(builtins, "isinstance", _patched_isinstance)
+    # Simulate what AuditIdentityMiddleware does: set ContextVars
+    mw_mod._session_id_var.set("sess-abc")
+    mw_mod._request_id_var.set("42")
+    mw_mod._user_id_var.set("alice@example.com")
 
     def sample_tool(**_kwargs):
         return {"ok": True}
 
-    wrapped = _audit_wrap(sample_tool)
-    wrapped(ctx=mock_ctx)
+    try:
+        wrapped = _audit_wrap(sample_tool)
+        wrapped()
 
-    assert span.attributes["mcp.session.id"] == "sess-abc"
-    assert span.attributes["mcp.request.id"] == "42"
+        assert span.attributes["mcp.session.id"] == "sess-abc"
+        assert span.attributes["mcp.request.id"] == "42"
+        assert span.attributes["user.id"] == "alice@example.com"
+    finally:
+        # Clean up ContextVars
+        mw_mod._session_id_var.set(None)
+        mw_mod._request_id_var.set(None)
+        mw_mod._user_id_var.set(None)
 
 
 def test_audit_wrap_records_exception_on_failure(monkeypatch: pytest.MonkeyPatch) -> None:

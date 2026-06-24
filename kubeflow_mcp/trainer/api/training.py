@@ -112,7 +112,6 @@ def _make_train_func(script: str, func_args: dict[str, Any] | None = None) -> Ca
     if not lines:
         lines = ["pass"]
 
-
     if func_args:
         params = ", ".join(f"{k}=None" for k in func_args)
         wrapped = f"def {func_name}({params}):\n"
@@ -135,9 +134,8 @@ def _make_train_func(script: str, func_args: dict[str, Any] | None = None) -> Ca
     exec(code, ns)  # noqa: S102
     return ns[func_name]
 
-def _uncalled_train_call(
-    script: str, func_args: dict[str, Any] | None = None
-) -> list[str]:
+
+def _uncalled_train_call(script: str, func_args: dict[str, Any] | None = None) -> list[str]:
     """Return lines to append when a script defines but does not call train.
 
     Returns an empty list when no call needs to be appended.
@@ -150,8 +148,7 @@ def _uncalled_train_call(
     train_defs = (
         node
         for node in tree.body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        and node.name == "train"
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "train"
     )
     train_def = next(train_defs, None)
     if train_def is None or _has_train_call(tree.body):
@@ -159,14 +156,10 @@ def _uncalled_train_call(
 
     # Guard: if train() has required params and no func_args are provided,
     if not func_args and _has_required_params(train_def):
-        raise ValueError(
-            "User-defined train() requires parameters but no func_args were provided."
-        )
+        raise ValueError("User-defined train() requires parameters but no func_args were provided.")
 
     forwarded_args = _forwarded_train_args(train_def, func_args)
-    call_str = (
-        f"train({forwarded_args})" if forwarded_args else "train()"
-    )
+    call_str = f"train({forwarded_args})" if forwarded_args else "train()"
 
     if isinstance(train_def, ast.AsyncFunctionDef):
         return ["import asyncio", f"asyncio.run({call_str})"]
@@ -220,13 +213,8 @@ def _forwarded_train_args(
     if train_def.args.kwarg is not None:
         forwarded = func_args
     else:
-        accepted_names = {
-            arg.arg
-            for arg in [*train_def.args.args, *train_def.args.kwonlyargs]
-        }
-        unaccepted = [
-            key for key in func_args if key not in accepted_names
-        ]
+        accepted_names = {arg.arg for arg in [*train_def.args.args, *train_def.args.kwonlyargs]}
+        unaccepted = [key for key in func_args if key not in accepted_names]
         if unaccepted:
             raise ValueError(
                 "User-defined train() signature does not accept "
@@ -235,6 +223,7 @@ def _forwarded_train_args(
         forwarded = func_args
 
     return ", ".join(f"{key}={key}" for key in forwarded)
+
 
 def _get_client(namespace: str | None = None) -> Any:
     """Return a client targeting the given namespace.
