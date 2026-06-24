@@ -32,7 +32,6 @@ dev = [
     "pytest-asyncio>=0.23",
     "pytest-cov>=4.0",
     "ruff>=0.9",
-    "pip-audit>=2.7",
 ]
 docs = [
     "sphinx>=7.0",
