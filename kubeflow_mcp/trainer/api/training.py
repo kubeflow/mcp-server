@@ -109,6 +109,10 @@ def _make_train_func(script: str, func_args: dict[str, Any] | None = None) -> Ca
     stripped_script = textwrap.dedent(script).strip()
     lines = stripped_script.splitlines()
 
+    if not lines:
+        lines = ["pass"]
+
+
     if func_args:
         params = ", ".join(f"{k}=None" for k in func_args)
         wrapped = f"def {func_name}({params}):\n"
@@ -140,8 +144,8 @@ def _uncalled_train_call(
     """
     try:
         tree = ast.parse(script)
-    except SyntaxError:
-        return []
+    except SyntaxError as e:
+        raise SyntaxError(f"Invalid Python script: {e}") from e
 
     train_defs = (
         node
@@ -154,9 +158,10 @@ def _uncalled_train_call(
         return []
 
     # Guard: if train() has required params and no func_args are provided,
-    # we cannot safely generate a call skip auto-append.
     if not func_args and _has_required_params(train_def):
-        return []
+        raise ValueError(
+            "User-defined train() requires parameters but no func_args were provided."
+        )
 
     forwarded_args = _forwarded_train_args(train_def, func_args)
     call_str = (
@@ -169,7 +174,11 @@ def _uncalled_train_call(
 
 
 def _has_train_call(nodes: list[ast.stmt]) -> bool:
-    """Return True when module-level code calls ``train()`` directly."""
+    """Return True when module-level code calls ``train()`` directly.
+
+    Note: This only detects direct calls to `train()`. It does not detect
+    aliased calls (e.g., `t = train; t()`) or attribute-based calls.
+    """
     for node in nodes:
         # Only module-level execution can run before the generated wrapper returns.
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):

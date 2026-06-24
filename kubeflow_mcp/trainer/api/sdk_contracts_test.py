@@ -641,17 +641,42 @@ class TestMCPToSDKConversions:
 
         assert marker == [(0.01, 3)]
 
-    def test_make_train_func_skips_call_for_required_params(self):
-        """train(required_param) with no func_args must NOT auto-append a call."""
-        marker = self._run_wrapped_train(
-            """
-                import builtins
-                def train(required_param):
-                    builtins._kubeflow_mcp_train_marker.append("ran")
-            """
-        )
-        # train() was NOT called because required_param cannot be supplied
-        assert marker == []
+    def test_make_train_func_raises_value_error_for_required_params(self):
+        """train(required_param) with no func_args must raise a ValueError."""
+        with pytest.raises(ValueError, match=r"User-defined train\(\) requires parameters but no func_args were provided"):
+            self._run_wrapped_train(
+                """
+                    import builtins
+                    def train(required_param):
+                        builtins._kubeflow_mcp_train_marker.append("ran")
+                """
+            )
+
+    def test_make_train_func_raises_syntax_error_for_invalid_script(self):
+        """SyntaxError in the user script should be surfaced."""
+        from kubeflow_mcp.trainer.api.training import _make_train_func
+
+        with pytest.raises(SyntaxError, match="Invalid Python script"):
+            _make_train_func("def train():\n    pass\n  invalid syntax")
+
+    def test_make_train_func_raises_value_error_for_mismatched_func_args(self):
+        """train() with no args but func_args provided should raise ValueError."""
+        with pytest.raises(ValueError, match=r"User-defined train\(\) signature does not accept"):
+            self._run_wrapped_train(
+                """
+                    def train():
+                        pass
+                """,
+                func_args={"lr": 0.01}
+            )
+
+    def test_make_train_func_adds_pass_for_empty_script(self):
+        """An empty or whitespace-only script should generate a valid def train(): pass."""
+        from kubeflow_mcp.trainer.api.training import _make_train_func
+
+        train_func = _make_train_func("   \n  \t  \n")
+        assert callable(train_func)
+        train_func()  # Should run without Error
 
     def test_make_train_func_async_train_executes(self):
         """async def train() should be invoked via asyncio.run()."""
