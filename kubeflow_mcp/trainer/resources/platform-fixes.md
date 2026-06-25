@@ -96,7 +96,24 @@ For `fine_tune()`, these volumes apply to ALL replicated jobs (node, dataset-ini
 "env": {"NCCL_P2P_DISABLE": "1", "NCCL_SHM_DISABLE": "1"}
 ```
 
-**4. If emptyDirs are not enough** — escalate to cluster admin:
+**4. Pip package installation permission denied in run_custom_training()** — when using `run_custom_training(packages=[...])` on OpenShift under a restricted SCC, the SDK's pre-script pip install step attempts to run `pip install --user` which writes to `/.local`. Since user-defined emptyDir volumes are not mounted on the training container during this step, the job will fail immediately with:
+`PermissionError: [Errno 13] Permission denied: '/.local'`
+
+*Workaround*: Do **NOT** use the `packages` parameter on OpenShift. Instead, write a workaround directly in your training script to install the required packages to `/workspace/lib` (which is a writable emptyDir) and append it to `sys.path`:
+
+```python
+import subprocess, sys, os
+lib_dir = '/workspace/lib'
+os.makedirs(lib_dir, exist_ok=True)
+subprocess.run([
+    sys.executable, '-m', 'pip', 'install',
+    '--target', lib_dir, '--quiet',
+    'transformers', 'peft', 'trl'
+], check=True)
+sys.path.insert(0, lib_dir)
+```
+
+**5. If emptyDirs are not enough** — escalate to cluster admin:
 
 ```bash
 oc adm policy add-scc-to-user anyuid -z <service-account> -n <namespace>
