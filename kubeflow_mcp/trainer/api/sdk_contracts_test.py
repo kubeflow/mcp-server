@@ -844,3 +844,15 @@ class TestMCPToolSignatures:
         for p in mcp_lora_params:
             assert p in sig.parameters, f"MCP fine_tune missing LoRA param: {p}"
             assert p in lora_fields, f"SDK LoraConfig missing field: {p}"
+
+    def test_should_apply_hf_dataset_workaround(self):
+        """Workaround helper correctly detects top-level HuggingFace dataset URIs."""
+        from kubeflow_mcp.trainer.api.training import _should_apply_hf_dataset_workaround
+
+        assert _should_apply_hf_dataset_workaround("hf://org/ds") is True
+        assert _should_apply_hf_dataset_workaround("hf://org/ds/") is True
+        assert _should_apply_hf_dataset_workaround("hf://ds") is True
+        assert _should_apply_hf_dataset_workaround("hf://") is False
+        assert _should_apply_hf_dataset_workaround("hf://org/ds/subpath") is False
+        assert _should_apply_hf_dataset_workaround("s3://bucket/dataset") is False
+

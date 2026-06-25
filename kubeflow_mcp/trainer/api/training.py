@@ -147,6 +147,15 @@ def _inject_ownership_label(options: list) -> list:
     return options
 
 
+def _should_apply_hf_dataset_workaround(dataset: str) -> bool:
+    """Return True if dataset is a top-level HuggingFace URI that triggers SDK bug #32."""
+    if not dataset.startswith("hf://"):
+        return False
+    hf_repo = dataset.removeprefix("hf://").strip("/")
+    return bool(hf_repo and len(hf_repo.split("/")) <= 2)
+
+
+
 def _sdk_error(e: Exception, hint: str | None = None) -> dict[str, Any]:
     """Convert an exception into a ToolError dict with optional K8s response detail."""
     details: dict[str, Any] | None = None
@@ -757,14 +766,12 @@ def fine_tune(
         # Workaround for SDK bug where top-level HF datasets construct
         # invalid torchtune dataset.data_dir=/workspace/dataset/.
         # We override the torchtune CLI args directly via TrainerArgs.
-        if dataset.startswith("hf://"):
-            hf_repo = dataset.removeprefix("hf://").strip("/")
-            if hf_repo and len(hf_repo.split("/")) == 2:
-                options.append(
-                    TrainerArgs(
-                        args=["dataset.source=/workspace/dataset", "dataset.data_dir=null"]
-                    )
+        if _should_apply_hf_dataset_workaround(dataset):
+            options.append(
+                TrainerArgs(
+                    args=["dataset.source=/workspace/dataset", "dataset.data_dir=null"]
                 )
+            )
 
         client = _get_client(namespace)
         initializer = _build_initializer(
