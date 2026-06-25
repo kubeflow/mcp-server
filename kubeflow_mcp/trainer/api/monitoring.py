@@ -59,6 +59,14 @@ _FAILURE_PATTERNS: list[tuple[re.Pattern[str], str, str]] = [
         "Check dataset/model paths and volume mounts.",
     ),
     (
+        re.compile(
+            r"PermissionError: \[Errno 13\] Permission denied: '/\.local|Permission denied: '/\.local",
+            re.IGNORECASE,
+        ),
+        "OPENSHIFT_PIP_ERROR",
+        "On OpenShift under a restricted SCC, pip install --user fails on read-only /.local. Do NOT use the 'packages' parameter in run_custom_training(). Instead, install packages inside your script to /workspace/lib using subprocess and append to sys.path. Read trainer://guides/platform-fixes for details.",
+    ),
+    (
         re.compile(r"PermissionError|Access Denied", re.IGNORECASE),
         "PERMISSION_ERROR",
         "Check service account permissions and storage credentials.",

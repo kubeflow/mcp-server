@@ -370,6 +370,7 @@ TRAINING RULES:
 
 PLATFORM:
 - If pre_flight() returns platform=openshift, ALWAYS pass emptyDir volumes for /.local, /.cache, /tmp — without these, jobs fail on read-only filesystem. Read trainer://guides/platform-fixes for copy-paste JSON
+- OpenShift packages restriction: if platform=openshift, do NOT use the packages parameter in run_custom_training() as the pre-script pip install step will fail with PermissionError on /.local. Instead, install packages inside your training script to /workspace/lib using subprocess and append to sys.path
 - Gated HuggingFace models require hf_token parameter
 - Training jobs consume GPU resources — be conservative with num_nodes
 - Use get_training_events() to debug stuck/failed jobs. Read trainer://guides/troubleshooting for error-to-fix tables""",
