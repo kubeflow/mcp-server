@@ -617,11 +617,15 @@ class TestMCPToSDKConversions:
     )
     def test_make_train_func_detects_existing_train_calls(self, train_call):
         """Existing train() calls in module-level code should not be duplicated."""
-        script = textwrap.dedent("""
+        script = (
+            textwrap.dedent("""
                 import builtins
                 def train():
                     builtins._kubeflow_mcp_train_marker.append("ran")
-        """) + train_call + "\n"
+        """)
+            + train_call
+            + "\n"
+        )
         marker = self._run_wrapped_train(script)
 
         assert marker == ["ran"]
@@ -643,7 +647,10 @@ class TestMCPToSDKConversions:
 
     def test_make_train_func_raises_value_error_for_required_params(self):
         """train(required_param) with no func_args must raise a ValueError."""
-        with pytest.raises(ValueError, match=r"User-defined train\(\) requires parameters but no func_args were provided"):
+        with pytest.raises(
+            ValueError,
+            match=r"User-defined train\(\) requires parameters but no func_args were provided",
+        ):
             self._run_wrapped_train(
                 """
                     import builtins
@@ -667,7 +674,7 @@ class TestMCPToSDKConversions:
                     def train():
                         pass
                 """,
-                func_args={"lr": 0.01}
+                func_args={"lr": 0.01},
             )
 
     def test_make_train_func_adds_pass_for_empty_script(self):

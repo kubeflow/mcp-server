@@ -21,6 +21,7 @@ Designed for extensibility:
 
 import functools
 import importlib
+import json
 import logging
 import re
 import time
@@ -41,10 +42,32 @@ from kubeflow_mcp.core.health import (
     HEALTH_TOOLS,
 )
 from kubeflow_mcp.core.logging import with_correlation_id
-from kubeflow_mcp.core.policy import apply_policy_filters, get_allowed_tools, is_read_only
+from kubeflow_mcp.core.middleware import get_mcp_request_id, get_mcp_session_id, get_user_id
+from kubeflow_mcp.core.policy import (
+    apply_policy_filters,
+    get_allowed_tools,
+    get_effective_persona,
+    is_read_only,
+)
 from kubeflow_mcp.core.resilience import RateLimiter, get_breaker
 from kubeflow_mcp.core.resources import register_resources
 from kubeflow_mcp.core.security import mask_sensitive_data
+from kubeflow_mcp.core.telemetry import get_tracer
+
+try:
+    from opentelemetry.trace import SpanKind
+    from opentelemetry.trace import Status as _Status
+    from opentelemetry.trace import StatusCode as _StatusCode
+except ImportError:  # pragma: no cover
+    SpanKind = None  # type: ignore[assignment,misc]
+    _Status = None  # type: ignore[assignment,misc]
+    _StatusCode = None  # type: ignore[assignment,misc]
+
+# MCP protocol version from the SDK (used as span attribute)
+try:
+    from mcp.types import LATEST_PROTOCOL_VERSION as _MCP_PROTOCOL_VERSION
+except ImportError:  # pragma: no cover
+    _MCP_PROTOCOL_VERSION = None
 
 logger = logging.getLogger(__name__)
 
@@ -84,70 +107,117 @@ def _inject_meta(result: Any, tool_name: str) -> Any:
 
 def _audit_wrap(tool_func):
     """Wrap a tool function with rate limiting, circuit breaking, audit logging, and response metadata."""
+    tracer = get_tracer("kubeflow_mcp.tools")
 
     @functools.wraps(tool_func)
     def wrapper(**kwargs):
         tool_name = tool_func.__name__
-
-        if _rate_limiter is not None and not _rate_limiter.acquire():
-            logger.warning("rate_limited", extra={"tool": tool_name})
-            return {
-                "error": "Rate limit exceeded. Retry after a brief pause.",
-                "error_code": ErrorCode.RATE_LIMITED,
-            }
-
-        breaker = get_breaker(tool_name)
-        if not breaker.can_execute():
-            logger.warning("circuit_open", extra={"tool": tool_name})
-            return {
-                "error": f"Circuit breaker open for '{tool_name}' — K8s API may be degraded. Retries automatically after recovery timeout.",
-                "error_code": ErrorCode.CIRCUIT_OPEN,
-            }
-
         cid = with_correlation_id()
-        masked = mask_sensitive_data(kwargs) if kwargs else {}
+        persona = get_effective_persona()
         start = time.monotonic()
-        try:
-            result = tool_func(**kwargs)
-            duration_ms = int((time.monotonic() - start) * 1000)
-            is_success = (
-                "error_code" not in result and "error" not in result
-                if isinstance(result, dict)
-                else True
-            )
-            if is_success:
-                breaker.record_success()
-            elif is_infrastructure_error(result):
-                breaker.record_failure()
 
-            logger.info(
-                "tool_call",
-                extra={
-                    "audit": True,
-                    "correlation_id": cid,
-                    "tool": tool_name,
-                    "parameters": masked,
-                    "success": is_success,
-                    "duration_ms": duration_ms,
-                },
+        span_kwargs: dict[str, Any] = {}
+        if SpanKind is not None:
+            span_kwargs["kind"] = SpanKind.SERVER
+
+        with tracer.start_as_current_span(f"tools/call {tool_name}", **span_kwargs) as span:
+            # OTel MCP semantic conventions (Development status)
+            # https://opentelemetry.io/docs/specs/semconv/gen-ai/mcp/
+            span.set_attribute("mcp.method.name", "tools/call")
+            span.set_attribute("gen_ai.tool.name", tool_name)
+            span.set_attribute("gen_ai.operation.name", "execute_tool")
+            if _MCP_PROTOCOL_VERSION:
+                span.set_attribute("mcp.protocol.version", _MCP_PROTOCOL_VERSION)
+
+            # MCP session/request context (populated via AuditIdentityMiddleware ContextVars)
+            session_id = get_mcp_session_id()
+            if session_id:
+                span.set_attribute("mcp.session.id", session_id)
+            request_id = get_mcp_request_id()
+            if request_id:
+                span.set_attribute("mcp.request.id", request_id)
+            user_id = get_user_id()
+            if user_id:
+                span.set_attribute("user.id", user_id)
+
+            # Custom Kubeflow enrichment
+            span.set_attribute("kubeflow.persona", persona)
+            span.set_attribute("correlation_id", cid)
+            masked = mask_sensitive_data(kwargs) if kwargs else {}
+            span.set_attribute(
+                "tool.args_preview",
+                json.dumps(masked, default=str)[:300],
             )
-            return _inject_meta(result, tool_name)
-        except Exception:
-            duration_ms = int((time.monotonic() - start) * 1000)
-            breaker.record_failure()
-            logger.error(
-                "tool_call_failed",
-                extra={
-                    "audit": True,
-                    "correlation_id": cid,
-                    "tool": tool_name,
-                    "parameters": masked,
-                    "success": False,
-                    "duration_ms": duration_ms,
-                },
-                exc_info=True,
-            )
-            raise
+
+            if _rate_limiter is not None and not _rate_limiter.acquire():
+                duration_ms = int((time.monotonic() - start) * 1000)
+                span.set_attribute("tool.success", False)
+                span.set_attribute("tool.duration_ms", duration_ms)
+                logger.warning("rate_limited", extra={"tool": tool_name})
+                return {
+                    "error": "Rate limit exceeded. Retry after a brief pause.",
+                    "error_code": ErrorCode.RATE_LIMITED,
+                }
+
+            breaker = get_breaker(tool_name)
+            if not breaker.can_execute():
+                duration_ms = int((time.monotonic() - start) * 1000)
+                span.set_attribute("tool.success", False)
+                span.set_attribute("tool.duration_ms", duration_ms)
+                logger.warning("circuit_open", extra={"tool": tool_name})
+                return {
+                    "error": f"Circuit breaker open for '{tool_name}' — K8s API may be degraded. Retries automatically after recovery timeout.",
+                    "error_code": ErrorCode.CIRCUIT_OPEN,
+                }
+
+            try:
+                result = tool_func(**kwargs)
+                duration_ms = int((time.monotonic() - start) * 1000)
+                is_success = (
+                    "error_code" not in result and "error" not in result
+                    if isinstance(result, dict)
+                    else True
+                )
+                span.set_attribute("tool.success", is_success)
+                span.set_attribute("tool.duration_ms", duration_ms)
+                if is_success:
+                    breaker.record_success()
+                elif is_infrastructure_error(result):
+                    breaker.record_failure()
+
+                logger.info(
+                    "tool_call",
+                    extra={
+                        "audit": True,
+                        "correlation_id": cid,
+                        "tool": tool_name,
+                        "parameters": masked,
+                        "success": is_success,
+                        "duration_ms": duration_ms,
+                    },
+                )
+                return _inject_meta(result, tool_name)
+            except Exception as exc:
+                duration_ms = int((time.monotonic() - start) * 1000)
+                breaker.record_failure()
+                span.set_attribute("tool.success", False)
+                span.set_attribute("tool.duration_ms", duration_ms)
+                span.set_attribute("error.type", type(exc).__qualname__)
+                if _StatusCode is not None:
+                    span.set_status(_Status(_StatusCode.ERROR, str(exc)))
+                logger.error(
+                    "tool_call_failed",
+                    extra={
+                        "audit": True,
+                        "correlation_id": cid,
+                        "tool": tool_name,
+                        "parameters": masked,
+                        "success": False,
+                        "duration_ms": duration_ms,
+                    },
+                    exc_info=True,
+                )
+                raise
 
     return wrapper
 
@@ -287,7 +357,12 @@ def create_server(  # noqa: C901
     if auth_provider is not None:
         mcp_kwargs["auth"] = auth_provider
         logger.info("HTTP auth provider attached to server")
-    mcp: FastMCP = FastMCP("kubeflow-mcp", **mcp_kwargs)
+    mcp: FastMCP = FastMCP("kubeflow-mcp-server", **mcp_kwargs)
+
+    # Bridge FastMCP async context into sync _audit_wrap via ContextVars
+    from kubeflow_mcp.core.middleware import AuditIdentityMiddleware
+
+    mcp.add_middleware(AuditIdentityMiddleware)
 
     # Merge tool metadata from client modules
     all_descriptions: dict[str, str] = {}

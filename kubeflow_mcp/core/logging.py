@@ -49,7 +49,7 @@ class StructuredFormatter(logging.Formatter):
         if ctx is not None:
             log_dict["context"] = ctx
 
-        extra_keys = {"audit", "tool", "parameters", "success", "duration_ms"}
+        extra_keys = {"audit", "tool", "parameters", "success", "duration_ms", "tracing_enabled"}
         for key in extra_keys:
             if hasattr(record, key):
                 log_dict[key] = getattr(record, key)
