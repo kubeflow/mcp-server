@@ -21,7 +21,8 @@ Diagnostic workflows, error-to-fix tables, and known tool limitations.
 | NCCL timeout | Multi-node communication failure | Pass `env={"NCCL_TIMEOUT": "1800"}`, try gloo backend, check network |
 | 403 Forbidden (HuggingFace) | Gated model, no token | Accept model license, pass `hf_token` |
 | Read-only file system | Platform with read-only root FS | Add emptyDir volumes (see trainer://guides/platform-fixes) |
-| Permission denied /.local | Read-only root filesystem | Add dot-local emptyDir volume |
+| Permission denied /.local (at runtime) | Read-only root filesystem | Add dot-local emptyDir volume |
+| Permission denied /.local (during packages install) | run_custom_training pre-script restriction | Do NOT use `packages` parameter. See Workaround #4 in trainer://guides/platform-fixes |
 | ProcessGroupNCCL...no GPUs | torchtune on CPU cluster | Use `run_custom_training()` with gloo backend instead |
 | BackOff (crash loop) | Container keeps crashing | Check `get_training_logs()` for the root error |
 | Script syntax error | Invalid Python in `run_custom_training` | Script is wrapped into function body — no top-level indentation errors, no `if __name__` guards |

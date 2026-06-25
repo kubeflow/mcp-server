@@ -18,7 +18,8 @@ Error-based detection (from `get_training_logs()`):
 | Error pattern | Platform | Fix |
 |---------------|----------|-----|
 | "Read-only file system" | OpenShift (restricted SCC) | Add emptyDir volumes below |
-| "Permission denied" on /.local or /.cache | OpenShift (restricted SCC) | Add emptyDir volumes below |
+| "Permission denied" on /.local or /.cache (at runtime) | OpenShift (restricted SCC) | Add emptyDir volumes below |
+| "Permission denied" on /.local (during packages install in run_custom_training) | OpenShift (restricted SCC) | Do NOT use `packages` parameter. Use Workaround #4 below |
 
 ## OpenShift emptyDir Volumes
 
@@ -41,7 +42,7 @@ ALWAYS pass when `platform=openshift`. Copy-paste ready — pass directly as `vo
 
 Random UIDs (e.g. 1000660000). Do NOT assume root. Implications:
 - HOME may not be writable — use `/tmp` for outputs
-- `/.local` emptyDir fixes most pip issues
+- `/.local` emptyDir fixes most runtime pip issues (but does not apply to `packages` pre-script; see Workaround #4)
 - Avoid `chmod` / `chown` in training scripts
 
 ## GPU Tolerations
@@ -88,7 +89,7 @@ For `fine_tune()`, these volumes apply to ALL replicated jobs (node, dataset-ini
 **2. Non-root UID issues** — avoid commands that assume root. In scripts:
 - Write outputs to `/tmp` instead of `/root` or `/home`
 - Do NOT use `chmod`, `chown`, or write to `/etc`
-- Use `/.local` for pip user installs (already covered by emptyDir above)
+- Use `/.local` for runtime pip user installs (already covered by emptyDir above; for `packages` parameter use Workaround #4)
 
 **3. Network restrictions** — some SCCs block host networking. For multi-node training, pass env vars to `run_custom_training()` or `run_container_training()`:
 
@@ -96,7 +97,24 @@ For `fine_tune()`, these volumes apply to ALL replicated jobs (node, dataset-ini
 "env": {"NCCL_P2P_DISABLE": "1", "NCCL_SHM_DISABLE": "1"}
 ```
 
-**4. If emptyDirs are not enough** — escalate to cluster admin:
+**4. Pip package installation permission denied in run_custom_training()** — when using `run_custom_training(packages=[...])` on OpenShift under a restricted SCC, the SDK's pre-script pip install step attempts to run `pip install --user` which writes to `/.local`. Since user-defined emptyDir volumes are not mounted on the training container during this step, the job will fail immediately with:
+`PermissionError: [Errno 13] Permission denied: '/.local'`
+
+*Workaround*: Do **NOT** use the `packages` parameter on OpenShift. Instead, write a workaround directly in your training script to install the required packages to `/workspace/lib` (which is a writable emptyDir) and append it to `sys.path`:
+
+```python
+import subprocess, sys, os
+lib_dir = '/workspace/lib'
+os.makedirs(lib_dir, exist_ok=True)
+subprocess.run([
+    sys.executable, '-m', 'pip', 'install',
+    '--target', lib_dir, '--quiet',
+    'transformers', 'peft', 'trl'
+], check=True)
+sys.path.insert(0, lib_dir)
+```
+
+**5. If emptyDirs are not enough** — escalate to cluster admin:
 
 ```bash
 oc adm policy add-scc-to-user anyuid -z <service-account> -n <namespace>
