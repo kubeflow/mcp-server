@@ -969,3 +969,45 @@ class TestMCPToolSignatures:
         for p in mcp_lora_params:
             assert p in sig.parameters, f"MCP fine_tune missing LoRA param: {p}"
             assert p in lora_fields, f"SDK LoraConfig missing field: {p}"
+
+    def test_extract_failure_hint_openshift_and_hf(self):
+        """Verify _extract_failure_hint detects OpenShift permission and HF cache errors."""
+        from kubeflow_mcp.trainer.api.monitoring import _extract_failure_hint
+
+        hint1 = _extract_failure_hint("Permission denied: '/.local/lib'")
+        assert hint1 is not None and hint1["category"] == "OPENSHIFT_PERMISSION_ERROR"
+
+        hint2 = _extract_failure_hint("Permission denied when writing huggingface cache")
+        assert hint2 is not None and hint2["category"] == "HF_CACHE_WRITE_ERROR"
+
+    def test_get_training_logs_fallback_to_previous_logs(self):
+        """Verify get_training_logs queries previous=True pod logs when active container logs are empty."""
+        from unittest.mock import MagicMock, patch
+
+        from kubeflow_mcp.trainer.api.monitoring import get_training_logs
+
+        mock_client = MagicMock()
+        mock_client.get_job_logs.return_value = []
+
+        mock_pod = MagicMock()
+        mock_pod.metadata.name = "crashed-pod-0"
+
+        mock_v1 = MagicMock()
+        mock_v1.list_namespaced_pod.return_value = MagicMock(items=[mock_pod])
+        mock_v1.read_namespaced_pod_log.return_value = "CUDA out of memory\nCrash details"
+
+        with (
+            patch("kubeflow_mcp.trainer.api.monitoring.get_trainer_client_for_namespace", return_value=mock_client),
+            patch("kubeflow_mcp.trainer.api.monitoring.get_core_v1_api", return_value=mock_v1),
+            patch("kubeflow_mcp.trainer.api.monitoring.get_trainer_effective_namespace", return_value="test-ns"),
+            patch("kubeflow_mcp.trainer.api.monitoring.check_namespace_allowed", return_value=None),
+        ):
+            resp = get_training_logs(name="crashed-job")
+
+        assert "CUDA out of memory" in resp["data"]["logs"]
+        assert resp["data"]["failure_hint"]["category"] == "OOM"
+        mock_v1.read_namespaced_pod_log.assert_called_once_with(
+            name="crashed-pod-0", namespace="test-ns", previous=True, tail_lines=1000
+        )
+
+

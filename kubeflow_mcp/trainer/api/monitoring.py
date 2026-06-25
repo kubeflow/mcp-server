@@ -14,13 +14,24 @@
 
 """Monitoring tools for training job logs and events."""
 
+import logging
 import re
 from typing import Any
 
 from kubeflow_mcp.common.constants import ErrorCode
 from kubeflow_mcp.common.types import ToolError, ToolResponse, exception_details, is_k8s_not_found
-from kubeflow_mcp.common.utils import get_trainer_client_for_namespace
-from kubeflow_mcp.core.security import check_namespace_allowed, truncate_log_output
+from kubeflow_mcp.common.utils import (
+    get_core_v1_api,
+    get_trainer_client_for_namespace,
+    get_trainer_effective_namespace,
+)
+from kubeflow_mcp.core.security import (
+    check_namespace_allowed,
+    truncate_log_output,
+    validate_k8s_name,
+)
+
+logger = logging.getLogger(__name__)
 
 MAX_LOG_LINES = 1000
 MAX_EVENT_LIMIT = 500
@@ -28,6 +39,16 @@ MAX_WAIT_TIMEOUT = 3600
 MIN_POLLING_INTERVAL = 1
 
 _FAILURE_PATTERNS: list[tuple[re.Pattern[str], str, str]] = [
+    (
+        re.compile(r"Permission denied.*(/\.local|/home|/\.cache)", re.IGNORECASE),
+        "OPENSHIFT_PERMISSION_ERROR",
+        "OpenShift random UID cannot write to home directory; set env var HF_HOME=/workspace or mount a writable volume.",
+    ),
+    (
+        re.compile(r"Permission denied.*huggingface|HF_HOME", re.IGNORECASE),
+        "HF_CACHE_WRITE_ERROR",
+        "Set env var HF_HOME=/workspace to store HuggingFace cache on a writable volume mount.",
+    ),
     (
         re.compile(r"CUDA out of memory", re.IGNORECASE),
         "OOM",
@@ -126,6 +147,42 @@ def get_training_logs(
 
         client = get_trainer_client_for_namespace(namespace)
         log_lines = list(client.get_job_logs(name=name, step=step, follow=False))
+        if not log_lines:
+            try:
+                eff_ns = get_trainer_effective_namespace(namespace)
+                name_err = validate_k8s_name(name)
+                if name_err is not None:
+                    return name_err.model_dump()
+                v1 = get_core_v1_api()
+                pods = v1.list_namespaced_pod(
+                    namespace=eff_ns,
+                    label_selector=f"training.kubeflow.org/trainjob-name={name}",
+                )
+                for pod in pods.items:
+                    try:
+                        raw = v1.read_namespaced_pod_log(
+                            name=pod.metadata.name,
+                            namespace=eff_ns,
+                            previous=True,
+                            tail_lines=MAX_LOG_LINES,
+                        )
+                        if raw:
+                            log_lines.extend(raw.splitlines())
+                    except Exception as e:
+                        logger.debug(
+                            "Failed to read previous pod logs for pod %s/%s: %s",
+                            eff_ns,
+                            pod.metadata.name,
+                            e,
+                        )
+            except Exception as e:
+                logger.debug(
+                    "Previous-log fallback failed for job %s (namespace=%s): %s",
+                    name,
+                    namespace,
+                    e,
+                )
+
         if len(log_lines) > MAX_LOG_LINES:
             log_lines = log_lines[-MAX_LOG_LINES:]
 
