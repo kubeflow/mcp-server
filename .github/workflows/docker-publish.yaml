@@ -64,7 +64,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Scan image for critical CVEs (Trivy)
-        uses: aquasecurity/trivy-action@0.30.0
+        uses: aquasecurity/trivy-action@v0.36.0
         if: github.event_name != 'pull_request'
         with:
           image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
