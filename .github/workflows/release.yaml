@@ -1,0 +1,156 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Expected version (must match pyproject.toml and __init__.py)'
+        required: true
+        type: string
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  prepare:
+    name: Prepare release
+    runs-on: ubuntu-latest
+    outputs:
+      artifact-name: ${{ steps.vars.outputs.artifact-name }}
+      package-name: ${{ steps.vars.outputs.package-name }}
+      target-ref: ${{ steps.ref.outputs.target-ref }}
+      is-prerelease: ${{ steps.vars.outputs.is-prerelease }}
+      version: ${{ steps.vars.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'release' && github.event.release.tag_name || github.ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Check version and set outputs
+        id: vars
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          EXPECTED_VERSION: ${{ inputs.version }}
+        run: |
+          ARGS="--github-output"
+          if [[ -n "$RELEASE_TAG" ]]; then
+            ARGS="$ARGS --release-tag $RELEASE_TAG"
+          fi
+          if [[ -n "$EXPECTED_VERSION" ]]; then
+            ARGS="$ARGS --expected-version $EXPECTED_VERSION"
+          fi
+          python scripts/check_version.py $ARGS
+
+      - name: Resolve target ref
+        id: ref
+        run: |
+          if [[ "${{ github.event_name }}" == "release" ]]; then
+            echo "target-ref=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "target-ref=${{ github.ref }}" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: Build package
+    needs: [prepare]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.prepare.outputs.target-ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: make install-dev
+
+      - name: Run lint and formatting checks
+        run: make verify
+
+      - name: Run unit tests
+        run: make test-python
+
+      - name: Verify version
+        run: python scripts/check_version.py --expected-version "${{ needs.prepare.outputs.version }}"
+
+      - name: Build and validate package
+        run: |
+          uv build
+          uvx twine check dist/*
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ needs.prepare.outputs.artifact-name }}
+          path: dist/
+
+  publish-test-pypi:
+    name: Publish to Test PyPI
+    needs: [prepare, build]
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment:
+      name: test-pypi
+      url: https://test.pypi.org/project/${{ needs.prepare.outputs.package-name }}/
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v7
+        with:
+          name: ${{ needs.prepare.outputs.artifact-name }}
+          path: dist/
+
+      - name: Publish to Test PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          verbose: true
+
+  publish-pypi:
+    name: Publish to PyPI
+    needs: [prepare, build]
+    if: github.event_name == 'release' && needs.prepare.outputs.is-prerelease != 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: release
+      url: https://pypi.org/project/${{ needs.prepare.outputs.package-name }}/
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v7
+        with:
+          name: ${{ needs.prepare.outputs.artifact-name }}
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          verbose: true
+
+  github-release:
+    name: Upload release assets
+    needs: [prepare, build, publish-pypi]
+    if: always() && github.event_name == 'release' && needs.build.result == 'success' && (needs.publish-pypi.result == 'success' || needs.publish-pypi.result == 'skipped')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v7
+        with:
+          name: ${{ needs.prepare.outputs.artifact-name }}
+          path: dist/
+
+      - name: Upload assets to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" dist/* --repo "${{ github.repository }}" --clobber
