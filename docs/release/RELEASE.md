@@ -6,6 +6,13 @@ GitHub secrets.
 
 ## Versioning
 
+Kubeflow MCP version format follows Python's [PEP 440](https://peps.python.org/pep-0440/).
+Versions are in the format of `X.Y.Z`, where `X` is the major version, `Y` is
+the minor version, and `Z` is the patch version.
+
+Pre-releases use the format `X.Y.ZrcN` where `N` is the release candidate
+number (following [Kubeflow SDK conventions](https://github.com/kubeflow/sdk/blob/main/RELEASE.md)).
+
 Update both version sources in the same pull request:
 
 - `pyproject.toml`: `[project].version`
@@ -26,13 +33,14 @@ The workflow has two supported paths:
 1. Manual Test PyPI dry run.
 
    Run the `Release` workflow with `workflow_dispatch` on the ref you want to
-   test. The workflow builds the package and publishes it to Test PyPI only.
+   test. You must enter the expected version string — the workflow validates
+   it matches both `pyproject.toml` and `kubeflow_mcp/__init__.py`.
 
 2. Published GitHub Release.
 
    Publish a GitHub Release with the final release tag. The workflow builds the
-   tagged source, publishes a stable build to PyPI, and creates or updates the
-   GitHub Release asset set.
+   tagged source, publishes a stable build to PyPI, and attaches the
+   distribution artifacts to the GitHub Release.
 
 ## Pre-production Checklist
 
@@ -50,6 +58,7 @@ Use this flow for RC or dev validation before a production release.
 3. Open GitHub Actions -> `Release` -> `Run workflow`.
 
    Select the branch or tag that contains the version you want to test.
+   Enter the expected version string when prompted.
 
 4. Let the workflow publish to Test PyPI.
 
@@ -101,36 +110,7 @@ Run these checks from the repository root before publishing.
 1. Confirm the version is synchronized.
 
    ```sh
-   python - <<'PY'
-   import ast
-   import tomllib
-
-   with open("pyproject.toml", "rb") as f:
-       project_version = tomllib.load(f)["project"]["version"]
-
-   module = ast.parse(open("kubeflow_mcp/__init__.py", encoding="utf-8").read())
-   code_version = None
-   for node in module.body:
-       if (
-           isinstance(node, ast.Assign)
-           and len(node.targets) == 1
-           and isinstance(node.targets[0], ast.Name)
-           and node.targets[0].id == "__version__"
-           and isinstance(node.value, ast.Constant)
-           and isinstance(node.value.value, str)
-       ):
-           code_version = node.value.value
-           break
-
-   if code_version is None:
-       raise SystemExit("__version__ not found in kubeflow_mcp/__init__.py")
-
-   print(f"pyproject.toml version: {project_version}")
-   print(f"kubeflow_mcp version:   {code_version}")
-
-   if project_version != code_version:
-       raise SystemExit("version mismatch")
-   PY
+   python scripts/check_version.py
    ```
 
 2. Run lint, formatting, and unit tests.

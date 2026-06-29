@@ -2,6 +2,11 @@ name: Release
 
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Expected version (must match pyproject.toml and __init__.py)'
+        required: true
+        type: string
   release:
     types: [published]
 
@@ -16,7 +21,7 @@ jobs:
     outputs:
       artifact-name: ${{ steps.vars.outputs.artifact-name }}
       package-name: ${{ steps.vars.outputs.package-name }}
-      target-ref: ${{ steps.vars.outputs.target-ref }}
+      target-ref: ${{ steps.ref.outputs.target-ref }}
       is-prerelease: ${{ steps.vars.outputs.is-prerelease }}
       version: ${{ steps.vars.outputs.version }}
     steps:
@@ -25,72 +30,34 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event_name == 'release' && github.event.release.tag_name || github.ref }}
 
-      - name: Check version and release target
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Check version and set outputs
         id: vars
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
+          EXPECTED_VERSION: ${{ inputs.version }}
         run: |
-          python - <<'PY'
-          import ast
-          import os
-          from pathlib import Path
-          import re
-          import tomllib
+          ARGS="--github-output"
+          if [[ -n "$RELEASE_TAG" ]]; then
+            ARGS="$ARGS --release-tag $RELEASE_TAG"
+          fi
+          if [[ -n "$EXPECTED_VERSION" ]]; then
+            ARGS="$ARGS --expected-version $EXPECTED_VERSION"
+          fi
+          python scripts/check_version.py $ARGS
 
-          with open("pyproject.toml", "rb") as f:
-              project = tomllib.load(f)["project"]
-
-          package_name = project["name"]
-          project_version = project["version"]
-
-          module = ast.parse(open("kubeflow_mcp/__init__.py", encoding="utf-8").read())
-          code_version = None
-          for node in module.body:
-              if (
-                  isinstance(node, ast.Assign)
-                  and len(node.targets) == 1
-                  and isinstance(node.targets[0], ast.Name)
-                  and node.targets[0].id == "__version__"
-                  and isinstance(node.value, ast.Constant)
-                  and isinstance(node.value.value, str)
-              ):
-                  code_version = node.value.value
-                  break
-
-          if code_version is None:
-              raise SystemExit("__version__ not found in kubeflow_mcp/__init__.py")
-
-          print(f"Package name: {package_name}")
-          print(f"Project version: {project_version}")
-          print(f"Code version: {code_version}")
-
-          if project_version != code_version:
-              raise SystemExit("Version mismatch between pyproject.toml and kubeflow_mcp/__init__.py")
-
-          event_name = os.environ["GITHUB_EVENT_NAME"]
-          release_tag = os.environ.get("RELEASE_TAG", "")
-
-          if event_name == "release":
-              print(f"Release tag: {release_tag}")
-              if release_tag != project_version:
-                  raise SystemExit("Release tag must match the package version exactly")
-              target_ref = release_tag
-          else:
-              target_ref = os.environ["GITHUB_REF"]
-
-          is_prerelease = bool(re.search(r"(?:dev|rc)", project_version, re.IGNORECASE))
-
-          outputs = {
-              "artifact-name": f"dist-{project_version}",
-              "is-prerelease": str(is_prerelease).lower(),
-              "package-name": package_name,
-              "target-ref": target_ref,
-              "version": project_version,
-          }
-          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output_file:
-              for key, value in outputs.items():
-                  print(f"{key}={value}", file=output_file)
-          PY
+      - name: Resolve target ref
+        id: ref
+        run: |
+          if [[ "${{ github.event_name }}" == "release" ]]; then
+            echo "target-ref=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "target-ref=${{ github.ref }}" >> "$GITHUB_OUTPUT"
+          fi
 
   build:
     name: Build package
@@ -107,53 +74,17 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Setup build environment
-        run: |
-          make verify
+      - name: Install dependencies
+        run: make install-dev
+
+      - name: Run lint and formatting checks
+        run: make verify
 
       - name: Run unit tests
-        run: |
-          make test-python
+        run: make test-python
 
       - name: Verify version
-        env:
-          EXPECTED_VERSION: ${{ needs.prepare.outputs.version }}
-        run: |
-          python - <<'PY'
-          import ast
-          import os
-          import tomllib
-
-          expected_version = os.environ["EXPECTED_VERSION"]
-          with open("pyproject.toml", "rb") as f:
-              project_version = tomllib.load(f)["project"]["version"]
-
-          module = ast.parse(open("kubeflow_mcp/__init__.py", encoding="utf-8").read())
-          code_version = None
-          for node in module.body:
-              if (
-                  isinstance(node, ast.Assign)
-                  and len(node.targets) == 1
-                  and isinstance(node.targets[0], ast.Name)
-                  and node.targets[0].id == "__version__"
-                  and isinstance(node.value, ast.Constant)
-                  and isinstance(node.value.value, str)
-              ):
-                  code_version = node.value.value
-                  break
-
-          if code_version is None:
-              raise SystemExit("__version__ not found in kubeflow_mcp/__init__.py")
-
-          print(f"Expected version: {expected_version}")
-          print(f"Project version: {project_version}")
-          print(f"Code version: {code_version}")
-
-          if expected_version != project_version or project_version != code_version:
-              raise SystemExit("Version mismatch")
-
-          print(f"Version verified: {expected_version}")
-          PY
+        run: python scripts/check_version.py --expected-version "${{ needs.prepare.outputs.version }}"
 
       - name: Build and validate package
         run: |
@@ -208,13 +139,10 @@ jobs:
           verbose: true
 
   github-release:
-    name: Create GitHub Release
+    name: Upload release assets
     needs: [prepare, build, publish-pypi]
     if: always() && github.event_name == 'release' && needs.build.result == 'success' && (needs.publish-pypi.result == 'success' || needs.publish-pypi.result == 'skipped')
     runs-on: ubuntu-latest
-    environment:
-      name: release
-      url: https://github.com/kubeflow/mcp-server/releases/tag/${{ needs.prepare.outputs.version }}
     steps:
       - name: Download build artifacts
         uses: actions/download-artifact@v7
@@ -222,11 +150,7 @@ jobs:
           name: ${{ needs.prepare.outputs.artifact-name }}
           path: dist/
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ needs.prepare.outputs.version }}
-          name: ${{ needs.prepare.outputs.version }}
-          prerelease: ${{ needs.prepare.outputs.is-prerelease == 'true' }}
-          generate_release_notes: true
-          files: dist/*
+      - name: Upload assets to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" dist/* --repo "${{ github.repository }}" --clobber

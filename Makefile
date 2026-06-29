@@ -19,6 +19,10 @@ verify: install-dev ## Run linting and formatting checks
 	@uv run ruff check .
 	@uv run ruff format --check .
 
+.PHONY: check-version
+check-version: ## Verify pyproject.toml and __init__.py versions match
+	@python3 scripts/check_version.py
+
 .PHONY: format
 format: ## Auto-fix lint and formatting issues
 	@uv run ruff check --fix .
