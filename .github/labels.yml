@@ -1,0 +1,165 @@
+# Labels matching kubeflow/sdk taxonomy
+# Synced automatically via .github/workflows/sync-labels.yaml
+
+# ── kind/* ─────────────────────────────────────────────────────────────────────
+- name: kind/feature
+  color: "2515fc"
+  description: "New feature or request"
+
+- name: kind/bug
+  color: "fc2515"
+  description: "Something isn't working"
+
+- name: kind/cleanup
+  color: "6eadc1"
+  description: "Refactoring, chores, maintenance"
+
+- name: kind/discussion
+  color: "ecfc15"
+  description: "Design discussion or question"
+
+# ── area/* ─────────────────────────────────────────────────────────────────────
+- name: area/core
+  color: "0052cc"
+  description: "Core MCP server framework"
+
+- name: area/trainer
+  color: "d2b48c"
+  description: "TrainerClient tools"
+
+- name: area/agents
+  color: "83efc5"
+  description: "Agent backends (Ollama, LlamaIndex, etc.)"
+
+- name: area/optimizer
+  color: "0b24f3"
+  description: "OptimizerClient / Katib tools"
+
+- name: area/hub
+  color: "b63dce"
+  description: "Hub / Model Registry tools"
+
+- name: area/pipelines
+  color: "8fc221"
+  description: "Pipelines tools"
+
+- name: area/spark
+  color: "fbca04"
+  description: "SparkClient tools"
+
+- name: area/engprod
+  color: "09876a"
+  description: "CI/CD, Makefile, developer tooling"
+
+- name: area/testing
+  color: "00daff"
+  description: "Tests and benchmarks"
+
+- name: area/security
+  color: "e10269"
+  description: "Security hardening"
+
+- name: area/docs
+  color: "4230ce"
+  description: "Documentation"
+
+- name: area/examples
+  color: "b86ef3"
+  description: "Examples and tutorials"
+
+- name: area/observability
+  color: "c4e658"
+  description: "Metrics, tracing, logging"
+
+- name: area/release
+  color: "56c5da"
+  description: "Release management"
+
+- name: area/gsoc
+  color: "fcd915"
+  description: "Google Summer of Code"
+
+# ── lifecycle/* ────────────────────────────────────────────────────────────────
+- name: needs-triage
+  color: "BB2E03"
+  description: "Needs triage"
+
+- name: lifecycle/stale
+  color: "ededed"
+  description: "No recent activity"
+
+- name: lifecycle/frozen
+  color: "ededed"
+  description: "Frozen — do not close automatically"
+
+# ── triage/* ───────────────────────────────────────────────────────────────────
+- name: triage/accepted
+  color: "8fc951"
+  description: "Triaged and accepted"
+
+# ── do-not-merge/* ─────────────────────────────────────────────────────────────
+- name: do-not-merge/hold
+  color: "e11d48"
+  description: "Blocked — do not merge"
+
+- name: do-not-merge/work-in-progress
+  color: "e11d48"
+  description: "Work in progress"
+
+# ── size/* (managed by prow/bot) ───────────────────────────────────────────────
+- name: size/XS
+  color: "ededed"
+  description: ""
+
+- name: size/S
+  color: "ededed"
+  description: ""
+
+- name: size/M
+  color: "ededed"
+  description: ""
+
+- name: size/L
+  color: "ededed"
+  description: ""
+
+- name: size/XL
+  color: "ededed"
+  description: ""
+
+- name: size/XXL
+  color: "ededed"
+  description: ""
+
+# ── misc ───────────────────────────────────────────────────────────────────────
+- name: approved
+  color: "0ffa16"
+  description: "Approved by an approver in OWNERS"
+
+- name: lgtm
+  color: "e2e669"
+  description: "Looks good to me — approved by a reviewer"
+
+- name: ok-to-test
+  color: "74bb61"
+  description: "Approve CI for external contributors"
+
+- name: good first issue
+  color: "7057ff"
+  description: "Good for newcomers"
+
+- name: help wanted
+  color: "008672"
+  description: "Extra attention is needed"
+
+- name: question
+  color: "d876e3"
+  description: "Further information is requested"
+
+- name: wontfix
+  color: "ffffff"
+  description: "This will not be worked on"
+
+- name: dependencies
+  color: "ededed"
+  description: "Dependency updates"

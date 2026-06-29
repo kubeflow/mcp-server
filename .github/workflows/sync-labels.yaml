@@ -1,0 +1,33 @@
+# Syncs labels from .github/labels.yml into the GitHub repo.
+# Labels are largely aligned with kubeflow/sdk taxonomy but extended with
+# MCP-server-specific area/* labels (area/core, area/agents, area/observability, etc.).
+# Update .github/labels.yml and push to main to sync; or run manually via workflow_dispatch.
+name: Sync Labels
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/labels.yml
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Sync labels
+        uses: EndBug/label-sync@52074158190acb45f3077f9099fea818aa43f97a # v2
+        with:
+          config-file: .github/labels.yml
+          delete-other-labels: false
+          token: ${{ secrets.GITHUB_TOKEN }}
