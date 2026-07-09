@@ -290,5 +290,42 @@ class TestDeleteSession:
         assert out["error_code"] == "RESOURCE_NOT_FOUND"
 
 
+class TestClientFactory:
+    """get_spark_client_for_namespace must align the operated namespace with the
+    one check_namespace_allowed validates (no namespace-allowlist bypass)."""
+
+    def test_none_namespace_resolves_effective(self):
+        from kubeflow_mcp.common import utils
+
+        fake_cls = MagicMock()
+        utils._spark_ns_client_cache.clear()
+        with (
+            patch.object(utils, "_import_spark_client", return_value=fake_cls),
+            patch.object(utils, "get_trainer_effective_namespace", return_value="team-a"),
+        ):
+            utils.get_spark_client_for_namespace(None)
+        utils._spark_ns_client_cache.clear()
+
+        # A namespaced client was built for the *resolved* effective namespace.
+        assert fake_cls.call_count == 1
+        _args, kwargs = fake_cls.call_args
+        assert kwargs["backend_config"].namespace == "team-a"
+
+    def test_none_namespace_falls_back_when_resolution_fails(self):
+        from kubeflow_mcp.common import utils
+
+        with (
+            patch.object(
+                utils,
+                "get_trainer_effective_namespace",
+                side_effect=RuntimeError("no kubeconfig"),
+            ),
+            patch.object(utils, "get_spark_client", return_value="UNSCOPED") as gsc,
+        ):
+            out = utils.get_spark_client_for_namespace(None)
+        assert out == "UNSCOPED"
+        gsc.assert_called_once()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
