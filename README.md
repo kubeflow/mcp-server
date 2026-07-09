@@ -160,17 +160,30 @@ claude mcp add kubeflow -- kubeflow-mcp serve
 
 ```bash
 kubeflow-mcp serve \
-  --clients trainer,spark \       # modules: trainer, spark, optimizer (stub), hub (stub)
-  --persona ml-engineer \         # readonly | data-scientist | ml-engineer | platform-admin
-  --mode full \                   # full | progressive | semantic
-  --instruction-tier full \       # full | compact | minimal
-  --transport stdio \             # stdio | http | sse
-  --auth-token SECRET \           # bearer token for HTTP auth (dev/staging)
-  --otel-endpoint URL \           # OTLP HTTP endpoint (optional tracing)
-  --log-level INFO \              # DEBUG | INFO | WARNING | ERROR
-  --log-format console \          # console | json (auto-detected if omitted)
-  --no-banner                     # suppress startup banner
+  --clients trainer,spark \
+  --persona ml-engineer \
+  --mode full \
+  --instruction-tier full \
+  --transport stdio \
+  --auth-token SECRET \
+  --otel-endpoint URL \
+  --log-level INFO \
+  --log-format console \
+  --no-banner
 ```
+
+| Flag | Values |
+| ---- | ------ |
+| `--clients` | `trainer`, `spark`, `optimizer` (stub), `hub` (stub) |
+| `--persona` | `readonly` \| `data-scientist` \| `ml-engineer` \| `platform-admin` |
+| `--mode` | `full` \| `progressive` \| `semantic` |
+| `--instruction-tier` | `full` \| `compact` \| `minimal` |
+| `--transport` | `stdio` \| `http` \| `sse` |
+| `--auth-token` | bearer token for HTTP auth (dev/staging) |
+| `--otel-endpoint` | OTLP HTTP endpoint (optional tracing) |
+| `--log-level` | `DEBUG` \| `INFO` \| `WARNING` \| `ERROR` |
+| `--log-format` | `console` \| `json` (auto-detected if omitted) |
+| `--no-banner` | suppress startup banner |
 
 `--mode progressive` exposes 3 meta-tools (~85 tokens) for hierarchical discovery. `--mode semantic` exposes 2 meta-tools (~69 tokens) using embedding search. Both reduce token consumption significantly for agent workflows.
 
