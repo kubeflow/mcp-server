@@ -1,0 +1,12 @@
+blank_issues_enabled: true
+
+contact_links:
+  - name: Kubeflow MCP Server Documentation
+    url: https://www.kubeflow.org/docs/
+    about: Much help can be found in the docs
+  - name: Kubeflow ML experience Slack Channel
+    url: https://www.kubeflow.org/docs/about/community/#kubeflow-slack-channels
+    about: Ask the community on CNCF Slack — #kubeflow-ml-experience
+  - name: Kubeflow ML Experience WG Community Meeting
+    url: https://bit.ly/kf-ml-experience
+    about: Join the bi-weekly ML Experience WG meeting

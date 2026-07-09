@@ -1,0 +1,44 @@
+# Version control
+.git
+.github
+
+# Python runtime artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+
+# Build / dist
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+
+# Test + coverage
+tests/
+.coverage
+coverage.xml
+coverage.json
+htmlcov/
+.pytest_cache/
+
+# Documentation
+docs/
+
+# Dev tooling
+Makefile
+.pre-commit-config.yaml
+.ruff_cache/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*~
+
+# Secrets / local config
+.env
+.env.*

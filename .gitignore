@@ -2,8 +2,8 @@
 .vscode/
 .idea/
 __debug_bin
-.DS_Store
 *.swp
+*.swo
 *~
 
 # Python cache files
@@ -13,12 +13,23 @@ __pycache__/
 # Build artifacts
 build/
 dist/
+*.whl
 
 # Testing / coverage
+.pytest_cache/
 .coverage
+.coverage.*
 coverage.xml
 coverage.json
 htmlcov/
+.tox/
+.nox/
+.benchmarks/
+benchmark-results.json
+
+# Type checking
+.mypy_cache/
+.pytype/
 
 # Documentation build
 docs/_build/
@@ -26,7 +37,21 @@ docs/_build/
 # Environment / secrets
 .env
 .env.*
+.env.local
+*.local
 
 # Virtual environments
 .venv/
 venv/
+ENV/
+env/
+
+# uv
+.uv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db

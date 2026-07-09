@@ -1,7 +1,11 @@
 name: Feature Request
-description: Suggest a new feature
-labels: [enhancement]
+description: Suggest a new feature for Kubeflow MCP Server
+labels: ["kind/feature", "needs-triage"]
 body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to fill out this Kubeflow MCP Server feature request!
   - type: textarea
     id: description
     attributes:
@@ -14,7 +18,9 @@ body:
     id: use-case
     attributes:
       label: Use Case
-      description: Why is this feature needed?
+      description: Why is this feature needed? What problem does it solve?
+    validations:
+      required: true
 
   - type: textarea
     id: proposal
@@ -27,9 +33,19 @@ body:
     attributes:
       label: Component
       options:
+        - None
         - Core
         - TrainerClient
         - OptimizerClient
         - ModelRegistryClient
+        - PipelinesClient
+        - SparkClient
         - CLI
         - Documentation
+
+  - type: textarea
+    id: references
+    attributes:
+      label: References
+      description: Related issues, PRs, upstream KEPs, or SDK issues
+      placeholder: "e.g. kubeflow/sdk#125, KEP-936, agentgateway/agentgateway#42"

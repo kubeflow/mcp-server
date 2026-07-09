@@ -1,21 +1,25 @@
 ## Description
 
-<!-- Brief description of changes -->
+<!-- What does this PR do? -->
 
-## Type of Change
+## Related Issue
 
-- [ ] feat: New feature
-- [ ] fix: Bug fix
-- [ ] revert: Revert a change
-- [ ] chore: Maintenance / tooling
+<!-- Link to the issue this PR addresses -->
+Fixes #
 
 ## Checklist
 
+- [ ] I have read the [CONTRIBUTING](../CONTRIBUTING.md) guide
 - [ ] Tests pass locally (`make test-python`)
 - [ ] Linting passes (`make verify`)
 - [ ] Documentation updated (if applicable)
-- [ ] Commit messages follow conventional format
+- [ ] My commits are signed off (`git commit -s`)
 
-## Related Issues
+## Testing
 
-<!-- Link related issues: Fixes #123 -->
+<!-- Describe how this was tested. Check all that apply. -->
+
+- [ ] Unit tests
+- [ ] Integration tests
+- [ ] E2E tests
+- [ ] Manually tested (describe below)

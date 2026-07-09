@@ -108,4 +108,3 @@ Call `get_runtime("<runtime>", include_packages=True)` first — do NOT duplicat
 - Missing `pad_token` causes silent training failures
 - `device_map="auto"` breaks DDP multi-GPU training
 - Not adding emptyDir volumes on read-only filesystems (see trainer://guides/platform-fixes)
-

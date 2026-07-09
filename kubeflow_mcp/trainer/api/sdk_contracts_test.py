@@ -10,7 +10,9 @@ Tests validate:
 - Ensure dataclass fields match our usage
 """
 
+import builtins
 import inspect
+import textwrap
 from dataclasses import fields
 from typing import get_type_hints
 
@@ -547,11 +549,11 @@ class TestMCPToSDKConversions:
 
     def test_custom_training_script_to_callable(self):
         """Test that script string can become a callable for CustomTrainer."""
-        script = """
-def train_func():
-    import torch
-    print("Training...")
-"""
+        script = textwrap.dedent("""
+                def train_func():
+                    import torch
+                    print("Training...")
+                """)
         local_vars = {}
         exec(script, {}, local_vars)
         train_func = local_vars["train_func"]
@@ -563,6 +565,129 @@ def train_func():
         )
 
         assert callable(trainer.func)
+
+    def _run_wrapped_train(
+        self,
+        script: str,
+        func_args: dict | None = None,
+        **kwargs,
+    ):
+        from kubeflow_mcp.trainer.api.training import _make_train_func
+
+        builtins._kubeflow_mcp_train_marker = []
+        try:
+            train_func = _make_train_func(script, func_args=func_args)
+            train_func(**kwargs)
+            return builtins._kubeflow_mcp_train_marker
+        finally:
+            del builtins._kubeflow_mcp_train_marker
+
+    def test_make_train_func_calls_user_defined_train(self):
+        """A script-defined train() should run when the generated wrapper runs."""
+        marker = self._run_wrapped_train(
+            """
+                import builtins
+                def train():
+                    builtins._kubeflow_mcp_train_marker.append("ran")
+            """
+        )
+
+        assert marker == ["ran"]
+
+    def test_make_train_func_does_not_double_call_user_defined_train(self):
+        """A script that already calls train() should not run twice."""
+        marker = self._run_wrapped_train(
+            """
+                import builtins
+                def train():
+                    builtins._kubeflow_mcp_train_marker.append("ran")
+                train()
+            """
+        )
+
+        assert marker == ["ran"]
+
+    @pytest.mark.parametrize(
+        "train_call",
+        [
+            "result = train()",
+            "if True:\n    train()",
+            "print(train())",
+        ],
+    )
+    def test_make_train_func_detects_existing_train_calls(self, train_call):
+        """Existing train() calls in module-level code should not be duplicated."""
+        script = textwrap.dedent("""
+                import builtins
+                def train():
+                    builtins._kubeflow_mcp_train_marker.append("ran")
+        """) + train_call + "\n"
+        marker = self._run_wrapped_train(script)
+
+        assert marker == ["ran"]
+
+    def test_make_train_func_forwards_func_args_to_user_defined_train(self):
+        """Generated train() should forward matching func_args to a user-defined train()."""
+        marker = self._run_wrapped_train(
+            """
+                import builtins
+                def train(lr=None, epochs=None):
+                    builtins._kubeflow_mcp_train_marker.append((lr, epochs))
+            """,
+            func_args={"lr": 0.01, "epochs": 3},
+            lr=0.01,
+            epochs=3,
+        )
+
+        assert marker == [(0.01, 3)]
+
+    def test_make_train_func_raises_value_error_for_required_params(self):
+        """train(required_param) with no func_args must raise a ValueError."""
+        with pytest.raises(ValueError, match=r"User-defined train\(\) requires parameters but no func_args were provided"):
+            self._run_wrapped_train(
+                """
+                    import builtins
+                    def train(required_param):
+                        builtins._kubeflow_mcp_train_marker.append("ran")
+                """
+            )
+
+    def test_make_train_func_raises_syntax_error_for_invalid_script(self):
+        """SyntaxError in the user script should be surfaced."""
+        from kubeflow_mcp.trainer.api.training import _make_train_func
+
+        with pytest.raises(SyntaxError, match="Invalid Python script"):
+            _make_train_func("def train():\n    pass\n  invalid syntax")
+
+    def test_make_train_func_raises_value_error_for_mismatched_func_args(self):
+        """train() with no args but func_args provided should raise ValueError."""
+        with pytest.raises(ValueError, match=r"User-defined train\(\) signature does not accept"):
+            self._run_wrapped_train(
+                """
+                    def train():
+                        pass
+                """,
+                func_args={"lr": 0.01}
+            )
+
+    def test_make_train_func_adds_pass_for_empty_script(self):
+        """An empty or whitespace-only script should generate a valid def train(): pass."""
+        from kubeflow_mcp.trainer.api.training import _make_train_func
+
+        train_func = _make_train_func("   \n  \t  \n")
+        assert callable(train_func)
+        train_func()  # Should run without Error
+
+    def test_make_train_func_async_train_executes(self):
+        """async def train() should be invoked via asyncio.run()."""
+        marker = self._run_wrapped_train(
+            """
+                import builtins
+                async def train():
+                    builtins._kubeflow_mcp_train_marker.append("async_ran")
+            """
+        )
+        assert marker == ["async_ran"]
 
     def test_resources_dict_format(self):
         """Test resources_per_node dict format is valid for SDK."""
