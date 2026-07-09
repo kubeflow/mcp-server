@@ -18,7 +18,7 @@ The Kubeflow MCP Server exposes Kubeflow Training operations as [Model Context P
 - **Security-First**: Persona gating, namespace enforcement, input validation, bearer/JWT auth
 - **Multi-Platform**: Auto-detects OpenShift, EKS, GKE with platform-specific guidance
 - **Token-Efficient**: Progressive/semantic modes compress 23 tools into 2-3 meta-tools
-- **Extensible**: Plugin architecture for additional Kubeflow clients (TODO: optimizer, hub)
+- **Extensible**: Plugin architecture for additional Kubeflow clients (trainer, spark; TODO: optimizer, hub)
 
 ## Demo
 
@@ -181,7 +181,7 @@ claude mcp add kubeflow -- kubeflow-mcp serve
 ### `kubeflow-mcp serve`
 
 ```bash
-# Modules: trainer, optimizer (stub), hub (stub)
+# Modules: trainer, spark, optimizer (stub), hub (stub)
 # Persona: readonly | data-scientist | ml-engineer | platform-admin
 # Mode: full | progressive | semantic
 # Instruction tier: full | compact | minimal
@@ -192,7 +192,7 @@ claude mcp add kubeflow -- kubeflow-mcp serve
 # Log format: console | json (auto-detected if omitted)
 # No banner: suppress the FastMCP startup banner
 kubeflow-mcp serve \
-  --clients trainer \
+  --clients trainer,spark \
   --persona ml-engineer \
   --mode full \
   --instruction-tier full \
