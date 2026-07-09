@@ -207,12 +207,19 @@ _spark_ns_client_lock = threading.Lock()
 def get_spark_client_for_namespace(namespace: str | None = None) -> Any:
     """Return a SparkClient targeting the given namespace.
 
-    When *namespace* is ``None`` the shared singleton (default kubeconfig
-    namespace) is returned.  When a namespace is explicitly provided a cached
-    ``SparkClient`` scoped to that namespace is returned.
+    When *namespace* is ``None`` the effective default namespace is resolved via
+    the same path :func:`kubeflow_mcp.core.security.check_namespace_allowed` uses
+    (:func:`get_trainer_effective_namespace`) and the client is scoped to it, so
+    the namespace a request is *policy-checked* against always matches the one the
+    SparkClient actually *operates* in — closing a potential namespace-allowlist
+    bypass where the SDK's own default could diverge from the checked namespace.
+    Falls back to the unscoped singleton only if resolution fails.
     """
     if namespace is None:
-        return get_spark_client()
+        try:
+            namespace = get_trainer_effective_namespace(None)
+        except Exception:
+            return get_spark_client()
     with _spark_ns_client_lock:
         if namespace in _spark_ns_client_cache:
             return _spark_ns_client_cache[namespace]
