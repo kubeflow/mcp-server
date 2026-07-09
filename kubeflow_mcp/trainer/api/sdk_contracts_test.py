@@ -1111,8 +1111,45 @@ class TestMCPToolSignatures:
         ):
             resp = get_training_logs(name="crashed-job")
 
+        # Explicitly verify the fallback trigger condition (empty logs)
+        mock_client.get_job_logs.assert_called_once_with(
+            name="crashed-job", step="node-0", follow=False
+        )
         assert "CUDA out of memory" in resp["data"]["logs"]
         assert resp["data"]["failure_hint"]["category"] == "OOM"
         mock_v1.read_namespaced_pod_log.assert_called_once_with(
             name="crashed-pod-0", namespace="test-ns", previous=True, tail_lines=1000
         )
+
+    def test_get_training_logs_no_fallback_when_logs_exist(self):
+        """Verify get_training_logs does not fallback to previous=True when active container logs exist."""
+        from unittest.mock import MagicMock, patch
+
+        from kubeflow_mcp.trainer.api.monitoring import get_training_logs
+
+        mock_client = MagicMock()
+        # Return non-empty active logs
+        mock_client.get_job_logs.return_value = ["Active log line 1", "Active log line 2"]
+
+        mock_v1 = MagicMock()
+
+        with (
+            patch(
+                "kubeflow_mcp.trainer.api.monitoring.get_trainer_client_for_namespace",
+                return_value=mock_client,
+            ),
+            patch("kubeflow_mcp.trainer.api.monitoring.get_core_v1_api", return_value=mock_v1),
+            patch(
+                "kubeflow_mcp.trainer.api.monitoring.get_trainer_effective_namespace",
+                return_value="test-ns",
+            ),
+            patch("kubeflow_mcp.trainer.api.monitoring.check_namespace_allowed", return_value=None),
+        ):
+            resp = get_training_logs(name="active-job")
+
+        # Verify fallback logic was NOT triggered
+        mock_v1.list_namespaced_pod.assert_not_called()
+        mock_v1.read_namespaced_pod_log.assert_not_called()
+
+        # Verify normal behavior
+        assert "Active log line 1\nActive log line 2" in resp["data"]["logs"]
