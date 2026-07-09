@@ -21,7 +21,7 @@ import uuid
 from collections.abc import Callable
 from typing import Any
 
-from kubeflow.trainer.constants.constants import DEFAULT_PIP_INDEX_URLS
+from kubeflow.trainer.constants.constants import DATASET_PATH, DEFAULT_PIP_INDEX_URLS
 
 from kubeflow_mcp.common.constants import ErrorCode
 from kubeflow_mcp.common.types import PreviewResponse, ToolError, ToolResponse
@@ -148,12 +148,16 @@ def _inject_ownership_label(options: list) -> list:
 
 
 def _should_apply_hf_dataset_workaround(dataset: str) -> bool:
-    """Return True if dataset is a top-level HuggingFace URI that triggers SDK bug #32."""
+    """Return True if dataset is a top-level HuggingFace URI that triggers SDK bug #32.
+
+    HuggingFace dataset IDs are always ``org/name`` (exactly 2 segments).
+    Single-segment URIs like ``hf://ds`` are invalid and rejected.
+    URIs with subpaths like ``hf://org/ds/subpath`` don't trigger the bug.
+    """
     if not dataset.startswith("hf://"):
         return False
     hf_repo = dataset.removeprefix("hf://").strip("/")
-    return bool(hf_repo and len(hf_repo.split("/")) <= 2)
-
+    return bool(hf_repo and len(hf_repo.split("/")) == 2)
 
 
 def _sdk_error(e: Exception, hint: str | None = None) -> dict[str, Any]:
@@ -768,9 +772,7 @@ def fine_tune(
         # We override the torchtune CLI args directly via TrainerArgs.
         if _should_apply_hf_dataset_workaround(dataset):
             options.append(
-                TrainerArgs(
-                    args=["dataset.source=/workspace/dataset", "dataset.data_dir=null"]
-                )
+                TrainerArgs(args=[f"dataset.source={DATASET_PATH}", "dataset.data_dir=null"])
             )
 
         client = _get_client(namespace)

@@ -851,8 +851,30 @@ class TestMCPToolSignatures:
 
         assert _should_apply_hf_dataset_workaround("hf://org/ds") is True
         assert _should_apply_hf_dataset_workaround("hf://org/ds/") is True
-        assert _should_apply_hf_dataset_workaround("hf://ds") is True
+        assert _should_apply_hf_dataset_workaround("hf://ds") is False
         assert _should_apply_hf_dataset_workaround("hf://") is False
         assert _should_apply_hf_dataset_workaround("hf://org/ds/subpath") is False
         assert _should_apply_hf_dataset_workaround("s3://bucket/dataset") is False
 
+    def test_fine_tune_preview_includes_workaround_hint(self):
+        """confirmed=False preview path returns config without submitting the job."""
+        from unittest.mock import MagicMock, patch
+
+        from kubeflow_mcp.trainer.api.training import fine_tune
+
+        mock_client = MagicMock()
+
+        with (
+            patch("kubeflow_mcp.trainer.api.training._get_client", return_value=mock_client),
+            patch("kubeflow_mcp.trainer.api.training.check_namespace_allowed", return_value=None),
+        ):
+            resp = fine_tune(
+                model="hf://google/gemma-2b",
+                dataset="hf://tatsu-lab/alpaca",
+                confirmed=False,
+            )
+
+        # Preview should return config without actually creating a job.
+        assert "config" in resp
+        assert resp["config"]["mode"] == "builtin_trainer"
+        mock_client.create_job.assert_not_called()
