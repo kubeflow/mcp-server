@@ -226,6 +226,7 @@ CLIENT_MODULES = {
     "trainer": "kubeflow_mcp.trainer",
     "optimizer": "kubeflow_mcp.optimizer",
     "hub": "kubeflow_mcp.hub",
+    "spark": "kubeflow_mcp.spark",
 }
 
 _GLOBAL_HEADER = """\
