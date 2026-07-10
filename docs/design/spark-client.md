@@ -106,17 +106,15 @@ all five tools in `full` and `progressive` modes.
 
 ## Scope & phasing
 
-Answering the review questions on splitting scope and sequencing:
-
 - **This PR = SparkConnect only.** It matches the SDK surface that is *already
   released*, keeping the change reviewable and immediately usable.
-- **SparkJob = follow-up PR**, gated on [kubeflow/sdk#521](https://github.com/kubeflow/sdk/pull/521)
-  merging and a released `kubeflow` version exposing the batch APIs. It would add a
-  parallel set of tools (submit/list/get/logs/delete for `SparkApplication`) under
-  the same module, reusing this module's patterns.
-- **Dependencies / sequencing.** No hard blocker for this PR — it depends only on
-  the released `kubeflow[spark]` SparkConnect APIs. The SparkJob follow-up is the
-  only piece with a sequencing dependency (on the SDK batch work).
+- **SparkJob is out of scope here.** Spark batch jobs (`SparkApplication`) depend
+  on [kubeflow/sdk#521](https://github.com/kubeflow/sdk/pull/521), which is not yet
+  in a released `kubeflow` version, so they are left as potential follow-up work
+  once that SDK support lands — a parallel submit/list/get/logs/delete tool set
+  under the same module, reusing these patterns.
+- **Dependencies.** This PR depends only on the released `kubeflow[spark]`
+  SparkConnect APIs.
 
 ## Future work
 
