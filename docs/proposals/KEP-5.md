@@ -73,8 +73,14 @@ ROADMAP Phase 6 lists **Spark** ([#5](https://github.com/kubeflow/mcp-server/iss
 | Kubernetes | >= 1.27 | Matches existing MCP server requirement |
 | Python | >= 3.10 | Matches existing MCP server requirement |
 
+> **Note:** on the released 0.4.0/0.4.1 baseline, `SparkConnectInfo`'s driver-pod field is named
+> `pod_name`; it was renamed to `driver_pod_name` only on unreleased SDK `main`. See
+> "Serialize the released field name" under Key Design Decisions.
+
 ## Goals
 
+- Guard `delete_spark_session` so non-`platform-admin` personas can only delete sessions created
+  through MCP, mirroring the trainer's ownership check (see Key Design Decisions).
 - Implement **5 MCP tools** across Discovery, Sessions, and Monitoring for the SparkConnect
   session lifecycle.
 - Load the module (and its tool metadata) **without** requiring the optional `kubeflow[spark]`
@@ -93,7 +99,8 @@ ROADMAP Phase 6 lists **Spark** ([#5](https://github.com/kubeflow/mcp-server/iss
   data plane attaches with PySpark using the returned connect info.
 - **Attaching to a pre-existing external Spark Connect server** (`connect(base_url=…)` returns a
   live `SparkSession`, which is not serializable over MCP).
-- **`follow=True` streaming logs** — a stateless MCP tool returns a bounded snapshot.
+- **`follow=True` streaming logs** — a stateless MCP tool returns a snapshot, truncated
+  client-side to the last `tail_lines` (see Risks for the retrieval-bound caveat).
 
 ## Proposal
 
@@ -115,6 +122,12 @@ kubeflow_mcp/spark/
 - **Wrap only public, JSON-serializable methods.** `SparkConnectInfo` (a dataclass with an enum
   + datetime) is normalized to a plain dict. `connect()` returns a live pyspark `SparkSession`,
   which is handled specially (below).
+- **Serialize the released field name, not `main`.** The released `kubeflow[spark]` baseline
+  this KEP targets (0.4.0, 0.4.1) names the driver-pod field `SparkConnectInfo.pod_name`; the
+  field was renamed to `driver_pod_name` only on unreleased SDK `main`. The serialization helper
+  reads `pod_name` first and falls back to `driver_pod_name` (first non-`None` wins), so session
+  info stays correct against the released baseline today and keeps working if/when the rename
+  ships in a future release.
 - **Lazy SDK imports.** `kubeflow.spark` / `pyspark` are imported inside the client factory and
   the create path only, so `import kubeflow_mcp.spark` works without the `[spark]` extra; a
   missing extra surfaces a friendly `SDK_ERROR`.
@@ -124,6 +137,17 @@ kubeflow_mcp/spark/
   returns session metadata + connect info; the data plane attaches separately. If `connect()`
   fails *after* the CR is created (e.g. the MCP host can't reach the driver), the tool reports
   the provisioned session with a warning rather than losing it.
+  **Known limitation:** when the MCP server runs outside the cluster, `connect()` opens a
+  `kubectl port-forward` subprocess to reach the driver; `SparkSession.stop()` does not
+  terminate it, so repeated calls in an out-of-cluster deployment can leak subprocesses and
+  listening ports (see Risks).
+- **Ownership guard on delete.** `delete_spark_session` mirrors the trainer's `is_mcp_managed()`
+  pattern (`kubeflow_mcp/common/utils.py`, `trainer/api/lifecycle.py`): `create_spark_session`
+  labels the session with `MCP_MANAGED_LABEL` via the SDK's `Labels` option, and for
+  non-`platform-admin` personas, `delete_spark_session` checks that label before deleting and
+  rejects the request with a clear error if the session wasn't created through MCP. Without this,
+  any persona with delete access could remove *any* SparkConnect session in an allowed namespace,
+  not only MCP-created ones.
 - **Namespace safety.** A `None` namespace resolves the effective namespace via the same resolver
   `check_namespace_allowed` uses, so the policy-checked namespace always matches the one the
   client operates in.
@@ -143,13 +167,13 @@ kubeflow_mcp/spark/
 | Tool | Description | SDK Method |
 |------|-------------|------------|
 | `create_spark_session` | Create a session (two-phase confirm); returns connect info | `connect()` (create mode) |
-| `delete_spark_session` | [DESTRUCTIVE] Delete a session (two-phase confirm) | `delete_session()` |
+| `delete_spark_session` | [DESTRUCTIVE] Delete a session (two-phase confirm; ownership-guarded for non-admin personas) | `delete_session()` |
 
 #### Monitoring (phase `spark_monitoring`)
 
 | Tool | Description | SDK Method |
 |------|-------------|------------|
-| `get_spark_session_logs` | Bounded driver-pod logs (`tail_lines`) | `get_session_logs()` |
+| `get_spark_session_logs` | Driver-pod logs, truncated to the last `tail_lines` after retrieval | `get_session_logs()` |
 
 ### Persona Coverage
 
@@ -159,7 +183,9 @@ kubeflow_mcp/spark/
 | `data-scientist` (inherits readonly) | `create_spark_session`, `delete_spark_session` |
 | `ml-engineer` / `platform-admin` | inherit the above / unrestricted |
 
-`delete_spark_session` is added to `DESTRUCTIVE_TOOLS`.
+`delete_spark_session` is added to `DESTRUCTIVE_TOOLS` and, like `delete_training_job`, is
+ownership-guarded: non-`platform-admin` personas may only delete sessions created through MCP
+(see "Ownership guard on delete" under Key Design Decisions).
 
 ### Tool Phase Categories
 
@@ -180,9 +206,9 @@ log inspection) and the `training` section (create → attach → delete lifecyc
 |----------------------------|----------|-------|
 | `list_sessions()` | `list_spark_sessions` | |
 | `get_session()` | `get_spark_session` | |
-| `get_session_logs()` | `get_spark_session_logs` | bounded snapshot; `follow=True` not exposed |
-| `connect()` (create mode) | `create_spark_session` | releases the transient `SparkSession`, returns metadata |
-| `delete_session()` | `delete_spark_session` | destructive, confirm-gate |
+| `get_session_logs()` | `get_spark_session_logs` | client-side truncation only — the SDK call retrieves the full log before we truncate to `tail_lines` (see Risks); `follow=True` not exposed |
+| `connect()` (create mode) | `create_spark_session` | releases the transient `SparkSession`, returns metadata; labels the session for ownership tracking |
+| `delete_session()` | `delete_spark_session` | destructive, confirm-gate, ownership-guarded |
 
 #### SDK Compatibility Snippet
 
@@ -221,14 +247,19 @@ context switch.
 | pyspark ↔ cluster Spark version mismatch | Documented in the compatibility table and `spark://guides/troubleshooting` |
 | XXL PR scope | Scoped to SparkConnect only; SparkJob deferred to a follow-up gated on kubeflow/sdk#521 |
 | SDK API stability | Pinned to the released 0.4.0 baseline; covered/uncovered methods enumerated in `SDK_COMPATIBILITY` |
+| `delete_spark_session` lacks an ownership check | Mirror the trainer's `is_mcp_managed()` pattern: label MCP-created sessions and reject deletion of unowned sessions for non-`platform-admin` personas |
+| `get_session_logs()` retrieves the entire log before truncation | SDK 0.4.x calls `read_namespaced_pod_log` without a server-side tail limit, so today's `tail_lines` truncation is client-side only (no network/memory bound). Mitigation: bypass the SDK wrapper and call `CoreV1Api.read_namespaced_pod_log(tail_lines=...)` directly for a true server-side bound (trainer's `discovery.py` already uses `CoreV1Api` directly for a comparable case), or request SDK support for a `tail_lines` passthrough |
+| Out-of-cluster deployment leaks `kubectl port-forward` subprocesses on repeated `create_spark_session` calls | `SparkSession.stop()` does not terminate the backend's port-forward process. Mitigation: recommend in-cluster deployment of the MCP server as the supported mode for `create_spark_session`; track an SDK enhancement for explicit port-forward handle/cleanup exposure |
 
 ## Testing Plan
 
-- **Unit tests** (33, `tests/unit/spark/`): tool metadata/annotation consistency, persona +
-  phase + destructive-policy wiring, `SparkConnectInfo` serialization, and mocked-`SparkClient`
-  behavior for all five tools (state filter, not-found → `RESOURCE_NOT_FOUND`, log
-  tailing/truncation, confirm-gate previews, namespace resolution). The SDK is mocked, so tests
-  run **without** the `kubeflow[spark]` extra.
+- **Unit tests** (`tests/unit/spark/`): tool metadata/annotation consistency, persona +
+  phase + destructive-policy wiring, `SparkConnectInfo` serialization (including the
+  `pod_name`/`driver_pod_name` dual-field fallback), and mocked-`SparkClient` behavior for all
+  five tools (state filter, not-found → `RESOURCE_NOT_FOUND`, log tailing/truncation,
+  confirm-gate previews, namespace resolution, ownership-guard accept/reject paths on
+  `delete_spark_session` for non-admin personas). The SDK is mocked, so tests run **without**
+  the `kubeflow[spark]` extra.
 - **Server load**: `create_server(clients=["trainer", "spark"])` registers all five tools in
   both `full` and `progressive` modes.
 
