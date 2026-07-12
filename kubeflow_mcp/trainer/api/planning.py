@@ -75,8 +75,20 @@ def _get_model_info_from_hf(model: str) -> dict[str, Any] | None:
             return result
 
         from huggingface_hub import model_info
+        from huggingface_hub.errors import RepositoryNotFoundError
 
-        info = model_info(model, timeout=10)
+        try:
+            info = model_info(model, timeout=10)
+        except RepositoryNotFoundError as e:
+            # A well-formed id but no such repo (usually a typo); offer the same
+            # best-effort suggestions so callers still get a "did you mean".
+            # Other failures (auth, rate-limit, network, metadata) fall through
+            # to the outer handler unchanged, with no extra Hub request.
+            not_found: dict[str, Any] = {"error": str(e)}
+            suggestions = _suggest_hf_model_ids(model)
+            if suggestions:
+                not_found["suggestions"] = suggestions
+            return not_found
 
         # Get parameter count from safetensors metadata
         params = None
@@ -95,14 +107,7 @@ def _get_model_info_from_hf(model: str) -> dict[str, Any] | None:
         }
 
     except Exception as e:
-        # A valid-format but nonexistent id (e.g. a typo) lands here rather than
-        # the format branch above; offer the same best-effort suggestions so
-        # callers still get a "did you mean" list.
-        result: dict[str, Any] = {"error": str(e)}
-        suggestions = _suggest_hf_model_ids(model)
-        if suggestions:
-            result["suggestions"] = suggestions
-        return result
+        return {"error": str(e)}
 
 
 QUANTIZATION_BYTES: dict[str, float] = {

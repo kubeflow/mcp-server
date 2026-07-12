@@ -17,6 +17,9 @@
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import httpx
+from huggingface_hub.errors import RepositoryNotFoundError
+
 from kubeflow_mcp.trainer.api.planning import (
     _get_model_info_from_hf,
     _suggest_hf_model_ids,
@@ -26,6 +29,14 @@ from kubeflow_mcp.trainer.api.planning import (
 
 def _fake_models(*ids):
     return [SimpleNamespace(id=model_id) for model_id in ids]
+
+
+def _repo_not_found():
+    # The concrete exception model_info raises for a nonexistent repo.
+    request = httpx.Request("GET", "https://huggingface.co/api/models/x")
+    return RepositoryNotFoundError(
+        "Repository Not Found", response=httpx.Response(404, request=request)
+    )
 
 
 def test_suggest_normalizes_ollama_tag():
@@ -133,7 +144,7 @@ def test_not_found_id_attaches_suggestions():
     # A valid-format but nonexistent id fails at model_info (not the regex check),
     # and should still get "did you mean" suggestions.
     with (
-        patch("huggingface_hub.model_info", side_effect=RuntimeError("Repository Not Found")),
+        patch("huggingface_hub.model_info", side_effect=_repo_not_found()),
         patch("huggingface_hub.list_models") as mock_list,
     ):
         mock_list.return_value = _fake_models("meta-llama/Llama-3.2-1B")
@@ -145,7 +156,7 @@ def test_not_found_id_attaches_suggestions():
 
 def test_not_found_id_omits_suggestions_when_hub_errors():
     with (
-        patch("huggingface_hub.model_info", side_effect=RuntimeError("Repository Not Found")),
+        patch("huggingface_hub.model_info", side_effect=_repo_not_found()),
         patch("huggingface_hub.list_models", side_effect=RuntimeError("offline")),
     ):
         result = _get_model_info_from_hf("meta-lama/Llama-3")
@@ -156,7 +167,7 @@ def test_not_found_id_omits_suggestions_when_hub_errors():
 
 def test_estimate_resources_surfaces_suggestions_on_not_found():
     with (
-        patch("huggingface_hub.model_info", side_effect=RuntimeError("Repository Not Found")),
+        patch("huggingface_hub.model_info", side_effect=_repo_not_found()),
         patch("huggingface_hub.list_models") as mock_list,
     ):
         mock_list.return_value = _fake_models("meta-llama/Llama-3.2-1B")
@@ -164,3 +175,18 @@ def test_estimate_resources_surfaces_suggestions_on_not_found():
 
     assert result["success"] is False
     assert result["details"]["suggestions"] == ["meta-llama/Llama-3.2-1B"]
+
+
+def test_non_not_found_error_skips_suggestions():
+    # Only a missing repo should trigger suggestions. Other failures (timeout,
+    # auth/rate-limit, metadata errors) surface unchanged and make no extra Hub
+    # request, so an outage or a gated model does not get misleading matches.
+    with (
+        patch("huggingface_hub.model_info", side_effect=TimeoutError("timed out")),
+        patch("huggingface_hub.list_models") as mock_list,
+    ):
+        result = _get_model_info_from_hf("meta-llama/Llama-3.2-1B")
+
+    assert "error" in result
+    assert "suggestions" not in result
+    mock_list.assert_not_called()
