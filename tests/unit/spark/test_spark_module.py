@@ -45,12 +45,17 @@ SPARK_TOOL_NAMES = {t.__name__ for t in TOOLS}
 def _fake_session(
     name="spark-connect-ab12", state="Ready", namespace="default", driver_pod="drv-0"
 ):
-    """Build a duck-typed SparkConnectInfo (str-enum state, datetime timestamp)."""
+    """Build a duck-typed SparkConnectInfo (str-enum state, datetime timestamp).
+
+    Uses ``pod_name`` to match the released ``kubeflow[spark]`` 0.4.x SDK (the
+    declared compatibility baseline); unreleased SDK ``main`` renamed it to
+    ``driver_pod_name`` (covered separately by the fallback test below).
+    """
     return types.SimpleNamespace(
         name=name,
         namespace=namespace,
         state=types.SimpleNamespace(value=state),
-        driver_pod_name=driver_pod,
+        pod_name=driver_pod,
         pod_ip="10.0.0.5",
         service_name=f"{name}-svc",
         creation_timestamp=datetime(2026, 7, 9, 12, 0, 0),
@@ -157,6 +162,34 @@ class TestSerialization:
         info = _fake_session()
         info.state = "Failed"  # tolerate a plain string state
         assert session_info_to_dict(info)["state"] == "Failed"
+
+    def test_driver_pod_name_from_released_pod_name_field(self):
+        # Released kubeflow[spark] 0.4.0/0.4.1 exposes the driver pod as
+        # `pod_name`; the serializer must surface it under `driver_pod_name`.
+        info = types.SimpleNamespace(
+            name="s",
+            namespace="default",
+            state=types.SimpleNamespace(value="Ready"),
+            pod_name="server-pod-0",
+            pod_ip=None,
+            service_name=None,
+            creation_timestamp=None,
+        )
+        assert session_info_to_dict(info)["driver_pod_name"] == "server-pod-0"
+
+    def test_driver_pod_name_fallback_to_main_field(self):
+        # Unreleased SDK `main` renamed the field to `driver_pod_name`; the
+        # serializer falls back to it when `pod_name` is absent.
+        info = types.SimpleNamespace(
+            name="s",
+            namespace="default",
+            state=types.SimpleNamespace(value="Ready"),
+            driver_pod_name="server-pod-1",
+            pod_ip=None,
+            service_name=None,
+            creation_timestamp=None,
+        )
+        assert session_info_to_dict(info)["driver_pod_name"] == "server-pod-1"
 
 
 # ─── Tool behavior (mocked SparkClient) ─────────────────────────────────────
