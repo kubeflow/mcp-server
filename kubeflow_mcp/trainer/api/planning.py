@@ -36,17 +36,30 @@ def _suggest_hf_model_ids(model: str, limit: int = 3) -> list[str]:
 
     Normalizes common non-Hub formats into a search term (drops an ``hf://``
     prefix and any Ollama-style ``:tag`` suffix such as ``qwen3:8b``) and asks
-    the Hub for close matches. Returns an empty list when the lookup errors or
-    finds nothing, so the suggestions stay best-effort and the validation path
-    never depends on network access.
+    the Hub for close matches ranked by downloads, so canonical repos surface
+    ahead of community fine-tunes. If a full ``org/name`` term finds nothing
+    (usually a typo in the org, e.g. ``meta-lama/Llama-3``), it retries on just
+    the model name. Returns an empty list when the lookup errors or finds
+    nothing, so the suggestions stay best-effort and the validation path never
+    depends on network access.
     """
-    search = model.strip().removeprefix("hf://").split(":", 1)[0].strip()
-    if not search:
+    normalized = model.strip().removeprefix("hf://").split(":", 1)[0].strip()
+    if not normalized:
         return []
+    terms = [normalized]
+    name = normalized.rsplit("/", 1)[-1]
+    if name and name != normalized:
+        terms.append(name)
     try:
         from huggingface_hub import list_models
 
-        return [m.id for m in list_models(search=search, limit=limit, full=False)]
+        for term in terms:
+            matches = [
+                m.id for m in list_models(search=term, sort="downloads", limit=limit, full=False)
+            ]
+            if matches:
+                return matches
+        return []
     except Exception:  # noqa: BLE001 - suggestions are best-effort, never fatal
         return []
 
@@ -82,7 +95,14 @@ def _get_model_info_from_hf(model: str) -> dict[str, Any] | None:
         }
 
     except Exception as e:
-        return {"error": str(e)}
+        # A valid-format but nonexistent id (e.g. a typo) lands here rather than
+        # the format branch above; offer the same best-effort suggestions so
+        # callers still get a "did you mean" list.
+        result: dict[str, Any] = {"error": str(e)}
+        suggestions = _suggest_hf_model_ids(model)
+        if suggestions:
+            result["suggestions"] = suggestions
+        return result
 
 
 QUANTIZATION_BYTES: dict[str, float] = {
