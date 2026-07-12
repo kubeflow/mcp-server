@@ -38,8 +38,6 @@ jobs:
           sudo mv osv-scanner /usr/local/bin/
 
       - name: Run OSV-Scanner (SARIF for Security Tab)
-        # continue-on-error so a SARIF failure doesn't block the JSON scan + auto-fix below
-        continue-on-error: true
         run: |
           rc=0
           osv-scanner scan \
@@ -60,6 +58,8 @@ jobs:
           category: kubeflow-mcp-osv-scanner
 
       - name: Run OSV-Scanner (JSON for auto-fix)
+        # always() so a crash in the SARIF step above still doesn't skip the independent JSON scan
+        if: always()
         run: |
           rc=0
           osv-scanner scan \
@@ -165,7 +165,7 @@ jobs:
             # Compare: does natural version meet the fix?
             # compare_versions.py exits: 0 = upgrade needed, 1 = sufficient, 2 = parse error
             CMP_EXIT=0
-            uv run python3 .github/scripts/compare_versions.py "$NATURAL_VER" "$fix_ver" || CMP_EXIT=$?
+            uv run --with packaging python3 .github/scripts/compare_versions.py "$NATURAL_VER" "$fix_ver" || CMP_EXIT=$?
 
             if [ "$CMP_EXIT" -eq 2 ]; then
               echo "Warning: Could not parse versions for $pkg ($NATURAL_VER vs $fix_ver), skipping"
