@@ -9,8 +9,8 @@ creation-date: 2026-07-11
 # KEP-5: SparkConnect (Spark) Client Support for kubeflow-mcp-server
 
 This KEP proposes implementing the **Spark client module** for
-`kubeflow-mcp-server`, exposing the SparkConnect session lifecycle as 5 MCP
-tools across 3 categories. This implements the "Spark (Planned: Phase 6)" node
+`kubeflow-mcp-server`, exposing the SparkConnect session lifecycle as 6 MCP
+tools across 4 categories. This implements the "Spark (Planned: Phase 6)" node
 already identified in the architecture (module: `kubeflow_mcp.spark`), tracked
 by [#5](https://github.com/kubeflow/mcp-server/issues/5) — the number this KEP
 takes its name from, following the convention set by
@@ -23,7 +23,7 @@ A reference implementation is available in
 ## Summary
 
 This KEP proposes a **Spark client module** for `kubeflow-mcp-server`, exposing the
-**SparkConnect session lifecycle** as **5 MCP tools** across 3 categories (Discovery,
+**SparkConnect session lifecycle** as **6 MCP tools** across 4 categories (Planning, Discovery,
 Sessions, Monitoring). It implements the "Spark (Planned: Phase 6)" node identified in the
 architecture (issue [#5](https://github.com/kubeflow/mcp-server/issues/5)) by wrapping the
 already-released `kubeflow.spark.SparkClient` — the SparkConnect surface of the SDK's Spark
@@ -54,7 +54,7 @@ CLIENT_MODULES = {
     "trainer": "kubeflow_mcp.trainer",     # implemented
     "optimizer": "kubeflow_mcp.optimizer", # stub
     "hub": "kubeflow_mcp.hub",             # stub
-    "spark": "kubeflow_mcp.spark",         # this KEP (5 tools)
+    "spark": "kubeflow_mcp.spark",         # this KEP (6 tools)
 }
 ```
 
@@ -81,8 +81,10 @@ ROADMAP Phase 6 lists **Spark** ([#5](https://github.com/kubeflow/mcp-server/iss
 
 - Guard `delete_spark_session` so non-`platform-admin` personas can only delete sessions created
   through MCP, mirroring the trainer's ownership check (see Key Design Decisions).
-- Implement **5 MCP tools** across Discovery, Sessions, and Monitoring for the SparkConnect
-  session lifecycle.
+- Implement **6 MCP tools** across Planning, Discovery, Sessions, and Monitoring for the
+  SparkConnect session lifecycle, including a `spark_pre_flight` readiness check (CRD, controller
+  health, SDK importability) mirroring the trainer's `pre_flight()` and KEP-34's
+  `katib_pre_flight`.
 - Load the module (and its tool metadata) **without** requiring the optional `kubeflow[spark]`
   extra — all SDK imports are lazy.
 - Apply the server's existing conventions: persona filtering, confirm-gate for mutations,
@@ -110,6 +112,7 @@ ROADMAP Phase 6 lists **Spark** ([#5](https://github.com/kubeflow/mcp-server/iss
 kubeflow_mcp/spark/
 ├── __init__.py        # MODULE_INFO, TOOLS, descriptions/annotations, resources, instruction sections
 ├── api/
+│   ├── planning.py    # spark_pre_flight
 │   ├── discovery.py   # list_spark_sessions, get_spark_session
 │   ├── sessions.py    # create_spark_session, delete_spark_session
 │   └── monitoring.py  # get_spark_session_logs
@@ -155,6 +158,20 @@ kubeflow_mcp/spark/
 
 ### MCP Tools
 
+#### Planning (phase `spark_planning`)
+
+| Tool | Description | SDK Method |
+|------|-------------|------------|
+| `spark_pre_flight` | Verify the SparkConnect CRD (`sparkoperator.k8s.io/v1alpha1`) is installed, the Spark Operator controller is healthy, and `kubeflow[spark]` is importable | `ApiextensionsV1Api` + `CoreV1Api` + import check |
+
+> **Scope note**: mirrors the trainer's `pre_flight()` and KEP-34's
+> `katib_pre_flight` — a compound readiness check run first, before any other
+> Spark tool. Unlike the trainer's 4-sub-check `pre_flight()`, this is
+> narrower by design: it validates Spark-specific readiness only (CRD,
+> controller, SDK availability), not cluster resource sizing (Spark sessions
+> are user-sized via `num_executors`/`executor_resources`, not estimated from
+> a model like `fine_tune()`).
+
 #### Discovery (phase `spark_discovery`)
 
 | Tool | Description | SDK Method |
@@ -179,7 +196,7 @@ kubeflow_mcp/spark/
 
 | Persona | Spark tools |
 |---------|-------------|
-| `readonly` | `list_spark_sessions`, `get_spark_session`, `get_spark_session_logs` |
+| `readonly` | `spark_pre_flight`, `list_spark_sessions`, `get_spark_session`, `get_spark_session_logs` |
 | `data-scientist` (inherits readonly) | `create_spark_session`, `delete_spark_session` |
 | `ml-engineer` / `platform-admin` | inherit the above / unrestricted |
 
@@ -189,14 +206,16 @@ ownership-guarded: non-`platform-admin` personas may only delete sessions create
 
 ### Tool Phase Categories
 
-Three phases are added to `TOOL_PHASES`: `spark_discovery`, `spark_sessions`, `spark_monitoring`.
-The module's `PHASE_TO_SECTION` maps them onto the server's existing instruction slots
-(`monitoring` / `training`) so guidance surfaces for the right personas.
+Four phases are added to `TOOL_PHASES`: `spark_planning`, `spark_discovery`, `spark_sessions`,
+`spark_monitoring`. The module's `PHASE_TO_SECTION` maps them onto the server's existing
+instruction slots (`planning` / `monitoring` / `training`) so guidance surfaces for the right
+personas.
 
 ### Instruction Sections
 
-The module contributes Spark guidance under the `monitoring` section (session discovery +
-log inspection) and the `training` section (create → attach → delete lifecycle).
+The module contributes Spark guidance under the `planning` section (`spark_pre_flight` — run
+first), the `monitoring` section (session discovery + log inspection), and the `training` section
+(create → attach → delete lifecycle).
 
 ### SDK Compatibility Update
 
@@ -209,6 +228,13 @@ log inspection) and the `training` section (create → attach → delete lifecyc
 | `get_session_logs()` | `get_spark_session_logs` | client-side truncation only — the SDK call retrieves the full log before we truncate to `tail_lines` (see Risks); `follow=True` not exposed |
 | `connect()` (create mode) | `create_spark_session` | releases the transient `SparkSession`, returns metadata; labels the session for ownership tracking |
 | `delete_session()` | `delete_spark_session` | destructive, confirm-gate, ownership-guarded |
+
+#### Tools Beyond SDK Abstraction
+
+- **`spark_pre_flight`**: `SparkClient` has no readiness-check method. MCP exposes this using
+  `ApiextensionsV1Api` (CRD existence), `CoreV1Api` (Spark Operator controller pod health), and a
+  Python import check (`kubeflow[spark]` availability) — the same direct-API pattern the trainer
+  uses in `check_compatibility()`/`pre_flight()` and KEP-34 uses for `katib_pre_flight`.
 
 #### SDK Compatibility Snippet
 
@@ -228,6 +254,9 @@ log inspection) and the `training` section (create → attach → delete lifecyc
                                           # non-serializable pyspark SparkSession
         "get_session_logs(follow=True)",  # streaming not exposed
     ],
+    "k8s_api_operations": [
+        "spark_pre_flight (ApiextensionsV1Api CRD check + CoreV1Api controller health)",
+    ],
 },
 ```
 
@@ -237,6 +266,26 @@ Spark (data preparation) and Trainer (training) together cover a common ML loop 
 interface. Both share the SDK 0.4.0 baseline and the same server conventions (personas,
 confirm-gate, phases, instruction composition), so an agent can move between them without a
 context switch.
+
+#### TOOL_NEXT_HINTS
+
+Concrete `_meta.next` hints for clients that don't consume server instructions or resources
+(e.g. Ollama, custom agents), following the pattern already used for trainer tools:
+
+| Tool | Hint |
+|------|------|
+| `spark_pre_flight` | If checks pass, call `create_spark_session()` to provision a session |
+| `list_spark_sessions` | Call `get_spark_session(name)` for details on a specific session |
+| `get_spark_session` | Use `get_spark_session_logs(name)` for driver output, or `delete_spark_session(name)` to tear down |
+| `get_spark_session_logs` | If errors found, check the session state with `get_spark_session(name)` |
+| `create_spark_session` | Use connect info to attach PySpark, then `pre_flight()` to set up training |
+| `delete_spark_session` | Confirm removal with `list_spark_sessions()` |
+
+`create_spark_session`'s hint is the cross-client link into the trainer module, surfacing the
+`prepare data -> train` handoff described above. The reverse direction (a training-side hint back
+toward `create_spark_session` for further data prep) would mean editing the trainer module's
+existing `TOOL_NEXT_HINTS`, which is out of scope for this Spark-focused KEP — noted here as a
+possible small follow-up rather than committed to.
 
 ## Risks and Mitigations
 
@@ -253,15 +302,30 @@ context switch.
 
 ## Testing Plan
 
-- **Unit tests** (`tests/unit/spark/`): tool metadata/annotation consistency, persona +
+### Unit Tests
+
+- **Location**: `tests/unit/spark/`. Covers tool metadata/annotation consistency, persona +
   phase + destructive-policy wiring, `SparkConnectInfo` serialization (including the
-  `pod_name`/`driver_pod_name` dual-field fallback), and mocked-`SparkClient` behavior for all
-  five tools (state filter, not-found → `RESOURCE_NOT_FOUND`, log tailing/truncation,
-  confirm-gate previews, namespace resolution, ownership-guard accept/reject paths on
-  `delete_spark_session` for non-admin personas). The SDK is mocked, so tests run **without**
-  the `kubeflow[spark]` extra.
-- **Server load**: `create_server(clients=["trainer", "spark"])` registers all five tools in
-  both `full` and `progressive` modes.
+  `pod_name`/`driver_pod_name` dual-field fallback), `spark_pre_flight` CRD/controller detection,
+  and mocked-`SparkClient` behavior for all six tools (state filter, not-found →
+  `RESOURCE_NOT_FOUND`, log tailing/truncation, confirm-gate previews, namespace resolution,
+  ownership-guard accept/reject paths on `delete_spark_session` for non-admin personas). The SDK
+  is mocked, so tests run **without** the `kubeflow[spark]` extra.
+- **Server load**: `create_server(clients=["trainer", "spark"])` registers all six tools in both
+  `full` and `progressive` modes.
+
+### Integration Tests (deferred)
+
+Not part of this KEP's initial implementation, but planned as a follow-up — mirroring the
+trainer's and KEP-34's integration test plans, which run against a live cluster rather than a
+mocked SDK:
+
+- Kind cluster with the Spark Operator installed: `spark_pre_flight`, `create_spark_session`,
+  poll to `Ready` via `get_spark_session`, `get_spark_session_logs`, `delete_spark_session`
+- Ownership guard: a `data-scientist`-persona deletion of a non-MCP-created session is rejected;
+  an MCP-created session can be deleted
+- Cross-client: `create_spark_session` followed by the trainer's `pre_flight()`, demonstrating
+  the `prepare data -> train` handoff
 
 ## References
 
