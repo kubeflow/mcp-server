@@ -62,6 +62,18 @@ test-cov: ## Run tests with HTML coverage report
 
 ##@ Dev Tools
 
+.PHONY: conformance
+conformance: install-dev ## Run MCP protocol conformance suite against a local HTTP server
+	@echo "Starting kubeflow-mcp on http://localhost:8000/mcp (no cluster required)..."
+	@KUBECONFIG=/nonexistent uv run kubeflow-mcp serve --transport http --no-banner > /tmp/kubeflow-mcp-conformance.log 2>&1 & \
+	  SERVER_PID=$$!; \
+	  trap "kill $$SERVER_PID 2>/dev/null || true" EXIT; \
+	  timeout 60 bash -c 'until curl -sf -o /dev/null http://localhost:8000/mcp -X POST -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"make\",\"version\":\"1\"}}}"; do sleep 1; done'; \
+	  npx -y @modelcontextprotocol/conformance@0.1.16 server \
+	    --url http://localhost:8000/mcp \
+	    --suite active \
+	    --expected-failures tests/conformance/expected-failures.yaml
+
 TRANSPORT ?= stdio
 
 inspector: install-dev ## Launch MCP Inspector (TRANSPORT=stdio|http|sse)

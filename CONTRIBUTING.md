@@ -59,6 +59,34 @@ To run unit tests locally, use the following `make` command:
 make test-python
 ```
 
+### Conformance Testing
+
+We validate that the server correctly implements the MCP protocol
+(`initialize`, `tools/list`, `tools/call`, etc.) using the official
+[MCP conformance framework](https://github.com/modelcontextprotocol/conformance).
+This runs in CI on every PR (`.github/workflows/conformance.yaml`) and needs
+**no Kubernetes cluster and no LLM** — the server starts against an unreachable
+cluster and its tools degrade gracefully.
+
+To run the same suite locally (requires Node.js 20+):
+
+```bash
+make conformance
+```
+
+This starts `kubeflow-mcp serve --transport http` in the background, waits for
+it to answer `initialize`, then runs the conformance `active` suite against
+`http://localhost:8000/mcp`.
+
+**Baseline file.** `tests/conformance/expected-failures.yaml` lists scenarios
+that are allowed to fail — these are known spec gaps for this server (mostly
+scenarios that assume the reference server's test fixtures, a few unadvertised
+capabilities, and one DNS-rebinding hardening follow-up). Every scenario *not*
+listed must pass, and CI also fails if a listed scenario unexpectedly starts
+passing. When you add protocol features, remove the now-passing scenarios from
+the baseline; if you intentionally change behavior, update the list with a
+one-line reason.
+
 ## Commit Messages
 
 We use [Conventional Commits](https://www.conventionalcommits.org/):
