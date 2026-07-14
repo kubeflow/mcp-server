@@ -362,7 +362,7 @@ def create_server(  # noqa: C901
     # Bridge FastMCP async context into sync _audit_wrap via ContextVars
     from kubeflow_mcp.core.middleware import AuditIdentityMiddleware
 
-    mcp.add_middleware(AuditIdentityMiddleware)
+    mcp.add_middleware(AuditIdentityMiddleware())
 
     # Merge tool metadata from client modules
     all_descriptions: dict[str, str] = {}
