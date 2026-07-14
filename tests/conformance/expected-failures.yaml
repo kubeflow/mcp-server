@@ -17,8 +17,10 @@
 #     Kubeflow tools instead, so these fixture-driven scenarios can never pass.
 #   - A few exercise MCP capabilities this server does not advertise
 #     (completions, sampling, elicitation).
-#   - One (dns-rebinding-protection) is a real hardening gap in the FastMCP
-#     streamable-HTTP default — tracked as a follow-up, see reason below.
+#
+# Note: dns-rebinding-protection is intentionally NOT baselined — this server
+# enforces Host/Origin validation (see kubeflow_mcp/core/transport_security.py),
+# so that scenario is a required pass and CI must flag any regression.
 
 server:
   # --- Capabilities not advertised by this server ---
@@ -56,10 +58,3 @@ server:
   - prompts-get-with-args
   - prompts-get-embedded-resource
   - prompts-get-with-image
-
-  # --- Real hardening gap (follow-up) ---
-  # FastMCP's streamable-HTTP transport does not validate the Host/Origin header,
-  # so it accepts requests with a non-localhost Host (HTTP 200 instead of 4xx),
-  # leaving a localhost, unauthenticated server open to DNS-rebinding attacks.
-  # See: https://github.com/modelcontextprotocol/typescript-sdk/security/advisories/GHSA-w48q-cv73-mx4w
-  - dns-rebinding-protection
