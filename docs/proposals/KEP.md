@@ -1,3 +1,4 @@
+---
 title: "Kubeflow PieplinesClient support for `kubeflow-mcp-server`"
 
 authors:
@@ -7,9 +8,9 @@ authors:
 status: proposed
 
 creation-date: 2026-15-07
+---
 
-
-# KEP: Kubeflow PieplinesClient support for `kubeflow-mcp-server`
+# KEP: Kubeflow PipelinesClient support for `kubeflow-mcp-server`
 
 ## 1. Summary
 This KEP proposes the implementation of an agentic `kfp-generator` skill within the `kubeflow-mcp-server`. This tool allows AI agents to translate natural language user prompts into functional Kubeflow Pipeline (KFP) v2 Python code.
@@ -65,7 +66,7 @@ Syntax errors and boilerplate requirements result in iterative frustration. By i
 
 * **Self-Correction Loop**: Implement an automated feedback mechanism (`Prompt` -> `Code` -> `Compile` -> `Catch Error` -> `Fix`) to eliminate the need for human intervention initially.
 
-* **Validation Standards**: 100% compatibility with KFP v2 SDK IR (Intermediate Representation) by enforcing local compilation and validation checks.
+* **Validation Standards**: Compile generated pipelines with the supported KFP v2 SDK version and verify that an IR YAML artifact is produced; runtime and logical validation remain outside this check.
 
 * **Integration**: Integrate with existing `kubeflow-mcp-server` infrastructure (personas, namespace enforcement, etc.).
 
@@ -105,10 +106,11 @@ graph TD
     end
 
     Agent -->|1. Prompt| Generator
-    Generator -->|2. Self-Correction Loop| Generator
-    Generator -->|3. Validated YAML| MCP_Pipelines
-    MCP_Pipelines -->|4. Invoke| PClient
-    PClient -->|5. Deploy/Manage| Pipelines
+    Generator -->|3. Validated YAML preview| MCP_Pipelines
+    MCP_Pipelines -->|4. Request confirmation| Agent
+    Agent -->|5. confirmed=true| MCP_Pipelines
+    MCP_Pipelines -->|6. Invoke| PClient
+    PClient -->|7. Deploy/Manage| Pipelines
 
     style Generator fill:#444,stroke:#000,stroke-width:2px,color:#fff
 
@@ -121,19 +123,19 @@ graph TD
 * User -> AI Agent: Natural language request
 * AI Agent -> MCP Server: JSON-RPC tool call
 * MCP Server -> Kubeflow SDK: Python method call
-* Kubeflow SDK -> K8s API: CRD operations
+* Kubeflow SDK (`PipelinesClient`/`kfp.Client`) -> Kubeflow Pipelines API server: REST API request
 
 ```
-## 4 .Design Details
+## 4 Design Details
 
 ### Component Architecture
 The `kfp-generator` acts as a specialized skill registered within the `kubeflow-mcp-server`. The process follows a three-stage workflow:
 
 * **Generation Phase**: The agent receives a natural language prompt and utilizes an LLM to generate the `pipeline.py` script, including necessary imports and component decorators.
 
-*  **Verification Phase**: The agent invokes the local evaluation script (`eval_output.py`) within a protected, isolated virtual environment to attempt compilation.
+* **Verification Phase**: Execute `eval_output.py` in an ephemeral, unprivileged OS-level sandbox with no inherited credentials or network access, a read-only workspace except for the output directory, and CPU, memory, and time limits; a virtual environment alone is not a security boundary.
 
-*  **Correction Phase**: If the compilation fails, the agent parses the stderr/stdout logs, feeds the error details back into the prompt context, and iterates until the `VALIDATION PASSED` status is achieved.
+* **Correction Phase**: If compilation fails, sanitize the stderr/stdout logs, feed the error details back into the prompt context, and retry up to a configurable maximum (default 3); after exhaustion, return a structured validation error without deploying.
 
 ### Workflow Visualization
 ```
@@ -145,19 +147,17 @@ The `kfp-generator` acts as a specialized skill registered within the `kubeflow-
 ### Module Structure:
 ```
 
-clients/pipelines/
+kubeflow_mcp/pipelines/
 ├── __init__.py
 ├── base.py
-├── skills/                      # Centralized directory for agentic capabilities
-│   ├── kfp_generator/           # Specific skill for pipeline generation
-│   │   ├── SKILL.md
-│   │   ├── generator.py         # Code scaffolding logic
-│   │   ├── validator.py         # Self-correction / verification logic
-│   │   └── templates/           # Reusable pipeline patterns
-│   └── kfp_debugger/            # Future agentic skills can be added here
+│── kfp_generator/       # Specific skill for pipeline generation
+│── generator.py         # Code scaffolding logic
+│--- validator.py        # Self-correction / verification logic
+│   │   └── templates/   # Reusable pipeline patterns
+│   └── kfp_debugger/    # Future agentic skills can be added here
 ├── scripts/
-│   └── eval_output.py           # Verification script used by the validator
-└── examples/                    # Testing scenarios
+│   └── eval_output.py    # Verification script used by the validator
+└── examples/             # Testing scenarios
 
 ```
 ### Verified Tests:
@@ -177,7 +177,7 @@ clients/pipelines/
 
                        3. prompt.md --> a .md file that contains the natural language users can provide.
                        
-                       4. successful_ss.png --> an image containing the verfication log's screenshot.
+                       4. successful_ss.png --> an image containing the verfication log screenshot.
     
     ```
     
@@ -205,7 +205,7 @@ If a user asks for a "standard churn prediction pipeline" or others similar jobs
 
 
 
-## 6. References
+## 7. References
 * [Katib (Optimizer) KEP/PR Reference](https://github.com/kubeflow/mcp-server/pull/48)
 
 * [KFP-Generator Implementation](https://github.com/modichika/pipelines/tree/kfp-skills-testing/skills/kfp-generator)
