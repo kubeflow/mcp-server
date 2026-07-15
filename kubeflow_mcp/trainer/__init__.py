@@ -360,7 +360,7 @@ TOOL SELECTION:
 
 TRAINING RULES:
 - ALWAYS preview before submitting (confirmed=False first), then show preview to user and wait for approval
-- fine_tune() does NOT support env parameter — if env vars are needed, use run_custom_training() instead
+- fine_tune() does NOT support a user-specified env parameter — if custom env vars are needed, use run_custom_training() instead. HF_HOME is auto-injected
 - run_custom_training() and run_container_training() support env as a direct parameter: env={"KEY": "VALUE"}
 - URI formats: fine_tune() requires hf:// prefix for model/dataset; estimate_resources() uses bare model IDs
 - Volume scope: fine_tune() volumes apply to ALL replicated jobs (node, dataset-initializer, model-initializer). Do NOT add a workspace emptyDir — /workspace is provided by the runtime PVC
@@ -370,6 +370,7 @@ TRAINING RULES:
 
 PLATFORM:
 - If pre_flight() returns platform=openshift, ALWAYS pass emptyDir volumes for /.local, /.cache, /tmp — without these, jobs fail on read-only filesystem. Read trainer://guides/platform-fixes for copy-paste JSON
+- fine_tune() automatically sets HF_HOME=/workspace/.hf on all pods (node + initializers) to avoid PermissionError on /.cache under restricted SCC
 - OpenShift packages restriction: if platform=openshift, do NOT use the packages parameter in run_custom_training() as the pre-script pip install step will fail with PermissionError on /.local. Instead, install packages inside your training script to /workspace/lib using subprocess and append to sys.path
 - Gated HuggingFace models require hf_token parameter
 - Training jobs consume GPU resources — be conservative with num_nodes

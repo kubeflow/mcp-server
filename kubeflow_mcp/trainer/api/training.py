@@ -19,8 +19,11 @@ import logging
 import os
 import tempfile
 import textwrap
+import threading
 import uuid
 from collections.abc import Callable
+from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import Any
 
 from kubeflow.trainer.constants.constants import DATASET_PATH, DEFAULT_PIP_INDEX_URLS
@@ -80,9 +83,56 @@ try:
         TorchTuneInstructDataset,
     )
 
+    @dataclass
+    class _HFModelInitializer(HuggingFaceModelInitializer):
+        """Adds hf_home field so the SDK emits HF_HOME on spec.initializer.model.env."""
+
+        hf_home: str | None = None
+
+    @dataclass
+    class _HFDatasetInitializer(HuggingFaceDatasetInitializer):
+        """Adds hf_home field so the SDK emits HF_HOME on spec.initializer.dataset.env."""
+
+        hf_home: str | None = None
+
     _SDK_AVAILABLE = True
 except ImportError:
     _SDK_AVAILABLE = False
+
+HF_HOME_PATH = "/workspace/.hf"
+
+
+_hf_home_lock = threading.Lock()
+
+
+@contextmanager
+def _inject_trainer_hf_home(hf_home_path: str):
+    """Patch SDK to inject HF_HOME into spec.trainer.env for BuiltinTrainer jobs.
+
+    The SDK (v0.4.x) does not support env on BuiltinTrainer.  This context
+    manager temporarily patches ``get_trainer_cr_from_builtin_trainer`` so the
+    returned TrainerV1alpha1Trainer CR includes the HF_HOME env var, which
+    lands on ``spec.trainer.env`` instead of ``spec.runtimePatches``.
+    """
+    import kubeflow.trainer.backends.kubernetes.utils as k8s_utils
+    from kubeflow_trainer_api.models import IoK8sApiCoreV1EnvVar
+
+    original = k8s_utils.get_trainer_cr_from_builtin_trainer
+
+    def _patched(runtime, trainer, initializer=None):
+        cr = original(runtime, trainer, initializer)
+        if not any(e.name == "HF_HOME" for e in (cr.env or [])):
+            hf_env = IoK8sApiCoreV1EnvVar(name="HF_HOME", value=hf_home_path)
+            cr.env = (cr.env or []) + [hf_env]
+        return cr
+
+    with _hf_home_lock:
+        k8s_utils.get_trainer_cr_from_builtin_trainer = _patched
+        try:
+            yield
+        finally:
+            k8s_utils.get_trainer_cr_from_builtin_trainer = original
+
 
 _TRAINING_SCRIPT_DIR: str | None = None
 
@@ -313,8 +363,11 @@ def _build_initializer(
             storage_uri=model, ignore_patterns=model_ignore_patterns, **s3_kwargs
         )
     else:
-        model_init = HuggingFaceModelInitializer(
-            storage_uri=model, ignore_patterns=model_ignore_patterns, access_token=hf_token
+        model_init = _HFModelInitializer(
+            storage_uri=model,
+            ignore_patterns=model_ignore_patterns,
+            access_token=hf_token,
+            hf_home=HF_HOME_PATH,
         )
 
     if dataset.startswith("s3://"):
@@ -322,8 +375,11 @@ def _build_initializer(
             storage_uri=dataset, ignore_patterns=dataset_ignore_patterns, **s3_kwargs
         )
     else:
-        dataset_init = HuggingFaceDatasetInitializer(
-            storage_uri=dataset, ignore_patterns=dataset_ignore_patterns, access_token=hf_token
+        dataset_init = _HFDatasetInitializer(
+            storage_uri=dataset,
+            ignore_patterns=dataset_ignore_patterns,
+            access_token=hf_token,
+            hf_home=HF_HOME_PATH,
         )
 
     return Initializer(model=model_init, dataset=dataset_init)
@@ -348,8 +404,7 @@ def _build_runtime_patch(
     Returns an empty list if no patches are specified.
 
     The ``env`` parameter sets environment variables on the ``node`` container
-    via ``ContainerPatch``.  This is the mechanism used by ``fine_tune()``
-    (BuiltinTrainer) where env cannot be set through ``spec.trainer.env``.
+    via ``ContainerPatch``.
 
     Top-level options (``Labels``, ``Annotations``) are appended alongside
     the ``RuntimePatch`` in the returned list so they are applied independently.
@@ -699,8 +754,11 @@ def fine_tune(
     Supports HuggingFace (``hf://``) and S3 (``s3://``) model/dataset sources.
     Requires ``confirmed=True`` to submit. First call returns a preview.
 
-    Note: ``env`` is NOT supported for fine_tune. Use ``run_custom_training()``
-    with a LoRA script if you need custom environment variables.
+    Note: ``env`` is NOT supported as a user parameter for fine_tune.
+    Use ``run_custom_training()`` with a LoRA script if you need custom
+    environment variables. ``HF_HOME`` is automatically injected via
+    ``spec.trainer.env`` and ``spec.initializer.{model,dataset}.env``
+    to avoid ``PermissionError`` on read-only ``/.cache`` (OpenShift).
 
     Args:
         model: Model URI. Use ``hf://`` prefix for HuggingFace (e.g.,
@@ -920,9 +978,10 @@ def fine_tune(
 
         trainer = BuiltinTrainer(config=torch_cfg)
         _inject_ownership_label(options)
-        job_name = client.train(
-            runtime=runtime, initializer=initializer, trainer=trainer, options=options
-        )
+        with _inject_trainer_hf_home(HF_HOME_PATH):
+            job_name = client.train(
+                runtime=runtime, initializer=initializer, trainer=trainer, options=options
+            )
 
         return ToolResponse(
             data={

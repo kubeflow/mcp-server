@@ -1010,3 +1010,63 @@ class TestMCPToolSignatures:
         assert "config" in resp
         assert resp["config"]["mode"] == "builtin_trainer"
         mock_client.create_job.assert_not_called()
+
+    def test_hf_home_reaches_trainer_and_initializers(self):
+        """HF_HOME must land on spec.trainer.env and spec.initializer.{model,dataset}.env."""
+
+        from kubeflow.trainer.backends.kubernetes import utils as k8s_utils
+
+        from kubeflow_mcp.trainer.api.training import (
+            HF_HOME_PATH,
+            _HFDatasetInitializer,
+            _HFModelInitializer,
+            _inject_trainer_hf_home,
+        )
+
+        # --- Initializer subclasses produce HF_HOME via get_optional_initializer_envs ---
+        model_init = _HFModelInitializer(storage_uri="hf://google/gemma-2b", hf_home=HF_HOME_PATH)
+        dataset_init = _HFDatasetInitializer(
+            storage_uri="hf://tatsu-lab/alpaca", hf_home=HF_HOME_PATH
+        )
+
+        assert isinstance(model_init, sdk_types.HuggingFaceModelInitializer)
+        assert isinstance(dataset_init, sdk_types.HuggingFaceDatasetInitializer)
+
+        model_envs = k8s_utils.get_optional_initializer_envs(
+            model_init, required_fields={"storage_uri"}
+        )
+        dataset_envs = k8s_utils.get_optional_initializer_envs(
+            dataset_init, required_fields={"storage_uri"}
+        )
+
+        model_env_names = {e.name for e in model_envs}
+        dataset_env_names = {e.name for e in dataset_envs}
+        assert "HF_HOME" in model_env_names, "HF_HOME missing from model initializer env"
+        assert "HF_HOME" in dataset_env_names, "HF_HOME missing from dataset initializer env"
+
+        model_hf = next(e for e in model_envs if e.name == "HF_HOME")
+        assert model_hf.value == HF_HOME_PATH
+
+        # --- Context manager injects HF_HOME on the BuiltinTrainer CR ---
+        runtime_trainer = sdk_types.RuntimeTrainer(
+            trainer_type=sdk_types.TrainerType.BUILTIN_TRAINER,
+            framework="torchtune",
+            image="test:latest",
+        )
+        runtime_trainer.set_command(("torchrun",))
+        runtime = sdk_types.Runtime(name="torchtune-llama", trainer=runtime_trainer)
+        tune_config = sdk_types.TorchTuneConfig(batch_size=4, epochs=1)
+        builtin = sdk_types.BuiltinTrainer(config=tune_config)
+
+        with _inject_trainer_hf_home(HF_HOME_PATH):
+            cr = k8s_utils.get_trainer_cr_from_builtin_trainer(runtime, builtin)
+
+        assert cr.env is not None, "trainer CR env should not be None"
+        trainer_env_names = {e.name for e in cr.env}
+        assert "HF_HOME" in trainer_env_names, "HF_HOME missing from trainer env"
+        trainer_hf = next(e for e in cr.env if e.name == "HF_HOME")
+        assert trainer_hf.value == HF_HOME_PATH
+
+        # --- After exiting the context manager, the original is restored ---
+        cr_after = k8s_utils.get_trainer_cr_from_builtin_trainer(runtime, builtin)
+        assert cr_after.env is None, "monkey-patch should be reverted"
