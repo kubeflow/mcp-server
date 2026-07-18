@@ -180,11 +180,11 @@ jobs:
                 echo "Warning: uv lock failed after adding override for $pkg (exit code $LOCK_RC), skipping"
                 continue
               fi
-              printf '%s\n' "- ${pkg}==${fix_ver} (override) | [$advisory_id]($advisory_url)" >> applied_fixes.txt
+              printf '%s\n' "| ${pkg}==${fix_ver} (override) | [$advisory_id]($advisory_url) |" >> applied_fixes.txt
             else
               # NATURAL_VER >= fix_ver — natural upgrade worked
               echo "Natural upgrade sufficient ($NATURAL_VER >= $fix_ver)"
-              printf '%s\n' "- ${pkg}==${NATURAL_VER} (upgraded) | [$advisory_id]($advisory_url)" >> applied_fixes.txt
+              printf '%s\n' "| ${pkg}==${NATURAL_VER} (upgraded) | [$advisory_id]($advisory_url) |" >> applied_fixes.txt
             fi
           done <<< "$FIX_DATA"
 
