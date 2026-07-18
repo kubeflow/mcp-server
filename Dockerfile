@@ -42,6 +42,7 @@ LABEL org.opencontainers.image.version="${VERSION}" \
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
+    FASTMCP_HOST=0.0.0.0 \
     MCP_TRANSPORT=http \
     LOG_FORMAT=json
 

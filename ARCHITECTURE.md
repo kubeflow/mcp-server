@@ -25,7 +25,7 @@ Orchestrator Agent
 │  Policy        Persona-based tool filter     │
 │  Tool modes    full · progressive · semantic │
 │  Resilience    Rate limiter · Circuit breaker│
-│  Health        /health  /ready  /metrics     │
+│  Health        /health · /ready              │
 │  Security      Input validation · masking    │
 └──────────────────────┬──────────────────────-┘
                        │  Kubeflow SDK

@@ -41,6 +41,7 @@ from kubeflow_mcp.core.health import (
     HEALTH_TOOL_DESCRIPTIONS,
     HEALTH_TOOLS,
 )
+from kubeflow_mcp.core.http_edge import register_probe_routes
 from kubeflow_mcp.core.logging import with_correlation_id
 from kubeflow_mcp.core.middleware import get_mcp_request_id, get_mcp_session_id, get_user_id
 from kubeflow_mcp.core.policy import (
@@ -453,5 +454,6 @@ def create_server(  # noqa: C901
 
     # Register MCP resources from client modules (all resources, always)
     register_resources(mcp, loaded_modules)
+    register_probe_routes(mcp)
 
     return mcp

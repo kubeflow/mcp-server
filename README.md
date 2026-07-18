@@ -52,6 +52,13 @@ docker run --rm -p 8000:8000 \
 
 The server listens on `http://localhost:8000/mcp`.
 
+Container and Kubernetes probes are available without MCP authentication:
+
+```text
+GET /health  # liveness: the server process is accepting HTTP requests
+GET /ready   # readiness: configuration, policy, auth, and tools loaded successfully
+```
+
 **Environment variables**
 
 | Variable | Default | Description |
