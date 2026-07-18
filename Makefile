@@ -15,7 +15,7 @@
 SHELL = /usr/bin/env bash -o pipefail
 .SHELLFLAGS = -ec
 
-.PHONY: help uv install-dev verify format test-python test test-cov clean inspector
+.PHONY: help uv install-dev verify format test-python test-scripts test test-cov clean inspector
 
 PROJECT_DIR := $(shell dirname $(abspath $(lastword $(MAKEFILE_LIST))))
 
@@ -50,6 +50,10 @@ format: ## Auto-format and fix lint issues
 test-python: ## Run unit tests
 	@uv sync --all-extras --group dev
 	@uv run pytest --cov=kubeflow_mcp --cov-report=$(or $(report),term)
+
+test-scripts: ## Run GitHub Actions script tests
+	@uv sync --all-extras --group dev
+	@uv run pytest .github/scripts/test_scripts.py -v
 
 test: ## Run all tests (unit + integration)
 	@uv sync --all-extras --group dev
