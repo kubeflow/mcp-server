@@ -16,14 +16,15 @@ from fastmcp import FastMCP
 from starlette.testclient import TestClient
 
 from kubeflow_mcp.core.http_edge import register_probe_routes
+from kubeflow_mcp.core.server import create_server
 
 
-def _probe_client(*, authenticated: bool = False) -> TestClient:
+def _probe_client(*, authenticated: bool = False, ready: bool = True) -> TestClient:
     from kubeflow_mcp.core.auth import APIKeyVerifier
 
     auth = APIKeyVerifier(expected_token="secret") if authenticated else None
     mcp = FastMCP("test-server", auth=auth)
-    register_probe_routes(mcp)
+    register_probe_routes(mcp, is_ready=ready)
     return TestClient(mcp.http_app(transport="streamable-http"))
 
 
@@ -41,6 +42,23 @@ def test_ready_probe_reports_server_readiness() -> None:
 
     assert response.status_code == 200
     assert response.json() == {"status": "ready"}
+
+
+def test_ready_probe_rejects_incomplete_startup() -> None:
+    with _probe_client(ready=False) as client:
+        response = client.get("/ready")
+
+    assert response.status_code == 503
+    assert response.json() == {"status": "not_ready"}
+
+
+def test_ready_probe_rejects_unknown_configured_client() -> None:
+    mcp = create_server(clients=["missing-client"])
+    with TestClient(mcp.http_app(transport="streamable-http")) as client:
+        response = client.get("/ready")
+
+    assert response.status_code == 503
+    assert response.json() == {"status": "not_ready"}
 
 
 def test_probes_remain_available_when_mcp_auth_is_enabled() -> None:

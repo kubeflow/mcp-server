@@ -19,7 +19,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 
-def register_probe_routes(mcp: FastMCP) -> None:
+def register_probe_routes(mcp: FastMCP, *, is_ready: bool = True) -> None:
     """Register unauthenticated probes on the FastMCP HTTP application."""
 
     @mcp.custom_route("/health", methods=["GET"], include_in_schema=False)
@@ -28,6 +28,6 @@ def register_probe_routes(mcp: FastMCP) -> None:
 
     @mcp.custom_route("/ready", methods=["GET"], include_in_schema=False)
     async def ready(_request: Request) -> Response:
-        # Reaching this route means configuration, policy, auth, and tools loaded
-        # successfully during server construction.
+        if not is_ready:
+            return JSONResponse({"status": "not_ready"}, status_code=503)
         return JSONResponse({"status": "ready"})

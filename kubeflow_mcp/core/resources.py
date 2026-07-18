@@ -31,13 +31,14 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def register_resources(mcp: "FastMCP", loaded_modules: dict[str, Any]) -> None:
+def register_resources(mcp: "FastMCP", loaded_modules: dict[str, Any]) -> bool:
     """Register MCP resources from client modules with startup caching.
 
     All resources are always registered regardless of persona — persona
     filtering only controls which resources are *referenced* in instructions.
     """
     cache: dict[str, str] = {}
+    complete = True
 
     for module in loaded_modules.values():
         client_resources = getattr(module, "CLIENT_RESOURCES", {})
@@ -48,6 +49,7 @@ def register_resources(mcp: "FastMCP", loaded_modules: dict[str, Any]) -> None:
         for uri, (filename, description) in client_resources.items():
             path = resources_dir / filename
             if not path.exists():
+                complete = False
                 logger.warning(
                     f"MCP resource file not found: {path}. "
                     f"Ensure {filename} exists relative to {resources_dir}"
@@ -68,3 +70,4 @@ def register_resources(mcp: "FastMCP", loaded_modules: dict[str, Any]) -> None:
             logger.debug(f"Registered resource: {uri}")
 
     logger.info(f"Registered {len(cache)} MCP resources")
+    return complete
