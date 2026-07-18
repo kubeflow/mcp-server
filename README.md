@@ -63,6 +63,9 @@ The server listens on `http://localhost:8000/mcp`.
 | `KUBEFLOW_MCP_JWT_AUDIENCE` | _(none)_ | Expected JWT audience |
 | `KUBEFLOW_MCP_CLIENTS` | `trainer` | Comma-separated client modules to load |
 | `KUBEFLOW_MCP_PERSONA` | `readonly` | Tool persona (`readonly`, `data-scientist`, `ml-engineer`, `platform-admin`) |
+| `KUBEFLOW_MCP_ALLOWED_HOSTS` | _(loopback)_ | Comma-separated `Host` header allowlist for DNS rebinding protection; `:*` port wildcard supported (e.g. `mcp.example.com,mcp.example.com:*`) |
+| `KUBEFLOW_MCP_ALLOWED_ORIGINS` | _(loopback)_ | Comma-separated `Origin` header allowlist; `:*` port wildcard supported (e.g. `https://mcp.example.com`) |
+| `KUBEFLOW_MCP_DNS_REBINDING_PROTECTION` | `true` | Set `false` to disable Host/Origin validation (not recommended) |
 | `LOG_FORMAT` | `json` | Log format (`json`, `console`) |
 | `LOG_LEVEL` | `INFO` | Log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
 
@@ -80,6 +83,8 @@ The server listens on `http://localhost:8000/mcp`.
 ```
 
 For in-cluster deployments, replace `localhost:8000` with the Kubernetes Service address and mount `KUBEFLOW_MCP_AUTH_TOKEN` from a Secret.
+
+> **Note:** DNS rebinding protection allows only loopback `Host`/`Origin` headers by default. When exposing the server through a Service or Ingress, set `KUBEFLOW_MCP_ALLOWED_HOSTS` (e.g. `KUBEFLOW_MCP_ALLOWED_HOSTS=kubeflow-mcp.kubeflow.svc:*,mcp.example.com`) or requests will be rejected with HTTP 421.
 
 ### Example: Fine-tune a model via AI agent
 

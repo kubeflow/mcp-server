@@ -33,7 +33,6 @@ with an error response or passes the untouched send/receive channels through.
 
 from __future__ import annotations
 
-import logging
 from typing import TYPE_CHECKING
 
 from mcp.server.transport_security import (
@@ -45,8 +44,6 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 if TYPE_CHECKING:
     from kubeflow_mcp.core.config import SecurityConfig
-
-logger = logging.getLogger(__name__)
 
 # Loopback defaults used when no explicit allowlist is configured. These cover
 # both the IPv4 (127.0.0.1) and IPv6 (::1) loopback binds FastMCP may use, plus
