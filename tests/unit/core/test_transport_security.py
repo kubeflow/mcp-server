@@ -34,11 +34,37 @@ def _make_client(config: SecurityConfig) -> TestClient:
 
     settings = build_transport_security_settings(config)
     app = Starlette(
-        routes=[Route("/mcp", ok, methods=["GET", "POST"])],
+        routes=[
+            Route("/mcp", ok, methods=["GET", "POST"]),
+            Route("/health", ok, methods=["GET"]),
+            Route("/ready", ok, methods=["GET"]),
+        ],
         middleware=[Middleware(DNSRebindingProtectionMiddleware, settings=settings)],
     )
     # raise_server_exceptions keeps behaviour close to a real ASGI server.
     return TestClient(app, raise_server_exceptions=False)
+
+
+@pytest.mark.parametrize("path", ["/health", "/ready"])
+def test_probe_paths_bypass_host_validation(path: str):
+    # kubelet sends liveness/readiness probes with Host: <pod-ip>:<port>,
+    # which is never in the loopback allowlist. These paths are
+    # unauthenticated and return no sensitive data, so they must respond
+    # regardless of Host (see issue #91).
+    client = _make_client(SecurityConfig())
+    resp = client.get(path, headers={"host": "10.244.0.5:8000"})
+    assert resp.status_code == 200
+
+
+def test_mcp_path_still_protected_when_probes_are_exempt():
+    # Exempting /health and /ready must not weaken validation elsewhere.
+    client = _make_client(SecurityConfig())
+    resp = client.post(
+        "/mcp",
+        json={"jsonrpc": "2.0", "id": 1, "method": "ping"},
+        headers={"host": "attacker.example.com"},
+    )
+    assert resp.status_code == 421
 
 
 def test_defaults_allow_loopback_host():

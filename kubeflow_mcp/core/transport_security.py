@@ -86,6 +86,15 @@ def build_transport_security_settings(
     )
 
 
+# Paths that are exempt from Host/Origin validation. These probes are
+# unauthenticated by design, return no sensitive data, and must respond
+# regardless of the Host header a caller uses to reach them — notably
+# kubelet, which sends liveness/readiness probes with `Host: <pod-ip>:<port>`
+# rather than a loopback name. Rejecting those probes causes CrashLoopBackOff
+# in any Kubernetes/OpenShift deployment (see issue #91).
+_EXEMPT_PATHS = frozenset({"/health", "/ready"})
+
+
 class DNSRebindingProtectionMiddleware:
     """Pure-ASGI middleware that validates Host/Origin before the MCP handler."""
 
@@ -95,6 +104,10 @@ class DNSRebindingProtectionMiddleware:
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        if scope.get("path") in _EXEMPT_PATHS:
             await self.app(scope, receive, send)
             return
 
