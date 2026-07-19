@@ -40,16 +40,6 @@ MIN_POLLING_INTERVAL = 1
 
 _FAILURE_PATTERNS: list[tuple[re.Pattern[str], str, str]] = [
     (
-        re.compile(r"Permission denied.*(/\.local|/home|/\.cache)", re.IGNORECASE),
-        "OPENSHIFT_PERMISSION_ERROR",
-        "OpenShift random UID cannot write to home directory; set env var HF_HOME=/workspace or mount a writable volume.",
-    ),
-    (
-        re.compile(r"Permission denied.*huggingface|HF_HOME", re.IGNORECASE),
-        "HF_CACHE_WRITE_ERROR",
-        "Set env var HF_HOME=/workspace to store HuggingFace cache on a writable volume mount.",
-    ),
-    (
         re.compile(r"CUDA out of memory", re.IGNORECASE),
         "OOM",
         "Reduce batch_size, enable quantization (int8/int4), or request a larger GPU.",
@@ -78,6 +68,16 @@ _FAILURE_PATTERNS: list[tuple[re.Pattern[str], str, str]] = [
         re.compile(r"FileNotFoundError", re.IGNORECASE),
         "FILE_NOT_FOUND",
         "Check dataset/model paths and volume mounts.",
+    ),
+    # HF cache pattern MUST come before the generic PermissionError catch-all
+    # so that /.cache/huggingface failures are classified correctly.
+    (
+        re.compile(
+            r"Permission denied.*(?:huggingface|HF_HOME)|(?:huggingface|HF_HOME).*Permission denied",
+            re.IGNORECASE,
+        ),
+        "HF_CACHE_WRITE_ERROR",
+        "Set env var HF_HOME=/workspace to store HuggingFace cache on a writable volume mount.",
     ),
     (
         re.compile(

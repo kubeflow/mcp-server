@@ -1071,15 +1071,33 @@ class TestMCPToolSignatures:
         cr_after = k8s_utils.get_trainer_cr_from_builtin_trainer(runtime, builtin)
         assert cr_after.env is None, "monkey-patch should be reverted"
 
-    def test_extract_failure_hint_openshift_and_hf(self):
-        """Verify _extract_failure_hint detects OpenShift permission and HF cache errors."""
+    def test_extract_failure_hint_hf_cache_patterns(self):
+        """Verify _extract_failure_hint detects HF cache errors before generic PermissionError."""
         from kubeflow_mcp.trainer.api.monitoring import _extract_failure_hint
 
-        hint1 = _extract_failure_hint("Permission denied: '/.local/lib'")
-        assert hint1 is not None and hint1["category"] == "OPENSHIFT_PERMISSION_ERROR"
+        # "Permission denied" followed by "huggingface"
+        hint1 = _extract_failure_hint("Permission denied when writing huggingface cache")
+        assert hint1 is not None and hint1["category"] == "HF_CACHE_WRITE_ERROR"
 
-        hint2 = _extract_failure_hint("Permission denied when writing huggingface cache")
+        # "Permission denied" followed by "HF_HOME"
+        hint2 = _extract_failure_hint("Permission denied: cannot write to HF_HOME directory")
         assert hint2 is not None and hint2["category"] == "HF_CACHE_WRITE_ERROR"
+
+        # "HF_HOME" before "Permission denied" (reverse order)
+        hint3 = _extract_failure_hint("HF_HOME=/cache: Permission denied")
+        assert hint3 is not None and hint3["category"] == "HF_CACHE_WRITE_ERROR"
+
+        # /.cache/huggingface path must NOT fall through to generic PERMISSION_ERROR
+        hint4 = _extract_failure_hint(
+            "PermissionError: [Errno 13] Permission denied: '/.cache/huggingface/hub'"
+        )
+        assert hint4 is not None and hint4["category"] == "HF_CACHE_WRITE_ERROR"
+
+        # Generic permission error without HF keywords → PERMISSION_ERROR
+        hint5 = _extract_failure_hint(
+            "PermissionError: [Errno 13] Permission denied: '/data/output'"
+        )
+        assert hint5 is not None and hint5["category"] == "PERMISSION_ERROR"
 
     def test_get_training_logs_fallback_to_previous_logs(self):
         """Verify get_training_logs queries previous=True pod logs when active container logs are empty."""
