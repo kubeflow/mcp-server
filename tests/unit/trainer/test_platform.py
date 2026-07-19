@@ -26,6 +26,9 @@ Covers runtime CRUD preview/confirmed paths with mocked CustomObjects API:
 
 from unittest.mock import MagicMock, patch
 
+from kubeflow.trainer.constants import constants as trainer_constants
+
+from kubeflow_mcp.common import utils as mcp_utils
 from kubeflow_mcp.trainer.api.platform import create_runtime, delete_runtime, patch_runtime
 
 # ---------------------------------------------------------------------------
@@ -74,11 +77,14 @@ def test_patch_runtime_success_when_confirmed():
     assert result["data"]["patched"] is True
     assert result["data"]["runtime"] == "torch-tune"
     assert result["data"]["resource_version"] == "123"
-    api.patch_cluster_custom_object.assert_called_once()
-    kwargs = api.patch_cluster_custom_object.call_args.kwargs
-    assert kwargs["name"] == "torch-tune"
-    assert kwargs["body"] == patch_body
-    assert kwargs["plural"] == "clustertrainingruntimes"
+    api.patch_cluster_custom_object.assert_called_once_with(
+        group=trainer_constants.GROUP,
+        version=trainer_constants.VERSION,
+        plural="clustertrainingruntimes",
+        name="torch-tune",
+        body=patch_body,
+        _request_timeout=mcp_utils.K8S_TIMEOUT,
+    )
 
 
 def test_patch_runtime_not_found():
@@ -162,10 +168,18 @@ def test_create_runtime_success_when_confirmed():
     assert result["data"]["created"] is True
     assert result["data"]["runtime"] == "my-runtime"
     assert result["data"]["resource_version"] == "9"
-    kwargs = api.create_cluster_custom_object.call_args.kwargs
-    assert kwargs["plural"] == "clustertrainingruntimes"
-    assert kwargs["body"]["metadata"]["name"] == "my-runtime"
-    assert kwargs["body"]["spec"] == spec
+    api.create_cluster_custom_object.assert_called_once_with(
+        group=trainer_constants.GROUP,
+        version=trainer_constants.VERSION,
+        plural="clustertrainingruntimes",
+        body={
+            "apiVersion": f"{trainer_constants.GROUP}/{trainer_constants.VERSION}",
+            "kind": "ClusterTrainingRuntime",
+            "metadata": {"name": "my-runtime"},
+            "spec": spec,
+        },
+        _request_timeout=mcp_utils.K8S_TIMEOUT,
+    )
 
 
 def test_create_runtime_generic_error():
@@ -249,10 +263,19 @@ def test_delete_runtime_success_when_confirmed():
     assert result["data"]["deleted"] is True
     assert result["data"]["runtime"] == "torch-tune"
     assert result["data"]["dependent_jobs_affected"] == 1
-    api.delete_cluster_custom_object.assert_called_once()
-    kwargs = api.delete_cluster_custom_object.call_args.kwargs
-    assert kwargs["name"] == "torch-tune"
-    assert kwargs["plural"] == "clustertrainingruntimes"
+    api.list_cluster_custom_object.assert_called_once_with(
+        group=trainer_constants.GROUP,
+        version=trainer_constants.VERSION,
+        plural=trainer_constants.TRAINJOB_PLURAL,
+        _request_timeout=mcp_utils.K8S_TIMEOUT,
+    )
+    api.delete_cluster_custom_object.assert_called_once_with(
+        group=trainer_constants.GROUP,
+        version=trainer_constants.VERSION,
+        plural="clustertrainingruntimes",
+        name="torch-tune",
+        _request_timeout=mcp_utils.K8S_TIMEOUT,
+    )
 
 
 def test_delete_runtime_not_found():
