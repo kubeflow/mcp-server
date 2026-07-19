@@ -56,8 +56,14 @@ Container and Kubernetes probes are available without MCP authentication:
 
 ```text
 GET /health  # liveness: the server process is accepting HTTP requests
-GET /ready   # readiness: configuration, policy, auth, and tools loaded successfully
+GET /ready   # readiness: configured clients imported and packaged resources loaded
 ```
+
+`/ready` returns 200 only when both `clients_ready` and `resources_ready` are true. It does
+not contact Kubernetes or other APIs, so it is not a live dependency check. A missing
+packaged resource Markdown file keeps `/ready` at 503 even though `/health` and registered
+tools remain available; check the server logs and package contents rather than cluster
+dependencies.
 
 **Environment variables**
 

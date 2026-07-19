@@ -61,6 +61,23 @@ def test_ready_probe_rejects_unknown_configured_client() -> None:
     assert response.json() == {"status": "not_ready"}
 
 
+def test_ready_probe_rejects_missing_resource_file(monkeypatch) -> None:
+    import kubeflow_mcp.trainer as trainer_module
+
+    monkeypatch.setattr(
+        trainer_module,
+        "CLIENT_RESOURCES",
+        {"trainer://guides/missing": ("resources/missing.md", "Missing resource")},
+    )
+
+    mcp = create_server()
+    with TestClient(mcp.http_app(transport="streamable-http")) as client:
+        response = client.get("/ready")
+
+    assert response.status_code == 503
+    assert response.json() == {"status": "not_ready"}
+
+
 def test_probes_remain_available_when_mcp_auth_is_enabled() -> None:
     with _probe_client(authenticated=True) as client:
         health_response = client.get("/health")
