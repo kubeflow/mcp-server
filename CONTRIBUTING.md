@@ -18,12 +18,18 @@ We encourage the judicious use of AI/LLM tools; please refer to the [Kubeflow AI
    cd mcp-server
    ```
 
-3. Set up development environment:
+3. Install the [uv](https://docs.astral.sh/uv/) CLI if you do not already have it:
+   ```bash
+   curl -LsSf https://astral.sh/uv/install.sh | sh
+   ```
+   (`make install-dev` can also auto-install uv via the `make uv` target.)
+
+4. Set up development environment:
    ```bash
    make install-dev
    ```
 
-4. Create a branch:
+5. Create a branch:
    ```bash
    git checkout -b feat/your-feature
    ```
@@ -42,7 +48,7 @@ uv run pre-commit install
 
 The pre-commit hooks ensure code quality and consistency (linting and formatting with `ruff`). They are also executed in CI.
 
-To run verification checks locally:
+To run verification checks locally (matches CI: lockfile check + `pre-commit run --all-files`):
 
 ```bash
 make verify

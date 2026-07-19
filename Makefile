@@ -36,10 +36,10 @@ install-dev: uv ## Install all development dependencies
 
 ##@ Quality
 
-verify: ## Run linting and formatting checks
+verify: install-dev ## Run the same checks CI runs (pre-commit + lockfile)
 	@uv lock --check
-	@uv run --group dev ruff check .
-	@uv run --group dev ruff format --check .
+	@uv run pre-commit run --all-files
+	@echo "All checks passed!"
 
 format: ## Auto-format and fix lint issues
 	@uv run --group dev ruff check --fix .
