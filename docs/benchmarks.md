@@ -5,7 +5,15 @@ This project has a pytest-based benchmark suite under `tests/benchmarks/`.
 Run:
 
 ```bash
-uv run pytest tests/benchmarks/
+make benchmark
+```
+
+Benchmarks carry the `benchmark` marker and the default `addopts` deselects it, so `make test-python`, `make test`, and a bare `pytest` skip them. The marker is applied to every test under `tests/benchmarks/` automatically, so new benchmark files need no decorator.
+
+To run them without make:
+
+```bash
+uv run pytest tests/benchmarks/ -m benchmark
 ```
 
 This writes local output to:

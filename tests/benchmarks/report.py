@@ -55,7 +55,9 @@ def _bar_width(value: object, max_value: float) -> str:
 
 
 def _latency_summary(payload: dict[str, Any]) -> str:
-    results = [result for result in payload.get("results", []) if _number(result.get("p50"))]
+    results = [
+        result for result in payload.get("results", []) if _number(result.get("p50")) is not None
+    ]
     if not results:
         return ""
 

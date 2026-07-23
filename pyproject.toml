@@ -61,7 +61,10 @@ packages = ["kubeflow_mcp"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["kubeflow_mcp", "tests"]
-addopts = "-v --tb=short"
+addopts = "-v --tb=short -m 'not benchmark'"
+markers = [
+    "benchmark: performance benchmarks, excluded from default runs (see `make benchmark`)",
+]
 
 [tool.uv]
 # Pin transitive deps to versions that resolve known CVEs detected by the OSV-Scanner workflow.

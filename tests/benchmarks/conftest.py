@@ -11,8 +11,19 @@ from tests.benchmarks.report import generate_report
 
 DEFAULT_ITERATIONS = 100
 DEFAULT_WARMUP = 5
-OUTPUT_DIR = Path(__file__).parent.parent.parent / "benchmark-results"
+BENCHMARK_DIR = Path(__file__).parent
+OUTPUT_DIR = BENCHMARK_DIR.parent.parent / "benchmark-results"
 LATENCY_RESULTS: list[dict[str, object]] = []
+
+
+def pytest_configure(config: Any) -> None:
+    LATENCY_RESULTS.clear()
+
+
+def pytest_collection_modifyitems(config: Any, items: list[Any]) -> None:
+    for item in items:
+        if BENCHMARK_DIR in item.path.parents:
+            item.add_marker(pytest.mark.benchmark)
 
 
 def _percentile(sorted_samples: list[float], value: int) -> float:
