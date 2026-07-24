@@ -113,6 +113,20 @@ def _extract_failure_hint(logs: str) -> dict[str, str] | None:
     return None
 
 
+def _is_pod_for_step(pod: Any, step: str) -> bool:
+    """Return whether a JobSet pod corresponds to the requested TrainJob step."""
+    labels = getattr(pod.metadata, "labels", None) or {}
+    replicated_job = labels.get("jobset.sigs.k8s.io/replicatedjob-name")
+    job_index = labels.get("jobset.sigs.k8s.io/job-index")
+    if replicated_job == step:
+        return True
+    return (
+        replicated_job is not None
+        and job_index is not None
+        and f"{replicated_job}-{job_index}" == step
+    )
+
+
 def get_training_logs(
     name: str,
     step: str = "node-0",
@@ -167,6 +181,8 @@ def get_training_logs(
                     label_selector=f"training.kubeflow.org/trainjob-name={name}",
                 )
                 for pod in pods.items:
+                    if not _is_pod_for_step(pod, step):
+                        continue
                     try:
                         raw = v1.read_namespaced_pod_log(
                             name=pod.metadata.name,

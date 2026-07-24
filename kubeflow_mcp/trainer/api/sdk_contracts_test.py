@@ -1109,7 +1109,11 @@ class TestMCPToolSignatures:
         mock_client.get_job_logs.return_value = []
 
         mock_pod = MagicMock()
-        mock_pod.metadata.name = "crashed-pod-0"
+        mock_pod.metadata.name = "crashed-node-0"
+        mock_pod.metadata.labels = {
+            "jobset.sigs.k8s.io/replicatedjob-name": "node",
+            "jobset.sigs.k8s.io/job-index": "0",
+        }
 
         mock_v1 = MagicMock()
         mock_v1.list_namespaced_pod.return_value = MagicMock(items=[mock_pod])
@@ -1136,8 +1140,54 @@ class TestMCPToolSignatures:
         assert "CUDA out of memory" in resp["data"]["logs"]
         assert resp["data"]["failure_hint"]["category"] == "OOM"
         mock_v1.read_namespaced_pod_log.assert_called_once_with(
-            name="crashed-pod-0", namespace="test-ns", previous=True, tail_lines=1000
+            name="crashed-node-0", namespace="test-ns", previous=True, tail_lines=1000
         )
+
+    def test_get_training_logs_fallback_scopes_to_requested_step(self):
+        """Verify previous-log fallback does not mix logs from other TrainJob steps."""
+        from unittest.mock import MagicMock, call, patch
+
+        from kubeflow_mcp.trainer.api.monitoring import get_training_logs
+
+        mock_client = MagicMock()
+        mock_client.get_job_logs.return_value = []
+
+        node_0 = MagicMock()
+        node_0.metadata.name = "crashed-node-0"
+        node_0.metadata.labels = {
+            "jobset.sigs.k8s.io/replicatedjob-name": "node",
+            "jobset.sigs.k8s.io/job-index": "0",
+        }
+        node_1 = MagicMock()
+        node_1.metadata.name = "crashed-node-1"
+        node_1.metadata.labels = {
+            "jobset.sigs.k8s.io/replicatedjob-name": "node",
+            "jobset.sigs.k8s.io/job-index": "1",
+        }
+
+        mock_v1 = MagicMock()
+        mock_v1.list_namespaced_pod.return_value = MagicMock(items=[node_0, node_1])
+        mock_v1.read_namespaced_pod_log.side_effect = ["node-0 crash", "node-1 crash"]
+
+        with (
+            patch(
+                "kubeflow_mcp.trainer.api.monitoring.get_trainer_client_for_namespace",
+                return_value=mock_client,
+            ),
+            patch("kubeflow_mcp.trainer.api.monitoring.get_core_v1_api", return_value=mock_v1),
+            patch(
+                "kubeflow_mcp.trainer.api.monitoring.get_trainer_effective_namespace",
+                return_value="test-ns",
+            ),
+            patch("kubeflow_mcp.trainer.api.monitoring.check_namespace_allowed", return_value=None),
+        ):
+            resp = get_training_logs(name="crashed-job", step="node-0")
+
+        assert resp["data"]["logs"] == "node-0 crash"
+        mock_v1.read_namespaced_pod_log.assert_has_calls(
+            [call(name="crashed-node-0", namespace="test-ns", previous=True, tail_lines=1000)]
+        )
+        assert mock_v1.read_namespaced_pod_log.call_count == 1
 
     def test_get_training_logs_no_fallback_when_logs_exist(self):
         """Verify get_training_logs does not fallback to previous=True when active container logs exist."""
