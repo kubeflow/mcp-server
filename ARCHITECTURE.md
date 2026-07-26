@@ -52,6 +52,7 @@ Orchestrator Agent
 | Input validation | `core/security.py` | ✅ Available |
 | HTTP edge | `core/http_edge.py` | ✅ Available |
 | Trainer tools (23) | `trainer/api/` | ✅ Available |
+| Spark tools (5) — SparkConnect sessions ([KEP-5](https://github.com/kubeflow/mcp-server/pull/52)) | `spark/api/` | ✅ Available |
 | Optimizer | `optimizer/` | 🔲 Stub only |
 | Hub / Model Registry | `hub/` | 🔲 Stub only |
 | OpenTelemetry tracing | — | 🔄 In review ([#21](https://github.com/kubeflow/mcp-server/pull/21)) |
@@ -59,7 +60,7 @@ Orchestrator Agent
 | PyPI release workflow | — | 🔄 In review ([#28](https://github.com/kubeflow/mcp-server/pull/28)) |
 | CLI Agent Runtime | — | 🔲 Planned — Phase 3 ([#15](https://github.com/kubeflow/mcp-server/issues/15)) |
 | Gateway layer support | — | 🔲 Planned — Phase 4 |
-| Spark Connect | — | 🔲 Planned — Phase 6 ([#5](https://github.com/kubeflow/mcp-server/issues/5)) |
+| Spark Connect (session lifecycle) | `spark/` | ✅ Available ([#5](https://github.com/kubeflow/mcp-server/issues/5)) |
 
 ---
 
