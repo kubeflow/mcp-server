@@ -69,6 +69,10 @@ test: ## Run all tests (unit + integration)
 	@uv sync --all-extras --group dev
 	@uv run pytest tests/ kubeflow_mcp/ -v --tb=short
 
+test-e2e: ## Run Kubernetes E2E tests (requires KUBEFLOW_MCP_E2E=true and Kubeconfig)
+	@uv sync --all-extras --group dev
+	@KUBEFLOW_MCP_E2E=true uv run pytest tests/e2e/test_kubernetes_e2e.py -v
+
 test-cov: ## Run tests with HTML coverage report
 	@uv sync --all-extras --group dev
 	@uv run pytest --cov=kubeflow_mcp --cov-report=term-missing --cov-report=html
