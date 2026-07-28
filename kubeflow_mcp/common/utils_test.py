@@ -18,18 +18,60 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-from kubeflow_mcp.common.utils import _get_api_client, reset_clients
+from kubeflow_mcp.common.utils import (
+    MCP_MANAGED_LABEL,
+    MCP_MANAGED_VALUE,
+    _get_api_client,
+    is_mcp_managed,
+    reset_clients,
+)
+
+PATCH_CUSTOM_API = "kubeflow_mcp.common.utils.get_custom_objects_api"
 
 
 class TestIsMcpManaged:
-    """is_mcp_managed(name, namespace) makes a K8s API call.
-    Tests require mocking the CustomObjects API.
-    """
+    @patch(PATCH_CUSTOM_API)
+    def test_returns_true_when_label_present(self, mock_api_fn):
+        mock_api = MagicMock()
+        mock_api.get_namespaced_custom_object.return_value = {
+            "metadata": {"labels": {MCP_MANAGED_LABEL: MCP_MANAGED_VALUE}}
+        }
+        mock_api_fn.return_value = mock_api
+        assert is_mcp_managed("my-job", "default") is True
 
-    # TODO(test): test returns True when label present (mock get_custom_objects_api)
-    # TODO(test): test returns False when label absent
-    # TODO(test): test returns None on API error
-    pass
+    @patch(PATCH_CUSTOM_API)
+    def test_returns_false_when_label_missing(self, mock_api_fn):
+        mock_api = MagicMock()
+        mock_api.get_namespaced_custom_object.return_value = {
+            "metadata": {"labels": {"other-label": "value"}}
+        }
+        mock_api_fn.return_value = mock_api
+        assert is_mcp_managed("my-job", "default") is False
+
+    @patch(PATCH_CUSTOM_API)
+    def test_returns_false_when_no_labels(self, mock_api_fn):
+        mock_api = MagicMock()
+        mock_api.get_namespaced_custom_object.return_value = {"metadata": {}}
+        mock_api_fn.return_value = mock_api
+        assert is_mcp_managed("my-job", "default") is False
+
+    @patch(PATCH_CUSTOM_API)
+    def test_returns_false_on_404(self, mock_api_fn):
+        from kubernetes.client.exceptions import ApiException
+
+        mock_api = MagicMock()
+        mock_api.get_namespaced_custom_object.side_effect = ApiException(
+            status=404, reason="Not Found"
+        )
+        mock_api_fn.return_value = mock_api
+        assert is_mcp_managed("missing-job", "default") is False
+
+    @patch(PATCH_CUSTOM_API)
+    def test_returns_none_on_other_api_error(self, mock_api_fn):
+        mock_api = MagicMock()
+        mock_api.get_namespaced_custom_object.side_effect = Exception("connection refused")
+        mock_api_fn.return_value = mock_api
+        assert is_mcp_managed("my-job", "default") is None
 
 
 class TestResetClients:
