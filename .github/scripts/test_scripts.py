@@ -224,15 +224,18 @@ override-dependencies = [
     "requests==2.30.0",
 ]
 """
+        advisory_url = "https://new.com"
         exit_code, updated = self.run_update(
-            pyproject, "requests", "requests==2.31.0", "2025-01-15", "https://new.com"
+            pyproject, "requests", "requests==2.31.0", "2025-01-15", advisory_url
         )
 
         assert exit_code == 0
         assert '"requests==2.31.0",' in updated
         assert "2.30.0" not in updated  # Old version removed
         assert "2025-01-15" in updated  # New date
-        assert "https://new.com" in updated  # New advisory
+        assert (
+            f"# requests==2.31.0 - Added 2025-01-15 for security fix - {advisory_url}" in updated
+        )  # New advisory comment
 
     def test_add_second_override(self):
         """Add second package to existing overrides"""

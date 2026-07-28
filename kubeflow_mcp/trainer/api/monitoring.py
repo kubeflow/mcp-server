@@ -14,13 +14,24 @@
 
 """Monitoring tools for training job logs and events."""
 
+import logging
 import re
 from typing import Any
 
 from kubeflow_mcp.common.constants import ErrorCode
 from kubeflow_mcp.common.types import ToolError, ToolResponse, exception_details, is_k8s_not_found
-from kubeflow_mcp.common.utils import get_trainer_client_for_namespace
-from kubeflow_mcp.core.security import check_namespace_allowed, truncate_log_output
+from kubeflow_mcp.common.utils import (
+    get_core_v1_api,
+    get_trainer_client_for_namespace,
+    get_trainer_effective_namespace,
+)
+from kubeflow_mcp.core.security import (
+    check_namespace_allowed,
+    truncate_log_output,
+    validate_k8s_name,
+)
+
+logger = logging.getLogger(__name__)
 
 MAX_LOG_LINES = 1000
 MAX_EVENT_LIMIT = 500
@@ -58,6 +69,16 @@ _FAILURE_PATTERNS: list[tuple[re.Pattern[str], str, str]] = [
         "FILE_NOT_FOUND",
         "Check dataset/model paths and volume mounts.",
     ),
+    # HF cache pattern MUST come before the generic PermissionError catch-all
+    # so that /.cache/huggingface failures are classified correctly.
+    (
+        re.compile(
+            r"Permission denied.*(?:huggingface|HF_HOME)|(?:huggingface|HF_HOME).*Permission denied",
+            re.IGNORECASE,
+        ),
+        "HF_CACHE_WRITE_ERROR",
+        "Set env var HF_HOME=/workspace to store HuggingFace cache on a writable volume mount.",
+    ),
     (
         re.compile(
             r"PermissionError: \[Errno 13\] Permission denied: '/\.local|Permission denied: '/\.local",
@@ -90,6 +111,20 @@ def _extract_failure_hint(logs: str) -> dict[str, str] | None:
         if pattern.search(logs):
             return {"category": category, "suggestion": suggestion}
     return None
+
+
+def _is_pod_for_step(pod: Any, step: str) -> bool:
+    """Return whether a JobSet pod corresponds to the requested TrainJob step."""
+    labels = getattr(pod.metadata, "labels", None) or {}
+    replicated_job = labels.get("jobset.sigs.k8s.io/replicatedjob-name")
+    job_index = labels.get("jobset.sigs.k8s.io/job-index")
+    if replicated_job == step:
+        return True
+    return (
+        replicated_job is not None
+        and job_index is not None
+        and f"{replicated_job}-{job_index}" == step
+    )
 
 
 def get_training_logs(
@@ -134,6 +169,44 @@ def get_training_logs(
 
         client = get_trainer_client_for_namespace(namespace)
         log_lines = list(client.get_job_logs(name=name, step=step, follow=False))
+        if not log_lines:
+            try:
+                eff_ns = get_trainer_effective_namespace(namespace)
+                name_err = validate_k8s_name(name)
+                if name_err is not None:
+                    return name_err.model_dump()
+                v1 = get_core_v1_api()
+                pods = v1.list_namespaced_pod(
+                    namespace=eff_ns,
+                    label_selector=f"training.kubeflow.org/trainjob-name={name}",
+                )
+                for pod in pods.items:
+                    if not _is_pod_for_step(pod, step):
+                        continue
+                    try:
+                        raw = v1.read_namespaced_pod_log(
+                            name=pod.metadata.name,
+                            namespace=eff_ns,
+                            previous=True,
+                            tail_lines=MAX_LOG_LINES,
+                        )
+                        if raw:
+                            log_lines.extend(raw.splitlines())
+                    except Exception as e:
+                        logger.debug(
+                            "Failed to read previous pod logs for pod %s/%s: %s",
+                            eff_ns,
+                            pod.metadata.name,
+                            e,
+                        )
+            except Exception as e:
+                logger.debug(
+                    "Previous-log fallback failed for job %s (namespace=%s): %s",
+                    name,
+                    namespace,
+                    e,
+                )
+
         if len(log_lines) > MAX_LOG_LINES:
             log_lines = log_lines[-MAX_LOG_LINES:]
 

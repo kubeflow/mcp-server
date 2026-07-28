@@ -305,7 +305,13 @@ def validate_training_bounds(
     return None
 
 
-_SENSITIVE_EXACT = {"hf_token", "access_token", "secret_access_key", "s3_secret_access_key"}
+_SENSITIVE_EXACT = {
+    "token",
+    "hf_token",
+    "access_token",
+    "secret_access_key",
+    "s3_secret_access_key",
+}
 _SENSITIVE_SUBSTRINGS = {
     "password",
     "secret",

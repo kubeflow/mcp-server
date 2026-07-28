@@ -1,0 +1,60 @@
+# MCP conformance baseline — known spec gaps for kubeflow-mcp.
+#
+# The conformance runner (modelcontextprotocol/conformance) executes the
+# "active" suite against the running server over streamable HTTP. Scenarios
+# listed here are allowed to fail without failing CI; every scenario NOT listed
+# here must pass. The runner also fails if a listed scenario starts *passing*,
+# so this file catches both regressions and unexpected improvements.
+#
+# How to regenerate: run `make conformance` locally (see CONTRIBUTING.md), then
+# move any newly-failing scenario into this list with a one-line reason, or
+# remove a scenario that now passes.
+#
+# Every entry below is a legitimate gap for THIS server, not a protocol bug:
+#   - Most "active" scenarios assume the reference test server's fixtures
+#     (a resource named `test://static-text`, a prompt `test_simple_prompt`,
+#     tools that return images/audio/progress, etc.). kubeflow-mcp exposes real
+#     Kubeflow tools instead, so these fixture-driven scenarios can never pass.
+#   - A few exercise MCP capabilities this server does not advertise
+#     (completions, sampling, elicitation).
+#
+# Note: dns-rebinding-protection is intentionally NOT baselined — this server
+# enforces Host/Origin validation (see kubeflow_mcp/core/transport_security.py),
+# so that scenario is a required pass and CI must flag any regression.
+
+server:
+  # --- Capabilities not advertised by this server ---
+  # Completions capability is not implemented (JSON-RPC -32601 Method not found).
+  - completion-complete
+  # Server never issues sampling requests from within a tool call.
+  - tools-call-sampling
+  # Server never issues elicitation requests from within a tool call.
+  - tools-call-elicitation
+  - elicitation-sep1034-defaults
+  - elicitation-sep1330-enums
+
+  # --- Fixture-driven tool scenarios (no matching tool on this server) ---
+  # These expect reference-server tools that return specific content types or
+  # emit progress/logging notifications; kubeflow-mcp's tools return text.
+  - tools-call-image
+  - tools-call-audio
+  - tools-call-embedded-resource
+  - tools-call-mixed-content
+  - tools-call-with-logging
+  - tools-call-with-progress
+
+  # --- Fixture-driven resource scenarios (reference-server URIs absent) ---
+  # e.g. resources-read-text expects `test://static-text`. This server exposes
+  # its own Kubeflow resources and does not implement resource subscriptions.
+  - resources-read-text
+  - resources-read-binary
+  - resources-templates-read
+  - resources-subscribe
+  - resources-unsubscribe
+
+  # --- Fixture-driven prompt scenarios (reference-server prompts absent) ---
+  # e.g. prompts-get-simple expects `test_simple_prompt`.
+  - prompts-get-simple
+  - prompts-get-with-args
+  - prompts-get-embedded-resource
+  - prompts-get-with-image

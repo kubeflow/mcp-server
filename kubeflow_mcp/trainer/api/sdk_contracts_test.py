@@ -1010,3 +1010,214 @@ class TestMCPToolSignatures:
         assert "config" in resp
         assert resp["config"]["mode"] == "builtin_trainer"
         mock_client.create_job.assert_not_called()
+
+    def test_hf_home_reaches_trainer_and_initializers(self):
+        """HF_HOME must land on spec.trainer.env and spec.initializer.{model,dataset}.env."""
+
+        from kubeflow.trainer.backends.kubernetes import utils as k8s_utils
+
+        from kubeflow_mcp.trainer.api.training import (
+            HF_HOME_PATH,
+            _HFDatasetInitializer,
+            _HFModelInitializer,
+            _inject_trainer_hf_home,
+        )
+
+        # --- Initializer subclasses produce HF_HOME via get_optional_initializer_envs ---
+        model_init = _HFModelInitializer(storage_uri="hf://google/gemma-2b", hf_home=HF_HOME_PATH)
+        dataset_init = _HFDatasetInitializer(
+            storage_uri="hf://tatsu-lab/alpaca", hf_home=HF_HOME_PATH
+        )
+
+        assert isinstance(model_init, sdk_types.HuggingFaceModelInitializer)
+        assert isinstance(dataset_init, sdk_types.HuggingFaceDatasetInitializer)
+
+        model_envs = k8s_utils.get_optional_initializer_envs(
+            model_init, required_fields={"storage_uri"}
+        )
+        dataset_envs = k8s_utils.get_optional_initializer_envs(
+            dataset_init, required_fields={"storage_uri"}
+        )
+
+        model_env_names = {e.name for e in model_envs}
+        dataset_env_names = {e.name for e in dataset_envs}
+        assert "HF_HOME" in model_env_names, "HF_HOME missing from model initializer env"
+        assert "HF_HOME" in dataset_env_names, "HF_HOME missing from dataset initializer env"
+
+        model_hf = next(e for e in model_envs if e.name == "HF_HOME")
+        assert model_hf.value == HF_HOME_PATH
+
+        # --- Context manager injects HF_HOME on the BuiltinTrainer CR ---
+        runtime_trainer = sdk_types.RuntimeTrainer(
+            trainer_type=sdk_types.TrainerType.BUILTIN_TRAINER,
+            framework="torchtune",
+            image="test:latest",
+        )
+        runtime_trainer.set_command(("torchrun",))
+        runtime = sdk_types.Runtime(name="torchtune-llama", trainer=runtime_trainer)
+        tune_config = sdk_types.TorchTuneConfig(batch_size=4, epochs=1)
+        builtin = sdk_types.BuiltinTrainer(config=tune_config)
+
+        with _inject_trainer_hf_home(HF_HOME_PATH):
+            cr = k8s_utils.get_trainer_cr_from_builtin_trainer(runtime, builtin)
+
+        assert cr.env is not None, "trainer CR env should not be None"
+        trainer_env_names = {e.name for e in cr.env}
+        assert "HF_HOME" in trainer_env_names, "HF_HOME missing from trainer env"
+        trainer_hf = next(e for e in cr.env if e.name == "HF_HOME")
+        assert trainer_hf.value == HF_HOME_PATH
+
+        # --- After exiting the context manager, the original is restored ---
+        cr_after = k8s_utils.get_trainer_cr_from_builtin_trainer(runtime, builtin)
+        assert cr_after.env is None, "monkey-patch should be reverted"
+
+    def test_extract_failure_hint_hf_cache_patterns(self):
+        """Verify _extract_failure_hint detects HF cache errors before generic PermissionError."""
+        from kubeflow_mcp.trainer.api.monitoring import _extract_failure_hint
+
+        # "Permission denied" followed by "huggingface"
+        hint1 = _extract_failure_hint("Permission denied when writing huggingface cache")
+        assert hint1 is not None and hint1["category"] == "HF_CACHE_WRITE_ERROR"
+
+        # "Permission denied" followed by "HF_HOME"
+        hint2 = _extract_failure_hint("Permission denied: cannot write to HF_HOME directory")
+        assert hint2 is not None and hint2["category"] == "HF_CACHE_WRITE_ERROR"
+
+        # "HF_HOME" before "Permission denied" (reverse order)
+        hint3 = _extract_failure_hint("HF_HOME=/cache: Permission denied")
+        assert hint3 is not None and hint3["category"] == "HF_CACHE_WRITE_ERROR"
+
+        # /.cache/huggingface path must NOT fall through to generic PERMISSION_ERROR
+        hint4 = _extract_failure_hint(
+            "PermissionError: [Errno 13] Permission denied: '/.cache/huggingface/hub'"
+        )
+        assert hint4 is not None and hint4["category"] == "HF_CACHE_WRITE_ERROR"
+
+        # Generic permission error without HF keywords → PERMISSION_ERROR
+        hint5 = _extract_failure_hint(
+            "PermissionError: [Errno 13] Permission denied: '/data/output'"
+        )
+        assert hint5 is not None and hint5["category"] == "PERMISSION_ERROR"
+
+    def test_get_training_logs_fallback_to_previous_logs(self):
+        """Verify get_training_logs queries previous=True pod logs when active container logs are empty."""
+        from unittest.mock import MagicMock, patch
+
+        from kubeflow_mcp.trainer.api.monitoring import get_training_logs
+
+        mock_client = MagicMock()
+        mock_client.get_job_logs.return_value = []
+
+        mock_pod = MagicMock()
+        mock_pod.metadata.name = "crashed-node-0"
+        mock_pod.metadata.labels = {
+            "jobset.sigs.k8s.io/replicatedjob-name": "node",
+            "jobset.sigs.k8s.io/job-index": "0",
+        }
+
+        mock_v1 = MagicMock()
+        mock_v1.list_namespaced_pod.return_value = MagicMock(items=[mock_pod])
+        mock_v1.read_namespaced_pod_log.return_value = "CUDA out of memory\nCrash details"
+
+        with (
+            patch(
+                "kubeflow_mcp.trainer.api.monitoring.get_trainer_client_for_namespace",
+                return_value=mock_client,
+            ),
+            patch("kubeflow_mcp.trainer.api.monitoring.get_core_v1_api", return_value=mock_v1),
+            patch(
+                "kubeflow_mcp.trainer.api.monitoring.get_trainer_effective_namespace",
+                return_value="test-ns",
+            ),
+            patch("kubeflow_mcp.trainer.api.monitoring.check_namespace_allowed", return_value=None),
+        ):
+            resp = get_training_logs(name="crashed-job")
+
+        # Explicitly verify the fallback trigger condition (empty logs)
+        mock_client.get_job_logs.assert_called_once_with(
+            name="crashed-job", step="node-0", follow=False
+        )
+        assert "CUDA out of memory" in resp["data"]["logs"]
+        assert resp["data"]["failure_hint"]["category"] == "OOM"
+        mock_v1.read_namespaced_pod_log.assert_called_once_with(
+            name="crashed-node-0", namespace="test-ns", previous=True, tail_lines=1000
+        )
+
+    def test_get_training_logs_fallback_scopes_to_requested_step(self):
+        """Verify previous-log fallback does not mix logs from other TrainJob steps."""
+        from unittest.mock import MagicMock, call, patch
+
+        from kubeflow_mcp.trainer.api.monitoring import get_training_logs
+
+        mock_client = MagicMock()
+        mock_client.get_job_logs.return_value = []
+
+        node_0 = MagicMock()
+        node_0.metadata.name = "crashed-node-0"
+        node_0.metadata.labels = {
+            "jobset.sigs.k8s.io/replicatedjob-name": "node",
+            "jobset.sigs.k8s.io/job-index": "0",
+        }
+        node_1 = MagicMock()
+        node_1.metadata.name = "crashed-node-1"
+        node_1.metadata.labels = {
+            "jobset.sigs.k8s.io/replicatedjob-name": "node",
+            "jobset.sigs.k8s.io/job-index": "1",
+        }
+
+        mock_v1 = MagicMock()
+        mock_v1.list_namespaced_pod.return_value = MagicMock(items=[node_0, node_1])
+        mock_v1.read_namespaced_pod_log.side_effect = ["node-0 crash", "node-1 crash"]
+
+        with (
+            patch(
+                "kubeflow_mcp.trainer.api.monitoring.get_trainer_client_for_namespace",
+                return_value=mock_client,
+            ),
+            patch("kubeflow_mcp.trainer.api.monitoring.get_core_v1_api", return_value=mock_v1),
+            patch(
+                "kubeflow_mcp.trainer.api.monitoring.get_trainer_effective_namespace",
+                return_value="test-ns",
+            ),
+            patch("kubeflow_mcp.trainer.api.monitoring.check_namespace_allowed", return_value=None),
+        ):
+            resp = get_training_logs(name="crashed-job", step="node-0")
+
+        assert resp["data"]["logs"] == "node-0 crash"
+        mock_v1.read_namespaced_pod_log.assert_has_calls(
+            [call(name="crashed-node-0", namespace="test-ns", previous=True, tail_lines=1000)]
+        )
+        assert mock_v1.read_namespaced_pod_log.call_count == 1
+
+    def test_get_training_logs_no_fallback_when_logs_exist(self):
+        """Verify get_training_logs does not fallback to previous=True when active container logs exist."""
+        from unittest.mock import MagicMock, patch
+
+        from kubeflow_mcp.trainer.api.monitoring import get_training_logs
+
+        mock_client = MagicMock()
+        # Return non-empty active logs
+        mock_client.get_job_logs.return_value = ["Active log line 1", "Active log line 2"]
+
+        mock_v1 = MagicMock()
+
+        with (
+            patch(
+                "kubeflow_mcp.trainer.api.monitoring.get_trainer_client_for_namespace",
+                return_value=mock_client,
+            ),
+            patch("kubeflow_mcp.trainer.api.monitoring.get_core_v1_api", return_value=mock_v1),
+            patch(
+                "kubeflow_mcp.trainer.api.monitoring.get_trainer_effective_namespace",
+                return_value="test-ns",
+            ),
+            patch("kubeflow_mcp.trainer.api.monitoring.check_namespace_allowed", return_value=None),
+        ):
+            resp = get_training_logs(name="active-job")
+
+        # Verify fallback logic was NOT triggered
+        mock_v1.list_namespaced_pod.assert_not_called()
+        mock_v1.read_namespaced_pod_log.assert_not_called()
+
+        # Verify normal behavior
+        assert "Active log line 1\nActive log line 2" in resp["data"]["logs"]

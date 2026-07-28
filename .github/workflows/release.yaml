@@ -1,0 +1,300 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+      - 'release-*'
+    paths:
+      - 'kubeflow_mcp/__init__.py'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Expected version for the Test PyPI dry run (must match kubeflow_mcp/__init__.py)'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  prepare:
+    name: Prepare release branch
+    if: ${{ github.repository == 'kubeflow/mcp-server' && !(github.event_name == 'push' && startsWith(github.ref, 'refs/heads/release-') && github.actor == 'github-actions[bot]') }}
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.vars.outputs.version }}
+      branch: ${{ steps.vars.outputs.branch }}
+      is-prerelease: ${{ steps.vars.outputs.is-prerelease }}
+    steps:
+      # workflow_dispatch has no `branches:` filter (GitHub Actions ignores that
+      # key outside push/pull_request), so without this check any branch could be
+      # dispatched and published to Test PyPI. Fail fast, before checkout, so a
+      # disallowed dispatch gets a clear red X instead of a silent skip.
+      - name: Reject dispatch from non-release branches
+        if: github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/heads/release-')
+        run: |
+          echo "ERROR: Test PyPI dry runs may only be dispatched from 'main' or 'release-*' (got '${GITHUB_REF_NAME}')." >&2
+          exit 1
+
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Configure git user
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Check version and branch
+        id: vars
+        env:
+          EXPECTED_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          VERSION=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' kubeflow_mcp/__init__.py)
+
+          if [[ -z "$VERSION" ]]; then
+            echo "ERROR: Could not read __version__ from kubeflow_mcp/__init__.py" >&2
+            exit 1
+          fi
+
+          # Guard: only a proper X.Y.Z or X.Y.ZrcN version triggers a release.
+          # This prevents an accidental dev/placeholder bump (e.g. 0.1.0-dev) from
+          # cutting a release. Bump with `make release VERSION=X.Y.Z[rcN]`.
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(rc[0-9]+)?$ ]]; then
+            echo "ERROR: Version '$VERSION' is not a release version (expected X.Y.Z or X.Y.ZrcN)." >&2
+            echo "Bump the version with 'make release VERSION=X.Y.Z[rcN]' before releasing." >&2
+            exit 1
+          fi
+
+          if [[ -n "${EXPECTED_VERSION:-}" && "$EXPECTED_VERSION" != "$VERSION" ]]; then
+            echo "ERROR: Expected version '$EXPECTED_VERSION' but kubeflow_mcp/__init__.py has '$VERSION'." >&2
+            exit 1
+          fi
+
+          MAJOR_MINOR=$(echo "$VERSION" | cut -d. -f1,2)
+          BRANCH=release-$MAJOR_MINOR
+
+          # On a manual dry run, build the dispatched ref as-is and never touch
+          # release branches or tags.
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            BRANCH="${GITHUB_REF_NAME}"
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+
+          if [[ "$VERSION" =~ rc[0-9]+$ ]]; then
+            echo "is-prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is-prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Ensure release branch exists and contains version bump
+        if: github.event_name == 'push'
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.vars.outputs.version }}"
+          BRANCH="${{ steps.vars.outputs.branch }}"
+          MAIN_SHA="${{ github.sha }}"
+
+          if [[ "${GITHUB_REF_NAME}" == "$BRANCH" ]]; then
+            echo "Triggered on $BRANCH. Skipping cherry-pick from main."
+            exit 0
+          fi
+
+          if git ls-remote --heads origin "$BRANCH" | grep -q "$BRANCH"; then
+            echo "Using existing branch: $BRANCH"
+            git fetch origin "$BRANCH":"$BRANCH"
+            git checkout "$BRANCH"
+            if git merge-base --is-ancestor "$MAIN_SHA" "$BRANCH"; then
+              echo "Commit $MAIN_SHA already present in $BRANCH. Skipping cherry-pick."
+            else
+              if ! git cherry-pick -x "$MAIN_SHA"; then
+                echo "Cherry-pick failed. Please resolve manually on $BRANCH." >&2
+                exit 1
+              fi
+            fi
+          else
+            echo "Creating new branch: $BRANCH from main@$MAIN_SHA"
+            git checkout -B "$BRANCH" "$MAIN_SHA"
+          fi
+          git push origin "$BRANCH"
+
+  build:
+    name: Build package
+    needs: [prepare]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.prepare.outputs.branch }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          python-version: '3.11'
+          enable-cache: true
+
+      - name: Run lint and formatting checks
+        run: make verify
+
+      - name: Run unit tests
+        run: make test-python
+
+      - name: Verify version
+        run: |
+          set -euo pipefail
+          EXPECTED_VERSION="${{ needs.prepare.outputs.version }}"
+          CODE_VERSION="$(uv run python -c "import kubeflow_mcp; print(kubeflow_mcp.__version__)")"
+          echo "Expected version: $EXPECTED_VERSION"
+          echo "Code version:     $CODE_VERSION"
+          if [[ "$EXPECTED_VERSION" != "$CODE_VERSION" ]]; then
+            echo "Version mismatch"; exit 1
+          fi
+          echo "Version verified: $EXPECTED_VERSION"
+
+      - name: Build and validate package
+        run: |
+          uv build
+          uvx twine check dist/*
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: dist-${{ needs.prepare.outputs.version }}
+          path: dist/
+
+  create-tag:
+    name: Create and push tag
+    needs: [prepare, build]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.prepare.outputs.branch }}
+      - name: Create tag
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.prepare.outputs.version }}"
+          if git ls-remote --tags origin "$VERSION" | grep -q "refs/tags/$VERSION"; then
+            echo "Tag $VERSION already exists. Skipping"; exit 0
+          fi
+          git tag "$VERSION"
+          git push origin "$VERSION"
+
+  publish-test-pypi:
+    name: Publish to Test PyPI
+    needs: [prepare, build]
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment:
+      name: test-pypi
+      url: https://test.pypi.org/project/kubeflow-mcp/
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v7
+        with:
+          name: dist-${{ needs.prepare.outputs.version }}
+          path: dist/
+      - name: Publish to Test PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          verbose: true
+
+  publish-pypi:
+    name: Publish to PyPI
+    needs: [prepare, build, create-tag]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment:
+      name: release
+      url: https://pypi.org/project/kubeflow-mcp/
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v7
+        with:
+          name: dist-${{ needs.prepare.outputs.version }}
+          path: dist/
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          verbose: true
+
+  docker:
+    name: Publish Docker image
+    needs: [prepare, create-tag]
+    if: github.event_name == 'push'
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
+    uses: ./.github/workflows/docker-publish.yaml
+    secrets: inherit
+    with:
+      version: ${{ needs.prepare.outputs.version }}
+
+  github-release:
+    name: Create GitHub Release
+    needs: [prepare, build, create-tag, publish-pypi]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment:
+      name: release
+      url: https://github.com/kubeflow/mcp-server/releases
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.prepare.outputs.branch }}
+      - name: Download build artifacts
+        uses: actions/download-artifact@v7
+        with:
+          name: dist-${{ needs.prepare.outputs.version }}
+          path: dist/
+      # NOTE: Changelog extraction is temporarily disabled while changelog/git-cliff
+      # support is being added to the repo separately. GitHub's auto-generated notes are
+      # used in the meantime. Once CHANGELOG/CHANGELOG-X.Y.md exists, restore this step,
+      # set `body: ${{ steps.changelog.outputs.changelog }}`, and flip
+      # `generate_release_notes` back to false.
+      # - name: Extract changelog
+      #   if: needs.prepare.outputs.is-prerelease != 'true'
+      #   id: changelog
+      #   run: |
+      #     VERSION="${{ needs.prepare.outputs.version }}"
+      #     MAJOR_MINOR=$(echo "$VERSION" | cut -d. -f1,2)
+      #     CHANGELOG_FILE="CHANGELOG/CHANGELOG-${MAJOR_MINOR}.md"
+      #     set -euo pipefail
+      #     [[ -f "$CHANGELOG_FILE" ]] || { echo "ERROR: $CHANGELOG_FILE not found" >&2; exit 1; }
+      #     HEADER_REGEX="^#\{1,2\} \\[${VERSION//./\\.}\\]"
+      #     SECTION=$(sed -n "/$HEADER_REGEX/,\$p" "$CHANGELOG_FILE")
+      #     [[ -n "$SECTION" ]] || { echo "ERROR: No changelog section for $VERSION in \"$CHANGELOG_FILE\"" >&2; exit 1; }
+      #     NEXT_VERSION=$(echo "$SECTION" | grep -m1 "^#\{1,2\} \\[[0-9]" || true)
+      #     if [[ -n "$NEXT_VERSION" ]]; then
+      #         CHANGELOG=$(echo "$SECTION" | sed '1d' | sed '/^#\{1,2\} \[[0-9]/,$d')
+      #     else
+      #         CHANGELOG=$(echo "$SECTION" | sed '1d')
+      #     fi
+      #     [[ -n "$CHANGELOG" ]] || { echo "ERROR: Empty changelog body for $VERSION in \"$CHANGELOG_FILE\"" >&2; exit 1; }
+      #     {
+      #       echo "changelog<<EOF"
+      #       echo "$CHANGELOG"
+      #       echo "EOF"
+      #     } >> "$GITHUB_OUTPUT"
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.version }}
+          name: ${{ needs.prepare.outputs.version }}
+          draft: false
+          prerelease: ${{ needs.prepare.outputs.is-prerelease == 'true' }}
+          generate_release_notes: true
+          files: |
+            dist/*

@@ -52,6 +52,19 @@ docker run --rm -p 8000:8000 \
 
 The server listens on `http://localhost:8000/mcp`.
 
+Container and Kubernetes probes are available without MCP authentication:
+
+```text
+GET /health  # liveness: the server process is accepting HTTP requests
+GET /ready   # readiness: configured clients imported and packaged resources loaded
+```
+
+`/ready` returns 200 only when both `clients_ready` and `resources_ready` are true. It does
+not contact Kubernetes or other APIs, so it is not a live dependency check. A missing
+packaged resource Markdown file keeps `/ready` at 503 even though `/health` and registered
+tools remain available; check the server logs and package contents rather than cluster
+dependencies.
+
 **Environment variables**
 
 | Variable | Default | Description |
@@ -63,6 +76,9 @@ The server listens on `http://localhost:8000/mcp`.
 | `KUBEFLOW_MCP_JWT_AUDIENCE` | _(none)_ | Expected JWT audience |
 | `KUBEFLOW_MCP_CLIENTS` | `trainer` | Comma-separated client modules to load |
 | `KUBEFLOW_MCP_PERSONA` | `readonly` | Tool persona (`readonly`, `data-scientist`, `ml-engineer`, `platform-admin`) |
+| `KUBEFLOW_MCP_ALLOWED_HOSTS` | _(loopback)_ | Comma-separated `Host` header allowlist for DNS rebinding protection; `:*` port wildcard supported (e.g. `mcp.example.com,mcp.example.com:*`) |
+| `KUBEFLOW_MCP_ALLOWED_ORIGINS` | _(loopback)_ | Comma-separated `Origin` header allowlist; `:*` port wildcard supported (e.g. `https://mcp.example.com`) |
+| `KUBEFLOW_MCP_DNS_REBINDING_PROTECTION` | `true` | Set `false` to disable Host/Origin validation (not recommended) |
 | `LOG_FORMAT` | `json` | Log format (`json`, `console`) |
 | `LOG_LEVEL` | `INFO` | Log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
 
@@ -80,6 +96,8 @@ The server listens on `http://localhost:8000/mcp`.
 ```
 
 For in-cluster deployments, replace `localhost:8000` with the Kubernetes Service address and mount `KUBEFLOW_MCP_AUTH_TOKEN` from a Secret.
+
+> **Note:** DNS rebinding protection allows only loopback `Host`/`Origin` headers by default. When exposing the server through a Service or Ingress, set `KUBEFLOW_MCP_ALLOWED_HOSTS` (e.g. `KUBEFLOW_MCP_ALLOWED_HOSTS=kubeflow-mcp.kubeflow.svc:*,mcp.example.com`) or requests will be rejected with HTTP 421.
 
 ### Example: Fine-tune a model via AI agent
 
@@ -250,8 +268,9 @@ make inspector TRANSPORT=sse      # Inspector + SSE (start server separately)
 
 ## Documentation
 
-
 - **[CONTRIBUTING](CONTRIBUTING.md)**: Development workflow and PR guidelines
+- **[ROADMAP](ROADMAP.md)**: Project roadmap
+- **[SECURITY](SECURITY.md)**: Vulnerability reporting; see [ARCHITECTURE.md#security-model](ARCHITECTURE.md#security-model) for threat model, RBAC, and hardening
 - **[KEP-936](https://github.com/kubeflow/community/tree/master/proposals/936-kubeflow-mcp-server)**: Design proposal
 
 ## License

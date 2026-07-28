@@ -115,6 +115,25 @@ class AuthConfig(BaseModel):
     audience: str | None = Field(default=None)
 
 
+class SecurityConfig(BaseModel):
+    """HTTP transport security (DNS rebinding protection).
+
+    Validates the ``Host`` and ``Origin`` headers of incoming HTTP requests so a
+    malicious web page cannot use DNS rebinding to reach a locally-bound server.
+    Only applies to the ``http``/``sse`` transports; ``stdio`` has no HTTP surface.
+
+    ``allowed_hosts``/``allowed_origins`` support an exact match or a ``:*`` port
+    wildcard (e.g. ``localhost:*``). When left empty they default to loopback
+    values (IPv4 ``127.0.0.1``, IPv6 ``[::1]``, and ``localhost``), which is
+    correct for the default ``127.0.0.1`` bind used in dev and CI. IPv6 hosts
+    must be given in bracketed form (e.g. ``[::1]:*``) to match the Host header.
+    """
+
+    enable_dns_rebinding_protection: bool = Field(default=True)
+    allowed_hosts: list[str] = Field(default_factory=list)
+    allowed_origins: list[str] = Field(default_factory=list)
+
+
 class ResilienceConfig(BaseModel):
     """Rate limiter and circuit breaker tuning."""
 
@@ -149,6 +168,7 @@ class Config(BaseModel):
 
     server: ServerConfig = Field(default_factory=ServerConfig)
     auth: AuthConfig = Field(default_factory=AuthConfig)
+    security: SecurityConfig = Field(default_factory=SecurityConfig)
     resilience: ResilienceConfig = Field(default_factory=ResilienceConfig)
     trainer: TrainerConfig = Field(default_factory=TrainerConfig)
     optimizer: OptimizerConfig = Field(default_factory=OptimizerConfig)
@@ -272,6 +292,29 @@ def load_config(config_path: Path | None = None) -> Config:
         audience=os.getenv("KUBEFLOW_MCP_JWT_AUDIENCE", auth_file.get("audience")),
     )
 
+    security_file = file_config.get("security", {})
+
+    def _csv_env(name: str, file_default: list[str]) -> list[str]:
+        raw = os.getenv(name)
+        if raw is None:
+            return list(file_default)
+        return [item.strip() for item in raw.split(",") if item.strip()]
+
+    dns_protect_env = os.getenv("KUBEFLOW_MCP_DNS_REBINDING_PROTECTION")
+    security = SecurityConfig(
+        enable_dns_rebinding_protection=(
+            dns_protect_env.strip().lower() not in {"0", "false", "no", "off"}
+            if dns_protect_env is not None
+            else security_file.get("enable_dns_rebinding_protection", True)
+        ),
+        allowed_hosts=_csv_env(
+            "KUBEFLOW_MCP_ALLOWED_HOSTS", security_file.get("allowed_hosts", [])
+        ),
+        allowed_origins=_csv_env(
+            "KUBEFLOW_MCP_ALLOWED_ORIGINS", security_file.get("allowed_origins", [])
+        ),
+    )
+
     resilience_file = file_config.get("resilience", {})
     resilience = ResilienceConfig(
         rate_limit=float(
@@ -297,6 +340,7 @@ def load_config(config_path: Path | None = None) -> Config:
     return Config(
         server=server,
         auth=auth,
+        security=security,
         resilience=resilience,
         trainer=trainer,
         optimizer=optimizer,

@@ -163,6 +163,7 @@ def serve(
     )
 
     auth_provider = None
+    http_middleware = None
     if transport != "stdio":
         auth_provider = build_auth_provider(cfg.auth)
         if auth_provider is None:
@@ -170,6 +171,27 @@ def serve(
                 "HTTP transport with no auth configured — server is open. "
                 "Set --auth-token or KUBEFLOW_MCP_AUTH_TOKEN for bearer auth, "
                 "or KUBEFLOW_MCP_JWKS_URI for JWT verification."
+            )
+
+        from starlette.middleware import Middleware
+
+        from kubeflow_mcp.core.transport_security import (
+            DNSRebindingProtectionMiddleware,
+            build_transport_security_settings,
+        )
+
+        security_settings = build_transport_security_settings(cfg.security)
+        if security_settings.enable_dns_rebinding_protection:
+            http_middleware = [
+                Middleware(
+                    DNSRebindingProtectionMiddleware,
+                    settings=security_settings,
+                )
+            ]
+        else:
+            logger.warning(
+                "DNS rebinding protection is disabled — set "
+                "KUBEFLOW_MCP_DNS_REBINDING_PROTECTION=true to re-enable it."
             )
 
     client_list = [c.strip() for c in clients.split(",")]
@@ -185,9 +207,13 @@ def serve(
     if transport == "stdio":
         server.run(show_banner=show_banner)
     elif transport == "sse":
-        server.run(transport="sse", show_banner=show_banner)
+        server.run(transport="sse", show_banner=show_banner, middleware=http_middleware)
     else:
-        server.run(transport="streamable-http", show_banner=show_banner)
+        server.run(
+            transport="streamable-http",
+            show_banner=show_banner,
+            middleware=http_middleware,
+        )
 
 
 @cli.command()

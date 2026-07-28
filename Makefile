@@ -19,6 +19,16 @@ SHELL = /usr/bin/env bash -o pipefail
 
 PROJECT_DIR := $(shell dirname $(abspath $(lastword $(MAKEFILE_LIST))))
 
+# Setting SED for compatibility with macos
+ifeq ($(shell command -v gsed 2>/dev/null),)
+    SED ?= $(shell command -v sed)
+else
+    SED ?= $(shell command -v gsed)
+endif
+ifeq ($(shell ${SED} --version 2>&1 | grep -q GNU; echo $$?),1)
+    $(error !!! GNU sed is required. If on OS X, use 'brew install gnu-sed'.)
+endif
+
 help: ## Display this help.
 	@awk 'BEGIN {FS = ":.*##"; printf "\nUsage:\n  make \033[36m<target>\033[0m\n"} /^[a-zA-Z_0-9-]+:.*?##/ { printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2 } /^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5) } ' $(MAKEFILE_LIST)
 
@@ -36,10 +46,10 @@ install-dev: uv ## Install all development dependencies
 
 ##@ Quality
 
-verify: ## Run linting and formatting checks
+verify: install-dev ## Run the same checks CI runs (pre-commit + lockfile)
 	@uv lock --check
-	@uv run --group dev ruff check .
-	@uv run --group dev ruff format --check .
+	@uv run pre-commit run --all-files
+	@echo "All checks passed!"
 
 format: ## Auto-format and fix lint issues
 	@uv run --group dev ruff check --fix .
@@ -65,6 +75,18 @@ test-cov: ## Run tests with HTML coverage report
 	@echo "Coverage report: htmlcov/index.html"
 
 ##@ Dev Tools
+
+.PHONY: conformance
+conformance: install-dev ## Run MCP protocol conformance suite against a local HTTP server
+	@echo "Starting kubeflow-mcp on http://localhost:8000/mcp (no cluster required)..."
+	@KUBECONFIG=/nonexistent uv run kubeflow-mcp serve --transport http --no-banner > /tmp/kubeflow-mcp-conformance.log 2>&1 & \
+	  SERVER_PID=$$!; \
+	  trap "kill $$SERVER_PID 2>/dev/null || true" EXIT; \
+	  timeout 60 bash -c 'until curl -sf -o /dev/null http://localhost:8000/mcp -X POST -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"make\",\"version\":\"1\"}}}"; do sleep 1; done'; \
+	  npx -y @modelcontextprotocol/conformance@0.1.16 server \
+	    --url http://localhost:8000/mcp \
+	    --suite active \
+	    --expected-failures tests/conformance/expected-failures.yaml
 
 TRANSPORT ?= stdio
 

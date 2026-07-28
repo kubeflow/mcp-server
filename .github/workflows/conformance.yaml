@@ -1,0 +1,77 @@
+name: MCP Conformance
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  conformance:
+    runs-on: ubuntu-latest
+    name: Protocol conformance (streamable HTTP)
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Install package
+        run: uv sync --all-extras
+
+      # Start the server over streamable HTTP with no kubeconfig / no cluster.
+      # health_check and all tools degrade gracefully when K8s is unreachable,
+      # so the server starts and answers initialize/tools-list without a cluster.
+      - name: Start MCP server
+        env:
+          KUBECONFIG: /nonexistent
+        run: |
+          uv run kubeflow-mcp serve --transport http --no-banner > server.log 2>&1 &
+          echo $! > server.pid
+
+      # FastMCP streamable-HTTP has no plain health endpoint, so probe the MCP
+      # endpoint with a real initialize request and wait for HTTP 200.
+      - name: Wait for server
+        run: |
+          timeout 60 bash -c 'until curl -sf -o /dev/null \
+            http://localhost:8000/mcp \
+            -X POST \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/json, text/event-stream" \
+            -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"ci\",\"version\":\"1\"}}}"; \
+            do sleep 1; done'
+
+      - name: Run MCP conformance suite
+        uses: modelcontextprotocol/conformance@v0.1.16
+        with:
+          mode: server
+          url: http://localhost:8000/mcp
+          suite: active
+          expected-failures: tests/conformance/expected-failures.yaml
+          node-version: 22
+
+      - name: Dump server logs
+        if: always()
+        run: cat server.log || true
+
+      - name: Stop MCP server
+        if: always()
+        run: |
+          if [ -f server.pid ]; then
+            kill "$(cat server.pid)" 2>/dev/null || true
+          fi

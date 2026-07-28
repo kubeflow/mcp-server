@@ -41,6 +41,7 @@ from kubeflow_mcp.core.health import (
     HEALTH_TOOL_DESCRIPTIONS,
     HEALTH_TOOLS,
 )
+from kubeflow_mcp.core.http_edge import register_probe_routes
 from kubeflow_mcp.core.logging import with_correlation_id
 from kubeflow_mcp.core.middleware import get_mcp_request_id, get_mcp_session_id, get_user_id
 from kubeflow_mcp.core.policy import (
@@ -343,12 +344,16 @@ def create_server(  # noqa: C901
 
     # Single import per client — cache module refs for reuse
     loaded_modules: dict[str, Any] = {}
+    clients_ready = True
     for client_name in clients:
         if client_name not in CLIENT_MODULES:
+            clients_ready = False
+            logger.warning(f"Unknown client '{client_name}'")
             continue
         try:
             loaded_modules[client_name] = importlib.import_module(CLIENT_MODULES[client_name])
         except ImportError as e:
+            clients_ready = False
             logger.warning(f"Failed to import client '{client_name}': {e}")
 
     # Build instructions (persona + tier aware)
@@ -362,7 +367,7 @@ def create_server(  # noqa: C901
     # Bridge FastMCP async context into sync _audit_wrap via ContextVars
     from kubeflow_mcp.core.middleware import AuditIdentityMiddleware
 
-    mcp.add_middleware(AuditIdentityMiddleware)
+    mcp.add_middleware(AuditIdentityMiddleware())
 
     # Merge tool metadata from client modules
     all_descriptions: dict[str, str] = {}
@@ -452,6 +457,7 @@ def create_server(  # noqa: C901
         logger.info(f"Full mode: registered {registered} tools")
 
     # Register MCP resources from client modules (all resources, always)
-    register_resources(mcp, loaded_modules)
+    resources_ready = register_resources(mcp, loaded_modules)
+    register_probe_routes(mcp, is_ready=clients_ready and resources_ready)
 
     return mcp

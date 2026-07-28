@@ -51,3 +51,28 @@ TODO: Implement the following test categories:
    - JWTVerifier validates JWKS signatures
    - Unauthenticated HTTP requests rejected with 401
 """
+
+from __future__ import annotations
+
+from kubeflow_mcp.core.security import mask_sensitive_data
+
+
+def test_mask_sensitive_data_masks_sensitive_exact_fields() -> None:
+    data = {
+        "model": "llama",
+        "token": "ghp_xxxxxxxxxxxx",
+        "hf_token": "hf_secret",
+        "access_token": "at_secret",
+        "secret_access_key": "sak_secret",
+        "s3_secret_access_key": "s3_secret",
+        "api_token": "api_secret",
+    }
+    assert mask_sensitive_data(data) == {
+        "model": "llama",
+        "token": "***",
+        "hf_token": "***",
+        "access_token": "***",
+        "secret_access_key": "***",
+        "s3_secret_access_key": "***",
+        "api_token": "***",
+    }

@@ -38,6 +38,18 @@ ALWAYS pass when `platform=openshift`. Copy-paste ready — pass directly as `vo
 - `run_custom_training()`: auto-injects workspace emptyDir at `/workspace`
 - `run_container_training()`: add workspace emptyDir only if your image writes to `/workspace`
 
+## HuggingFace Cache Directory (HF_HOME)
+
+`fine_tune()` automatically sets `HF_HOME=/workspace/.hf` on all pods (node, dataset-initializer, model-initializer). This redirects HuggingFace cache writes from the default `/.cache/huggingface` (read-only under OpenShift's restricted SCC) to the writable `/workspace` PVC.
+
+No user action is needed for `fine_tune()`. For `run_custom_training()` or `run_container_training()` that use HuggingFace libraries, pass:
+
+```json
+"env": {"HF_HOME": "/workspace/.hf"}
+```
+
+**Important:** `run_container_training()` does NOT auto-mount `/workspace`. You must supply a writable volume (e.g. an emptyDir) mounted at `/workspace` for `HF_HOME=/workspace/.hf` to work. Without it, the path is on the read-only root filesystem and writes will fail.
+
 ## OpenShift Non-Root UID
 
 Random UIDs (e.g. 1000660000). Do NOT assume root. Implications:

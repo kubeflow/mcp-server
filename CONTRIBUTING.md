@@ -18,12 +18,18 @@ We encourage the judicious use of AI/LLM tools; please refer to the [Kubeflow AI
    cd mcp-server
    ```
 
-3. Set up development environment:
+3. Install the [uv](https://docs.astral.sh/uv/) CLI if you do not already have it:
+   ```bash
+   curl -LsSf https://astral.sh/uv/install.sh | sh
+   ```
+   (`make install-dev` can also auto-install uv via the `make uv` target.)
+
+4. Set up development environment:
    ```bash
    make install-dev
    ```
 
-4. Create a branch:
+5. Create a branch:
    ```bash
    git checkout -b feat/your-feature
    ```
@@ -42,7 +48,7 @@ uv run pre-commit install
 
 The pre-commit hooks ensure code quality and consistency (linting and formatting with `ruff`). They are also executed in CI.
 
-To run verification checks locally:
+To run verification checks locally (matches CI: lockfile check + `pre-commit run --all-files`):
 
 ```bash
 make verify
@@ -58,6 +64,41 @@ To run unit tests locally, use the following `make` command:
 ```bash
 make test-python
 ```
+
+### Conformance Testing
+
+We validate that the server correctly implements the MCP protocol
+(`initialize`, `tools/list`, `tools/call`, etc.) using the official
+[MCP conformance framework](https://github.com/modelcontextprotocol/conformance).
+This runs in CI on every PR (`.github/workflows/conformance.yaml`) and needs
+**no Kubernetes cluster and no LLM** — the server starts against an unreachable
+cluster and its tools degrade gracefully.
+
+To run the same suite locally (requires Node.js 20+):
+
+```bash
+make conformance
+```
+
+This starts `kubeflow-mcp serve --transport http` in the background, waits for
+it to answer `initialize`, then runs the conformance `active` suite against
+`http://localhost:8000/mcp`.
+
+**Baseline file.** `tests/conformance/expected-failures.yaml` lists scenarios
+that are allowed to fail — these are known spec gaps for this server (mostly
+scenarios that assume the reference server's test fixtures, plus a few
+unadvertised capabilities). Every scenario *not* listed must pass, and CI also
+fails if a listed scenario unexpectedly starts passing. When you add protocol
+features, remove the now-passing scenarios from the baseline; if you
+intentionally change behavior, update the list with a one-line reason.
+
+**DNS rebinding protection.** The HTTP/SSE transports validate the `Host` and
+`Origin` headers (`kubeflow_mcp/core/transport_security.py`) so a locally-bound
+server cannot be reached by a malicious web page via DNS rebinding. Protection
+is on by default and allows loopback hosts; override the allowlists with
+`KUBEFLOW_MCP_ALLOWED_HOSTS` / `KUBEFLOW_MCP_ALLOWED_ORIGINS` (comma-separated,
+`:*` port wildcard supported) when serving on a non-loopback address, or set
+`KUBEFLOW_MCP_DNS_REBINDING_PROTECTION=false` to disable it (not recommended).
 
 ## Commit Messages
 

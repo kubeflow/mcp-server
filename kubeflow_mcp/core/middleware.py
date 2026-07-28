@@ -69,7 +69,7 @@ class AuditIdentityMiddleware:
 
         from kubeflow_mcp.core.middleware import AuditIdentityMiddleware
         mcp = FastMCP("kubeflow-mcp-server")
-        mcp.add_middleware(AuditIdentityMiddleware)
+        mcp.add_middleware(AuditIdentityMiddleware())
     """
 
     async def __call__(self, context: Any, call_next: Any) -> Any:
