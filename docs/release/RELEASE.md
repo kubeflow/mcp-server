@@ -71,7 +71,7 @@ make release VERSION=X.Y.Z      # e.g. make release VERSION=0.1.0
 This updates:
 
 - `kubeflow_mcp/__init__.py` → `__version__ = "X.Y.Z"`
-- `CHANGELOG/CHANGELOG-X.Y.md` → a new top entry `## [X.Y.Z] (YYYY-MM-DD)`
+- `CHANGELOG/CHANGELOG-X.Y.md` → a new top entry `# [X.Y.Z] (YYYY-MM-DD)`
   (skipped for `rcN`)
 
 ### 2. Open a pull request

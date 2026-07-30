@@ -107,31 +107,62 @@ endif
 
 ##@ Release
 
+# Bump version and generate changelog with git-cliff (Docker), matching kubeflow/sdk.
+# Usage: make release VERSION=0.1.0
+# Optional: GITHUB_TOKEN=... (or export it) for contributor attribution / New Contributors.
+# Scope: prefer PREV_TAG..upstream/release-X.Y, else --unreleased. RC versions skip changelog.
 .PHONY: release
-release: install-dev ## Bump the version in kubeflow_mcp/__init__.py (VERSION=X.Y.Z[rcN])
+release: install-dev ## Bump version and generate changelog (VERSION=X.Y.Z[rcN])
 	@if [ -z "$(VERSION)" ] || ! echo "$(VERSION)" | grep -E -q '^[0-9]+\.[0-9]+\.[0-9]+(rc[0-9]+)?$$'; then \
 		echo "Error: VERSION must be set in X.Y.Z or X.Y.ZrcN format. Usage: make release VERSION=X.Y.Z[rcN]"; \
 		exit 1; \
 	fi
 	@$(SED) -i 's/^__version__ = ".*"/__version__ = "$(VERSION)"/' kubeflow_mcp/__init__.py
 	@echo "Version bumped to $(VERSION) in kubeflow_mcp/__init__.py"
-# NOTE: Changelog generation via git-cliff is temporarily disabled — changelog/git-cliff
-# support is being added to the repo separately. Re-enable the block below (plus the
-# git-cliff dev dependency in pyproject.toml and a cliff.toml) once that work lands.
-#	@if echo "$(VERSION)" | grep -E -q 'rc[0-9]+$$'; then \
-#		echo "Skipping changelog generation for RC release $(VERSION)"; \
-#	else \
-#		MAJOR_MINOR=$$(echo "$(VERSION)" | cut -d. -f1,2); \
-#		CHANGELOG_PATH="CHANGELOG/CHANGELOG-$$MAJOR_MINOR.md"; \
-#		echo "Generating changelog for $(VERSION) (unreleased)"; \
-#		CLIFF_CMD="uv run git-cliff --unreleased --tag $(VERSION)"; \
-#		if [ -f "$$CHANGELOG_PATH" ]; then \
-#			$$CLIFF_CMD --prepend "$$CHANGELOG_PATH"; \
-#		else \
-#			$$CLIFF_CMD -o "$$CHANGELOG_PATH"; \
-#		fi; \
-#		echo "Changelog generated at $$CHANGELOG_PATH"; \
-#	fi
+	@if echo "$(VERSION)" | grep -E -q 'rc[0-9]+$$'; then \
+		echo "Skipping changelog generation for RC release $(VERSION)"; \
+	else \
+		git fetch upstream --tags --prune; \
+		MAJOR_MINOR=$$(echo "$(VERSION)" | cut -d. -f1,2); \
+		CHANGELOG_PATH="CHANGELOG/CHANGELOG-$$MAJOR_MINOR.md"; \
+		RELEASE_BRANCH="release-$$MAJOR_MINOR"; \
+		RELEASE_SHA=$$(git rev-parse --verify --quiet "refs/remotes/upstream/$$RELEASE_BRANCH"); \
+		if [ -n "$$RELEASE_SHA" ]; then \
+			PREV_TAG=$$(git describe --tags --abbrev=0 --match '[0-9]*' --exclude '*rc*' "$$RELEASE_SHA" 2>/dev/null || true); \
+			if [ -n "$$PREV_TAG" ]; then \
+				CLIFF_SCOPE="$$PREV_TAG..$$RELEASE_SHA"; \
+				echo "Generating changelog for $(VERSION) (range: $$PREV_TAG..$$RELEASE_BRANCH @ $$RELEASE_SHA)"; \
+			else \
+				CLIFF_SCOPE="--unreleased"; \
+				echo "Generating changelog for $(VERSION) (no prior tag on $$RELEASE_BRANCH; using --unreleased)"; \
+			fi; \
+		elif [ ! -f "$$CHANGELOG_PATH" ]; then \
+			CLIFF_SCOPE="--unreleased"; \
+			echo "Generating changelog for $(VERSION) (new release line $$MAJOR_MINOR, branch $$RELEASE_BRANCH not created yet; using --unreleased)"; \
+		else \
+			echo "Error: branch $$RELEASE_BRANCH not found locally or on upstream, but $$CHANGELOG_PATH exists. Run: git fetch upstream $$RELEASE_BRANCH"; \
+			exit 1; \
+		fi; \
+		mkdir -p CHANGELOG; \
+		export GITHUB_TOKEN="$(GITHUB_TOKEN)"; \
+		CLIFF_CMD="docker run --rm -u $$(id -u):$$(id -g) -v $(PROJECT_DIR):/app"; \
+		if [ -n "$$GITHUB_TOKEN" ]; then \
+			CLIFF_CMD="$$CLIFF_CMD -e GITHUB_TOKEN"; \
+		fi; \
+		CLIFF_CMD="$$CLIFF_CMD -w /app ghcr.io/orhun/git-cliff/git-cliff:latest $$CLIFF_SCOPE --tag $(VERSION)"; \
+		# Prepend only when a prior release heading exists; stubs/empty files use -o
+		# so the first entry is not written above a '# Changelog' intro.
+		if [ -f "$$CHANGELOG_PATH" ] && grep -qE '^# \[[0-9]+\.[0-9]+\.[0-9]+\]' "$$CHANGELOG_PATH"; then \
+			$$CLIFF_CMD --prepend "$$CHANGELOG_PATH"; \
+		else \
+			$$CLIFF_CMD -o "$$CHANGELOG_PATH"; \
+		fi; \
+		echo "Changelog generated at $$CHANGELOG_PATH"; \
+	fi
+	@echo ""
+	@echo "Release commit for $(VERSION) is ready."
+	@echo "Review the changelog changes if needed, then commit with:"
+	@echo "git add -A && git commit -s -m 'Prepare Release $(VERSION)'"
 
 ##@ Cleanup
 
