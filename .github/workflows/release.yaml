@@ -33,7 +33,7 @@ jobs:
           echo "ERROR: Release may only be dispatched from 'main' or 'release-*' (got '${GITHUB_REF_NAME}')." >&2
           exit 1
 
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
 
@@ -104,7 +104,7 @@ jobs:
     needs: [prepare]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
           ref: ${{ needs.prepare.outputs.branch }}
@@ -149,7 +149,7 @@ jobs:
     needs: [prepare, build]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
           ref: ${{ needs.prepare.outputs.branch }}
@@ -200,7 +200,7 @@ jobs:
       name: release
       url: https://github.com/kubeflow/mcp-server/releases
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
           ref: ${{ needs.prepare.outputs.branch }}
