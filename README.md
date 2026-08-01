@@ -71,7 +71,7 @@ dependencies.
 
 | Variable | Default | Description |
 |---|---|---|
-| `MCP_TRANSPORT` | `http` | Transport protocol (`http`, `sse`, `stdio`) |
+| `MCP_TRANSPORT` | `stdio` | Transport protocol (`http`, `sse`, `stdio`) |
 | `KUBEFLOW_MCP_AUTH_TOKEN` | _(none)_ | Bearer token for HTTP auth |
 | `KUBEFLOW_MCP_JWKS_URI` | _(none)_ | JWKS endpoint for JWT verification (production) |
 | `KUBEFLOW_MCP_JWT_ISSUER` | _(none)_ | Expected JWT issuer |
