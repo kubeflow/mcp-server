@@ -218,19 +218,6 @@ Without auth configured, the server logs a warning that the HTTP endpoint is ope
 
 </details>
 
-<details>
-<summary>Agent Subcommand</summary>
-
-```bash
-kubeflow-mcp agent \
-  --backend ollama \              # ollama (default; more backends planned)
-  --model qwen3:8b \              # model name for the backend
-  --mode full \                   # full | progressive | semantic
-  --thinking                      # enable thinking output (supported models)
-```
-
-</details>
-
 ## Observability
 
 OpenTelemetry tracing is optional and can be enabled without changing tool code.
@@ -247,9 +234,6 @@ kubeflow-mcp serve
 
 Each tool invocation emits a span with attributes:
 `tool.name`, `tool.args_preview`, `tool.success`, `tool.duration_ms`, `kubeflow.persona`, and `correlation_id`.
-
-> **Note:** `kubeflow-mcp agent --otel-endpoint ...` emits spans under a separate
-> `kubeflow-mcp-agent` service in Jaeger, distinct from the `kubeflow-mcp` server spans.
 
 ## Development
 
