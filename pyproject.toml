@@ -1,6 +1,6 @@
 [project]
 name = "kubeflow-mcp"
-version = "0.1.0-dev"
+dynamic = ["version"]
 requires-python = ">=3.10"
 description = "Model Context Protocol server for AI-assisted development with Kubeflow"
 readme = "README.md"
@@ -19,14 +19,14 @@ dependencies = [
     "pydantic>=2.0",
     "pyyaml>=6.0",
     "click>=8.0",
-    "kubeflow>=0.4.0",
+    "kubeflow==0.4.0",
     "huggingface-hub>=0.20",
 ]
 
 [project.optional-dependencies]
-hub = ["kubeflow[hub]>=0.4.0"]
-spark = ["kubeflow[spark]>=0.4.0"]
-all = ["kubeflow[hub]>=0.4.0", "kubeflow[spark]>=0.4.0"]
+hub = ["kubeflow[hub]==0.4.0"]
+spark = ["kubeflow[spark]==0.4.0"]
+all = ["kubeflow[hub]==0.4.0", "kubeflow[spark]==0.4.0"]
 
 [dependency-groups]
 dev = [
@@ -48,12 +48,21 @@ otel = [
     "opentelemetry-sdk>=1.29.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/kubeflow/mcp-server"
+Documentation = "https://github.com/kubeflow/mcp-server#readme"
+Source = "https://github.com/kubeflow/mcp-server"
+Issues = "https://github.com/kubeflow/mcp-server/issues"
+
 [project.scripts]
 kubeflow-mcp = "kubeflow_mcp.cli:cli"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "kubeflow_mcp/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["kubeflow_mcp"]

@@ -1,5 +1,7 @@
 # Kubeflow MCP Server
 
+<!-- mcp-name: io.github.kubeflow/mcp-server -->
+
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE) [![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue)](https://www.python.org) [![Join Slack](https://img.shields.io/badge/Join_Slack-blue?logo=slack)](https://www.kubeflow.org/docs/about/community/#kubeflow-slack-channels) [![Coverage Status](https://coveralls.io/repos/github/kubeflow/mcp-server/badge.svg?branch=main)](https://coveralls.io/github/kubeflow/mcp-server?branch=main) [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/kubeflow/mcp-server)
 
 Proposal: [KEP-936](https://github.com/kubeflow/community/tree/master/proposals/936-kubeflow-mcp-server) · [ROADMAP](ROADMAP.md) · [SECURITY](SECURITY.md) · [CONTRIBUTING](CONTRIBUTING.md)
@@ -69,7 +71,7 @@ dependencies.
 
 | Variable | Default | Description |
 |---|---|---|
-| `MCP_TRANSPORT` | `http` | Transport protocol (`http`, `sse`, `stdio`) |
+| `MCP_TRANSPORT` | `stdio` | Transport protocol (`http`, `sse`, `stdio`) |
 | `KUBEFLOW_MCP_AUTH_TOKEN` | _(none)_ | Bearer token for HTTP auth |
 | `KUBEFLOW_MCP_JWKS_URI` | _(none)_ | JWKS endpoint for JWT verification (production) |
 | `KUBEFLOW_MCP_JWT_ISSUER` | _(none)_ | Expected JWT issuer |
@@ -216,24 +218,11 @@ Without auth configured, the server logs a warning that the HTTP endpoint is ope
 
 </details>
 
-<details>
-<summary>Agent Subcommand</summary>
-
-```bash
-kubeflow-mcp agent \
-  --backend ollama \              # ollama (default; more backends planned)
-  --model qwen3:8b \              # model name for the backend
-  --mode full \                   # full | progressive | semantic
-  --thinking                      # enable thinking output (supported models)
-```
-
-</details>
-
 ## Observability
 
 OpenTelemetry tracing is optional and can be enabled without changing tool code.
 
-- Install optional dependencies: `pip install ".[otel]"`
+- Install optional dependencies from source: `uv sync --group otel`
 - Enable tracing with CLI flag or env var:
 
 ```bash
@@ -245,9 +234,6 @@ kubeflow-mcp serve
 
 Each tool invocation emits a span with attributes:
 `tool.name`, `tool.args_preview`, `tool.success`, `tool.duration_ms`, `kubeflow.persona`, and `correlation_id`.
-
-> **Note:** `kubeflow-mcp agent --otel-endpoint ...` emits spans under a separate
-> `kubeflow-mcp-agent` service in Jaeger, distinct from the `kubeflow-mcp` server spans.
 
 ## Development
 
@@ -268,8 +254,9 @@ make inspector TRANSPORT=sse      # Inspector + SSE (start server separately)
 
 ## Documentation
 
-
 - **[CONTRIBUTING](CONTRIBUTING.md)**: Development workflow and PR guidelines
+- **[ROADMAP](ROADMAP.md)**: Project roadmap
+- **[SECURITY](SECURITY.md)**: Vulnerability reporting; see [ARCHITECTURE.md#security-model](ARCHITECTURE.md#security-model) for threat model, RBAC, and hardening
 - **[KEP-936](https://github.com/kubeflow/community/tree/master/proposals/936-kubeflow-mcp-server)**: Design proposal
 
 ## License

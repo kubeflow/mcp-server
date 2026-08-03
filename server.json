@@ -1,0 +1,21 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.kubeflow/mcp-server",
+  "title": "Kubeflow MCP Server",
+  "description": "AI-assisted Kubeflow Training via Model Context Protocol — plan, submit, monitor, and manage TrainJobs.",
+  "repository": {
+    "url": "https://github.com/kubeflow/mcp-server",
+    "source": "github"
+  },
+  "version": "0.1.0rc1",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "kubeflow-mcp",
+      "version": "0.1.0rc1",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}
