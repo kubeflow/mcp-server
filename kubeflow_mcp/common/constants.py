@@ -72,6 +72,7 @@ class JobStatus:
 # =============================================================================
 
 TOOL_PHASES: dict[str, list[str]] = {
+    # ── Trainer phases ──
     "planning": [
         "pre_flight",
         "check_compatibility",
@@ -95,6 +96,26 @@ TOOL_PHASES: dict[str, list[str]] = {
         "delete_runtime",
     ],
     "health": ["health_check", "get_server_logs"],
+    # ── Optimizer (Katib) phases ──
+    "optimizer_planning": ["katib_pre_flight"],
+    "optimizer_discovery": [
+        "list_experiments",
+        "get_experiment",
+        "get_experiment_status",
+        "get_trial",
+        "get_successful_trials",
+        "list_suggestions",
+    ],
+    "optimizer_optimization": ["create_hpo_experiment", "create_experiment_from_spec"],
+    "optimizer_monitoring": [
+        "get_experiment_trials",
+        "get_best_trial",
+        "get_suggestion",
+        "wait_for_experiment",
+        "get_experiment_trial_logs",
+        "get_experiment_events",
+    ],
+    "optimizer_lifecycle": ["delete_experiment", "update_experiment"],
 }
 
 # Reverse mapping: tool name -> phase
@@ -121,6 +142,7 @@ TRAINER_CRD_NAME = "trainjobs.trainer.kubeflow.org"
 # =============================================================================
 
 TOOL_NEXT_HINTS: dict[str, str] = {
+    # ── Trainer hints ──
     "pre_flight": "Proceed to list_runtimes() to find available runtimes",
     "check_compatibility": "Call get_cluster_resources() or use pre_flight() for full check",
     "get_cluster_resources": "Call estimate_resources(model=...) or list_runtimes()",
@@ -136,7 +158,10 @@ TOOL_NEXT_HINTS: dict[str, str] = {
     ),
     "get_training_logs": "If errors found, check get_training_events(name) for K8s-level issues",
     "get_training_events": "Fix the issue and retry, or delete_training_job(name) and resubmit",
-    "wait_for_training": "Check get_training_logs(name) for final output",
+    "wait_for_training": (
+        "Check get_training_logs(name) for final output. "
+        "Use create_hpo_experiment() to optimize hyperparameters"
+    ),
     "delete_training_job": "Resubmit with fine_tune() or run_custom_training() if needed",
     "update_training_job": "Check get_training_job(name) to verify new status",
     "inspect_crd": "Use inspect_controller(view='logs') to check controller health",
@@ -146,6 +171,24 @@ TOOL_NEXT_HINTS: dict[str, str] = {
     "patch_runtime": "Verify changes with get_runtime(name)",
     "create_runtime": "Verify with list_runtimes() or get_runtime(name)",
     "delete_runtime": "Confirm removal with list_runtimes()",
+    # ── Optimizer (Katib) hints ──
+    "katib_pre_flight": "Proceed to list_experiments() or create_hpo_experiment()",
+    "list_experiments": "Call get_experiment(name) for details on a specific experiment",
+    "get_experiment": "Use get_experiment_trials(name) or get_best_trial(name) for results",
+    "get_experiment_status": "Use get_experiment(name) for full details or get_experiment_trial_logs(name)",
+    "get_trial": "Check get_experiment_trial_logs(name, trial=trial) for trial output",
+    "get_successful_trials": "Use get_best_trial(name) for the optimal result",
+    "list_suggestions": "Check get_suggestion(name) for details on a specific suggestion",
+    "get_experiment_trials": "Use get_best_trial(name) or get_experiment_trial_logs(name, trial=trial)",
+    "get_best_trial": "Use fine_tune() to retrain with these hyperparameters",
+    "get_suggestion": "Check get_experiment_events(name) if suggestion is stuck",
+    "wait_for_experiment": "Check get_best_trial(name) for optimal results",
+    "get_experiment_trial_logs": "If errors found, check get_experiment_events(name)",
+    "get_experiment_events": "Fix the issue and retry, or delete_experiment(name) and resubmit",
+    "create_hpo_experiment": "Monitor with get_experiment_status() or wait_for_experiment()",
+    "create_experiment_from_spec": "Monitor with get_experiment_status() or wait_for_experiment()",
+    "delete_experiment": "Resubmit with create_hpo_experiment() if needed",
+    "update_experiment": "Check get_experiment_status(name) to verify new status",
 }
 
 
@@ -179,9 +222,27 @@ SDK_COMPATIBILITY: dict[str, object] = {
             ],
         },
         "optimizer": {
-            "status": "stub",
-            "sdk_client": "kubeflow.katib.KatibClient",
-            "covered_methods": [],
+            "status": "implemented",
+            "sdk_client": "kubeflow.optimizer.OptimizerClient",
+            "covered_methods": [
+                "optimize",
+                "get_job",
+                "list_jobs",
+                "delete_job",
+                "get_best_results",
+                "get_job_logs",
+                "get_job_events",
+                "wait_for_job_status",
+            ],
+            "uncovered_methods": [],  # all 8 OptimizerClient methods are covered
+            "k8s_api_operations": [
+                "create_experiment_from_spec (CustomObjectsApi create)",
+                "create_hpo_experiment/early_stopping (CustomObjectsApi create)",
+                "list_suggestions (CustomObjectsApi list)",
+                "get_suggestion (CustomObjectsApi get)",
+                "update_experiment (CustomObjectsApi patch)",
+                "katib_pre_flight (ApiextensionsV1Api + CoreV1Api)",
+            ],
         },
         "hub": {
             "status": "stub",

@@ -264,7 +264,20 @@ def _sections_for_persona(persona: str) -> list[str]:
     allowed = get_allowed_tools(persona) or set(TOOL_TO_PHASE.keys())
     phases_used = {TOOL_TO_PHASE[t] for t in allowed if t in TOOL_TO_PHASE}
 
-    section_order = ["planning", "monitoring", "training", "platform"]
+    # Canonical ordering for well-known section names. Any client module may
+    # define additional sections (e.g. the optimizer's namespaced
+    # ``optimizer_planning``/``optimizer_optimization``/``optimizer_monitoring``);
+    # those are appended in a stable order so every module's instruction
+    # sections surface, not just the ones hardcoded here.
+    preferred_order = [
+        "planning",
+        "monitoring",
+        "training",
+        "platform",
+        "optimizer_planning",
+        "optimizer_optimization",
+        "optimizer_monitoring",
+    ]
 
     sections_needed: set[str] = set()
     for module_path in CLIENT_MODULES.values():
@@ -278,7 +291,9 @@ def _sections_for_persona(persona: str) -> list[str]:
         except ImportError:
             continue
 
-    return [s for s in section_order if s in sections_needed]
+    ordered = [s for s in preferred_order if s in sections_needed]
+    extra = sorted(sections_needed - set(preferred_order))
+    return ordered + extra
 
 
 def _build_server_instructions(
