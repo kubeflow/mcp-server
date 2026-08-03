@@ -170,10 +170,47 @@ class TestInstructionComposition:
         sections = _sections_for_persona("platform-admin")
         assert "platform" in sections
 
-    def test_section_order(self):
+    def test_section_order_is_deterministic_and_follows_client_order(self):
+        """Section ordering must be stable and respect CLIENT_MODULES insertion order.
+
+        Instead of hardcoding every section name (which breaks each time a new
+        client is added), assert structural invariants:
+        1. No duplicate sections
+        2. Every section belongs to a known client SECTION_ORDER
+        3. Within each client, relative order is preserved
+        """
+        import importlib
+
+        from kubeflow_mcp.core.server import CLIENT_MODULES
+
         sections = _sections_for_persona("platform-admin")
-        expected_order = ["planning", "monitoring", "training", "platform"]
-        assert sections == expected_order
+
+        # 1. No duplicates
+        assert len(sections) == len(set(sections)), f"Duplicate sections: {sections}"
+
+        # Collect each client's SECTION_ORDER
+        client_orders: dict[str, list[str]] = {}
+        for name, path in CLIENT_MODULES.items():
+            try:
+                mod = importlib.import_module(path)
+                order = getattr(mod, "SECTION_ORDER", [])
+                if order:
+                    client_orders[name] = order
+            except ImportError:
+                continue
+
+        # 2. All returned sections belong to a known client SECTION_ORDER
+        all_known = {s for order in client_orders.values() for s in order}
+        unknown = set(sections) - all_known
+        assert not unknown, f"Unknown sections not in any client SECTION_ORDER: {unknown}"
+
+        # 3. Within each client, relative order is preserved
+        for name, order in client_orders.items():
+            present = [s for s in sections if s in order]
+            expected = [s for s in order if s in sections]
+            assert present == expected, (
+                f"Client '{name}' section order violated: got {present}, expected {expected}"
+            )
 
     @pytest.mark.parametrize(
         "test_case",

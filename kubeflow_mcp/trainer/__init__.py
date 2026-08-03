@@ -324,6 +324,11 @@ PHASE_TO_SECTION: dict[str, str | None] = {
     "health": None,
 }
 
+# Canonical ordering of this client's instruction sections.  server.py
+# concatenates SECTION_ORDER from every loaded client to build a stable
+# global preferred order — no hardcoded list in the core.
+SECTION_ORDER: list[str] = ["planning", "monitoring", "training", "platform"]
+
 INSTRUCTION_SECTIONS: dict[str, dict[str, str]] = {
     "planning": {
         "full": """\
@@ -397,5 +402,6 @@ __all__ = [
     "CLIENT_RESOURCES",
     "INSTRUCTION_SECTIONS",
     "PHASE_TO_SECTION",
+    "SECTION_ORDER",
     *[t.__name__ for t in TOOLS],
 ]

@@ -173,9 +173,7 @@ def test_serve_sse_transport_calls_build_auth_provider():
         runner = CliRunner()
         runner.invoke(cli, ["serve", "--transport", "sse"])
 
-    fake_auth_mod = sys.modules.get(
-        "kubeflow_mcp.core.auth", modules_patch["kubeflow_mcp.core.auth"]
-    )
+    fake_auth_mod = modules_patch["kubeflow_mcp.core.auth"]
     fake_auth_mod.build_auth_provider.assert_called_once()
 
 
