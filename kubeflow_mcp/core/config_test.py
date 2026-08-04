@@ -108,6 +108,16 @@ def test_load_config_env_overrides_file(tmp_path):
     assert cfg.server.persona == "platform-admin"
 
 
+def test_load_config_ignores_non_mapping_yaml(tmp_path, caplog):
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("- trainer\n- optimizer\n")
+
+    cfg = load_config(config_path=config_file)
+
+    assert cfg.server.clients == ["trainer"]
+    assert "Config root must be a mapping" in caplog.text
+
+
 # TODO(test): test config_path that doesn't exist falls back to default search
 # TODO(test): test malformed YAML handled gracefully
 # TODO(test): test auth config env overrides (KUBEFLOW_MCP_AUTH_TOKEN, KUBEFLOW_MCP_JWKS_URI)
