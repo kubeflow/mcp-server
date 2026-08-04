@@ -34,9 +34,15 @@ body = """
 
 {%- if github -%}
 {%- set new_contributors = github.contributors | filter(attribute="is_first_time", value=true) -%}
-{%- if new_contributors | length != 0 %}
+{%- set valid_contributors = [] -%}
+{%- for contributor in new_contributors -%}
+  {%- if contributor.pr_number -%}
+    {%- set_global valid_contributors = valid_contributors | concat(with=contributor) -%}
+  {%- endif -%}
+{%- endfor -%}
+{%- if valid_contributors | length != 0 %}
 ## New Contributors
-{% for contributor in new_contributors %}
+{% for contributor in valid_contributors %}
 - @{{ contributor.username }} made their first contribution in \
   [#{{ contributor.pr_number }}](https://github.com/kubeflow/mcp-server/pull/{{ contributor.pr_number }})
 {%- endfor %}
