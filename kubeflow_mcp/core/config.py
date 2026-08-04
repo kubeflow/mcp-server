@@ -191,7 +191,14 @@ def _load_yaml_config(path: Path) -> dict[str, Any]:
 
         with open(path) as f:
             data = yaml.safe_load(f)
-            return data if data else {}
+            if data is None:
+                return {}
+            if not isinstance(data, dict):
+                logger.warning(
+                    "Config root must be a mapping; ignoring %s (got %s)", path, type(data).__name__
+                )
+                return {}
+            return data
     except ImportError:
         logger.warning("PyYAML not installed, skipping config file")
         return {}
