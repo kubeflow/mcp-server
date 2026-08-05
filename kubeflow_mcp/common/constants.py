@@ -180,7 +180,7 @@ SDK_COMPATIBILITY: dict[str, object] = {
         },
         "optimizer": {
             "status": "stub",
-            "sdk_client": "kubeflow.katib.KatibClient",
+            "sdk_client": "kubeflow.optimizer.OptimizerClient",
             "covered_methods": [],
         },
         "hub": {
