@@ -1,0 +1,112 @@
+name: OSV-Scanner Version Bump
+
+on:
+  schedule:
+    - cron: '0 3 * * 1'
+  workflow_dispatch:
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Check latest OSV-Scanner release
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          WORKFLOW=".github/workflows/osv-scanner.yaml"
+          CURRENT=$(sed -n 's/.*OSV_VERSION="\([^"]*\)".*/\1/p' "$WORKFLOW" | head -1)
+          LATEST=$(gh api repos/google/osv-scanner/releases/latest --jq '.tag_name' | sed 's/^v//')
+          echo "current=$CURRENT latest=$LATEST"
+          # Upstream release metadata is interpolated into later run steps —
+          # accept strict X.Y.Z only so shell/sed metacharacters can never ride along
+          if ! [[ "$CURRENT" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || ! [[ "$LATEST" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Current ($CURRENT) or latest ($LATEST) version is not plain X.Y.Z"
+            exit 1
+          fi
+          # compare_versions.py: exit 0 = current < latest (bump needed),
+          # exit 1 = current >= latest (no-op; also guards against upstream rollbacks)
+          CMP_EXIT=0
+          uv run --no-project --with packaging python3 .github/scripts/compare_versions.py "$CURRENT" "$LATEST" || CMP_EXIT=$?
+          if [ "$CMP_EXIT" -eq 1 ]; then
+            echo "Current pin (v$CURRENT) is already at least v$LATEST. Nothing to do."
+            echo "update_needed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          elif [ "$CMP_EXIT" -ne 0 ]; then
+            echo "::error::Version comparison failed (exit code $CMP_EXIT)"
+            exit 1
+          fi
+          echo "update_needed=true" >> "$GITHUB_OUTPUT"
+          echo "current=$CURRENT" >> "$GITHUB_OUTPUT"
+          echo "latest=$LATEST" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch and verify new checksum
+        if: steps.check.outputs.update_needed == 'true'
+        id: checksum
+        run: |
+          LATEST="${{ steps.check.outputs.latest }}"
+          curl -fsSL "https://github.com/google/osv-scanner/releases/download/v${LATEST}/osv-scanner_SHA256SUMS" -o sums.txt
+          SHA=$(awk '$2 == "osv-scanner_linux_amd64" {print $1}' sums.txt)
+          if ! echo "$SHA" | grep -qE '^[a-f0-9]{64}$'; then
+            echo "::error::Could not extract a valid SHA256 for osv-scanner_linux_amd64 from SHA256SUMS"
+            exit 1
+          fi
+          # Cross-check: the published checksum must match the actual binary before we pin it
+          curl -fsSL "https://github.com/google/osv-scanner/releases/download/v${LATEST}/osv-scanner_linux_amd64" -o osv-scanner-new
+          ACTUAL=$(sha256sum osv-scanner-new | awk '{print $1}')
+          if [ "$ACTUAL" != "$SHA" ]; then
+            echo "::error::Binary checksum mismatch for v${LATEST}: SHA256SUMS says ${SHA}, binary is ${ACTUAL}"
+            exit 1
+          fi
+          rm -f osv-scanner-new sums.txt
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Update pinned version and checksum
+        if: steps.check.outputs.update_needed == 'true'
+        # The helper validates both values, requires exactly one replacement each,
+        # and fails instead of opening a half-updated PR
+        run: |
+          python3 .github/scripts/update_scanner_pin.py \
+            .github/workflows/osv-scanner.yaml \
+            "${{ steps.check.outputs.latest }}" \
+            "${{ steps.checksum.outputs.sha }}"
+          git diff --stat
+
+      - name: Create Pull Request
+        if: steps.check.outputs.update_needed == 'true'
+        # Pinned to an immutable commit: this step holds a write-scoped credential,
+        # so a mutable major tag must not be able to swap the code underneath it
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8
+        with:
+          # Pushing a commit that modifies .github/workflows/ requires the `workflow`
+          # scope, which the default GITHUB_TOKEN cannot be granted. A maintainer must
+          # add WORKFLOW_BUMP_TOKEN (fine-grained PAT or GitHub App token with contents,
+          # pull-requests and workflows write access). Until then, scheduled runs are
+          # green on the no-op path but an actual bump will fail at the push.
+          token: ${{ secrets.WORKFLOW_BUMP_TOKEN || secrets.GITHUB_TOKEN }}
+          commit-message: "chore(ci): bump OSV-Scanner to v${{ steps.check.outputs.latest }}"
+          title: "chore(ci): bump OSV-Scanner to v${{ steps.check.outputs.latest }}"
+          add-paths: |
+            .github/workflows/osv-scanner.yaml
+          body: |
+            Bumps the pinned OSV-Scanner from v${{ steps.check.outputs.current }} to [v${{ steps.check.outputs.latest }}](https://github.com/google/osv-scanner/releases/tag/v${{ steps.check.outputs.latest }}).
+
+            The checksum was sourced from the release's official `osv-scanner_SHA256SUMS` and cross-verified
+            against the downloaded binary before this PR was opened, so the pin + checksum supply-chain
+            guard in the scan workflow is preserved.
+
+            > Auto-generated by the weekly `osv-scanner-bump` workflow. Review and merge to adopt the new version.
+          branch: osv-scanner-version-bump
+          delete-branch: true
+          labels: |
+            area/security

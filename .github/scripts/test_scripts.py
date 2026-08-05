@@ -325,6 +325,88 @@ override-dependencies = ["pkg1==1.0.0", "pkg2==2.0.0"]
         _assert_valid_toml(updated)
 
 
+class TestUpdateScannerPin:
+    """Tests for update_scanner_pin.py"""
+
+    WORKFLOW = (
+        "steps:\n"
+        "  - name: Install OSV-Scanner\n"
+        "    run: |\n"
+        '      OSV_VERSION="2.4.0"\n'
+        f'      EXPECTED_SHA="{"a" * 64}"\n'
+        "      curl -fsSL ...\n"
+    )
+
+    def run_pin(self, content: str, version: str, sha: str) -> tuple[int, str]:
+        """Run update_scanner_pin.py against a temp workflow file."""
+        original_dir = os.getcwd()
+        with TemporaryDirectory() as tmp:
+            try:
+                os.chdir(tmp)
+                Path("wf.yaml").write_text(content)
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        str(SCRIPTS_DIR / "update_scanner_pin.py"),
+                        "wf.yaml",
+                        version,
+                        sha,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                )
+                return result.returncode, Path("wf.yaml").read_text()
+            finally:
+                os.chdir(original_dir)
+
+    def test_updates_both_lines(self):
+        """Happy path: both version and checksum lines are rewritten"""
+        exit_code, updated = self.run_pin(self.WORKFLOW, "2.5.0", "b" * 64)
+        assert exit_code == 0
+        assert 'OSV_VERSION="2.5.0"' in updated
+        assert f'EXPECTED_SHA="{"b" * 64}"' in updated
+        assert "2.4.0" not in updated
+        assert "a" * 64 not in updated
+
+    def test_rejects_malformed_version(self):
+        """Non-X.Y.Z versions (including shell metacharacters) are rejected"""
+        for bad in ["2.5", "v2.5.0", '2.5.0"; rm -rf /', "2.5.0-rc1", ""]:
+            exit_code, updated = self.run_pin(self.WORKFLOW, bad, "b" * 64)
+            assert exit_code == 1
+            assert updated == self.WORKFLOW  # untouched
+
+    def test_rejects_malformed_checksum(self):
+        """Checksums that are not 64-char lowercase hex are rejected"""
+        for bad in ["b" * 63, "B" * 64, "xyz", "", "b" * 64 + '"']:
+            exit_code, updated = self.run_pin(self.WORKFLOW, "2.5.0", bad)
+            assert exit_code == 1
+            assert updated == self.WORKFLOW
+
+    def test_fails_when_lines_missing(self):
+        """A workflow without both pin lines fails instead of silently half-updating"""
+        no_sha = 'OSV_VERSION="2.4.0"\n'
+        exit_code, updated = self.run_pin(no_sha, "2.5.0", "b" * 64)
+        assert exit_code == 1
+        assert updated == no_sha
+
+    def test_missing_file(self):
+        """A nonexistent workflow path exits nonzero"""
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPTS_DIR / "update_scanner_pin.py"),
+                "does-not-exist.yaml",
+                "2.5.0",
+                "b" * 64,
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        assert result.returncode == 1
+
+
 if __name__ == "__main__":
     # Allow running with: python test_scripts.py
     pytest.main([__file__, "-v"])
