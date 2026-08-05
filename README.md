@@ -78,6 +78,7 @@ dependencies.
 | `KUBEFLOW_MCP_JWT_AUDIENCE` | _(none)_ | Expected JWT audience |
 | `KUBEFLOW_MCP_CLIENTS` | `trainer` | Comma-separated client modules to load |
 | `KUBEFLOW_MCP_PERSONA` | `readonly` | Tool persona (`readonly`, `data-scientist`, `ml-engineer`, `platform-admin`) |
+| `KUBEFLOW_MCP_INSTRUCTION_TIER` | `full` | Instruction verbosity (`full`, `compact`, `minimal`) |
 | `KUBEFLOW_MCP_ALLOWED_HOSTS` | _(loopback)_ | Comma-separated `Host` header allowlist for DNS rebinding protection; `:*` port wildcard supported (e.g. `mcp.example.com,mcp.example.com:*`) |
 | `KUBEFLOW_MCP_ALLOWED_ORIGINS` | _(loopback)_ | Comma-separated `Origin` header allowlist; `:*` port wildcard supported (e.g. `https://mcp.example.com`) |
 | `KUBEFLOW_MCP_DNS_REBINDING_PROTECTION` | `true` | Set `false` to disable Host/Origin validation (not recommended) |
