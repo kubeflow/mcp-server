@@ -15,7 +15,7 @@
 SHELL = /usr/bin/env bash -o pipefail
 .SHELLFLAGS = -ec
 
-.PHONY: help uv install-dev verify format test-python test-scripts test test-cov clean inspector release changelog
+.PHONY: help uv install-dev verify format test-python test-scripts test test-cov benchmark clean inspector release changelog
 
 PROJECT_DIR := $(shell dirname $(abspath $(lastword $(MAKEFILE_LIST))))
 
@@ -73,6 +73,10 @@ test-cov: ## Run tests with HTML coverage report
 	@uv sync --all-extras --group dev
 	@uv run pytest --cov=kubeflow_mcp --cov-report=term-missing --cov-report=html
 	@echo "Coverage report: htmlcov/index.html"
+
+benchmark: ## Run the benchmark suite (excluded from the other test targets)
+	@uv sync --all-extras --group dev
+	@uv run pytest tests/benchmarks/ -m benchmark
 
 ##@ Dev Tools
 
