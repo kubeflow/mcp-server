@@ -168,15 +168,13 @@ def test_serve_sse_transport_uses_sse():
 
 def test_serve_sse_transport_calls_build_auth_provider():
     mock_server, _, modules_patch = _make_serve_mocks()
+    mock_build_auth_provider = modules_patch["kubeflow_mcp.core.auth"].build_auth_provider
 
     with patch.dict(sys.modules, modules_patch):
         runner = CliRunner()
         runner.invoke(cli, ["serve", "--transport", "sse"])
 
-    fake_auth_mod = sys.modules.get(
-        "kubeflow_mcp.core.auth", modules_patch["kubeflow_mcp.core.auth"]
-    )
-    fake_auth_mod.build_auth_provider.assert_called_once()
+    mock_build_auth_provider.assert_called_once()
 
 
 def test_serve_progressive_mode():

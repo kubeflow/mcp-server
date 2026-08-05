@@ -56,14 +56,15 @@ make verify
 
 ## Testing
 
-The project includes unit tests to ensure code quality and functionality.
-
-### Unit Testing
-To run unit tests locally, use the following `make` command:
-
 ```bash
-make test-python
+make test-python           # unit tests + coverage
+uv run pytest kubeflow_mcp/core/security_test.py -k "test_validate_k8s_name"  # single test
 ```
+
+Unit tests are co-located as `<module>_test.py` next to source files
+([Kubeflow SDK convention](https://github.com/kubeflow/sdk/blob/main/AGENTS.md#3-testing-requirements)).
+Shared fixtures live in `conftest.py` (root) and `kubeflow_mcp/conftest.py`;
+shared helpers in `tests/common.py`. Look for `# TODO(test):` markers for gaps to fill.
 
 ### Conformance Testing
 

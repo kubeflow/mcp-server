@@ -17,8 +17,13 @@
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+from tests.common import TestCase
+
 from kubeflow_mcp.trainer.api.planning import (
+    _estimate_from_params,
     _get_model_info_from_hf,
+    _parse_k8s_version,
     _suggest_hf_model_ids,
     estimate_resources,
 )
@@ -104,3 +109,39 @@ def test_estimate_resources_omits_suggestions_when_none_found():
 
     assert result["success"] is False
     assert "suggestions" not in result["details"]
+
+
+# ─── Pure helpers (version parse / resource estimate) ───────────────────────
+
+
+@pytest.mark.parametrize(
+    "test_case",
+    [
+        TestCase(
+            name="parses v1.29.3",
+            config={"git_version": "v1.29.3"},
+            expected_output=(1, 29),
+        ),
+        TestCase(
+            name="parses without v prefix",
+            config={"git_version": "1.30.0"},
+            expected_output=(1, 30),
+        ),
+        TestCase(
+            name="invalid version returns None",
+            config={"git_version": "garbage"},
+            expected_output=None,
+        ),
+    ],
+)
+def test_parse_k8s_version(test_case):
+    assert _parse_k8s_version(**test_case.config) == test_case.expected_output
+
+
+def test_estimate_from_params_small_model():
+    result = _estimate_from_params(7e9, batch_size=4, quantization="bf16")
+    assert result["gpu_count"] >= 1
+    assert result["gpu_memory_gb"] >= 1
+    assert result["params_billions"] == 7.0
+    assert result["quantization"] == "bf16"
+    assert "weights_gb" in result["breakdown"]

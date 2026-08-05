@@ -71,10 +71,13 @@ packages = ["kubeflow_mcp"]
 asyncio_mode = "auto"
 testpaths = ["kubeflow_mcp", "tests"]
 addopts = "-v --tb=short -m 'not benchmark'"
+
 markers = [
     "benchmark: performance benchmarks, excluded from default runs (see `make benchmark`)",
+    "integration: requires Kind cluster with Trainer CRD",
+    "slow: tests that take >5s (rate limiter, retry backoff)",
+    "smoke: basic import and metadata checks",
 ]
-
 [tool.uv]
 # Pin transitive deps to versions that resolve known CVEs detected by the OSV-Scanner workflow.
 constraint-dependencies = [

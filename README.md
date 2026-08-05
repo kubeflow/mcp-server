@@ -81,7 +81,7 @@ dependencies.
 | `KUBEFLOW_MCP_ALLOWED_HOSTS` | _(loopback)_ | Comma-separated `Host` header allowlist for DNS rebinding protection; `:*` port wildcard supported (e.g. `mcp.example.com,mcp.example.com:*`) |
 | `KUBEFLOW_MCP_ALLOWED_ORIGINS` | _(loopback)_ | Comma-separated `Origin` header allowlist; `:*` port wildcard supported (e.g. `https://mcp.example.com`) |
 | `KUBEFLOW_MCP_DNS_REBINDING_PROTECTION` | `true` | Set `false` to disable Host/Origin validation (not recommended) |
-| `LOG_FORMAT` | `json` | Log format (`json`, `console`) |
+| `LOG_FORMAT` | _(auto)_ | Log format (`json`, `console`); defaults to `console` in an interactive terminal and `json` otherwise |
 | `LOG_LEVEL` | `INFO` | Log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
 
 **MCP client config (HTTP transport)**
@@ -121,7 +121,8 @@ Agent calls: fine_tune(..., confirmed=True) → TrainJob "train-gemma-abc" creat
 Agent calls: get_training_logs("train-gemma-abc") → training progress...
 ```
 
-Every mutating tool requires `confirmed=True` — agents always preview before submitting.
+Most mutating tools require `confirmed=True` and return a preview before making changes.
+`update_training_job` is a legacy exception and immediately suspends or resumes a training job.
 
 ### MCP Client Config
 

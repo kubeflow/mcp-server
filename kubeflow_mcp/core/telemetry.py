@@ -99,7 +99,7 @@ def setup_tracing(endpoint: str | None = None, service_name: str = "kubeflow-mcp
     if not _OTEL_AVAILABLE:
         logger.warning(
             "OpenTelemetry endpoint configured but OTel packages are not installed. "
-            "Install with: pip install '.[otel]'"
+            "Install OpenTelemetry dependencies from source with: uv sync --group otel"
         )
         return False
 
