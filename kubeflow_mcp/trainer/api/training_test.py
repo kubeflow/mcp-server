@@ -12,15 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for trainer/api/training.py — fine_tune, run_custom_training, run_container_training.
-
-Covers validation, preview (confirmed=False), and error paths.
-Submission paths require mocking the Kubeflow SDK and are marked as TODOs.
-"""
+"""Tests for trainer/api/training.py — fine_tune, run_custom_training, run_container_training."""
 
 from __future__ import annotations
 
 import ast
+import inspect
+from unittest.mock import MagicMock, patch
 
 import pytest
 from tests.common import FAILED, PREVIEW, VALIDATION_ERROR, TestCase, assert_test_case
@@ -37,6 +35,10 @@ from kubeflow_mcp.trainer.api.training import (
     run_container_training,
     run_custom_training,
 )
+
+PATCH_CLIENT = "kubeflow_mcp.trainer.api.training._get_client"
+PATCH_NS_CHECK = "kubeflow_mcp.trainer.api.training.check_namespace_allowed"
+PATCH_GPU_CHECK = "kubeflow_mcp.trainer.api.training._check_gpu_available"
 
 # ─── fine_tune validation ───────────────────────────────────────────────────
 
@@ -73,14 +75,144 @@ def test_fine_tune_validation(test_case):
     assert_test_case(test_case, fine_tune)
 
 
-# TODO(test): test confirmed=True with mock SDK creates job
-# TODO(test): test hf_token passed through to SDK
-# TODO(test): test dataset parameter handling
-# TODO(test): test LoRA config (lora_rank, lora_alpha, lora_dropout)
-# TODO(test): test custom volumes and tolerations
-# TODO(test): test S3 model/dataset sources
-# TODO(test): test namespace policy enforcement
-# TODO(test): test GPU validation against cluster resources
+class TestFineTuneConfirmed:
+    @patch(PATCH_GPU_CHECK, return_value=None)
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_confirmed_creates_job(self, mock_client_fn, _ns, _gpu):
+        mock_client = MagicMock()
+        mock_client.train.return_value = "train-gemma-abc"
+        mock_client_fn.return_value = mock_client
+        result = fine_tune(
+            model="hf://org/model",
+            dataset="hf://org/ds",
+            runtime="torchtune-llama",
+            confirmed=True,
+        )
+        assert result["success"] is True
+        assert result["data"]["job_name"] == "train-gemma-abc"
+        assert result["data"]["status"] == "Created"
+        mock_client.train.assert_called_once()
+
+    @patch(PATCH_GPU_CHECK, return_value=None)
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_hf_token_passed_to_sdk(self, mock_client_fn, _ns, _gpu):
+        mock_client = MagicMock()
+        mock_client.train.return_value = "train-job"
+        mock_client_fn.return_value = mock_client
+        result = fine_tune(
+            model="hf://org/model",
+            dataset="hf://org/ds",
+            runtime="torchtune-llama",
+            hf_token="hf_secret_token",
+            confirmed=True,
+        )
+        assert result["success"] is True
+        call_kwargs = mock_client.train.call_args
+        initializer = call_kwargs.kwargs["initializer"]
+        assert initializer.model.access_token == "hf_secret_token"
+
+    @patch(PATCH_GPU_CHECK, return_value=None)
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_dataset_parameter_handling(self, mock_client_fn, _ns, _gpu):
+        mock_client = MagicMock()
+        mock_client.train.return_value = "train-job"
+        mock_client_fn.return_value = mock_client
+        result = fine_tune(
+            model="hf://org/model",
+            dataset="hf://org/dataset",
+            runtime="torchtune-llama",
+            confirmed=True,
+        )
+        assert result["success"] is True
+        call_kwargs = mock_client.train.call_args
+        initializer = call_kwargs.kwargs["initializer"]
+        assert "hf://org/dataset" in initializer.dataset.storage_uri
+
+    @patch(PATCH_GPU_CHECK, return_value=None)
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_lora_config(self, mock_client_fn, _ns, _gpu):
+        mock_client = MagicMock()
+        mock_client.train.return_value = "train-job"
+        mock_client_fn.return_value = mock_client
+        result = fine_tune(
+            model="hf://org/model",
+            dataset="hf://org/ds",
+            runtime="torchtune-llama",
+            lora_rank=16,
+            lora_alpha=32,
+            lora_dropout=0.1,
+            confirmed=True,
+        )
+        assert result["success"] is True
+        call_kwargs = mock_client.train.call_args
+        trainer = call_kwargs.kwargs["trainer"]
+        assert trainer.config.peft_config.lora_rank == 16
+        assert trainer.config.peft_config.lora_alpha == 32
+        assert trainer.config.peft_config.lora_dropout == 0.1
+
+    @patch(PATCH_GPU_CHECK, return_value=None)
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_s3_model_source(self, mock_client_fn, _ns, _gpu):
+        mock_client = MagicMock()
+        mock_client.train.return_value = "train-job"
+        mock_client_fn.return_value = mock_client
+        result = fine_tune(
+            model="s3://bucket/model",
+            dataset="s3://bucket/dataset",
+            runtime="torchtune-llama",
+            s3_access_key_id="AKIA",
+            s3_secret_access_key="secret",
+            confirmed=True,
+        )
+        assert result["success"] is True
+        call_kwargs = mock_client.train.call_args
+        initializer = call_kwargs.kwargs["initializer"]
+        assert initializer.model.storage_uri == "s3://bucket/model"
+        assert initializer.dataset.storage_uri == "s3://bucket/dataset"
+
+    @patch(PATCH_NS_CHECK)
+    def test_namespace_policy_enforcement(self, mock_ns_check):
+        from kubeflow_mcp.common.types import ToolError as ToolErrorModel
+
+        mock_ns_check.return_value = ToolErrorModel(
+            error="namespace blocked", error_code="PERMISSION_DENIED"
+        )
+        result = fine_tune(
+            model="hf://org/model",
+            dataset="hf://org/ds",
+            namespace="forbidden-ns",
+            confirmed=True,
+        )
+        assert result["success"] is False
+        assert result["error_code"] == "PERMISSION_DENIED"
+
+    def test_gpu_validation_blocks_on_zero_gpus(self):
+        from kubeflow_mcp.common.types import ToolError as ToolErrorModel
+
+        gpu_err = ToolErrorModel(
+            error="fine_tune() requires GPUs", error_code="VALIDATION_ERROR"
+        ).model_dump()
+        with patch(PATCH_GPU_CHECK, return_value=gpu_err):
+            result = fine_tune(
+                model="hf://org/model",
+                dataset="hf://org/ds",
+            )
+        assert result["success"] is False
+        assert "GPU" in result["error"]
+
+    def test_non_torchtune_runtime_rejected(self):
+        result = fine_tune(
+            model="hf://org/model",
+            dataset="hf://org/ds",
+            runtime="torch-distributed",
+        )
+        assert result["success"] is False
+        assert "torchtune" in result["error"]
 
 
 # ─── run_custom_training validation ─────────────────────────────────────────
@@ -128,13 +260,104 @@ def test_run_custom_training_validation(test_case):
         assert_test_case(test_case, run_custom_training)
 
 
-# TODO(test): test preview returns script + config without submitting
-# TODO(test): test confirmed=True with mock SDK creates job
-# TODO(test): test env parameter passed to training job
-# TODO(test): test packages parameter installs dependencies
-# TODO(test): test auto-generated name format
-# TODO(test): test KUBEFLOW_MCP_UNSAFE_SCRIPTS=true override
-# TODO(test): test namespace policy enforcement
+class TestRunCustomTrainingConfirmed:
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_confirmed_creates_job(self, mock_client_fn, _ns):
+        mock_client = MagicMock()
+        mock_client.train.return_value = "custom-train-abc"
+        mock_client_fn.return_value = mock_client
+        result = run_custom_training(
+            script="print('hello')",
+            runtime="torch-distributed",
+            confirmed=True,
+        )
+        assert result["success"] is True
+        assert result["data"]["job_name"] == "custom-train-abc"
+        assert result["data"]["status"] == "Created"
+        mock_client.train.assert_called_once()
+
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_env_parameter_passed(self, mock_client_fn, _ns):
+        mock_client = MagicMock()
+        mock_client.train.return_value = "train-job"
+        mock_client_fn.return_value = mock_client
+        result = run_custom_training(
+            script="print('hello')",
+            runtime="torch-distributed",
+            env={"MY_VAR": "value"},
+            confirmed=True,
+        )
+        assert result["success"] is True
+        call_kwargs = mock_client.train.call_args
+        trainer = call_kwargs.kwargs["trainer"]
+        assert trainer.env == {"MY_VAR": "value"}
+
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_packages_parameter(self, mock_client_fn, _ns):
+        mock_client = MagicMock()
+        mock_client.train.return_value = "train-job"
+        mock_client_fn.return_value = mock_client
+        result = run_custom_training(
+            script="import torch; print(torch.__version__)",
+            runtime="torch-distributed",
+            packages=["torch", "transformers"],
+            confirmed=True,
+        )
+        assert result["success"] is True
+        call_kwargs = mock_client.train.call_args
+        trainer = call_kwargs.kwargs["trainer"]
+        assert trainer.packages_to_install == ["torch", "transformers"]
+
+    def test_preview_returns_config(self):
+        result = run_custom_training(
+            script="print('hello')",
+            runtime="torch-distributed",
+            confirmed=False,
+        )
+        assert result["status"] == "preview"
+        assert result["config"]["runtime"] == "torch-distributed"
+        assert "print('hello')" in result["config"]["script"]
+
+    def test_auto_generated_name_format(self):
+        result = run_custom_training(
+            script="print('hello')",
+            runtime="torch-distributed",
+            confirmed=False,
+        )
+        assert result["status"] == "preview"
+        assert result["config"]["name"] is None
+
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_unsafe_scripts_override(self, mock_client_fn, _ns):
+        mock_client = MagicMock()
+        mock_client.train.return_value = "train-job"
+        mock_client_fn.return_value = mock_client
+        with patch.dict("os.environ", {"KUBEFLOW_MCP_UNSAFE_SCRIPTS": "true"}):
+            result = run_custom_training(
+                script="import os\nos.system('ls')",
+                runtime="torch-distributed",
+                confirmed=True,
+            )
+        assert result["success"] is True
+
+    @patch(PATCH_NS_CHECK)
+    def test_namespace_policy_enforcement(self, mock_ns_check):
+        from kubeflow_mcp.common.types import ToolError as ToolErrorModel
+
+        mock_ns_check.return_value = ToolErrorModel(
+            error="namespace blocked", error_code="PERMISSION_DENIED"
+        )
+        result = run_custom_training(
+            script="print('hello')",
+            namespace="forbidden-ns",
+            confirmed=True,
+        )
+        assert result["success"] is False
+        assert result["error_code"] == "PERMISSION_DENIED"
 
 
 # ─── run_container_training validation ──────────────────────────────────────
@@ -148,11 +371,68 @@ def test_run_container_training_invalid_name():
     assert result["success"] is False
 
 
-# TODO(test): test preview returns config without submitting
-# TODO(test): test confirmed=True with mock SDK creates job
-# TODO(test): test command and args override
-# TODO(test): test custom image configuration
-# TODO(test): test namespace policy enforcement
+class TestRunContainerTrainingConfirmed:
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_confirmed_creates_job(self, mock_client_fn, _ns):
+        mock_client = MagicMock()
+        mock_client.train.return_value = "container-train-abc"
+        mock_client_fn.return_value = mock_client
+        result = run_container_training(
+            image="pytorch/pytorch:2.0",
+            confirmed=True,
+        )
+        assert result["success"] is True
+        assert result["data"]["job_name"] == "container-train-abc"
+        assert result["data"]["status"] == "Created"
+        mock_client.train.assert_called_once()
+
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_command_and_args_override(self, mock_client_fn, _ns):
+        mock_client = MagicMock()
+        mock_client.train.return_value = "train-job"
+        mock_client_fn.return_value = mock_client
+        result = run_container_training(
+            image="pytorch/pytorch:2.0",
+            command=["python", "train.py"],
+            args=["--epochs", "5"],
+            confirmed=True,
+        )
+        assert result["success"] is True
+        call_kwargs = mock_client.train.call_args
+        options = call_kwargs.kwargs["options"]
+        from kubeflow.trainer.options import TrainerArgs, TrainerCommand
+
+        cmd_opts = [o for o in options if isinstance(o, TrainerCommand)]
+        args_opts = [o for o in options if isinstance(o, TrainerArgs)]
+        assert len(cmd_opts) == 1
+        assert cmd_opts[0].command == ["python", "train.py"]
+        assert len(args_opts) == 1
+        assert args_opts[0].args == ["--epochs", "5"]
+
+    def test_preview_returns_config(self):
+        result = run_container_training(
+            image="pytorch/pytorch:2.0",
+            confirmed=False,
+        )
+        assert result["status"] == "preview"
+        assert result["config"]["image"] == "pytorch/pytorch:2.0"
+
+    @patch(PATCH_NS_CHECK)
+    def test_namespace_policy_enforcement(self, mock_ns_check):
+        from kubeflow_mcp.common.types import ToolError as ToolErrorModel
+
+        mock_ns_check.return_value = ToolErrorModel(
+            error="namespace blocked", error_code="PERMISSION_DENIED"
+        )
+        result = run_container_training(
+            image="pytorch/pytorch:2.0",
+            namespace="forbidden-ns",
+            confirmed=True,
+        )
+        assert result["success"] is False
+        assert result["error_code"] == "PERMISSION_DENIED"
 
 
 # ─── _make_train_func ────────────────────────────────────────────────────────
@@ -169,9 +449,23 @@ def test_make_train_func_accepts_args():
     assert callable(func)
 
 
-# TODO(test): test inspect.getsource works on returned function
-# TODO(test): test syntax error in script raises SyntaxError
-# TODO(test): test func_args appear as keyword parameters
+def test_make_train_func_inspect_getsource():
+    func = _make_train_func("x = 42\nprint(x)")
+    source = inspect.getsource(func)
+    assert "x = 42" in source
+    assert "def train" in source
+
+
+def test_make_train_func_syntax_error():
+    with pytest.raises(SyntaxError):
+        _make_train_func("def broken(:\n    pass")
+
+
+def test_make_train_func_args_appear_as_params():
+    func = _make_train_func("print(lr)", func_args={"lr": 0.001, "epochs": 5})
+    source = inspect.getsource(func)
+    assert "lr=None" in source
+    assert "epochs=None" in source
 
 
 # ─── Pure helpers (AST / builders) ────────────────────────────────────────────
