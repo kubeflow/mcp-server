@@ -167,7 +167,7 @@ jobs:
         id: comment
         continue-on-error: true
         if: always() && steps.compare.outputs.new_cves_found == 'true'
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           NEW_CVES: ${{ steps.compare.outputs.new_cves }}
         with:
@@ -238,7 +238,7 @@ jobs:
       - name: Delete security comment when resolved
         continue-on-error: true
         if: success() && steps.compare.outputs.new_cves_found == 'false'
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           script: |
             const commentMarker = '<!-- lockfile-security-check -->';
