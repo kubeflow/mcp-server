@@ -121,6 +121,7 @@ def update_training_job(
     name: str,
     action: str,
     namespace: str | None = None,
+    confirmed: bool = False,
 ) -> dict[str, Any]:
     """Suspend or resume a training job.
 
@@ -128,6 +129,8 @@ def update_training_job(
         name: TrainJob name.
         action: ``"suspend"`` to pause execution, ``"resume"`` to continue.
         namespace: K8s namespace. Uses default from kubeconfig when omitted.
+        confirmed: Set ``True`` to update. ``False`` returns a preview.
+
 
     Returns:
         dict: Response containing ``job``, ``namespace``, ``action``, ``message``.
@@ -152,6 +155,13 @@ def update_training_job(
             return ns_err.model_dump()
 
         ns = mcp_utils.get_trainer_effective_namespace(namespace)
+
+        if not confirmed:
+            past = "suspend" if action == "suspend" else "resume"
+            return PreviewResponse(
+                message=f"Will {action} training job '{name}'. Set confirmed=True to proceed.",
+                config={"job": name, "namespace": ns, "action": action},
+            ).model_dump()
         if get_effective_persona() not in ("platform-admin",):
             managed = mcp_utils.is_mcp_managed(name, ns)
             if managed is None:
