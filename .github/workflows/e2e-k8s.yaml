@@ -19,56 +19,43 @@ jobs:
     if: |
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'e2e'))
-    runs-on: ubuntu-latest
+    runs-on: oracle-vm-16cpu-64gb-x86-64
+
+    strategy:
+      fail-fast: false
+      matrix:
+        kubernetes-version: ["1.32.3"]
+        trainer-ref: ["master"]
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
 
-      - name: Setup Kubernetes Kind Cluster
-        uses: helm/kind-action@v1.10.0
+      - name: Checkout Kubeflow Trainer repository
+        uses: actions/checkout@v4
         with:
-          node_image: kindest/node:v1.32.2
-
-      - name: Verify Cluster Ready
-        run: |
-          kubectl cluster-info
-          kubectl get nodes -o wide
-
-      - name: Install Kubeflow Trainer CRDs
-        run: |
-          kubectl apply --server-side -k "github.com/kubeflow/trainer.git/manifests/base/crds?ref=v2.2.0"
-          kubectl wait --for=condition=Established --timeout=60s crd/trainjobs.trainer.kubeflow.org
-          kubectl wait --for=condition=Established --timeout=60s crd/clustertrainingruntimes.trainer.kubeflow.org
-
-      - name: Install ClusterTrainingRuntimes
-        run: |
-          kubectl apply --server-side -k "github.com/kubeflow/trainer.git/manifests/overlays/runtimes?ref=v2.2.0"
-          kubectl get clustertrainingruntimes
-
-      - name: Mock GPU resource on Kind Node
-        run: |
-          NODE_NAME=$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}')
-          echo "Mocking nvidia.com/gpu on node: $NODE_NAME"
-          kubectl patch node "$NODE_NAME" --subresource=status --type=json -p='[
-            {"op": "add", "path": "/status/capacity/nvidia.com~1gpu", "value": "1"},
-            {"op": "add", "path": "/status/allocatable/nvidia.com~1gpu", "value": "1"}
-          ]'
-          # Verify node has Nvidia GPU allocatable
-          kubectl get node "$NODE_NAME" -o jsonpath='{.status.allocatable}'
+          repository: kubeflow/trainer
+          ref: ${{ matrix.trainer-ref }}
+          path: trainer
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v7
+        uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
 
       - name: Synchronize dependencies
         run: uv sync --all-extras --group dev
+
+      - name: Setup cluster
+        run: |
+          cd ./trainer
+          make test-e2e-setup-cluster \
+            K8S_VERSION=${{ matrix.kubernetes-version }}
 
       - name: Run E2E Tests
         env:
