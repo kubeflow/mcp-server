@@ -34,8 +34,8 @@ Before writing code, agents should:
 ```
 .github/                         # GitHub Actions (CI, issue/PR templates)
 docs/                            # Architecture assets and diagrams
-tests/                           # Unit, integration, e2e, and benchmark suites
-kubeflow_mcp/                    # Main Python package
+tests/                           # Integration, e2e, conformance suites; shared test helpers
+kubeflow_mcp/                    # Main Python package (unit tests co-located as *_test.py)
 ├── cli.py                       # Click CLI entry (`kubeflow-mcp serve`)
 ├── __main__.py                  # python -m kubeflow_mcp
 ├── common/                      # Shared constants, types, and utils
@@ -116,7 +116,7 @@ make verify                   # uv lock --check + ruff check + ruff format --che
 make test-python              # Unit tests + coverage
 make test                     # Broader suite under tests/ and kubeflow_mcp/
 make test-python report=xml   # XML coverage report
-uv run pytest -q tests/unit/core/test_security.py
+uv run pytest -q kubeflow_mcp/core/security_test.py
 uv run pytest -q kubeflow_mcp/trainer/api/sdk_contracts_test.py
 uv run pytest -q path/to/file.py::test_name -k "pattern"
 ```
@@ -187,7 +187,7 @@ make inspector                 # MCP Inspector (TRANSPORT=stdio|http|sse, defaul
 - Every new feature or bug fix MUST be covered by tests
 - Prefer co-located `*_test.py` next to modules when matching existing patterns
   (e.g. `kubeflow_mcp/cli_test.py`, `kubeflow_mcp/trainer/api/sdk_contracts_test.py`)
-- Package-level suites also live under `tests/unit/`, `tests/integration/`, `tests/e2e/`
+- Shared test helpers live in `tests/common.py`; integration and conformance suites under `tests/`
 - SDK contract tests guard compatibility with the Kubeflow SDK — do not delete or weaken them
 - Unit tests must not require a live cluster or network unless clearly marked integration/e2e
 

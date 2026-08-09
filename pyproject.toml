@@ -47,6 +47,12 @@ otel = [
     "opentelemetry-sdk>=1.29.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/kubeflow/mcp-server"
+Documentation = "https://github.com/kubeflow/mcp-server#readme"
+Source = "https://github.com/kubeflow/mcp-server"
+Issues = "https://github.com/kubeflow/mcp-server/issues"
+
 [project.scripts]
 kubeflow-mcp = "kubeflow_mcp.cli:cli"
 
@@ -64,6 +70,11 @@ packages = ["kubeflow_mcp"]
 asyncio_mode = "auto"
 testpaths = ["kubeflow_mcp", "tests"]
 addopts = "-v --tb=short"
+markers = [
+    "integration: requires Kind cluster with Trainer CRD",
+    "slow: tests that take >5s (rate limiter, retry backoff)",
+    "smoke: basic import and metadata checks",
+]
 
 [tool.uv]
 # Pin transitive deps to versions that resolve known CVEs detected by the OSV-Scanner workflow.

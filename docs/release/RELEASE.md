@@ -71,12 +71,13 @@ make release VERSION=X.Y.Z      # e.g. make release VERSION=0.1.0
 This updates:
 
 - `kubeflow_mcp/__init__.py` → `__version__ = "X.Y.Z"`
-- `CHANGELOG/CHANGELOG-X.Y.md` → a new top entry `## [X.Y.Z] (YYYY-MM-DD)`
+- `server.json` → top-level and PyPI package `version` fields (MCP Registry metadata)
+- `CHANGELOG/CHANGELOG-X.Y.md` → a new top entry `# [X.Y.Z] (YYYY-MM-DD)`
   (skipped for `rcN`)
 
 ### 2. Open a pull request
 
-- Review `kubeflow_mcp/__init__.py` and `CHANGELOG/CHANGELOG-X.Y.md`.
+- Review `kubeflow_mcp/__init__.py`, `server.json`, and `CHANGELOG/CHANGELOG-X.Y.md`.
 - **Latest minor series:** open the PR against `main`.
 - **Older minor-series patch** (e.g. `0.1.1` when `main` is on `0.2.x`): check out the
   `release-X.Y` branch and open the PR against it.
@@ -92,8 +93,9 @@ Merging the version bump triggers the `Release` workflow (it fires only when
 3. **Tag** — creates and pushes the `X.Y.Z` tag.
 4. **Publish to PyPI** — trusted publishing (requires approval).
 5. **Publish Docker image** — builds and pushes `ghcr.io/<owner>/<repo>` (see below).
-6. **GitHub Release** — attaches the built artifacts and the changelog body (requires
-   approval).
+6. **GitHub Release** — creates the release as a draft, attaches the built artifacts, then
+   publishes it (requires approval). It is created as a draft first because immutable
+   releases lock a release's assets once it is published.
 
 A version that is not a valid `X.Y.Z` / `X.Y.ZrcN` string (for example a `-dev`
 placeholder) is rejected by the workflow so an accidental bump cannot cut a release.
@@ -116,33 +118,36 @@ Also confirm the [PyPI project](https://pypi.org/project/kubeflow-mcp/), the
 [GitHub Release](https://github.com/kubeflow/mcp-server/releases), and the container image
 were published.
 
-## Test PyPI Dry Run
+## Manual Dispatch
 
-Use this to validate a build end-to-end without touching production. Running the `Release`
-workflow via **`workflow_dispatch`** builds the selected ref and publishes **only to Test
-PyPI** — it does not create a branch, tag, GitHub Release, or Docker image.
+The `Release` workflow can also be started manually from GitHub Actions →
+`Release` → `Run workflow`. A dispatch runs the **same full release** as a version-bump
+push: it creates the release branch, tags, publishes to PyPI, pushes the image, and creates
+the GitHub Release. It is not a dry run.
 
-Dispatch is only allowed from `main` or an existing `release-X.Y` branch — the workflow
+Dispatch is only allowed from `main` or an existing `release-X.Y` branch; the workflow
 rejects a dispatch from any other branch. (GitHub Actions ignores a `branches:` filter on
-`workflow_dispatch`, so this is enforced by an explicit check instead.) This means the RC
-bump must land on `main` (or `release-X.Y`) before you can dry run it — you cannot dispatch
-from a feature branch.
+`workflow_dispatch`, so this is enforced by an explicit check.)
 
-1. Bump the version with `make release VERSION=X.Y.ZrcN` and merge it to `main` (or
-   `release-X.Y`).
-2. Open GitHub Actions → `Release` → `Run workflow`, select `main` (or the `release-X.Y`
-   branch), and enter the expected version string (validated against
-   `kubeflow_mcp/__init__.py`).
-3. Approve the `test-pypi` environment.
-4. Verify the upload:
+Use a dispatch to resume a release whose run failed part-way (for example, an approval
+timed out). Steps that already completed are skipped: an existing tag is left alone, and
+PyPI rejects a re-upload of an existing version.
 
-   ```sh
-   pip install \
-     --index-url https://test.pypi.org/simple/ \
-     --extra-index-url https://pypi.org/simple/ \
-     kubeflow-mcp==X.Y.ZrcN
-   kubeflow-mcp --version
-   ```
+## Pre-releases
+
+Publish a release candidate by bumping to an `rcN` version:
+
+```sh
+make release VERSION=X.Y.ZrcN
+```
+
+RC versions publish to PyPI like any other release, but the GitHub Release is marked as a
+pre-release and the container image gets only the exact-version tag (no `latest`, no moving
+major/minor tags). Install one explicitly:
+
+```sh
+pip install kubeflow-mcp==X.Y.ZrcN
+```
 
 ## Docker Image
 
@@ -193,14 +198,13 @@ Run these from the repository root before releasing.
    ```
 
 Trusted publishing cannot be exercised locally because it depends on GitHub Actions OIDC
-tokens and the configured environments — use the Test PyPI dry run for that.
+tokens and the configured environments.
 
 ## Trusted Publisher Setup
 
-Configure trusted publishing for both PyPI and Test PyPI. The workflow uses `id-token: write`
-and reads no PyPI token from secrets.
+The workflow publishes with `id-token: write` and reads no PyPI token from secrets.
 
-For PyPI, add a publisher for the `kubeflow-mcp` project:
+On PyPI, add a trusted publisher for the `kubeflow-mcp` project:
 
 | Field | Value |
 | --- | --- |
@@ -209,14 +213,5 @@ For PyPI, add a publisher for the `kubeflow-mcp` project:
 | Workflow name | `release.yaml` |
 | Environment name | `release` |
 
-For Test PyPI, add a publisher for the `kubeflow-mcp` project:
-
-| Field | Value |
-| --- | --- |
-| Owner | `kubeflow` |
-| Repository name | `mcp-server` |
-| Workflow name | `release.yaml` |
-| Environment name | `test-pypi` |
-
-Create matching GitHub environments named `release` and `test-pypi`, and configure required
-reviewers on each so publishing waits for manual approval.
+Create a matching GitHub environment named `release` and configure required reviewers on it
+so publishing waits for manual approval.
