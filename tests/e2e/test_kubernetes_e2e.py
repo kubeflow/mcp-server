@@ -142,15 +142,23 @@ async def test_kubernetes_e2e_flow(mcp_session: ClientSession) -> None:
     job_names = [job["name"] for job in data["data"]["jobs"]]
     assert job_name not in job_names
 
-    # 7. fine_tune(confirmed=True) asserts TrainJob CR exists in cluster
+    # 7. run_custom_training(confirmed=True) asserts TrainJob CR exists in cluster (CPU mode)
+    custom_job_name = "e2e-custom-train-job"
+    noop_script = (
+        "import torch\n"
+        "def train():\n"
+        "    print(f'PyTorch version: {torch.__version__}')\n"
+        "if __name__ == '__main__':\n"
+        "    train()\n"
+    )
     resp = await mcp_session.call_tool(
-        "fine_tune",
+        "run_custom_training",
         arguments={
-            "model": "hf://google/gemma-2b",
-            "dataset": "hf://tatsu-lab/alpaca",
+            "script": noop_script,
             "runtime": runtime_name,
-            "name": job_name,
+            "name": custom_job_name,
             "namespace": namespace,
+            "gpu_per_node": 0,
             "confirmed": True,
         },
     )
@@ -158,24 +166,24 @@ async def test_kubernetes_e2e_flow(mcp_session: ClientSession) -> None:
     assert len(resp.content) == 1
     data = json.loads(resp.content[0].text)
     assert data["success"] is True
-    assert data["data"]["job_name"] == job_name
+    assert data["data"]["job_name"] == custom_job_name
     assert data["data"]["status"] == "Created"
 
     # 8. get_training_job() reads back the created job
     resp = await mcp_session.call_tool(
-        "get_training_job", arguments={"name": job_name, "namespace": namespace}
+        "get_training_job", arguments={"name": custom_job_name, "namespace": namespace}
     )
     assert not resp.isError
     assert len(resp.content) == 1
     data = json.loads(resp.content[0].text)
     assert data["success"] is True
-    assert data["data"]["name"] == job_name
+    assert data["data"]["name"] == custom_job_name
     assert data["data"]["status"] == "Created"
 
     # 9. delete_training_job(confirmed=True) removes it, verify gone
     resp = await mcp_session.call_tool(
         "delete_training_job",
-        arguments={"name": job_name, "namespace": namespace, "confirmed": True},
+        arguments={"name": custom_job_name, "namespace": namespace, "confirmed": True},
     )
     assert not resp.isError
     assert len(resp.content) == 1
@@ -185,7 +193,7 @@ async def test_kubernetes_e2e_flow(mcp_session: ClientSession) -> None:
 
     # Verify job is gone
     resp = await mcp_session.call_tool(
-        "get_training_job", arguments={"name": job_name, "namespace": namespace}
+        "get_training_job", arguments={"name": custom_job_name, "namespace": namespace}
     )
     assert resp.isError
     data = json.loads(resp.content[0].text)
