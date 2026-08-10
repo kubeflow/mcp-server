@@ -24,6 +24,7 @@ from tests.common import TestCase
 
 from kubeflow_mcp.core.config import (
     ServerConfig,
+    _find_config_file,
     load_config,
 )
 
@@ -116,6 +117,20 @@ def test_load_config_ignores_non_mapping_yaml(tmp_path, caplog):
 
     assert cfg.server.clients == ["trainer"]
     assert "Config root must be a mapping" in caplog.text
+
+
+def test_find_config_file_prefers_project_local_config(tmp_path):
+    home_dir = tmp_path / "home"
+    home_dir.mkdir()
+    (home_dir / ".kubeflow-mcp.yaml").write_text("server:\n  persona: readonly\n")
+    local_config = tmp_path / ".kubeflow-mcp.yaml"
+    local_config.write_text("server:\n  persona: ml-engineer\n")
+
+    with (
+        patch("kubeflow_mcp.core.config.Path.home", return_value=home_dir),
+        patch("kubeflow_mcp.core.config.Path.cwd", return_value=tmp_path),
+    ):
+        assert _find_config_file() == local_config
 
 
 # TODO(test): test config_path that doesn't exist falls back to default search

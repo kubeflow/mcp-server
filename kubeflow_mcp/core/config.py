@@ -68,12 +68,12 @@ logger = logging.getLogger(__name__)
 
 
 def _get_config_paths() -> list[Path]:
-    """Config file locations, searched in order. Evaluated lazily so cwd is fresh."""
+    """Config file locations, searched in order with project-local config first."""
     return [
+        Path.cwd() / ".kubeflow-mcp.yaml",
         Path.home() / ".kubeflow-mcp.yaml",
         Path.home() / ".kubeflow-mcp.yml",
         Path.home() / ".config" / "kubeflow-mcp" / "config.yaml",
-        Path.cwd() / ".kubeflow-mcp.yaml",
     ]
 
 
