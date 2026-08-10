@@ -29,22 +29,22 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Checkout Kubeflow Trainer repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: kubeflow/trainer
           ref: ${{ matrix.trainer-ref }}
           path: trainer
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.11"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
 
@@ -56,6 +56,7 @@ jobs:
           cd ./trainer
           make test-e2e-setup-cluster \
             K8S_VERSION=${{ matrix.kubernetes-version }}
+          kubectl get clustertrainingruntimes
 
       - name: Run E2E Tests
         env:

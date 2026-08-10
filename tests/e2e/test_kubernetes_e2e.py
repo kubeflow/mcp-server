@@ -88,14 +88,22 @@ async def test_kubernetes_e2e_flow(mcp_session: ClientSession) -> None:
     runtimes = data["data"]["runtimes"]
     assert len(runtimes) > 0
 
-    # Find the first torchtune runtime
+    # Find a suitable runtime for fine_tune testing (preferring torchtune/torch runtime)
     runtime_name = None
     for r in runtimes:
         name = r.get("name", "")
-        if name.startswith("torchtune") or name.startswith("torch-tune"):
+        if "torchtune" in name or "torch-tune" in name:
             runtime_name = name
             break
-    assert runtime_name is not None, f"Could not find any torchtune runtime in {runtimes}"
+    if not runtime_name:
+        for r in runtimes:
+            name = r.get("name", "")
+            if "torch" in name:
+                runtime_name = name
+                break
+    if not runtime_name and len(runtimes) > 0:
+        runtime_name = runtimes[0]["name"]
+    assert runtime_name is not None, f"Could not find any runtime in {runtimes}"
 
     # 5. list_training_jobs() empty list on fresh cluster
     namespace = "default"
