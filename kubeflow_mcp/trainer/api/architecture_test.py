@@ -170,10 +170,64 @@ class TestInstructionComposition:
         sections = _sections_for_persona("platform-admin")
         assert "platform" in sections
 
-    def test_section_order(self):
+    def test_section_order_is_deterministic_and_follows_client_order(self):
+        """Ordering must be stable and respect each client's SECTION_ORDER.
+
+        Asserting structural invariants rather than a hardcoded list, so adding
+        a client does not break this test:
+        1. No duplicate sections
+        2. Every section belongs to some client's SECTION_ORDER
+        3. Within a client, relative order is preserved
+        """
+        import importlib
+
+        from kubeflow_mcp.core.server import CLIENT_MODULES
+
         sections = _sections_for_persona("platform-admin")
-        expected_order = ["planning", "monitoring", "training", "platform"]
-        assert sections == expected_order
+
+        assert len(sections) == len(set(sections)), f"Duplicate sections: {sections}"
+
+        client_orders: dict[str, list[str]] = {}
+        for name, path in CLIENT_MODULES.items():
+            try:
+                mod = importlib.import_module(path)
+            except ImportError:
+                continue
+            order = getattr(mod, "SECTION_ORDER", [])
+            if order:
+                client_orders[name] = order
+
+        all_known = {s for order in client_orders.values() for s in order}
+        assert not set(sections) - all_known, (
+            f"Sections not in any client SECTION_ORDER: {set(sections) - all_known}"
+        )
+
+        for name, order in client_orders.items():
+            present = [s for s in sections if s in order]
+            expected = [s for s in order if s in sections]
+            assert present == expected, f"Client '{name}' order violated: {present} != {expected}"
+
+    def test_trainer_declares_its_section_order(self):
+        from kubeflow_mcp.trainer import SECTION_ORDER
+
+        assert SECTION_ORDER == ["planning", "monitoring", "training", "platform"]
+
+    def test_sections_from_a_module_without_section_order_fall_back_sorted(self):
+        """A client exporting no SECTION_ORDER must still surface its sections,
+        in a deterministic (sorted) position rather than set iteration order."""
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        # Two unknown sections, deliberately given in non-alphabetical order.
+        fake = SimpleNamespace(PHASE_TO_SECTION={"planning": "zeta", "discovery": "alpha"})
+        with (
+            patch("kubeflow_mcp.core.server.CLIENT_MODULES", {"fake": "fake_mod"}),
+            patch("importlib.import_module", return_value=fake),
+        ):
+            sections = _sections_for_persona("platform-admin")
+
+        assert sections == sorted(sections), f"fallback not deterministic: {sections}"
+        assert sections == ["alpha", "zeta"]
 
     @pytest.mark.parametrize(
         "test_case",
