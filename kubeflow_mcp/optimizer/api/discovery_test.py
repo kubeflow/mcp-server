@@ -215,9 +215,12 @@ def test_get_experiment_and_status_report_identical_counts():
 
 
 def test_get_experiment_status_not_found():
-    client = MagicMock()
-    client.get_job.side_effect = _not_found()
-    with patch(f"{_DISC}.get_optimizer_client_for_namespace", return_value=client):
+    api = MagicMock()
+    api.get_namespaced_custom_object.side_effect = _not_found()
+    with (
+        patch(f"{_DISC}.get_custom_objects_api", return_value=api),
+        patch(f"{_DISC}.get_optimizer_effective_namespace", return_value="kubeflow"),
+    ):
         result = discovery.get_experiment_status("missing")
     assert result["error_code"] == "RESOURCE_NOT_FOUND"
 
