@@ -22,10 +22,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 from tests.common import TestCase
 
+from kubeflow_mcp.common.failures import FAILURE_PATTERNS, extract_failure_hint
 from kubeflow_mcp.trainer.api.monitoring import (
-    _FAILURE_PATTERNS,
     MAX_LOG_LINES,
-    _extract_failure_hint,
     _is_pod_for_step,
     get_training_events,
     get_training_logs,
@@ -33,14 +32,14 @@ from kubeflow_mcp.trainer.api.monitoring import (
 )
 
 
-def test_extract_failure_hint_openshift_pip_error():
+def testextract_failure_hint_openshift_pip_error():
     # Test exact PermissionError trace
     logs = (
         "Installing collected packages: torch\n"
         "PermissionError: [Errno 13] Permission denied: '/.local'\n"
         "ERROR: Job failed"
     )
-    hint = _extract_failure_hint(logs)
+    hint = extract_failure_hint(logs)
     assert hint is not None
     assert hint["category"] == "OPENSHIFT_PIP_ERROR"
     assert "On OpenShift under a restricted SCC" in hint["suggestion"]
@@ -48,15 +47,15 @@ def test_extract_failure_hint_openshift_pip_error():
 
     # Test generic permission denied on /.local
     logs_generic = "Permission denied: '/.local/bin/pip'"
-    hint_generic = _extract_failure_hint(logs_generic)
+    hint_generic = extract_failure_hint(logs_generic)
     assert hint_generic is not None
     assert hint_generic["category"] == "OPENSHIFT_PIP_ERROR"
 
 
-def test_extract_failure_hint_generic_permission_error():
+def testextract_failure_hint_generic_permission_error():
     # Test a generic permission error does not trigger OpenShift pip error
     logs = "PermissionError: [Errno 13] Permission denied: '/workspace/data.csv'"
-    hint = _extract_failure_hint(logs)
+    hint = extract_failure_hint(logs)
     assert hint is not None
     assert hint["category"] == "PERMISSION_ERROR"
     assert "Check service account permissions" in hint["suggestion"]
@@ -127,7 +126,7 @@ def test_failure_pattern_matches(test_case):
     log_line = test_case.config["log_line"]
     expected = test_case.config["expected_category"]
     matched = False
-    for pattern, category, hint in _FAILURE_PATTERNS:
+    for pattern, category, hint in FAILURE_PATTERNS:
         if pattern.search(log_line):
             assert category == expected
             assert len(hint) > 0
@@ -138,25 +137,25 @@ def test_failure_pattern_matches(test_case):
 
 def test_normal_log_not_matched():
     normal = "Epoch 1/10: loss=2.34, lr=0.001"
-    for pattern, _category, _hint in _FAILURE_PATTERNS:
+    for pattern, _category, _hint in FAILURE_PATTERNS:
         assert not pattern.search(normal)
-    assert _extract_failure_hint("Training completed successfully. Epoch 5/5 finished.") is None
+    assert extract_failure_hint("Training completed successfully. Epoch 5/5 finished.") is None
 
 
-def test_extract_failure_hint_suggestion_text():
-    cuda = _extract_failure_hint("RuntimeError: CUDA error: device-side assert triggered")
+def testextract_failure_hint_suggestion_text():
+    cuda = extract_failure_hint("RuntimeError: CUDA error: device-side assert triggered")
     assert cuda is not None
     assert "GPU driver compatibility" in cuda["suggestion"]
 
-    import_err = _extract_failure_hint("ImportError: cannot import name 'AutoModel'")
+    import_err = extract_failure_hint("ImportError: cannot import name 'AutoModel'")
     assert import_err is not None
     assert "package versions" in import_err["suggestion"]
 
-    missing = _extract_failure_hint("FileNotFoundError: [Errno 2] No such file")
+    missing = extract_failure_hint("FileNotFoundError: [Errno 2] No such file")
     assert missing is not None
     assert "dataset/model paths" in missing["suggestion"]
 
-    network = _extract_failure_hint("ConnectionRefused: could not connect to master")
+    network = extract_failure_hint("ConnectionRefused: could not connect to master")
     assert network is not None
     assert network["category"] == "NETWORK_ERROR"
     assert "network policies" in network["suggestion"]
