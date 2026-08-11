@@ -1,9 +1,9 @@
-# [0.1.0](https://github.com/kubeflow/mcp-server/releases/tag/0.1.0) (2026-08-10)
+# [0.1.1](https://github.com/kubeflow/mcp-server/releases/tag/0.1.1) (2026-08-11)
 
 This is the first official release of the Kubeflow MCP Server.
 
 ```
-pip install kubeflow-mcp==0.1.0
+pip install kubeflow-mcp==0.1.1
 ```
 
 The Kubeflow MCP Server exposes Kubeflow Trainer operations as [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) tools, letting AI agents plan, submit, monitor, and manage training jobs conversationally. Learn more about the highlights in the blog post:
