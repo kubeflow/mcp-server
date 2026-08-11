@@ -261,3 +261,32 @@ def test_get_experiment_events_not_found():
     with patch(f"{_MON}.get_optimizer_client_for_namespace", return_value=client):
         result = monitoring.get_experiment_events("missing")
     assert result["error_code"] == "RESOURCE_NOT_FOUND"
+
+
+def test_get_experiment_trials_accepts_the_succeeded_alias():
+    """Katib's CRD vocabulary says "Succeeded"; the SDK reports "Complete".
+    Both must select the same trials, as they do for list_experiments."""
+    client = MagicMock()
+    client.get_job.return_value = _job(trials=[_trial("t1", "Complete"), _trial("t2", "Failed")])
+    with patch(f"{_MON}.get_optimizer_client_for_namespace", return_value=client):
+        aliased = monitoring.get_experiment_trials("exp-1", status="Succeeded")
+        native = monitoring.get_experiment_trials("exp-1", status="Complete")
+
+    assert aliased["data"]["total"] == 1
+    assert aliased["data"]["trials"][0]["name"] == "t1"
+    assert aliased["data"]["trials"] == native["data"]["trials"]
+
+
+def test_get_suggestion_not_found_names_the_right_kind():
+    """It must not report a missing Suggestion as a missing Experiment."""
+    api = MagicMock()
+    api.get_namespaced_custom_object.side_effect = _not_found()
+    with (
+        patch(f"{_MON}.get_custom_objects_api", return_value=api),
+        patch(f"{_MON}.get_optimizer_effective_namespace", return_value="kubeflow"),
+    ):
+        result = monitoring.get_suggestion("exp-1")
+
+    assert result["error_code"] == "RESOURCE_NOT_FOUND"
+    assert "Suggestion 'exp-1' not found" in result["error"]
+    assert "experiment starts running" in result["hint"]

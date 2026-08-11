@@ -28,7 +28,7 @@ from typing import Any
 
 from kubeflow_mcp.common.constants import ErrorCode
 from kubeflow_mcp.common.failures import extract_failure_hint
-from kubeflow_mcp.common.types import ToolError, ToolResponse, exception_details, is_k8s_not_found
+from kubeflow_mcp.common.types import ToolError, ToolResponse
 from kubeflow_mcp.common.utils import (
     K8S_TIMEOUT,
     get_custom_objects_api,
@@ -44,6 +44,8 @@ from kubeflow_mcp.optimizer.api._common import (
     check_optimizer_namespace,
     clamp_limit,
     experiment_error,
+    resolve_status_filter,
+    resource_error,
 )
 from kubeflow_mcp.optimizer.constants import (
     KATIB_API_GROUP,
@@ -55,7 +57,7 @@ from kubeflow_mcp.optimizer.constants import (
 from kubeflow_mcp.optimizer.types import (
     event_to_dict,
     result_to_dict,
-    trial_counts,
+    trial_counts_from_job,
     trial_to_dict,
 )
 
@@ -104,14 +106,15 @@ def get_experiment_trials(
 
         trials = [trial_to_dict(t) for t in (getattr(job, "trials", None) or [])]
         if status:
-            trials = [t for t in trials if t.get("status") == status]
+            want = resolve_status_filter(status)
+            trials = [t for t in trials if t.get("status") == want]
 
         data: dict[str, Any] = {
             "experiment": name,
             "trials": trials[:limit],
             "total": len(trials),
         }
-        data["summary"] = trial_counts(job)
+        data["summary"] = trial_counts_from_job(job)
         return ToolResponse(data=data).model_dump()
 
     except Exception as e:
@@ -225,17 +228,7 @@ def get_suggestion(
         return ToolResponse(data=data).model_dump()
 
     except Exception as e:
-        if is_k8s_not_found(e):
-            return ToolError(
-                error=f"Suggestion '{name}' not found",
-                error_code=ErrorCode.RESOURCE_NOT_FOUND,
-                hint="A Suggestion is created once an experiment starts running.",
-            ).model_dump()
-        return ToolError(
-            error=str(e),
-            error_code=ErrorCode.SDK_ERROR,
-            details=exception_details(e),
-        ).model_dump()
+        return resource_error(e, name, kind="Suggestion").model_dump()
 
 
 def wait_for_experiment(
@@ -291,7 +284,7 @@ def wait_for_experiment(
             "reached": True,
             "message": f"Experiment reached '{final_status}'",
         }
-        data.update(trial_counts(job))
+        data.update(trial_counts_from_job(job))
         return ToolResponse(data=data).model_dump()
 
     except TimeoutError:

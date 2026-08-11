@@ -32,6 +32,16 @@ _FIND_HINT = "Use list_experiments() to find available experiments"
 DEFAULT_LIST_LIMIT = 50
 MAX_LIST_LIMIT = 500
 
+# Katib's CRD vocabulary calls a finished resource "Succeeded"; the SDK reports
+# "Complete". Accept both wherever a caller filters by status, so the same value
+# works against experiments and trials alike.
+STATUS_FILTER_ALIASES: dict[str, str] = {"Succeeded": "Complete"}
+
+
+def resolve_status_filter(status: str) -> str:
+    """Map a caller-supplied status onto the value the SDK actually reports."""
+    return STATUS_FILTER_ALIASES.get(status, status)
+
 
 def clamp_limit(limit: int) -> tuple[int, ToolError | None]:
     """Validate and cap a caller-supplied result limit.
@@ -75,30 +85,64 @@ def _api_status(exc: Exception) -> int | None:
     return None
 
 
-def experiment_error(exc: Exception, name: str) -> ToolError:
+def resource_error(exc: Exception, name: str, kind: str = "Experiment") -> ToolError:
     """Map an exception raised by the SDK or K8s API onto a ``ToolError``.
 
     The optimizer SDK wraps API failures as ``RuntimeError(...) from
     ApiException``, so a missing resource is only visible through the cause
     chain — :func:`is_k8s_not_found` handles that.
+
+    Args:
+        exc: The exception raised by the SDK or Kubernetes client.
+        name: Name of the resource the operation targeted.
+        kind: Resource kind, used in the message. Defaults to ``"Experiment"``.
     """
     if is_k8s_not_found(exc):
         return ToolError(
-            error=f"Experiment '{name}' not found",
+            error=f"{kind} '{name}' not found",
             error_code=ErrorCode.RESOURCE_NOT_FOUND,
-            hint=_FIND_HINT,
+            hint=(
+                _FIND_HINT
+                if kind == "Experiment"
+                else "A Suggestion is created once an experiment starts running."
+            ),
         )
     if _api_status(exc) == 409:
         # A name collision is caller-fixable, so report it as a validation
         # error: SDK_ERROR would also count as an infrastructure failure and
         # needlessly trip the circuit breaker for this tool.
         return ToolError(
-            error=f"Experiment '{name}' already exists",
+            error=f"{kind} '{name}' already exists",
             error_code=ErrorCode.VALIDATION_ERROR,
             hint=(
                 "Choose a different name, or delete the existing experiment "
                 f"with delete_experiment('{name}', confirmed=True)."
             ),
+        )
+    return ToolError(
+        error=str(exc),
+        error_code=ErrorCode.SDK_ERROR,
+        details=exception_details(exc),
+    )
+
+
+def experiment_error(exc: Exception, name: str) -> ToolError:
+    """:func:`resource_error` for the Experiment kind, which most tools target."""
+    return resource_error(exc, name)
+
+
+def collection_error(exc: Exception) -> ToolError:
+    """Map an exception from a list operation onto a ``ToolError``.
+
+    List tools have no single resource name to report, so they cannot use
+    :func:`resource_error`. A 403 is still surfaced distinctly because a
+    namespace the caller cannot read is caller-fixable, not an outage.
+    """
+    if _api_status(exc) == 403:
+        return ToolError(
+            error=f"Not authorized to list this resource: {exc}",
+            error_code=ErrorCode.PERMISSION_DENIED,
+            hint="Check the service account's RBAC for the target namespace.",
         )
     return ToolError(
         error=str(exc),

@@ -106,7 +106,7 @@ def test_trial_counts():
             _trial("d", "Created"),  # neither running/succeeded/failed
         ]
     )
-    assert ser.trial_counts(job) == {
+    assert ser.trial_counts_from_job(job) == {
         "total_trials": 4,
         "running_trials": 1,
         "succeeded_trials": 1,

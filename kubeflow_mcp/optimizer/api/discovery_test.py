@@ -18,9 +18,11 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 from kubernetes.client.exceptions import ApiException
 
 from kubeflow_mcp.optimizer.api import discovery
+from kubeflow_mcp.optimizer.types import trial_counts_from_cr
 
 _DISC = "kubeflow_mcp.optimizer.api.discovery"
 
@@ -134,25 +136,82 @@ def test_get_experiment_invalid_name():
 # ─── get_experiment_status ─────────────────────────────────────────────────
 
 
-def test_get_experiment_status_counts():
-    client = MagicMock()
-    client.get_job.return_value = _job(
-        "exp-1",
-        "Running",
-        trials=[
-            _trial("t1", "Complete"),
-            _trial("t2", "Running"),
-            _trial("t3", "Failed"),
-        ],
+def _status_cr(**status):
+    """Experiment CR carrying only status, as get_experiment_status reads it."""
+    return {"metadata": {"name": "exp-1"}, "spec": {}, "status": status}
+
+
+def _patch_cr(cr):
+    api = MagicMock()
+    api.get_namespaced_custom_object.return_value = cr
+    return (
+        patch(f"{_DISC}.get_custom_objects_api", return_value=api),
+        patch(f"{_DISC}.get_optimizer_effective_namespace", return_value="kubeflow"),
     )
-    with patch(f"{_DISC}.get_optimizer_client_for_namespace", return_value=client):
-        result = discovery.get_experiment_status("exp-1")
-    data = result["data"]
+
+
+def test_get_experiment_status_counts():
+    cr = _status_cr(trials=3, trialsRunning=1, trialsSucceeded=1, trialsFailed=1)
+    api_p, ns_p = _patch_cr(cr)
+    with api_p, ns_p:
+        data = discovery.get_experiment_status("exp-1")["data"]
     assert data["status"] == "Running"
     assert data["total_trials"] == 3
     assert data["running_trials"] == 1
     assert data["succeeded_trials"] == 1
     assert data["failed_trials"] == 1
+
+
+def test_get_experiment_status_reads_the_cr_not_the_sdk():
+    """It must not call get_job(), which also resolves every trial's TrainJob."""
+    client = MagicMock()
+    api_p, ns_p = _patch_cr(_status_cr(trials=1))
+    with api_p, ns_p, patch(f"{_DISC}.get_optimizer_client_for_namespace", return_value=client):
+        discovery.get_experiment_status("exp-1")
+    client.get_job.assert_not_called()
+
+
+def test_get_experiment_status_surfaces_early_stopped_trials():
+    """The SDK's trial view has no EarlyStopped state; the CR does."""
+    cr = _status_cr(trials=4, trialsSucceeded=2, trialsEarlyStopped=2)
+    api_p, ns_p = _patch_cr(cr)
+    with api_p, ns_p:
+        data = discovery.get_experiment_status("exp-1")["data"]
+    assert data["early_stopped_trials"] == 2
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        ({"conditions": [{"type": "Succeeded", "status": "True"}]}, "Complete"),
+        ({"conditions": [{"type": "Failed", "status": "True"}]}, "Failed"),
+        ({"conditions": [{"type": "Succeeded", "status": "False"}]}, "Created"),
+        ({"trialsRunning": 2}, "Running"),
+        ({}, "Created"),
+    ],
+)
+def test_get_experiment_status_derives_phase_like_the_sdk(status, expected):
+    """Mirrors the SDK's own derivation from Experiment conditions."""
+    api_p, ns_p = _patch_cr(_status_cr(**status))
+    with api_p, ns_p:
+        data = discovery.get_experiment_status("exp-1")["data"]
+    assert data["status"] == expected
+
+
+def test_get_experiment_and_status_report_identical_counts():
+    """Regression: the two tools previously disagreed, because one derived
+    counts from TrainJob statuses and the other read the CR."""
+    cr = _experiment_cr()
+    client = MagicMock(get_job=MagicMock(return_value=_job("exp-1", trials=[_trial("t1")])))
+    api_p, ns_p = _patch_cr(cr)
+    with api_p, ns_p, patch(f"{_DISC}.get_optimizer_client_for_namespace", return_value=client):
+        full = discovery.get_experiment("exp-1")["data"]
+        light = discovery.get_experiment_status("exp-1")["data"]
+
+    shared = set(trial_counts_from_cr(cr["status"]))
+    assert shared, "fixture should carry counters"
+    for key in shared:
+        assert full[key] == light[key], f"{key}: {full[key]} != {light[key]}"
 
 
 def test_get_experiment_status_not_found():

@@ -26,6 +26,16 @@ tools produce identical field names for the same SDK objects.
 from typing import Any
 
 from kubeflow_mcp.common.constants import JobStatus
+from kubeflow_mcp.optimizer.constants import (
+    OPTIMIZATION_JOB_COMPLETE,
+    OPTIMIZATION_JOB_CREATED,
+    OPTIMIZATION_JOB_FAILED,
+    OPTIMIZATION_JOB_RUNNING,
+)
+
+# Katib spells the success condition on the Experiment CR "Succeeded", while the
+# SDK reports the resulting job status as "Complete".
+_CR_CONDITION_SUCCEEDED = "Succeeded"
 
 # Trial status comes from the Trial's underlying TrainJob (``trial.trainjob.status``),
 # so these are TrainJob statuses — not the OptimizationJob statuses in
@@ -131,7 +141,7 @@ def algorithm_to_dict(algorithm: Any) -> dict[str, Any]:
     return data
 
 
-def trial_counts(job: Any) -> dict[str, int]:
+def trial_counts_from_job(job: Any) -> dict[str, int]:
     """Aggregate trial counts by status for an OptimizationJob."""
     trials = getattr(job, "trials", None) or []
     running = succeeded = failed = 0
@@ -169,7 +179,7 @@ def experiment_summary(job: Any) -> dict[str, Any]:
         "status": getattr(job, "status", None) or "Unknown",
         "creation_timestamp": _isoformat(getattr(job, "creation_timestamp", None)),
     }
-    data.update(trial_counts(job))
+    data.update(trial_counts_from_job(job))
     return data
 
 
@@ -227,7 +237,33 @@ _CR_TRIAL_COUNTERS = {
 }
 
 
-def cr_conditions(status: dict[str, Any]) -> list[dict[str, Any]]:
+def experiment_phase(status: dict[str, Any]) -> str:
+    """Derive the OptimizationJob status string from Experiment CR status.
+
+    Mirrors the SDK's own derivation in
+    ``kubeflow.optimizer.backends.kubernetes.backend.__get_optimization_job_from_cr``
+    so a CR-sourced status matches what ``OptimizerClient.get_job()`` reports:
+    a true ``Succeeded`` condition means Complete, a true ``Failed`` condition
+    means Failed, otherwise Running if any trial is running, else Created.
+
+    The SDK checks each trial's TrainJob for the running case; the CR's own
+    ``trialsRunning`` counter carries the same information without fetching
+    every trial.
+    """
+    for condition in status.get("conditions") or []:
+        if condition.get("status") != "True":
+            continue
+        if condition.get("type") == _CR_CONDITION_SUCCEEDED:
+            return OPTIMIZATION_JOB_COMPLETE
+        if condition.get("type") == OPTIMIZATION_JOB_FAILED:
+            return OPTIMIZATION_JOB_FAILED
+
+    if status.get("trialsRunning"):
+        return OPTIMIZATION_JOB_RUNNING
+    return OPTIMIZATION_JOB_CREATED
+
+
+def conditions_to_list(status: dict[str, Any]) -> list[dict[str, Any]]:
     """Serialize ``status.conditions`` from an Experiment CR.
 
     Conditions carry the reason an experiment failed or stalled, which is the
@@ -245,7 +281,7 @@ def cr_conditions(status: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
-def cr_optimal_trial(status: dict[str, Any]) -> dict[str, Any] | None:
+def optimal_trial_to_dict(status: dict[str, Any]) -> dict[str, Any] | None:
     """Serialize ``status.currentOptimalTrial``, or None when unset.
 
     Katib leaves the name empty until a trial has produced metrics, so an
@@ -274,7 +310,7 @@ def cr_optimal_trial(status: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
-def cr_trial_counts(status: dict[str, Any]) -> dict[str, int]:
+def trial_counts_from_cr(status: dict[str, Any]) -> dict[str, int]:
     """Trial counts as reported by the Experiment CR itself.
 
     Preferred over deriving counts from ``OptimizationJob.trials``: Katib tracks
@@ -288,7 +324,7 @@ def cr_trial_counts(status: dict[str, Any]) -> dict[str, int]:
     }
 
 
-def cr_early_stopping(spec: dict[str, Any]) -> dict[str, Any] | None:
+def early_stopping_to_dict(spec: dict[str, Any]) -> dict[str, Any] | None:
     """Serialize ``spec.earlyStopping``, or None when not configured."""
     early = spec.get("earlyStopping") or {}
     if not early:

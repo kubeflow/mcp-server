@@ -25,7 +25,7 @@ import logging
 from typing import Any
 
 from kubeflow_mcp.common.constants import ErrorCode
-from kubeflow_mcp.common.types import ToolError, ToolResponse, exception_details
+from kubeflow_mcp.common.types import ToolError, ToolResponse
 from kubeflow_mcp.common.utils import (
     K8S_TIMEOUT,
     get_custom_objects_api,
@@ -37,7 +37,9 @@ from kubeflow_mcp.optimizer.api._common import (
     DEFAULT_LIST_LIMIT,
     check_optimizer_namespace,
     clamp_limit,
+    collection_error,
     experiment_error,
+    resolve_status_filter,
 )
 from kubeflow_mcp.optimizer.constants import (
     EXPERIMENT_PLURAL,
@@ -46,22 +48,18 @@ from kubeflow_mcp.optimizer.constants import (
     SUGGESTION_PLURAL,
 )
 from kubeflow_mcp.optimizer.types import (
-    cr_conditions,
-    cr_early_stopping,
-    cr_optimal_trial,
-    cr_trial_counts,
+    conditions_to_list,
+    early_stopping_to_dict,
+    experiment_phase,
     experiment_summary,
     experiment_to_dict,
     is_success_status,
-    trial_counts,
+    optimal_trial_to_dict,
+    trial_counts_from_cr,
     trial_to_dict,
 )
 
 logger = logging.getLogger(__name__)
-
-# Legacy/CRD status "Succeeded" maps to the SDK's terminal status "Complete".
-# Mirrors the trainer's list_training_jobs alias for consistent filtering.
-_STATUS_FILTER_ALIASES: dict[str, str] = {"Succeeded": "Complete"}
 
 
 def list_experiments(
@@ -96,7 +94,7 @@ def list_experiments(
 
         experiments = [experiment_summary(job) for job in jobs]
         if status:
-            want = _STATUS_FILTER_ALIASES.get(status, status)
+            want = resolve_status_filter(status)
             experiments = [e for e in experiments if e.get("status") == want]
 
         return ToolResponse(
@@ -104,11 +102,7 @@ def list_experiments(
         ).model_dump()
 
     except Exception as e:
-        return ToolError(
-            error=str(e),
-            error_code=ErrorCode.SDK_ERROR,
-            details=exception_details(e),
-        ).model_dump()
+        return collection_error(e).model_dump()
 
 
 def get_experiment(
@@ -118,8 +112,9 @@ def get_experiment(
 ) -> dict[str, Any]:
     """Get full details of a Katib optimization experiment.
 
-    Returns the complete experiment: status, trials, search space, algorithm,
-    objectives, and trial configuration.
+    Combines the SDK's view (search space, algorithm, objectives, trial config,
+    embedded trials) with fields only the Experiment CR carries: ``conditions``,
+    ``best_trial``, ``early_stopping``, the phase, and the trial counters.
 
     Args:
         name: Experiment name.
@@ -129,7 +124,12 @@ def get_experiment(
             ``get_experiment_trials()`` to page through them.
 
     Returns:
-        dict: Response containing full experiment details.
+        dict: Response containing ``name``, ``status``, ``creation_timestamp``,
+        ``objectives``, ``algorithm``, ``search_space``, ``trial_config``,
+        ``trials`` (up to ``limit``), ``trials_truncated``, ``conditions``,
+        ``best_trial``, ``early_stopping`` and the CR trial counters. When the
+        CR read fails, the CR-sourced keys are replaced by
+        ``detail_unavailable: True`` and the SDK-derived values remain.
 
     Raises:
         ToolError: If experiment not found (``RESOURCE_NOT_FOUND``).
@@ -167,16 +167,21 @@ def get_experiment_status(
 ) -> dict[str, Any]:
     """Lightweight status-only check for an experiment.
 
-    Returns only the status string and trial counts — faster to consume than
-    ``get_experiment()`` for polling.
+    Reads the Experiment CR directly rather than going through
+    ``OptimizerClient.get_job()``, which additionally resolves every trial's
+    TrainJob. That makes this both cheaper than ``get_experiment()`` and
+    consistent with it: both report the CR's own counters, including
+    ``early_stopped_trials``, which the SDK's trial view cannot express.
 
     Args:
         name: Experiment name.
         namespace: K8s namespace. Uses default from kubeconfig when omitted.
 
     Returns:
-        dict: Response containing ``status``, ``total_trials``,
-              ``running_trials``, ``succeeded_trials``, ``failed_trials``.
+        dict: Response containing ``name``, ``status`` and the CR trial
+        counters (``total_trials``, ``running_trials``, ``succeeded_trials``,
+        ``failed_trials``, ``pending_trials``, ``killed_trials``,
+        ``early_stopped_trials``), omitting any the CR does not report.
     """
     name_err = validate_k8s_name(name)
     if name_err is not None:
@@ -187,14 +192,14 @@ def get_experiment_status(
         return ns_err.model_dump()
 
     try:
-        client = get_optimizer_client_for_namespace(namespace)
-        job = client.get_job(name=name)
+        obj = _read_experiment_cr(name, namespace)
+        status = obj.get("status") or {}
 
         data: dict[str, Any] = {
             "name": name,
-            "status": getattr(job, "status", None) or "Unknown",
+            "status": experiment_phase(status),
         }
-        data.update(trial_counts(job))
+        data.update(trial_counts_from_cr(status))
         return ToolResponse(data=data).model_dump()
 
     except Exception as e:
@@ -348,11 +353,25 @@ def list_suggestions(
         ).model_dump()
 
     except Exception as e:
-        return ToolError(
-            error=str(e),
-            error_code=ErrorCode.SDK_ERROR,
-            details=exception_details(e),
-        ).model_dump()
+        return collection_error(e).model_dump()
+
+
+def _read_experiment_cr(name: str, namespace: str | None) -> dict[str, Any]:
+    """Fetch the raw Experiment custom resource.
+
+    Raises whatever the Kubernetes client raises; callers decide whether that is
+    fatal (``get_experiment_status``) or merely degrades the response
+    (``get_experiment``).
+    """
+    ns = get_optimizer_effective_namespace(namespace)
+    return get_custom_objects_api().get_namespaced_custom_object(
+        group=KATIB_API_GROUP,
+        version=KATIB_API_VERSION,
+        namespace=ns,
+        plural=EXPERIMENT_PLURAL,
+        name=name,
+        _request_timeout=K8S_TIMEOUT,
+    )
 
 
 def _experiment_cr_detail(name: str, namespace: str | None) -> dict[str, Any]:
@@ -367,28 +386,22 @@ def _experiment_cr_detail(name: str, namespace: str | None) -> dict[str, Any]:
     response rather than failing the whole call.
     """
     try:
-        ns = get_optimizer_effective_namespace(namespace)
-        obj = get_custom_objects_api().get_namespaced_custom_object(
-            group=KATIB_API_GROUP,
-            version=KATIB_API_VERSION,
-            namespace=ns,
-            plural=EXPERIMENT_PLURAL,
-            name=name,
-            _request_timeout=K8S_TIMEOUT,
-        )
+        obj = _read_experiment_cr(name, namespace)
     except Exception as e:
         logger.debug("get_experiment(%s): CR detail unavailable: %s", name, e)
         return {"detail_unavailable": True}
 
     status = obj.get("status") or {}
-    spec = obj.get("spec") or {}
     detail: dict[str, Any] = {
-        "conditions": cr_conditions(status),
-        "best_trial": cr_optimal_trial(status),
-        "early_stopping": cr_early_stopping(spec),
+        "conditions": conditions_to_list(status),
+        "best_trial": optimal_trial_to_dict(status),
+        "early_stopping": early_stopping_to_dict(obj.get("spec") or {}),
+        # Derive the phase from the same source get_experiment_status uses, so
+        # the two tools cannot disagree about a single experiment.
+        "status": experiment_phase(status),
     }
     # CR counters are authoritative; they supersede the SDK-derived ones.
-    detail.update(cr_trial_counts(status))
+    detail.update(trial_counts_from_cr(status))
     return detail
 
 
