@@ -76,10 +76,13 @@ def _build_parameter(name: str, spec: dict[str, Any]) -> models.V1beta1Parameter
     names, string coercion of numbers) stays identical to the SDK's own output.
 
     Raises:
-        ValueError: The entry is malformed; the message is surfaced to the caller.
+        TypeError: The entry is not an object.
+        ValueError: The entry is an object but malformed.
+
+    Either message is surfaced to the caller as a validation error.
     """
     if not isinstance(spec, dict):
-        raise ValueError(f"search_space['{name}'] must be an object, got {type(spec).__name__}")
+        raise TypeError(f"search_space['{name}'] must be an object, got {type(spec).__name__}")
 
     if "choices" in spec:
         choices = spec["choices"]
@@ -237,42 +240,32 @@ def create_hpo_experiment(
     if ns_err is not None:
         return ns_err.model_dump()
 
-    if objective_type not in OBJECTIVE_TYPES:
-        return ToolError(
-            error=f"objective_type must be one of {sorted(OBJECTIVE_TYPES)}, got '{objective_type}'",
-            error_code=ErrorCode.VALIDATION_ERROR,
-        ).model_dump()
-    if algorithm not in ALGORITHMS:
-        return ToolError(
-            error=f"algorithm must be one of {sorted(ALGORITHMS)}, got '{algorithm}'",
-            error_code=ErrorCode.VALIDATION_ERROR,
-        ).model_dump()
-    if not search_space:
-        return ToolError(
-            error="search_space must define at least one parameter",
-            error_code=ErrorCode.VALIDATION_ERROR,
-        ).model_dump()
-    if not trial_template:
-        return ToolError(
-            error="trial_template must define the workload to run per trial",
-            error_code=ErrorCode.VALIDATION_ERROR,
-        ).model_dump()
-    if not 1 <= max_trial_count <= MAX_TRIAL_COUNT_LIMIT:
-        return ToolError(
-            error=(
-                f"max_trial_count must be between 1 and {MAX_TRIAL_COUNT_LIMIT}, "
-                f"got {max_trial_count}"
-            ),
-            error_code=ErrorCode.VALIDATION_ERROR,
-        ).model_dump()
-    if not 1 <= parallel_trial_count <= MAX_PARALLEL_TRIAL_LIMIT:
-        return ToolError(
-            error=(
-                f"parallel_trial_count must be between 1 and {MAX_PARALLEL_TRIAL_LIMIT}, "
-                f"got {parallel_trial_count}"
-            ),
-            error_code=ErrorCode.VALIDATION_ERROR,
-        ).model_dump()
+    # (is_invalid, message) pairs, evaluated in order; the first failure wins.
+    # Kept as a table so adding a rule does not add another return path.
+    problems: list[tuple[bool, str]] = [
+        (
+            objective_type not in OBJECTIVE_TYPES,
+            f"objective_type must be one of {sorted(OBJECTIVE_TYPES)}, got '{objective_type}'",
+        ),
+        (
+            algorithm not in ALGORITHMS,
+            f"algorithm must be one of {sorted(ALGORITHMS)}, got '{algorithm}'",
+        ),
+        (not search_space, "search_space must define at least one parameter"),
+        (not trial_template, "trial_template must define the workload to run per trial"),
+        (
+            not 1 <= max_trial_count <= MAX_TRIAL_COUNT_LIMIT,
+            f"max_trial_count must be between 1 and {MAX_TRIAL_COUNT_LIMIT}, got {max_trial_count}",
+        ),
+        (
+            not 1 <= parallel_trial_count <= MAX_PARALLEL_TRIAL_LIMIT,
+            f"parallel_trial_count must be between 1 and {MAX_PARALLEL_TRIAL_LIMIT}, "
+            f"got {parallel_trial_count}",
+        ),
+    ]
+    for is_invalid, message in problems:
+        if is_invalid:
+            return ToolError(error=message, error_code=ErrorCode.VALIDATION_ERROR).model_dump()
 
     try:
         ns = mcp_utils.get_optimizer_effective_namespace(namespace)
@@ -288,7 +281,7 @@ def create_hpo_experiment(
             parallel_trial_count=parallel_trial_count,
             max_failed_trials=max_failed_trials,
         ).to_dict()
-    except ValueError as e:
+    except (TypeError, ValueError) as e:
         return ToolError(error=str(e), error_code=ErrorCode.VALIDATION_ERROR).model_dump()
 
     if not confirmed:

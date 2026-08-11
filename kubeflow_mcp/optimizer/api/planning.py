@@ -23,7 +23,12 @@ from typing import Any
 
 from kubeflow_mcp.common import utils as mcp_utils
 from kubeflow_mcp.common.constants import ErrorCode
-from kubeflow_mcp.common.types import ToolError, ToolResponse, exception_details
+from kubeflow_mcp.common.types import (
+    ToolError,
+    ToolResponse,
+    exception_details,
+    is_k8s_not_found,
+)
 from kubeflow_mcp.optimizer.constants import (
     EXPERIMENT_CRD_NAME,
     KATIB_CONTROLLER_LABELS,
@@ -32,129 +37,171 @@ from kubeflow_mcp.optimizer.constants import (
 
 logger = logging.getLogger(__name__)
 
+# Each sub-check returns the fields it learned plus anything that blocks or
+# merely warns, so katib_pre_flight stays a flat composition of independent
+# checks rather than one long branching function.
+CheckResult = tuple[dict[str, Any], list[str], list[str]]
+
+_INSTALL_HINT = "https://www.kubeflow.org/docs/components/katib/installation/"
+
+
+def _check_experiment_crd() -> CheckResult:
+    """Confirm the Katib Experiment CRD is registered on the cluster."""
+    try:
+        crd = mcp_utils.get_apiextensions_api().read_custom_resource_definition(
+            name=EXPERIMENT_CRD_NAME,
+            _request_timeout=mcp_utils.K8S_TIMEOUT,
+        )
+    except Exception as e:
+        if is_k8s_not_found(e):
+            return (
+                {"katib_crd_found": False},
+                [
+                    f"Katib Experiment CRD not found ({EXPERIMENT_CRD_NAME}). Install Katib: {_INSTALL_HINT}"
+                ],
+                [],
+            )
+        return {"katib_crd_found": False}, [f"Cannot check Katib CRD: {e}"], []
+
+    served = [v.name for v in (crd.spec.versions or []) if getattr(v, "served", True)]
+    return {"katib_crd_found": True, "katib_crd_versions": served}, [], []
+
+
+def _find_controller_pod() -> Any | None:
+    """Locate the Katib controller pod, preferring its conventional namespace."""
+    core_api = mcp_utils.get_core_v1_api()
+    pods = core_api.list_namespaced_pod(
+        namespace=KATIB_CONTROLLER_NAMESPACE_DEFAULT,
+        label_selector=KATIB_CONTROLLER_LABELS,
+        _request_timeout=mcp_utils.K8S_TIMEOUT,
+    )
+    if not pods.items:
+        pods = core_api.list_pod_for_all_namespaces(
+            label_selector=KATIB_CONTROLLER_LABELS,
+            _request_timeout=mcp_utils.K8S_TIMEOUT,
+        )
+    return pods.items[0] if pods.items else None
+
+
+def _check_controller() -> CheckResult:
+    """Confirm the Katib controller pod is both Running and Ready.
+
+    Phase alone is not enough: a pod can be ``Running`` while its container
+    fails readiness, which is exactly what a Katib install missing its
+    ClusterRoles looks like. Treating that as healthy reports a false green.
+    """
+    try:
+        pod = _find_controller_pod()
+    except Exception as e:
+        return (
+            {"controller_status": "check_failed"},
+            [],
+            [f"Cannot check Katib controller pods: {e}"],
+        )
+
+    if pod is None:
+        return (
+            {"controller_status": "not_found"},
+            [
+                "Katib controller pod not found. Checked namespace "
+                f"'{KATIB_CONTROLLER_NAMESPACE_DEFAULT}' and all namespaces."
+            ],
+            [],
+        )
+
+    phase = pod.status.phase if pod.status else "Unknown"
+    where = f"{pod.metadata.namespace}/{pod.metadata.name}"
+    info: dict[str, Any] = {
+        "controller_status": phase,
+        "controller_namespace": pod.metadata.namespace,
+        "controller_name": pod.metadata.name,
+    }
+
+    if phase != "Running":
+        return (
+            info,
+            [f"Katib controller pod is in '{phase}' state (expected 'Running'). Pod: {where}"],
+            [],
+        )
+
+    statuses = getattr(pod.status, "container_statuses", None) or []
+    not_ready = [cs.name for cs in statuses if not cs.ready]
+    if not_ready:
+        info["controller_ready"] = False
+        return (
+            info,
+            [
+                "Katib controller pod is Running but not Ready (containers failing "
+                f"readiness: {', '.join(not_ready)}). Pod: {where}. Check controller "
+                "logs and verify Katib RBAC (ClusterRole/ClusterRoleBinding) is installed."
+            ],
+            [],
+        )
+    if not statuses:
+        # Statuses not published yet: indeterminate rather than known-bad.
+        return (
+            info,
+            [],
+            [
+                "Katib controller pod reports no container statuses yet; readiness could not be confirmed."
+            ],
+        )
+
+    info["controller_ready"] = True
+    return info, [], []
+
+
+def _check_trainer() -> CheckResult:
+    """Report whether the trainer client is usable for cross-client workflows.
+
+    Never a blocker: the optimizer is fully usable on its own.
+    """
+    try:
+        mcp_utils.get_trainer_client()
+    except Exception:
+        return (
+            {"trainer_available": False},
+            [],
+            [
+                "Trainer client not available. Cross-client workflows "
+                "(optimize → train with best hyperparameters) require "
+                "--clients trainer,optimizer"
+            ],
+        )
+    return {"trainer_available": True}, [], []
+
 
 def katib_pre_flight() -> dict[str, Any]:
     """One-shot readiness check for Katib hyperparameter optimization.
 
     Validates that the Katib/Optimizer infrastructure is ready:
-    1. Experiment CRD exists on the cluster
-    2. Katib controller pod is running
-    3. Reports trainer cross-client availability
 
-    Call this FIRST before any optimizer operations.
+    1. The Experiment CRD is registered on the cluster
+    2. The Katib controller pod is Running **and** passing readiness
+    3. Whether the trainer client is loaded, for cross-client workflows
+
+    Call this FIRST before any optimizer operations. It never raises for an
+    unhealthy cluster; problems are reported in ``blockers``.
 
     Returns:
-        dict: Response containing ``blockers`` (list of issues preventing use),
-              ``warnings`` (non-blocking issues), ``katib_crd_versions``,
-              and ``controller_status``.
-
-    Raises:
-        ToolError: If cluster is unreachable (``CLUSTER_ERROR``).
+        dict: Response containing ``ready`` (bool), ``blockers`` (issues that
+        prevent use), ``warnings`` (non-blocking), ``katib_crd_found``,
+        ``katib_crd_versions``, ``controller_status``, ``controller_ready``
+        and ``trainer_available``.
     """
+    info: dict[str, Any] = {}
     blockers: list[str] = []
     warnings: list[str] = []
-    info: dict[str, Any] = {}
 
-    # ── Check 1: Experiment CRD exists ──────────────────────────────
-    try:
-        api = mcp_utils.get_apiextensions_api()
-        crd = api.read_custom_resource_definition(
-            name=EXPERIMENT_CRD_NAME,
-            _request_timeout=mcp_utils.K8S_TIMEOUT,
-        )
-        versions = [v.name for v in (crd.spec.versions or []) if getattr(v, "served", True)]
-        info["katib_crd_versions"] = versions
-        info["katib_crd_found"] = True
-    except Exception as e:
-        from kubeflow_mcp.common.types import is_k8s_not_found
+    for check in (_check_experiment_crd, _check_controller, _check_trainer):
+        found, check_blockers, check_warnings = check()
+        info.update(found)
+        blockers.extend(check_blockers)
+        warnings.extend(check_warnings)
 
-        if is_k8s_not_found(e):
-            blockers.append(
-                f"Katib Experiment CRD not found ({EXPERIMENT_CRD_NAME}). "
-                "Install Katib: https://www.kubeflow.org/docs/components/katib/installation/"
-            )
-            info["katib_crd_found"] = False
-        else:
-            blockers.append(f"Cannot check Katib CRD: {e}")
-            info["katib_crd_found"] = False
-
-    # ── Check 2: Controller pod health ──────────────────────────────
-    try:
-        core_api = mcp_utils.get_core_v1_api()
-        pods = core_api.list_namespaced_pod(
-            namespace=KATIB_CONTROLLER_NAMESPACE_DEFAULT,
-            label_selector=KATIB_CONTROLLER_LABELS,
-            _request_timeout=mcp_utils.K8S_TIMEOUT,
-        )
-        if not pods.items:
-            pods = core_api.list_pod_for_all_namespaces(
-                label_selector=KATIB_CONTROLLER_LABELS,
-                _request_timeout=mcp_utils.K8S_TIMEOUT,
-            )
-
-        if not pods.items:
-            blockers.append(
-                "Katib controller pod not found. "
-                f"Checked namespace '{KATIB_CONTROLLER_NAMESPACE_DEFAULT}' and all namespaces."
-            )
-            info["controller_status"] = "not_found"
-        else:
-            pod = pods.items[0]
-            phase = pod.status.phase if pod.status else "Unknown"
-            info["controller_status"] = phase
-            info["controller_namespace"] = pod.metadata.namespace
-            info["controller_name"] = pod.metadata.name
-
-            if phase != "Running":
-                blockers.append(
-                    f"Katib controller pod is in '{phase}' state "
-                    f"(expected 'Running'). Pod: {pod.metadata.namespace}/{pod.metadata.name}"
-                )
-            else:
-                # Phase "Running" only means the pod was admitted and started —
-                # containers can still be failing their readiness probes (e.g. a
-                # controller that cannot watch its CRDs because RBAC is missing).
-                # Without this check pre-flight reports a false green light.
-                statuses = getattr(pod.status, "container_statuses", None) or []
-                not_ready = [cs.name for cs in statuses if not cs.ready]
-                if not_ready:
-                    info["controller_ready"] = False
-                    blockers.append(
-                        "Katib controller pod is Running but not Ready "
-                        f"(containers failing readiness: {', '.join(not_ready)}). "
-                        f"Pod: {pod.metadata.namespace}/{pod.metadata.name}. "
-                        "Check controller logs and verify Katib RBAC "
-                        "(ClusterRole/ClusterRoleBinding) is installed."
-                    )
-                elif statuses:
-                    info["controller_ready"] = True
-                else:
-                    # Container statuses not published yet — readiness is
-                    # indeterminate rather than known-bad, so warn instead.
-                    warnings.append(
-                        "Katib controller pod reports no container statuses yet; "
-                        "readiness could not be confirmed."
-                    )
-    except Exception as e:
-        warnings.append(f"Cannot check Katib controller pods: {e}")
-        info["controller_status"] = "check_failed"
-
-    # ── Check 3: Trainer module availability (cross-client hint) ────
-    try:
-        mcp_utils.get_trainer_client()
-        info["trainer_available"] = True
-    except Exception:
-        info["trainer_available"] = False
-        warnings.append(
-            "Trainer client not available. Cross-client workflows "
-            "(optimize → train with best hyperparameters) require "
-            "--clients trainer,optimizer"
-        )
-
-    # ── Build response ──────────────────────────────────────────────
     info["blockers"] = blockers
     info["warnings"] = warnings
-    info["ready"] = len(blockers) == 0
+    info["ready"] = not blockers
 
     try:
         return ToolResponse(data=info).model_dump()

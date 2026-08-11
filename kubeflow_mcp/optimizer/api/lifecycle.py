@@ -47,6 +47,41 @@ ACTIONS = ("suspend", "resume")
 PARALLELISM_ANNOTATION = "kubeflow-mcp/pre-suspend-parallel-trial-count"
 DEFAULT_PARALLELISM = 1
 
+# (parallelTrialCount to set, annotation patch to apply)
+ParallelismPatch = tuple[int, dict[str, str | None]]
+
+
+def _suspend_patch(current_parallelism: int | None) -> ParallelismPatch:
+    """Pause by zeroing concurrency, remembering what to restore later."""
+    remembered = str(current_parallelism or DEFAULT_PARALLELISM)
+    return 0, {PARALLELISM_ANNOTATION: remembered}
+
+
+def _resume_patch(annotations: dict[str, str]) -> ParallelismPatch:
+    """Restore the remembered concurrency, clearing the stash as we go.
+
+    Never restores 0: a missing or corrupt annotation would otherwise leave the
+    experiment paused while reporting that it resumed.
+    """
+    stashed = annotations.get(PARALLELISM_ANNOTATION)
+    target = int(stashed) if stashed and stashed.isdigit() else DEFAULT_PARALLELISM
+    return max(target, DEFAULT_PARALLELISM), {PARALLELISM_ANNOTATION: None}
+
+
+def _update_response(
+    name: str, namespace: str, action: str, parallelism: int, outcome: str
+) -> dict[str, Any]:
+    """Single response shape for every update_experiment outcome."""
+    return ToolResponse(
+        data={
+            "experiment": name,
+            "namespace": namespace,
+            "action": action,
+            "parallel_trial_count": parallelism,
+            "message": f"Experiment '{name}' {outcome}",
+        }
+    ).model_dump()
+
 
 def delete_experiment(
     name: str,
@@ -173,27 +208,12 @@ def update_experiment(
         annotations = (current.get("metadata") or {}).get("annotations") or {}
         parallelism = (current.get("spec") or {}).get("parallelTrialCount")
 
-        if action == "suspend":
-            if parallelism == 0:
-                return ToolResponse(
-                    data={
-                        "experiment": name,
-                        "namespace": ns,
-                        "action": action,
-                        "parallel_trial_count": 0,
-                        "message": f"Experiment '{name}' is already suspended",
-                    }
-                ).model_dump()
-            target = 0
-            # Remember the concurrency we are pausing so resume can restore it.
-            annotation_patch = {PARALLELISM_ANNOTATION: str(parallelism or DEFAULT_PARALLELISM)}
-        else:
-            stashed = annotations.get(PARALLELISM_ANNOTATION)
-            target = int(stashed) if stashed and stashed.isdigit() else DEFAULT_PARALLELISM
-            target = max(target, DEFAULT_PARALLELISM)
-            # Clear the stash so a later suspend records a fresh value.
-            annotation_patch = {PARALLELISM_ANNOTATION: None}
+        if action == "suspend" and parallelism == 0:
+            return _update_response(name, ns, action, 0, "is already suspended")
 
+        target, annotation_patch = (
+            _suspend_patch(parallelism) if action == "suspend" else _resume_patch(annotations)
+        )
         api.patch_namespaced_custom_object(
             **target_ref,
             body={
@@ -204,15 +224,7 @@ def update_experiment(
         )
 
         past = "suspended" if action == "suspend" else "resumed"
-        return ToolResponse(
-            data={
-                "experiment": name,
-                "namespace": ns,
-                "action": action,
-                "parallel_trial_count": target,
-                "message": f"Experiment '{name}' {past} (parallelTrialCount={target})",
-            }
-        ).model_dump()
+        return _update_response(name, ns, action, target, f"{past} (parallelTrialCount={target})")
 
     except Exception as e:
         logger.warning("update_experiment(%s, %s) failed: %s", name, action, e, exc_info=True)
