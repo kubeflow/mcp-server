@@ -16,6 +16,7 @@
 
 Mirrors kubeflow SDK's client structure:
 - TrainerClient from kubeflow.trainer
+- OptimizerClient from kubeflow.optimizer
 """
 
 import threading
@@ -173,9 +174,105 @@ def is_mcp_managed(name: str, namespace: str) -> bool | None:
         return None
 
 
+# =============================================================================
+# Optimizer (Katib) client factories
+# Mirrors the TrainerClient pattern above.
+# =============================================================================
+
+
+@lru_cache(maxsize=1)
+def get_optimizer_client() -> Any:
+    """Get or create OptimizerClient singleton.
+
+    Uses default KubernetesBackendConfig with current kubeconfig context.
+    """
+    from kubeflow.optimizer import OptimizerClient
+
+    return OptimizerClient()
+
+
+_optimizer_ns_client_cache: dict[str, Any] = {}
+_optimizer_ns_client_lock = threading.Lock()
+
+
+def get_optimizer_client_for_namespace(namespace: str | None = None) -> Any:
+    """Return an OptimizerClient targeting the given namespace.
+
+    When *namespace* is ``None`` the shared singleton (default kubeconfig
+    namespace) is returned.  When a namespace is explicitly provided a
+    cached ``OptimizerClient`` scoped to that namespace is returned.
+    """
+    if namespace is None:
+        return get_optimizer_client()
+    with _optimizer_ns_client_lock:
+        if namespace in _optimizer_ns_client_cache:
+            return _optimizer_ns_client_cache[namespace]
+        from kubeflow.common.types import KubernetesBackendConfig
+        from kubeflow.optimizer import OptimizerClient
+
+        client = OptimizerClient(backend_config=KubernetesBackendConfig(namespace=namespace))
+        if len(_optimizer_ns_client_cache) >= _NS_CLIENT_CACHE_MAX:
+            oldest = next(iter(_optimizer_ns_client_cache))
+            del _optimizer_ns_client_cache[oldest]
+        _optimizer_ns_client_cache[namespace] = client
+        return client
+
+
+def get_optimizer_effective_namespace(namespace: str | None = None) -> str:
+    """Namespace for OptimizationJob operations: explicit arg, then SDK backend, else ``default``.
+
+    Aligns direct CustomObjects calls with :class:`OptimizerClient` (Kubernetes backend).
+    """
+    if namespace:
+        return namespace
+    client = get_optimizer_client()
+    backend = client.backend
+    ns = getattr(backend, "namespace", None)
+    if ns is not None:
+        return str(ns)
+    return "default"
+
+
+def is_optimizer_mcp_managed(name: str, namespace: str) -> bool | None:
+    """Check if an Experiment was created through MCP (has the ownership label).
+
+    Returns:
+        True if the experiment has the MCP ownership label.
+        False if the experiment exists but lacks the label.
+        None if the check could not be performed (API error, permissions).
+    """
+    from kubeflow_mcp.optimizer.constants import (
+        EXPERIMENT_PLURAL,
+        KATIB_API_GROUP,
+        KATIB_API_VERSION,
+    )
+
+    try:
+        api = get_custom_objects_api()
+        obj = api.get_namespaced_custom_object(
+            group=KATIB_API_GROUP,
+            version=KATIB_API_VERSION,
+            namespace=namespace,
+            plural=EXPERIMENT_PLURAL,
+            name=name,
+            _request_timeout=K8S_TIMEOUT,
+        )
+        labels = obj.get("metadata", {}).get("labels", {})
+        return labels.get(MCP_MANAGED_LABEL) == MCP_MANAGED_VALUE
+    except Exception as e:
+        from kubeflow_mcp.common.types import is_k8s_not_found
+
+        if is_k8s_not_found(e):
+            return False
+        return None
+
+
 def reset_clients() -> None:
     """Reset all cached clients (for testing or kubeconfig rotation)."""
     get_trainer_client.cache_clear()
+    get_optimizer_client.cache_clear()
     _get_api_client.cache_clear()
     with _ns_client_lock:
         _ns_client_cache.clear()
+    with _optimizer_ns_client_lock:
+        _optimizer_ns_client_cache.clear()
