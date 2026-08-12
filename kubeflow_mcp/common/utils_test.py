@@ -22,12 +22,15 @@ from unittest.mock import MagicMock, patch
 from kubeflow_mcp.common.utils import (
     MCP_MANAGED_LABEL,
     MCP_MANAGED_VALUE,
+    OWNERSHIP_MANAGED,
+    OWNERSHIP_MISSING,
+    OWNERSHIP_UNMANAGED,
     _get_api_client,
     get_core_v1_api,
     get_custom_objects_api,
     get_trainer_client_for_namespace,
     get_trainer_effective_namespace,
-    is_mcp_managed,
+    get_trainer_ownership,
     reset_clients,
 )
 
@@ -36,34 +39,36 @@ PATCH_GET_API_CLIENT = "kubeflow_mcp.common.utils._get_api_client"
 PATCH_TRAINER_CLIENT = "kubeflow_mcp.common.utils.get_trainer_client"
 
 
-class TestIsMcpManaged:
+class TestGetTrainerOwnership:
     @patch(PATCH_CUSTOM_API)
-    def test_returns_true_when_label_present(self, mock_api_fn):
+    def test_managed_when_label_present(self, mock_api_fn):
         mock_api = MagicMock()
         mock_api.get_namespaced_custom_object.return_value = {
             "metadata": {"labels": {MCP_MANAGED_LABEL: MCP_MANAGED_VALUE}}
         }
         mock_api_fn.return_value = mock_api
-        assert is_mcp_managed("my-job", "default") is True
+        assert get_trainer_ownership("my-job", "default") == OWNERSHIP_MANAGED
 
     @patch(PATCH_CUSTOM_API)
-    def test_returns_false_when_label_missing(self, mock_api_fn):
+    def test_unmanaged_when_label_missing(self, mock_api_fn):
         mock_api = MagicMock()
         mock_api.get_namespaced_custom_object.return_value = {
             "metadata": {"labels": {"other-label": "value"}}
         }
         mock_api_fn.return_value = mock_api
-        assert is_mcp_managed("my-job", "default") is False
+        assert get_trainer_ownership("my-job", "default") == OWNERSHIP_UNMANAGED
 
     @patch(PATCH_CUSTOM_API)
-    def test_returns_false_when_no_labels(self, mock_api_fn):
+    def test_unmanaged_when_no_labels(self, mock_api_fn):
         mock_api = MagicMock()
         mock_api.get_namespaced_custom_object.return_value = {"metadata": {}}
         mock_api_fn.return_value = mock_api
-        assert is_mcp_managed("my-job", "default") is False
+        assert get_trainer_ownership("my-job", "default") == OWNERSHIP_UNMANAGED
 
     @patch(PATCH_CUSTOM_API)
-    def test_returns_false_on_404(self, mock_api_fn):
+    def test_missing_on_404_is_distinct_from_unmanaged(self, mock_api_fn):
+        """A job that does not exist must not be reported as merely unlabelled:
+        the two need opposite responses from the ownership gate."""
         from kubernetes.client.exceptions import ApiException
 
         mock_api = MagicMock()
@@ -71,14 +76,14 @@ class TestIsMcpManaged:
             status=404, reason="Not Found"
         )
         mock_api_fn.return_value = mock_api
-        assert is_mcp_managed("missing-job", "default") is False
+        assert get_trainer_ownership("missing-job", "default") == OWNERSHIP_MISSING
 
     @patch(PATCH_CUSTOM_API)
     def test_returns_none_on_other_api_error(self, mock_api_fn):
         mock_api = MagicMock()
         mock_api.get_namespaced_custom_object.side_effect = Exception("connection refused")
         mock_api_fn.return_value = mock_api
-        assert is_mcp_managed("my-job", "default") is None
+        assert get_trainer_ownership("my-job", "default") is None
 
 
 class TestResetClients:
