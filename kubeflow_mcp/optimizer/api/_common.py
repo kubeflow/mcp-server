@@ -24,8 +24,14 @@ from kubeflow_mcp.common.constants import ErrorCode
 from kubeflow_mcp.common.types import ToolError, exception_details, is_k8s_not_found
 from kubeflow_mcp.core.policy import get_effective_persona
 from kubeflow_mcp.core.security import check_namespace_allowed
+from kubeflow_mcp.optimizer.constants import KATIB_API_GROUP
 
 _FIND_HINT = "Use list_experiments() to find available experiments"
+_WEBHOOK_HINT = (
+    "The Katib control plane is not serving its admission webhooks. Run "
+    "katib_pre_flight() to confirm, then check the katib-controller deployment "
+    "and its RBAC. No experiment can be created until it reports ready."
+)
 
 # Collection responses are truncated so a large experiment cannot exhaust the
 # agent's context window. Matches the trainer client's list bounds.
@@ -85,6 +91,20 @@ def _api_status(exc: Exception) -> int | None:
     return None
 
 
+def _is_webhook_unavailable(exc: Exception) -> bool:
+    """True when the API server could not reach Katib's admission webhooks.
+
+    A Katib control plane that is installed but not Ready leaves its webhook
+    Service with no endpoints, and every write is rejected with a 500 whose
+    message names the webhook. The raw error is a wall of HTTP headers that
+    says nothing about what to do, so it is worth detecting.
+    """
+    if _api_status(exc) != 500:
+        return False
+    message = str(exc)
+    return "failed calling webhook" in message and KATIB_API_GROUP in message
+
+
 def resource_error(exc: Exception, name: str, kind: str = "Experiment") -> ToolError:
     """Map an exception raised by the SDK or K8s API onto a ``ToolError``.
 
@@ -123,6 +143,9 @@ def resource_error(exc: Exception, name: str, kind: str = "Experiment") -> ToolE
         error=str(exc),
         error_code=ErrorCode.SDK_ERROR,
         details=exception_details(exc),
+        # Stays SDK_ERROR: an unreachable webhook is a genuine infrastructure
+        # failure and should trip the circuit breaker. Only the hint is added.
+        hint=_WEBHOOK_HINT if _is_webhook_unavailable(exc) else None,
     )
 
 
@@ -161,14 +184,22 @@ def require_mcp_ownership(name: str, namespace: str, action: str) -> ToolError |
     if get_effective_persona() == "platform-admin":
         return None
 
-    managed = mcp_utils.is_optimizer_mcp_managed(name, namespace)
-    if managed is None:
+    ownership = mcp_utils.get_optimizer_ownership(name, namespace)
+    if ownership is None:
         return ToolError(
             error=f"Cannot verify ownership of experiment '{name}' (API error)",
             error_code=ErrorCode.SDK_ERROR,
             hint="Retry, or use the platform-admin persona to bypass the check.",
         )
-    if not managed:
+    if ownership == mcp_utils.OWNERSHIP_MISSING:
+        # Report the real problem. Falling through to the ownership message
+        # would blame permissions for what is usually a mistyped name.
+        return ToolError(
+            error=f"Experiment '{name}' not found",
+            error_code=ErrorCode.RESOURCE_NOT_FOUND,
+            hint=_FIND_HINT,
+        )
+    if ownership == mcp_utils.OWNERSHIP_UNMANAGED:
         return ToolError(
             error=f"Experiment '{name}' was not created by MCP",
             error_code=ErrorCode.VALIDATION_ERROR,

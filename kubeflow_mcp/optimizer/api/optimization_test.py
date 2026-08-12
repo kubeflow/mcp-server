@@ -166,6 +166,92 @@ def test_all_advertised_algorithms_are_accepted():
         assert result["config"]["spec"]["algorithm"]["algorithmName"] == algorithm
 
 
+# ─── integer parameters ────────────────────────────────────────────────────
+
+
+def test_int_parameter_is_typed_int_not_double():
+    """Katib supports "int"; the SDK's Search helpers only emit double."""
+    with cluster():
+        params = _create(search_space={"layers": {"min": 2, "max": 8, "type": "int"}})["config"][
+            "spec"
+        ]["parameters"]
+
+    assert params[0]["parameterType"] == "int"
+    # Bounds keep the SDK's own string encoding.
+    assert params[0]["feasibleSpace"]["min"] == "2"
+    assert params[0]["feasibleSpace"]["max"] == "8"
+
+
+def test_int_parameter_accepts_step():
+    with cluster():
+        params = _create(search_space={"layers": {"min": 2, "max": 8, "type": "int", "step": 2}})[
+            "config"
+        ]["spec"]["parameters"]
+    assert params[0]["feasibleSpace"]["step"] == "2"
+
+
+@pytest.mark.parametrize(
+    "space",
+    [
+        {"layers": {"min": 2.5, "max": 8, "type": "int"}},
+        {"layers": {"min": 2, "max": "8", "type": "int"}},
+        {"layers": {"min": 2, "max": 8, "type": "int", "step": 0}},
+        {"layers": {"min": 2, "max": 8, "type": "int", "step": 1.5}},
+    ],
+)
+def test_int_parameter_rejects_non_integers(space):
+    with cluster() as api:
+        result = _create(search_space=space)
+    assert result["success"] is False
+    assert result["error_code"] == "VALIDATION_ERROR"
+    api.create_namespaced_custom_object.assert_not_called()
+
+
+# ─── primaryContainerName resolution ───────────────────────────────────────
+
+JOB_TEMPLATE = {
+    "apiVersion": "batch/v1",
+    "kind": "Job",
+    "spec": {
+        "template": {
+            "spec": {"containers": [{"name": "training-container", "image": "katib/random:1"}]}
+        }
+    },
+}
+
+
+def test_primary_container_follows_a_job_template():
+    """Katib collects metrics from this container; hardcoding Trainer's "node"
+    would silently collect nothing from a plain batch/v1 Job."""
+    with cluster():
+        spec = _create(trial_template=JOB_TEMPLATE)["config"]["spec"]
+    assert spec["trialTemplate"]["primaryContainerName"] == "training-container"
+
+
+def test_primary_container_defaults_to_node_for_a_trainjob():
+    """A TrainJob has no inline pod spec; Trainer names its container "node"."""
+    with cluster():
+        spec = _create()["config"]["spec"]
+    assert spec["trialTemplate"]["primaryContainerName"] == "node"
+
+
+def test_primary_container_prefers_node_over_a_sidecar():
+    template = {
+        "spec": {"template": {"spec": {"containers": [{"name": "istio-proxy"}, {"name": "node"}]}}}
+    }
+    with cluster():
+        spec = _create(trial_template=template)["config"]["spec"]
+    assert spec["trialTemplate"]["primaryContainerName"] == "node"
+
+
+def test_explicit_primary_container_wins():
+    with cluster():
+        spec = _create(trial_template=JOB_TEMPLATE, primary_container_name="sidecar")["config"][
+            "spec"
+        ]
+    assert spec["trialTemplate"]["primaryContainerName"] == "sidecar"
+
+
 def test_create_failure_maps_to_sdk_error():
     api = MagicMock()
     api.create_namespaced_custom_object.side_effect = RuntimeError("boom")
@@ -191,6 +277,37 @@ def test_duplicate_name_is_actionable_and_does_not_trip_breaker():
     assert "already exists" in result["error"]
     assert "delete_experiment" in result["hint"]
     assert is_infrastructure_error(result) is False
+
+
+def test_unreachable_katib_webhook_gets_an_actionable_hint():
+    """Observed on a cluster whose katib-controller was Running but not Ready:
+    the raw 500 is a wall of HTTP headers that never says what to do."""
+    from kubernetes.client.exceptions import ApiException
+
+    from kubeflow_mcp.common.constants import is_infrastructure_error
+
+    api = MagicMock()
+    api.create_namespaced_custom_object.side_effect = ApiException(
+        status=500,
+        reason="Internal Server Error",
+        http_resp=MagicMock(
+            status=500,
+            reason="Internal Server Error",
+            data=(
+                b'{"message":"Internal error occurred: failed calling webhook '
+                b'\\"defaulter.experiment.katib.kubeflow.org\\": no endpoints available '
+                b'for service \\"katib-controller\\""}'
+            ),
+            getheaders=lambda: {},
+        ),
+    )
+    with cluster(api):
+        result = _create(confirmed=True)
+
+    assert result["error_code"] == "SDK_ERROR"
+    assert "katib_pre_flight()" in result["hint"]
+    # A downed control plane is a real outage: the breaker should still trip.
+    assert is_infrastructure_error(result) is True
 
 
 # ─── create_experiment_from_spec ───────────────────────────────────────────

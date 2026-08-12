@@ -42,6 +42,7 @@ from kubeflow_mcp.optimizer.api._common import check_optimizer_namespace, experi
 from kubeflow_mcp.optimizer.constants import (
     EXPERIMENT_KIND,
     EXPERIMENT_PLURAL,
+    INT_PARAMETER,
     KATIB_API_GROUP,
     KATIB_API_VERSION,
 )
@@ -101,14 +102,81 @@ def _build_parameter(name: str, spec: dict[str, Any]) -> models.V1beta1Parameter
             param = Search.uniform(spec["min"], spec["max"])
         elif distribution == "loguniform":
             param = Search.loguniform(spec["min"], spec["max"])
+        elif distribution == "int":
+            param = _build_int_parameter(name, spec)
         else:
             raise ValueError(
-                f"search_space['{name}'].type must be 'uniform' or 'loguniform', "
+                f"search_space['{name}'].type must be 'uniform', 'loguniform' or 'int', "
                 f"got '{distribution}'"
             )
 
     param.name = name
     return param
+
+
+def _build_int_parameter(name: str, spec: dict[str, Any]) -> models.V1beta1ParameterSpec:
+    """Build an integer parameter, which the SDK's ``Search`` cannot express.
+
+    ``Search`` only emits ``double`` and ``categorical``, so an ordered discrete
+    range could otherwise only be written as ``choices``, which every algorithm
+    then treats as unordered categories. Reuses ``Search.uniform`` for the
+    feasible-space encoding and retypes it, so the string coercion still matches
+    the SDK's own output exactly.
+    """
+    for bound in ("min", "max"):
+        value = spec[bound]
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(
+                f"search_space['{name}'].{bound} must be an integer when type is "
+                f"'int', got {value!r}"
+            )
+
+    param = Search.uniform(spec["min"], spec["max"])
+    param.parameter_type = INT_PARAMETER
+
+    if "step" in spec:
+        step = spec["step"]
+        if isinstance(step, bool) or not isinstance(step, int) or step < 1:
+            raise ValueError(
+                f"search_space['{name}'].step must be a positive integer, got {step!r}"
+            )
+        param.feasible_space.step = str(step)
+
+    return param
+
+
+def _resolve_primary_container(trial_template: dict[str, Any], override: str | None) -> str:
+    """Name the container Katib should collect metrics from.
+
+    Katib injects its metrics collector into the container named by
+    ``primaryContainerName``; if that name matches nothing in the trial's pod,
+    no metrics are ever collected and the experiment stalls with no error.
+    Defaulting to Trainer's ``node`` is only right for TrainJob templates, so
+    the name is read off the template when it carries an inline pod spec.
+    """
+    if override:
+        return override
+
+    spec = trial_template.get("spec")
+    if not isinstance(spec, dict):
+        return trainer_constants.NODE
+
+    # batch/v1 Job and friends nest the pod under spec.template; a bare Pod
+    # trialSpec carries containers directly.
+    pod_spec = (
+        spec.get("template", {}).get("spec") if isinstance(spec.get("template"), dict) else None
+    )
+    containers = (pod_spec or spec).get("containers")
+    if not isinstance(containers, list):
+        return trainer_constants.NODE
+
+    names = [c["name"] for c in containers if isinstance(c, dict) and c.get("name")]
+    if not names:
+        # TrainJob and other runtime-backed templates have no inline containers;
+        # Trainer names the workload container "node".
+        return trainer_constants.NODE
+    # A sidecar can sort first, so prefer the conventional name when present.
+    return trainer_constants.NODE if trainer_constants.NODE in names else names[0]
 
 
 def _build_experiment(
@@ -123,6 +191,7 @@ def _build_experiment(
     max_trial_count: int,
     parallel_trial_count: int,
     max_failed_trials: int | None,
+    primary_container_name: str | None = None,
 ) -> models.V1beta1Experiment:
     """Assemble the Experiment CR, stamped with the MCP ownership label."""
     return models.V1beta1Experiment(
@@ -145,7 +214,9 @@ def _build_experiment(
             algorithm=models.V1beta1AlgorithmSpec(algorithmName=algorithm),
             trialTemplate=models.V1beta1TrialTemplate(
                 retain=True,
-                primaryContainerName=trainer_constants.NODE,
+                primaryContainerName=_resolve_primary_container(
+                    trial_template, primary_container_name
+                ),
                 trialParameters=[
                     models.V1beta1TrialParameterSpec(name=key, reference=key)
                     for key in search_space
@@ -187,19 +258,25 @@ def create_hpo_experiment(
     max_trial_count: int = 10,
     parallel_trial_count: int = 2,
     max_failed_trials: int | None = None,
+    primary_container_name: str | None = None,
     namespace: str | None = None,
     confirmed: bool = False,
 ) -> dict[str, Any]:
     """Create a hyperparameter optimization experiment from flat parameters.
 
-    ``search_space`` maps each parameter name to a continuous range or a
-    categorical list::
+    ``search_space`` maps each parameter name to a continuous range, an integer
+    range, or a categorical list::
 
         {
             "lr": {"min": 0.001, "max": 0.1, "type": "loguniform"},
             "momentum": {"min": 0.5, "max": 0.99},
+            "num_layers": {"min": 2, "max": 8, "type": "int"},
             "batch_size": {"choices": [16, 32, 64]},
         }
+
+    Prefer ``type: "int"`` over ``choices`` for an ordered discrete range:
+    categorical values carry no ordering, so the algorithm cannot tell that 4
+    lies between 2 and 8.
 
     ``trial_template`` is the Katib ``trialSpec`` — the workload cloned per
     trial. Reference tuned parameters with ``${trialParameters.<name>}``::
@@ -226,6 +303,9 @@ def create_hpo_experiment(
         max_trial_count: Total trials to run. Default 10.
         parallel_trial_count: Trials to run concurrently. Default 2.
         max_failed_trials: Failed trials tolerated before the experiment fails.
+        primary_container_name: Container Katib collects metrics from. Defaults
+            to the container named in ``trial_template``, or Trainer's ``node``
+            when the template carries no inline pod spec (a TrainJob).
         namespace: K8s namespace. Uses default from kubeconfig when omitted.
         confirmed: Set ``True`` to submit. ``False`` returns a preview.
 
@@ -280,6 +360,7 @@ def create_hpo_experiment(
             max_trial_count=max_trial_count,
             parallel_trial_count=parallel_trial_count,
             max_failed_trials=max_failed_trials,
+            primary_container_name=primary_container_name,
         ).to_dict()
     except (TypeError, ValueError) as e:
         return ToolError(error=str(e), error_code=ErrorCode.VALIDATION_ERROR).model_dump()

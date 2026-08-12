@@ -25,6 +25,12 @@ dependencies = [
     # it ourselves rather than only reaching it through the SDK.
     "kubeflow-katib-api>=0.19.0",
     "huggingface-hub>=0.20",
+    # Arrives transitively via `kubeflow`, but constrained here: 36.0.0 and
+    # 36.0.1 look up the bearer token under a different api_key than the
+    # kubeconfig and in-cluster loaders write it to, so no Authorization header
+    # is sent and every call fails with a bare 401. Fixed in 36.0.2.
+    # https://github.com/kubernetes-client/python/issues/2595
+    "kubernetes!=36.0.0,!=36.0.1",
 ]
 
 [project.optional-dependencies]

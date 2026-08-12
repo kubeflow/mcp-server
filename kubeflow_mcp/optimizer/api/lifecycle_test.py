@@ -20,6 +20,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from kubernetes.client.exceptions import ApiException
 
+from kubeflow_mcp.common import utils as mcp_utils
 from kubeflow_mcp.optimizer.api import lifecycle as lc
 
 _UTILS = "kubeflow_mcp.common.utils"
@@ -35,13 +36,19 @@ def _not_found():
 
 @contextmanager
 def cluster(api: MagicMock | None = None, persona="platform-admin", managed=True, client=None):
+    """``managed`` accepts True/False/None, or an ownership string directly."""
     api = api or MagicMock()
     client = client or MagicMock()
+    ownership = {
+        True: mcp_utils.OWNERSHIP_MANAGED,
+        False: mcp_utils.OWNERSHIP_UNMANAGED,
+        None: None,
+    }.get(managed, managed)
     with (
         patch(f"{_UTILS}.get_optimizer_effective_namespace", return_value="kubeflow"),
         patch(f"{_UTILS}.get_custom_objects_api", return_value=api),
         patch(f"{_UTILS}.get_optimizer_client_for_namespace", return_value=client),
-        patch(f"{_UTILS}.is_optimizer_mcp_managed", return_value=managed),
+        patch(f"{_UTILS}.get_optimizer_ownership", return_value=ownership),
         patch(f"{_COMMON}.get_effective_persona", return_value=persona),
     ):
         yield api, client
@@ -116,6 +123,24 @@ def test_ownership_check_failure_is_reported():
         result = lc.delete_experiment("unknown", confirmed=True)
     assert result["error_code"] == "SDK_ERROR"
     client.delete_job.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("call", "attr"),
+    [
+        (lambda: lc.delete_experiment("typo", confirmed=True), "delete_job"),
+        (lambda: lc.update_experiment("typo", "suspend"), "delete_job"),
+    ],
+)
+def test_missing_experiment_reports_not_found_not_ownership(call, attr):
+    """A name that does not exist must not be blamed on ownership: that sends
+    the caller after RBAC when the real problem is usually a typo."""
+    with cluster(persona="data-scientist", managed=mcp_utils.OWNERSHIP_MISSING) as (_, client):
+        result = call()
+    assert result["success"] is False
+    assert result["error_code"] == "RESOURCE_NOT_FOUND"
+    assert "not created by MCP" not in result["error"]
+    getattr(client, attr).assert_not_called()
 
 
 # ─── update_experiment: suspend / resume ───────────────────────────────────

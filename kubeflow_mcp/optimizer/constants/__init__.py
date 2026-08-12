@@ -33,6 +33,13 @@ EXPERIMENT_KIND = sdk_constants.EXPERIMENT_KIND  # "Experiment"
 # Used for direct CustomObjectsApi access (list_suggestions, get_suggestion).
 SUGGESTION_PLURAL = "suggestions"
 
+# Katib's integer parameter type. The SDK defines DOUBLE_PARAMETER and
+# CATEGORICAL_PARAMETERS but has no int equivalent, because its ``Search``
+# helpers only emit those two. Katib itself supports "int", and HPO needs it
+# for genuinely discrete ordered ranges (layer counts, batch sizes), so the
+# value is defined here rather than re-exported.
+INT_PARAMETER = "int"
+
 # ─── OptimizationJob status values (from SDK) ──────────────────────────────
 
 OPTIMIZATION_JOB_CREATED = sdk_constants.OPTIMIZATION_JOB_CREATED

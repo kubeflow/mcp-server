@@ -233,13 +233,22 @@ def get_optimizer_effective_namespace(namespace: str | None = None) -> str:
     return "default"
 
 
-def is_optimizer_mcp_managed(name: str, namespace: str) -> bool | None:
-    """Check if an Experiment was created through MCP (has the ownership label).
+# Outcomes of an optimizer ownership check. "missing" is kept distinct from
+# "unmanaged" so callers can report a typo'd name as not-found instead of
+# blaming ownership, which sends the caller after RBAC that is not the problem.
+OWNERSHIP_MANAGED = "managed"
+OWNERSHIP_UNMANAGED = "unmanaged"
+OWNERSHIP_MISSING = "missing"
+
+
+def get_optimizer_ownership(name: str, namespace: str) -> str | None:
+    """Classify an Experiment for the MCP ownership gate.
 
     Returns:
-        True if the experiment has the MCP ownership label.
-        False if the experiment exists but lacks the label.
-        None if the check could not be performed (API error, permissions).
+        ``OWNERSHIP_MANAGED`` if the experiment carries the MCP ownership label,
+        ``OWNERSHIP_UNMANAGED`` if it exists without the label,
+        ``OWNERSHIP_MISSING`` if no such experiment exists, or
+        ``None`` if the check could not be performed (API error, permissions).
     """
     from kubeflow_mcp.optimizer.constants import (
         EXPERIMENT_PLURAL,
@@ -258,12 +267,13 @@ def is_optimizer_mcp_managed(name: str, namespace: str) -> bool | None:
             _request_timeout=K8S_TIMEOUT,
         )
         labels = obj.get("metadata", {}).get("labels", {})
-        return labels.get(MCP_MANAGED_LABEL) == MCP_MANAGED_VALUE
+        managed = labels.get(MCP_MANAGED_LABEL) == MCP_MANAGED_VALUE
+        return OWNERSHIP_MANAGED if managed else OWNERSHIP_UNMANAGED
     except Exception as e:
         from kubeflow_mcp.common.types import is_k8s_not_found
 
         if is_k8s_not_found(e):
-            return False
+            return OWNERSHIP_MISSING
         return None
 
 
