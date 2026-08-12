@@ -264,9 +264,15 @@ def wait_for_experiment(
             error=f"timeout_seconds must be >= 1, got {timeout_seconds}",
             error_code=ErrorCode.VALIDATION_ERROR,
         ).model_dump()
+    # Rejected rather than clamped upward, matching wait_for_training: silently
+    # polling slower than asked looks like the tool ignoring its own arguments.
+    if polling_interval < MIN_POLLING_INTERVAL:
+        return ToolError(
+            error=f"polling_interval must be >= {MIN_POLLING_INTERVAL}, got {polling_interval}",
+            error_code=ErrorCode.VALIDATION_ERROR,
+        ).model_dump()
 
     timeout_seconds = min(timeout_seconds, MAX_WAIT_TIMEOUT)
-    polling_interval = max(polling_interval, MIN_POLLING_INTERVAL)
 
     try:
         client = get_optimizer_client_for_namespace(namespace)

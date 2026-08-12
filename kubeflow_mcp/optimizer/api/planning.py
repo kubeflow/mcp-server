@@ -19,7 +19,7 @@ one call aggregates multiple sub-checks into a single response.
 """
 
 import logging
-from typing import Any
+from typing import Any, NamedTuple
 
 from kubeflow_mcp.common import utils as mcp_utils
 from kubeflow_mcp.common.constants import ErrorCode
@@ -37,10 +37,22 @@ from kubeflow_mcp.optimizer.constants import (
 
 logger = logging.getLogger(__name__)
 
-# Each sub-check returns the fields it learned plus anything that blocks or
-# merely warns, so katib_pre_flight stays a flat composition of independent
-# checks rather than one long branching function.
-CheckResult = tuple[dict[str, Any], list[str], list[str]]
+
+class CheckResult(NamedTuple):
+    """What one sub-check learned, plus anything that blocks or merely warns.
+
+    Keeps ``katib_pre_flight`` a flat composition of independent checks rather
+    than one long branching function. Named rather than a bare 3-tuple because
+    ``blockers`` and ``warnings`` share a type: transposing them at a call site
+    would downgrade a blocker to a warning and report a false green, which is
+    the exact failure ``_check_controller`` exists to prevent. Construct it with
+    keywords so that mistake cannot be made silently.
+    """
+
+    info: dict[str, Any]
+    blockers: tuple[str, ...] = ()
+    warnings: tuple[str, ...] = ()
+
 
 _INSTALL_HINT = "https://www.kubeflow.org/docs/components/katib/installation/"
 
@@ -54,17 +66,20 @@ def _check_experiment_crd() -> CheckResult:
         )
     except Exception as e:
         if is_k8s_not_found(e):
-            return (
-                {"katib_crd_found": False},
-                [
-                    f"Katib Experiment CRD not found ({EXPERIMENT_CRD_NAME}). Install Katib: {_INSTALL_HINT}"
-                ],
-                [],
+            return CheckResult(
+                info={"katib_crd_found": False},
+                blockers=(
+                    f"Katib Experiment CRD not found ({EXPERIMENT_CRD_NAME}). "
+                    f"Install Katib: {_INSTALL_HINT}",
+                ),
             )
-        return {"katib_crd_found": False}, [f"Cannot check Katib CRD: {e}"], []
+        return CheckResult(
+            info={"katib_crd_found": False},
+            blockers=(f"Cannot check Katib CRD: {e}",),
+        )
 
     served = [v.name for v in (crd.spec.versions or []) if getattr(v, "served", True)]
-    return {"katib_crd_found": True, "katib_crd_versions": served}, [], []
+    return CheckResult(info={"katib_crd_found": True, "katib_crd_versions": served})
 
 
 def _find_controller_pod() -> Any | None:
@@ -93,20 +108,18 @@ def _check_controller() -> CheckResult:
     try:
         pod = _find_controller_pod()
     except Exception as e:
-        return (
-            {"controller_status": "check_failed"},
-            [],
-            [f"Cannot check Katib controller pods: {e}"],
+        return CheckResult(
+            info={"controller_status": "check_failed"},
+            warnings=(f"Cannot check Katib controller pods: {e}",),
         )
 
     if pod is None:
-        return (
-            {"controller_status": "not_found"},
-            [
+        return CheckResult(
+            info={"controller_status": "not_found"},
+            blockers=(
                 "Katib controller pod not found. Checked namespace "
-                f"'{KATIB_CONTROLLER_NAMESPACE_DEFAULT}' and all namespaces."
-            ],
-            [],
+                f"'{KATIB_CONTROLLER_NAMESPACE_DEFAULT}' and all namespaces.",
+            ),
         )
 
     phase = pod.status.phase if pod.status else "Unknown"
@@ -118,37 +131,37 @@ def _check_controller() -> CheckResult:
     }
 
     if phase != "Running":
-        return (
-            info,
-            [f"Katib controller pod is in '{phase}' state (expected 'Running'). Pod: {where}"],
-            [],
+        return CheckResult(
+            info=info,
+            blockers=(
+                f"Katib controller pod is in '{phase}' state (expected 'Running'). Pod: {where}",
+            ),
         )
 
     statuses = getattr(pod.status, "container_statuses", None) or []
     not_ready = [cs.name for cs in statuses if not cs.ready]
     if not_ready:
         info["controller_ready"] = False
-        return (
-            info,
-            [
+        return CheckResult(
+            info=info,
+            blockers=(
                 "Katib controller pod is Running but not Ready (containers failing "
                 f"readiness: {', '.join(not_ready)}). Pod: {where}. Check controller "
-                "logs and verify Katib RBAC (ClusterRole/ClusterRoleBinding) is installed."
-            ],
-            [],
+                "logs and verify Katib RBAC (ClusterRole/ClusterRoleBinding) is installed.",
+            ),
         )
     if not statuses:
         # Statuses not published yet: indeterminate rather than known-bad.
-        return (
-            info,
-            [],
-            [
-                "Katib controller pod reports no container statuses yet; readiness could not be confirmed."
-            ],
+        return CheckResult(
+            info=info,
+            warnings=(
+                "Katib controller pod reports no container statuses yet; "
+                "readiness could not be confirmed.",
+            ),
         )
 
     info["controller_ready"] = True
-    return info, [], []
+    return CheckResult(info=info)
 
 
 def _check_trainer() -> CheckResult:
@@ -159,16 +172,15 @@ def _check_trainer() -> CheckResult:
     try:
         mcp_utils.get_trainer_client()
     except Exception:
-        return (
-            {"trainer_available": False},
-            [],
-            [
+        return CheckResult(
+            info={"trainer_available": False},
+            warnings=(
                 "Trainer client not available. Cross-client workflows "
                 "(optimize → train with best hyperparameters) require "
-                "--clients trainer,optimizer"
-            ],
+                "--clients trainer,optimizer",
+            ),
         )
-    return {"trainer_available": True}, [], []
+    return CheckResult(info={"trainer_available": True})
 
 
 def katib_pre_flight() -> dict[str, Any]:
@@ -194,10 +206,10 @@ def katib_pre_flight() -> dict[str, Any]:
     warnings: list[str] = []
 
     for check in (_check_experiment_crd, _check_controller, _check_trainer):
-        found, check_blockers, check_warnings = check()
-        info.update(found)
-        blockers.extend(check_blockers)
-        warnings.extend(check_warnings)
+        result = check()
+        info.update(result.info)
+        blockers.extend(result.blockers)
+        warnings.extend(result.warnings)
 
     info["blockers"] = blockers
     info["warnings"] = warnings

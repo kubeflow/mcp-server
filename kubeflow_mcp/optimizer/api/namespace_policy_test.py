@@ -97,37 +97,62 @@ def test_generic_helper_still_defaults_to_trainer():
         assert check_namespace_allowed(None) is None
 
 
+# Minimal valid arguments per tool. Keyed by name so the sweep below can be
+# driven from the module's own TOOLS list rather than a parallel copy of it.
+_TOOL_KWARGS: dict[str, dict] = {
+    "list_experiments": {},
+    "get_experiment": {"name": "exp"},
+    "get_experiment_status": {"name": "exp"},
+    "get_trial": {"name": "exp", "trial": "t1"},
+    "get_successful_trials": {"name": "exp"},
+    "list_suggestions": {},
+    "get_experiment_trials": {"name": "exp"},
+    "get_best_trial": {"name": "exp"},
+    "get_suggestion": {"name": "exp"},
+    "wait_for_experiment": {"name": "exp"},
+    "get_experiment_trial_logs": {"name": "exp"},
+    "get_experiment_events": {"name": "exp"},
+    "delete_experiment": {"name": "exp", "confirmed": True},
+    "update_experiment": {"name": "exp", "action": "suspend"},
+    "create_hpo_experiment": {
+        "name": "exp",
+        "objective_metric": "acc",
+        "search_space": {"lr": {"min": 0.1, "max": 1}},
+        "trial_template": {"kind": "TrainJob"},
+        "confirmed": True,
+    },
+    "create_experiment_from_spec": {
+        "spec": {"metadata": {"name": "exp"}},
+        "confirmed": True,
+    },
+}
+
+# katib_pre_flight inspects cluster-scoped resources and takes no namespace,
+# so it is the one tool with nothing to enforce.
+_NO_NAMESPACE = {"katib_pre_flight"}
+
+
+def test_every_tool_is_covered_by_the_sweep():
+    """Fail when a new tool is added without namespace coverage.
+
+    The sweep below used to be a hand-written list, which silently stayed green
+    as tools were added. This binds it to the module's own TOOLS export so a new
+    tool must either be exercised or explicitly exempted.
+    """
+    from kubeflow_mcp.optimizer import TOOLS
+
+    covered = set(_TOOL_KWARGS) | _NO_NAMESPACE
+    missing = {t.__name__ for t in TOOLS} - covered
+    assert not missing, f"tools missing namespace-policy coverage: {sorted(missing)}"
+
+
 @pytest.mark.parametrize(
     ("tool", "kwargs"),
     [
-        (discovery.list_experiments, {}),
-        (discovery.get_experiment, {"name": "exp"}),
-        (discovery.get_experiment_status, {"name": "exp"}),
-        (discovery.get_trial, {"name": "t1", "experiment": "exp"}),
-        (discovery.get_successful_trials, {"name": "exp"}),
-        (discovery.list_suggestions, {}),
-        (monitoring.get_experiment_trials, {"name": "exp"}),
-        (monitoring.get_best_trial, {"name": "exp"}),
-        (monitoring.get_suggestion, {"name": "exp"}),
-        (monitoring.wait_for_experiment, {"name": "exp"}),
-        (monitoring.get_experiment_trial_logs, {"name": "exp"}),
-        (monitoring.get_experiment_events, {"name": "exp"}),
-        (lifecycle.delete_experiment, {"name": "exp", "confirmed": True}),
-        (lifecycle.update_experiment, {"name": "exp", "action": "suspend"}),
-        (
-            optimization.create_hpo_experiment,
-            {
-                "name": "exp",
-                "objective_metric": "acc",
-                "search_space": {"lr": {"min": 0.1, "max": 1}},
-                "trial_template": {"kind": "TrainJob"},
-                "confirmed": True,
-            },
-        ),
-        (
-            optimization.create_experiment_from_spec,
-            {"spec": {"metadata": {"name": "exp"}}, "confirmed": True},
-        ),
+        pytest.param(tool, _TOOL_KWARGS[tool.__name__], id=tool.__name__)
+        for module in (discovery, monitoring, lifecycle, optimization)
+        for tool in vars(module).values()
+        if callable(tool) and getattr(tool, "__name__", None) in _TOOL_KWARGS
     ],
 )
 def test_every_tool_enforces_the_allowlist(tool, kwargs):

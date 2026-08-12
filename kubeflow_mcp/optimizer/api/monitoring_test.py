@@ -172,14 +172,27 @@ def test_wait_for_experiment_reaches_terminal():
     assert kwargs["status"] == {"Complete", "Failed"}
 
 
-def test_wait_for_experiment_caps_timeout_and_interval():
+def test_wait_for_experiment_caps_timeout():
     client = MagicMock()
     client.wait_for_job_status.return_value = _job(status="Complete")
     with patch(f"{_MON}.get_optimizer_client_for_namespace", return_value=client):
-        monitoring.wait_for_experiment("exp-1", timeout_seconds=99999, polling_interval=1)
+        monitoring.wait_for_experiment("exp-1", timeout_seconds=99999, polling_interval=15)
     _, kwargs = client.wait_for_job_status.call_args
     assert kwargs["timeout"] == monitoring.MAX_WAIT_TIMEOUT
-    assert kwargs["polling_interval"] == monitoring.MIN_POLLING_INTERVAL
+    assert kwargs["polling_interval"] == 15
+
+
+def test_wait_for_experiment_rejects_too_frequent_polling():
+    """Matches wait_for_training: too low is an error, not a silent adjustment.
+
+    Clamping upward would poll slower than the caller asked without saying so.
+    """
+    client = MagicMock()
+    with patch(f"{_MON}.get_optimizer_client_for_namespace", return_value=client):
+        result = monitoring.wait_for_experiment("exp-1", polling_interval=1)
+    assert result["success"] is False
+    assert result["error_code"] == "VALIDATION_ERROR"
+    client.wait_for_job_status.assert_not_called()
 
 
 def test_wait_for_experiment_timeout():

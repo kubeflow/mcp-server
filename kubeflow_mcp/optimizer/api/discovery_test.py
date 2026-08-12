@@ -232,17 +232,30 @@ def test_get_trial_found():
     client = MagicMock()
     client.get_job.return_value = _job("exp-1", trials=[_trial("t1"), _trial("t2")])
     with patch(f"{_DISC}.get_optimizer_client_for_namespace", return_value=client):
-        result = discovery.get_trial("t2", experiment="exp-1")
+        result = discovery.get_trial("exp-1", trial="t2")
     assert result["success"] is True
     assert result["data"]["name"] == "t2"
     assert result["data"]["experiment"] == "exp-1"
+
+
+def test_get_trial_takes_the_experiment_as_name():
+    """``name`` is the experiment in every optimizer tool, this one included.
+
+    Guards the argument order: reading it as (trial, experiment) would look up
+    the wrong resource and report a not-found for a name that exists.
+    """
+    client = MagicMock()
+    client.get_job.return_value = _job("exp-1", trials=[_trial("t1")])
+    with patch(f"{_DISC}.get_optimizer_client_for_namespace", return_value=client):
+        discovery.get_trial("exp-1", "t1")
+    assert client.get_job.call_args.kwargs["name"] == "exp-1"
 
 
 def test_get_trial_missing_trial():
     client = MagicMock()
     client.get_job.return_value = _job("exp-1", trials=[_trial("t1")])
     with patch(f"{_DISC}.get_optimizer_client_for_namespace", return_value=client):
-        result = discovery.get_trial("nope", experiment="exp-1")
+        result = discovery.get_trial("exp-1", trial="nope")
     assert result["success"] is False
     assert result["error_code"] == "RESOURCE_NOT_FOUND"
 
@@ -251,7 +264,7 @@ def test_get_trial_missing_experiment():
     client = MagicMock()
     client.get_job.side_effect = _not_found()
     with patch(f"{_DISC}.get_optimizer_client_for_namespace", return_value=client):
-        result = discovery.get_trial("t1", experiment="missing")
+        result = discovery.get_trial("missing", trial="t1")
     assert result["error_code"] == "RESOURCE_NOT_FOUND"
 
 

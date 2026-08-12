@@ -119,11 +119,27 @@ full cross-product is small enough to enumerate.
 |---|---|---|
 | Continuous, uniform | `{"min": 0.5, "max": 0.99}` | `double`, uniform distribution |
 | Continuous, log-scale | `{"min": 1e-5, "max": 1e-1, "type": "loguniform"}` | `double`, logUniform |
+| Discrete range | `{"min": 2, "max": 8, "type": "int"}` | `int`, uniform distribution |
 | Categorical | `{"choices": [16, 32, 64]}` | `categorical` (values are stringified) |
 
 `uniform` is the default when `type` is omitted. Use `loguniform` for anything
 spanning orders of magnitude — learning rates and weight decay especially;
 a uniform range from 1e-5 to 1e-1 spends 90% of its samples above 0.01.
+
+Use `int` for whole numbers with a meaningful order (layer counts, batch sizes,
+epochs). `min`, `max` and the optional `step` must all be integers. Reaching for
+`choices` instead throws the ordering away: categorical values are unordered, so
+the algorithm cannot learn that 4 sits between 2 and 8. Keep `choices` for
+genuinely unordered options such as optimizer names or activation functions.
+
+## Metrics collection
+
+`primary_container_name` names the container Katib collects metrics from, and it
+is derived from `trial_template`: the container in the template's pod spec, or
+`node` when the template has none (a `TrainJob`). Set it explicitly only when the
+metric-producing container is not the one that gets picked, such as a pod whose
+first container is a sidecar. A name matching no container in the trial pod
+collects nothing, and the experiment stalls without an error.
 
 ## Budget and response limits
 

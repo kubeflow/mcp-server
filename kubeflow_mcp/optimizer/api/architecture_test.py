@@ -62,6 +62,47 @@ class TestModuleExports:
         missing = tool_names - desc_names
         assert not missing, f"Tools missing descriptions: {missing}"
 
+    def test_advertised_algorithms_match_the_implementation(self):
+        """Every accepted algorithm must appear in the agent-facing surfaces.
+
+        A description is the tool's API: an agent only ever sees these strings,
+        so a capability the implementation accepts but the prose omits is
+        unreachable in practice. Binding the two makes drift a test failure
+        rather than a silently unusable feature.
+        """
+        from kubeflow_mcp.optimizer import CLIENT_TOOL_DESCRIPTIONS, INSTRUCTION_SECTIONS
+        from kubeflow_mcp.optimizer.api.optimization import ALGORITHMS
+
+        surfaces = {
+            "description": CLIENT_TOOL_DESCRIPTIONS["create_hpo_experiment"],
+            "instructions": INSTRUCTION_SECTIONS["optimizer_optimization"]["full"],
+        }
+        for surface, text in surfaces.items():
+            missing = {a for a in ALGORITHMS if a not in text}
+            assert not missing, f"algorithms absent from {surface}: {sorted(missing)}"
+
+    def test_advertised_search_types_match_the_implementation(self):
+        """Same binding for search-space types, which live in a different file.
+
+        ``int`` shipped in the builder while all three surfaces still listed
+        only three types, so agents had no way to discover it.
+        """
+        from pathlib import Path
+
+        from kubeflow_mcp.optimizer import CLIENT_TOOL_DESCRIPTIONS, INSTRUCTION_SECTIONS
+
+        guide = Path(__file__).resolve().parents[1] / "resources" / "hpo-patterns.md"
+        surfaces = {
+            "description": CLIENT_TOOL_DESCRIPTIONS["create_hpo_experiment"],
+            "instructions": INSTRUCTION_SECTIONS["optimizer_optimization"]["full"],
+            "hpo-patterns.md": guide.read_text(),
+        }
+        # Mirrors the branches in optimization._build_parameter.
+        search_types = {"uniform", "loguniform", "int", "choice"}
+        for surface, text in surfaces.items():
+            missing = {t for t in search_types if t not in text}
+            assert not missing, f"search types absent from {surface}: {sorted(missing)}"
+
     def test_all_tools_have_annotations(self):
         from kubeflow_mcp.optimizer import CLIENT_TOOL_ANNOTATIONS, TOOLS
 

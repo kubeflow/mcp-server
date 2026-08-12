@@ -98,7 +98,10 @@ CLIENT_TOOL_DESCRIPTIONS: dict[str, str] = {
         "Lightweight status check — status string + trial counts only. "
         "Faster than get_experiment() for polling."
     ),
-    "get_trial": "Get trial details: parameters, metrics, and status by name.",
+    "get_trial": (
+        "Get one trial's parameters, metrics and status. "
+        "Pass the experiment as `name` and the trial as `trial`."
+    ),
     "get_successful_trials": (
         "Successful trials with hyperparameters and metrics for comparison. "
         "Returns up to `limit` (default 50); `total` reports the full count."
@@ -117,7 +120,7 @@ CLIENT_TOOL_DESCRIPTIONS: dict[str, str] = {
     "get_experiment_events": ("K8s events for experiment. Debug scheduling/image pull issues."),
     "create_hpo_experiment": (
         "Create HPO experiment from flat params. Search types: uniform, "
-        "loguniform, choice. Algorithms: random, grid, bayesianoptimization, "
+        "loguniform, int, choice. Algorithms: random, grid, bayesianoptimization, "
         "tpe, multivariate-tpe, cmaes, sobol, hyperband. "
         "Set confirmed=True to submit."
     ),
@@ -332,10 +335,15 @@ OPTIMIZER MONITORING AND LIFECYCLE:
         "full": """\
 OPTIMIZER TOOL SELECTION:
 - HPO with flat params → create_hpo_experiment() — specify objective, search space, algorithm
-  - Search types: uniform (continuous), loguniform (log-scale), choice (categorical)
+  - Search types: uniform (continuous), loguniform (log-scale), int (discrete range),
+    choice (categorical)
+  - Prefer int over choice for ordered whole numbers: categorical values carry no
+    ordering, so the algorithm cannot tell that 4 lies between 2 and 8
   - Algorithms: random (default), grid, bayesianoptimization, tpe, multivariate-tpe,
     cmaes, sobol, hyperband
   - trial_template is the Katib trialSpec; reference params as ${trialParameters.<name>}
+  - primary_container_name is derived from trial_template; set it only when the
+    container Katib should collect metrics from is not the one it picks
   - ALWAYS preview first (confirmed=False), then show preview and wait for approval
 - Raw V1beta1Experiment spec → create_experiment_from_spec() — escape hatch for
   early stopping, custom metrics collectors, resume policies and NAS

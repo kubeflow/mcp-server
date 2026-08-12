@@ -208,7 +208,7 @@ def get_experiment_status(
 
 def get_trial(
     name: str,
-    experiment: str,
+    trial: str,
     namespace: str | None = None,
 ) -> dict[str, Any]:
     """Get details of a specific trial within an experiment.
@@ -217,8 +217,9 @@ def get_trial(
     located within ``OptimizerClient.get_job().trials``.
 
     Args:
-        name: Trial name.
-        experiment: Parent experiment name.
+        name: Experiment name. Every optimizer tool takes the experiment as
+            ``name``; the trial is selected with ``trial``.
+        trial: Trial name within that experiment.
         namespace: K8s namespace. Uses default from kubeconfig when omitted.
 
     Returns:
@@ -227,12 +228,12 @@ def get_trial(
     Raises:
         ToolError: If experiment or trial not found (``RESOURCE_NOT_FOUND``).
     """
-    name_err = validate_k8s_name(name, "name")
+    name_err = validate_k8s_name(name)
     if name_err is not None:
         return name_err.model_dump()
-    exp_err = validate_k8s_name(experiment, "experiment")
-    if exp_err is not None:
-        return exp_err.model_dump()
+    trial_err = validate_k8s_name(trial, "trial")
+    if trial_err is not None:
+        return trial_err.model_dump()
 
     ns_err = check_optimizer_namespace(namespace)
     if ns_err is not None:
@@ -240,22 +241,22 @@ def get_trial(
 
     try:
         client = get_optimizer_client_for_namespace(namespace)
-        job = client.get_job(name=experiment)
+        job = client.get_job(name=name)
 
-        for trial in getattr(job, "trials", None) or []:
-            if getattr(trial, "name", None) == name:
-                data = trial_to_dict(trial)
-                data["experiment"] = experiment
+        for candidate in getattr(job, "trials", None) or []:
+            if getattr(candidate, "name", None) == trial:
+                data = trial_to_dict(candidate)
+                data["experiment"] = name
                 return ToolResponse(data=data).model_dump()
 
         return ToolError(
-            error=f"Trial '{name}' not found in experiment '{experiment}'",
+            error=f"Trial '{trial}' not found in experiment '{name}'",
             error_code=ErrorCode.RESOURCE_NOT_FOUND,
-            hint=f"Use get_experiment_trials('{experiment}') to list trials",
+            hint=f"Use get_experiment_trials('{name}') to list trials",
         ).model_dump()
 
     except Exception as e:
-        return experiment_error(e, experiment).model_dump()
+        return experiment_error(e, name).model_dump()
 
 
 def get_successful_trials(
