@@ -30,6 +30,29 @@ request_context: ContextVar[dict[str, Any] | None] = ContextVar("request_context
 _log_buffer: deque[dict[str, Any]] = deque(maxlen=1000)
 
 
+def _redact_dict(d: Any) -> Any:
+    """Recursively redact sensitive keys in a dict (and any nested lists)."""
+    sensitive_keys = {"password", "token", "secret", "authorization", "credential", "api_key"}
+
+    if isinstance(d, dict):
+        redacted = {}
+        for k, v in d.items():
+            if isinstance(k, str) and any(s in k.lower() for s in sensitive_keys):
+                redacted[k] = "***"
+            elif isinstance(v, (dict, list)):
+                redacted[k] = _redact_dict(v)
+            elif isinstance(v, str):
+                redacted[k] = _REDACT_PATTERNS.sub("***", v)
+            else:
+                redacted[k] = v
+        return redacted
+
+    if isinstance(d, list):
+        return [_redact_dict(item) for item in d]
+
+    return d
+
+
 class StructuredFormatter(logging.Formatter):
     """JSON formatter for production."""
 
@@ -47,12 +70,13 @@ class StructuredFormatter(logging.Formatter):
 
         ctx = request_context.get()
         if ctx is not None:
-            log_dict["context"] = ctx
+            log_dict["context"] = _redact_dict(ctx)
 
         extra_keys = {"audit", "tool", "parameters", "success", "duration_ms", "tracing_enabled"}
         for key in extra_keys:
             if hasattr(record, key):
-                log_dict[key] = getattr(record, key)
+                value = getattr(record, key)
+                log_dict[key] = _redact_dict(value) if isinstance(value, (dict, list)) else value
 
         return json.dumps(log_dict, default=str)
 
