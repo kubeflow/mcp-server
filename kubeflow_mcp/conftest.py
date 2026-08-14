@@ -132,18 +132,13 @@ def mock_k8s_apis():
         "items": [create_mock_trainjob()],
     }
 
-    apiext_mock.list_custom_resource_definition.return_value = MagicMock(
-        items=[
-            MagicMock(
-                metadata=MagicMock(name="trainjobs.trainer.kubeflow.org"),
-                spec=MagicMock(
-                    group="trainer.kubeflow.org",
-                    versions=[MagicMock(name="v1", served=True, storage=True)],
-                ),
-                status=MagicMock(conditions=[]),
-            )
-        ]
-    )
+    crd = MagicMock()
+    crd.metadata.name = "trainjobs.trainer.kubeflow.org"
+    crd.spec.group = "trainer.kubeflow.org"
+    crd.spec.scope = "Namespaced"
+    crd.spec.versions = [MagicMock(name="v1", served=True, storage=True)]
+    crd.status.conditions = []
+    apiext_mock.list_custom_resource_definition.return_value = MagicMock(items=[crd])
 
     with (
         patch(
