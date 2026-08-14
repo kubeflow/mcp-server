@@ -24,10 +24,35 @@ from contextvars import ContextVar
 from datetime import datetime, timezone
 from typing import Any
 
+from kubeflow_mcp.core.security import mask_sensitive_data
+
 correlation_id: ContextVar[str] = ContextVar("correlation_id", default="")
 request_context: ContextVar[dict[str, Any] | None] = ContextVar("request_context", default=None)
 
 _log_buffer: deque[dict[str, Any]] = deque(maxlen=1000)
+
+
+def _redact_dict(d: Any) -> Any:
+    """Recursively redact sensitive data for logging."""
+
+    if isinstance(d, dict):
+        return _apply_pattern(mask_sensitive_data(d))
+    if isinstance(d, list):
+        return [_redact_dict(item) for item in d]
+
+    return d
+
+
+def _apply_pattern(d: Any) -> Any:
+    """Apply _REDACT_PATTERNS to string leaves in an already key-masked structure."""
+    if isinstance(d, dict):
+        return {k: _apply_pattern(v) for k, v in d.items()}
+    if isinstance(d, list):
+        return [_apply_pattern(v) for v in d]
+    if isinstance(d, str):
+        return _REDACT_PATTERNS.sub("***", d)
+
+    return d
 
 
 class StructuredFormatter(logging.Formatter):
@@ -47,12 +72,13 @@ class StructuredFormatter(logging.Formatter):
 
         ctx = request_context.get()
         if ctx is not None:
-            log_dict["context"] = ctx
+            log_dict["context"] = _redact_dict(ctx)
 
         extra_keys = {"audit", "tool", "parameters", "success", "duration_ms", "tracing_enabled"}
         for key in extra_keys:
             if hasattr(record, key):
-                log_dict[key] = getattr(record, key)
+                value = getattr(record, key)
+                log_dict[key] = _redact_dict(value) if isinstance(value, (dict, list)) else value
 
         return json.dumps(log_dict, default=str)
 
