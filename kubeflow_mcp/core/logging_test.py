@@ -59,10 +59,26 @@ class TestRedactDict:
         assert result == {"Password": "***", "API_KEY": "***"}
 
     def test_substring_key_match(self):
-        # Matching is substring-based, so keys like "auth_token" or
-        # "client_secret" should also be redacted.
+        # auth_token matches via the "_token" suffix rule; client_secret
+        # matches via the "secret" substring rule in mask_sensitive_data.
         result = _redact_dict({"auth_token": "abc", "client_secret": "xyz"})
         assert result == {"auth_token": "***", "client_secret": "***"}
+
+    def test_tokenizer_key_not_falsely_redacted(self):
+        # mask_sensitive_data deliberately does not treat "tokenizer" as
+        # sensitive despite containing "token" as a substring — this was
+        # the false positive with the old local key-matching logic.
+        result = _redact_dict({"tokenizer": "bert-base-uncased"})
+        assert result == {"tokenizer": "bert-base-uncased"}
+
+    def test_safe_keys_not_redacted(self):
+        result = _redact_dict({"public_key": "ssh-rsa AAAA...", "key_name": "prod"})
+        assert result["public_key"] == "ssh-rsa AAAA..."
+        assert result["key_name"] == "prod"
+
+    def test_exact_sensitive_key_redacted(self):
+        result = _redact_dict({"access_token": "abc", "secret_access_key": "xyz"})
+        assert result == {"access_token": "***", "secret_access_key": "***"}
 
     def test_non_dict_non_list_input_returned_unchanged(self):
         assert _redact_dict("just a string") == "just a string"

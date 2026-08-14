@@ -24,6 +24,8 @@ from contextvars import ContextVar
 from datetime import datetime, timezone
 from typing import Any
 
+from kubeflow_mcp.core.security import mask_sensitive_data
+
 correlation_id: ContextVar[str] = ContextVar("correlation_id", default="")
 request_context: ContextVar[dict[str, Any] | None] = ContextVar("request_context", default=None)
 
@@ -31,24 +33,24 @@ _log_buffer: deque[dict[str, Any]] = deque(maxlen=1000)
 
 
 def _redact_dict(d: Any) -> Any:
-    """Recursively redact sensitive keys in a dict (and any nested lists)."""
-    sensitive_keys = {"password", "token", "secret", "authorization", "credential", "api_key"}
+    """Recursively redact sensitive data for logging."""
 
     if isinstance(d, dict):
-        redacted = {}
-        for k, v in d.items():
-            if isinstance(k, str) and any(s in k.lower() for s in sensitive_keys):
-                redacted[k] = "***"
-            elif isinstance(v, (dict, list)):
-                redacted[k] = _redact_dict(v)
-            elif isinstance(v, str):
-                redacted[k] = _REDACT_PATTERNS.sub("***", v)
-            else:
-                redacted[k] = v
-        return redacted
-
+        return _apply_pattern(mask_sensitive_data(d))
     if isinstance(d, list):
         return [_redact_dict(item) for item in d]
+
+    return d
+
+
+def _apply_pattern(d: Any) -> Any:
+    """Apply _REDACT_PATTERNS to string leaves in an already key-masked structure."""
+    if isinstance(d, dict):
+        return {k: _apply_pattern(v) for k, v in d.items()}
+    if isinstance(d, list):
+        return [_apply_pattern(v) for v in d]
+    if isinstance(d, str):
+        return _REDACT_PATTERNS.sub("***", d)
 
     return d
 
