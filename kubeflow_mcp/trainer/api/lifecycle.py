@@ -121,6 +121,7 @@ def update_training_job(
     name: str,
     action: str,
     namespace: str | None = None,
+    confirmed: bool = False,
 ) -> dict[str, Any]:
     """Suspend or resume a training job.
 
@@ -128,6 +129,8 @@ def update_training_job(
         name: TrainJob name.
         action: ``"suspend"`` to pause execution, ``"resume"`` to continue.
         namespace: K8s namespace. Uses default from kubeconfig when omitted.
+        confirmed: Set ``True`` to update. ``False`` returns a preview.
+
 
     Returns:
         dict: Response containing ``job``, ``namespace``, ``action``, ``message``.
@@ -166,11 +169,15 @@ def update_training_job(
                     error_code=ErrorCode.VALIDATION_ERROR,
                     details={
                         "hint": (
-                            "Non-admin personas can only suspend/resume jobs created through MCP tools. "
-                            "Use platform-admin persona for externally created jobs."
+                            "Non-admin personas can only suspend/resume jobs created through MCP tools. Use platform-admin persona for externally created jobs."
                         ),
                     },
                 ).model_dump()
+        if not confirmed:
+            return PreviewResponse(
+                message=f"Will {action} training job '{name}'. Set confirmed=True to proceed.",
+                config={"job": name, "namespace": ns, "action": action},
+            ).model_dump()
 
         api = mcp_utils.get_trainer_custom_objects_api()
         body = {"spec": {"suspend": action == "suspend"}}
