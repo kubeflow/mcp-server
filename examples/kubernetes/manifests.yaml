@@ -1,0 +1,199 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kubeflow-user-example-com
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kubeflow-mcp
+  namespace: kubeflow-user-example-com
+  labels:
+    app.kubernetes.io/name: kubeflow-mcp
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kubeflow-mcp-read
+rules:
+  - apiGroups: ["trainer.kubeflow.org"]
+    resources: ["clustertrainingruntimes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["nodes", "namespaces"]
+    verbs: ["get", "list"]
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kubeflow-mcp-read
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kubeflow-mcp-read
+subjects:
+  - kind: ServiceAccount
+    name: kubeflow-mcp
+    namespace: kubeflow-user-example-com
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kubeflow-mcp-trainjobs
+  namespace: kubeflow-user-example-com
+rules:
+  - apiGroups: ["trainer.kubeflow.org"]
+    resources: ["trainjobs", "trainjobs/status"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["trainer.kubeflow.org"]
+    resources: ["trainingruntimes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["jobset.x-k8s.io"]
+    resources: ["jobsets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "events", "persistentvolumeclaims"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kubeflow-mcp-trainjobs
+  namespace: kubeflow-user-example-com
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kubeflow-mcp-trainjobs
+subjects:
+  - kind: ServiceAccount
+    name: kubeflow-mcp
+    namespace: kubeflow-user-example-com
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kubeflow-mcp-trainer-version
+  namespace: kubeflow-system
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["kubeflow-trainer-public"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kubeflow-mcp-trainer-version
+  namespace: kubeflow-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kubeflow-mcp-trainer-version
+subjects:
+  - kind: ServiceAccount
+    name: kubeflow-mcp
+    namespace: kubeflow-user-example-com
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: kubeflow-mcp-auth
+  namespace: kubeflow-user-example-com
+  labels:
+    app.kubernetes.io/name: kubeflow-mcp
+type: Opaque
+stringData:
+  token: REPLACE_ME
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kubeflow-mcp
+  namespace: kubeflow-user-example-com
+  labels:
+    app.kubernetes.io/name: kubeflow-mcp
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kubeflow-mcp
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kubeflow-mcp
+      annotations:
+        sidecar.istio.io/inject: "false"
+    spec:
+      serviceAccountName: kubeflow-mcp
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: server
+          image: ghcr.io/kubeflow/mcp-server:latest
+          ports:
+            - name: http
+              containerPort: 8000
+          env:
+            - name: MCP_TRANSPORT
+              value: http
+            - name: FASTMCP_HOST
+              value: "0.0.0.0"
+            - name: KUBEFLOW_MCP_ALLOWED_HOSTS
+              value: "kubeflow-mcp:*,kubeflow-mcp.kubeflow-user-example-com.svc:*,kubeflow-mcp.kubeflow-user-example-com.svc.cluster.local:*,localhost:*,127.0.0.1:*"
+            - name: KUBEFLOW_MCP_PERSONA
+              value: data-scientist
+            - name: KUBEFLOW_MCP_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: kubeflow-mcp-auth
+                  key: token
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kubeflow-mcp
+  namespace: kubeflow-user-example-com
+  labels:
+    app.kubernetes.io/name: kubeflow-mcp
+spec:
+  selector:
+    app.kubernetes.io/name: kubeflow-mcp
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
