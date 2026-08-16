@@ -15,7 +15,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7
+        uses: actions/checkout@v7.0.1
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7
@@ -52,7 +52,7 @@ jobs:
 
       - name: Upload SARIF to GitHub Security tab
         if: always() && hashFiles('osv-results.sarif') != ''
-        uses: github/codeql-action/upload-sarif@v4
+        uses: github/codeql-action/upload-sarif@v4.37.4
         with:
           sarif_file: osv-results.sarif
           category: kubeflow-mcp-osv-scanner

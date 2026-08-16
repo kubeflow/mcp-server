@@ -218,6 +218,13 @@ def test_setup_tracing_rejects_invalid_endpoint() -> None:
         telemetry.setup_tracing("localhost:4318/v1/traces")
 
 
+def test_normalize_endpoint_preserves_query_parameters() -> None:
+    assert (
+        telemetry._normalize_and_validate_endpoint("https://collector.example.com?tenant=demo")
+        == "https://collector.example.com/v1/traces?tenant=demo"
+    )
+
+
 def test_setup_tracing_reuses_existing_provider(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: dict[str, object] = {}
 

@@ -19,12 +19,12 @@ jobs:
 
     steps:
       - name: Checkout PR branch
-        uses: actions/checkout@v7
+        uses: actions/checkout@v7.0.1
         with:
           path: pr-code
 
       - name: Checkout base branch
-        uses: actions/checkout@v7
+        uses: actions/checkout@v7.0.1
         with:
           ref: ${{ github.base_ref }}
           path: base-code

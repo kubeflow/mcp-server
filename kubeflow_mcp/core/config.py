@@ -68,12 +68,12 @@ logger = logging.getLogger(__name__)
 
 
 def _get_config_paths() -> list[Path]:
-    """Config file locations, searched in order. Evaluated lazily so cwd is fresh."""
+    """Config file locations, searched in order with project-local config first."""
     return [
+        Path.cwd() / ".kubeflow-mcp.yaml",
         Path.home() / ".kubeflow-mcp.yaml",
         Path.home() / ".kubeflow-mcp.yml",
         Path.home() / ".config" / "kubeflow-mcp" / "config.yaml",
-        Path.cwd() / ".kubeflow-mcp.yaml",
     ]
 
 
@@ -191,7 +191,14 @@ def _load_yaml_config(path: Path) -> dict[str, Any]:
 
         with open(path) as f:
             data = yaml.safe_load(f)
-            return data if data else {}
+            if data is None:
+                return {}
+            if not isinstance(data, dict):
+                logger.warning(
+                    "Config root must be a mapping; ignoring %s (got %s)", path, type(data).__name__
+                )
+                return {}
+            return data
     except ImportError:
         logger.warning("PyYAML not installed, skipping config file")
         return {}

@@ -37,7 +37,7 @@ Fix timelines depend on severity: critical — ASAP, high — 2 weeks, medium �
 ## Prevention Mechanisms
 
 - **Code Reviews**: All changes are reviewed by maintainers via Prow `/lgtm` + `/approve`.
-- **Dependency Management**: Dependabot monitors dependencies; `pip-audit` runs in CI.
+- **Dependency Management**: Dependabot monitors dependencies; the nightly OSV-Scanner workflow scans `uv.lock` for known CVEs, uploads findings to the GitHub Security tab, and opens automated fix PRs.
 - **Continuous Integration**: Automated tests, linting, and security checks on every PR.
 - **Image Scanning**: Container images are scanned for vulnerabilities via Trivy.
 - **Input Validation**: AST-based script safety checks, K8s name validation, training parameter bounds (`core/security.py`).

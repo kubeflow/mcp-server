@@ -31,22 +31,40 @@ logger = logging.getLogger(__name__)
 _HF_MODEL_ID_RE = re.compile(r"^[a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+$")
 
 
+_MIN_NAME_FALLBACK_LEN = 3
+
+
 def _suggest_hf_model_ids(model: str, limit: int = 3) -> list[str]:
     """Suggest real HuggingFace model IDs for a malformed model reference.
 
     Normalizes common non-Hub formats into a search term (drops an ``hf://``
     prefix and any Ollama-style ``:tag`` suffix such as ``qwen3:8b``) and asks
-    the Hub for close matches. Returns an empty list when the lookup errors or
-    finds nothing, so the suggestions stay best-effort and the validation path
-    never depends on network access.
+    the Hub for close matches ranked by downloads, so canonical repos surface
+    ahead of community fine-tunes. If a full ``org/name`` term finds nothing
+    (usually a typo in the org, e.g. ``meta-lama/Llama-3``), it retries on just
+    the model name; that retry is skipped when the name is very short, since a
+    bare one or two character search is too broad to be a useful "did you mean".
+    Returns an empty list when the lookup errors or finds nothing, so the
+    suggestions stay best-effort and the validation path never depends on
+    network access.
     """
-    search = model.strip().removeprefix("hf://").split(":", 1)[0].strip()
-    if not search:
+    normalized = model.strip().removeprefix("hf://").split(":", 1)[0].strip()
+    if not normalized:
         return []
+    terms = [normalized]
+    name = normalized.rsplit("/", 1)[-1]
+    if name and name != normalized and len(name) >= _MIN_NAME_FALLBACK_LEN:
+        terms.append(name)
     try:
         from huggingface_hub import list_models
 
-        return [m.id for m in list_models(search=search, limit=limit, full=False)]
+        for term in terms:
+            matches = [
+                m.id for m in list_models(search=term, sort="downloads", limit=limit, full=False)
+            ]
+            if matches:
+                return matches
+        return []
     except Exception:  # noqa: BLE001 - suggestions are best-effort, never fatal
         return []
 
@@ -62,8 +80,20 @@ def _get_model_info_from_hf(model: str) -> dict[str, Any] | None:
             return result
 
         from huggingface_hub import model_info
+        from huggingface_hub.errors import RepositoryNotFoundError
 
-        info = model_info(model, timeout=10)
+        try:
+            info = model_info(model, timeout=10)
+        except RepositoryNotFoundError as e:
+            # A well-formed id but no such repo (usually a typo); offer the same
+            # best-effort suggestions so callers still get a "did you mean".
+            # Other failures (auth, rate-limit, network, metadata) fall through
+            # to the outer handler unchanged, with no extra Hub request.
+            not_found: dict[str, Any] = {"error": str(e)}
+            suggestions = _suggest_hf_model_ids(model)
+            if suggestions:
+                not_found["suggestions"] = suggestions
+            return not_found
 
         # Get parameter count from safetensors metadata
         params = None
