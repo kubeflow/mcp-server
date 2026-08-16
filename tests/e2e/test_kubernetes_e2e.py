@@ -149,7 +149,7 @@ async def test_kubernetes_e2e_flow(mcp_session: ClientSession) -> None:
     assert job_name not in existing_jobs
     assert custom_job_name not in existing_jobs
 
-    # 6. fine_tune(confirmed=False) returns preview, no CR created
+    # 6. fine_tune(confirmed=False) returns preview (or GPU validation error on CPU-only cluster)
     resp = await mcp_session.call_tool(
         "fine_tune",
         arguments={
@@ -164,9 +164,14 @@ async def test_kubernetes_e2e_flow(mcp_session: ClientSession) -> None:
     assert not resp.isError
     assert len(resp.content) == 1
     data = json.loads(resp.content[0].text)
-    assert data["success"] is True
-    assert data["status"] == "preview"
-    assert data["config"]["name"] == job_name
+    if cluster_res.get("gpu_total", 0) == 0:
+        assert data["success"] is False
+        assert data["error_code"] == "VALIDATION_ERROR"
+        assert "requires GPUs" in data["error"]
+    else:
+        assert data["success"] is True
+        assert data["status"] == "preview"
+        assert data["config"]["name"] == job_name
 
     # Verify no TrainJob was created
     resp = await mcp_session.call_tool("list_training_jobs", arguments={"namespace": namespace})
