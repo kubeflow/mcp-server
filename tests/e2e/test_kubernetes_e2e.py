@@ -14,6 +14,7 @@
 
 """Kubernetes E2E tests validating MCP tools against a real cluster."""
 
+import asyncio
 import json
 import os
 from collections.abc import AsyncGenerator
@@ -37,10 +38,30 @@ async def mcp_session() -> AsyncGenerator[ClientSession, None]:
         args=["run", "kubeflow-mcp", "serve", "--persona", "platform-admin", "--no-banner"],
         env=os.environ.copy(),
     )
-    async with stdio_client(server_params) as (read, write):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-            yield session
+
+    session_future: asyncio.Future[ClientSession] = asyncio.Future()
+    stop_event = asyncio.Event()
+
+    async def run_server() -> None:
+        try:
+            async with stdio_client(server_params) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    session_future.set_result(session)
+                    await stop_event.wait()
+        except Exception as exc:
+            if not session_future.done():
+                session_future.set_exception(exc)
+            else:
+                raise
+
+    task = asyncio.create_task(run_server())
+    try:
+        session = await session_future
+        yield session
+    finally:
+        stop_event.set()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.mark.asyncio
