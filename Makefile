@@ -15,7 +15,7 @@
 SHELL = /usr/bin/env bash -o pipefail
 .SHELLFLAGS = -ec
 
-.PHONY: help uv install-dev verify format test-python test-scripts test test-cov clean inspector release changelog
+.PHONY: help uv install-dev verify format test-python test-scripts test test-e2e test-cov clean inspector release changelog
 
 PROJECT_DIR := $(shell dirname $(abspath $(lastword $(MAKEFILE_LIST))))
 

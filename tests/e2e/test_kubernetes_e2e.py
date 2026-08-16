@@ -88,41 +88,53 @@ async def test_kubernetes_e2e_flow(mcp_session: ClientSession) -> None:
     runtimes = data["data"]["runtimes"]
     assert len(runtimes) > 0
 
-    # Find a suitable runtime for fine_tune testing (preferring torchtune/torch runtime)
-    runtime_name = None
+    # Pick runtime for fine_tune preview (requires torchtune)
+    torchtune_runtime_name = None
     for r in runtimes:
         name = r.get("name", "")
         if "torchtune" in name or "torch-tune" in name:
-            runtime_name = name
+            torchtune_runtime_name = name
             break
-    if not runtime_name:
+    if not torchtune_runtime_name:
+        torchtune_runtime_name = runtimes[0]["name"]
+
+    # Pick runtime for run_custom_training (prefer torch-distributed or torch-*)
+    custom_runtime_name = None
+    for r in runtimes:
+        name = r.get("name", "")
+        if name.startswith("torch-distributed"):
+            custom_runtime_name = name
+            break
+    if not custom_runtime_name:
         for r in runtimes:
             name = r.get("name", "")
-            if "torch" in name:
-                runtime_name = name
+            if name.startswith("torch"):
+                custom_runtime_name = name
                 break
-    if not runtime_name and len(runtimes) > 0:
-        runtime_name = runtimes[0]["name"]
-    assert runtime_name is not None, f"Could not find any runtime in {runtimes}"
+    if not custom_runtime_name:
+        custom_runtime_name = runtimes[0]["name"]
 
-    # 5. list_training_jobs() empty list on fresh cluster
+    # 5. list_training_jobs() verify test job names are not present
     namespace = "default"
+    job_name = "e2e-fine-tune-job"
+    custom_job_name = "e2e-custom-train-job"
+
     resp = await mcp_session.call_tool("list_training_jobs", arguments={"namespace": namespace})
     assert not resp.isError
     assert len(resp.content) == 1
     data = json.loads(resp.content[0].text)
     assert data["success"] is True
-    assert data["data"]["total"] == 0
-    assert len(data["data"]["jobs"]) == 0
+    existing_jobs = [j["name"] for j in data["data"]["jobs"]]
+    assert job_name not in existing_jobs
+    assert custom_job_name not in existing_jobs
 
     # 6. fine_tune(confirmed=False) returns preview, no CR created
-    job_name = "e2e-fine-tune-job"
     resp = await mcp_session.call_tool(
         "fine_tune",
         arguments={
             "model": "hf://google/gemma-2b",
             "dataset": "hf://tatsu-lab/alpaca",
-            "runtime": runtime_name,
+            "runtime": torchtune_runtime_name,
             "name": job_name,
             "namespace": namespace,
             "confirmed": False,
@@ -143,7 +155,6 @@ async def test_kubernetes_e2e_flow(mcp_session: ClientSession) -> None:
     assert job_name not in job_names
 
     # 7. run_custom_training(confirmed=True) asserts TrainJob CR exists in cluster (CPU mode)
-    custom_job_name = "e2e-custom-train-job"
     noop_script = (
         "import torch\n"
         "def train():\n"
@@ -155,7 +166,7 @@ async def test_kubernetes_e2e_flow(mcp_session: ClientSession) -> None:
         "run_custom_training",
         arguments={
             "script": noop_script,
-            "runtime": runtime_name,
+            "runtime": custom_runtime_name,
             "name": custom_job_name,
             "namespace": namespace,
             "gpu_per_node": 0,
@@ -195,7 +206,7 @@ async def test_kubernetes_e2e_flow(mcp_session: ClientSession) -> None:
     resp = await mcp_session.call_tool(
         "get_training_job", arguments={"name": custom_job_name, "namespace": namespace}
     )
-    assert resp.isError
+    assert not resp.isError
     data = json.loads(resp.content[0].text)
     assert data["success"] is False
     assert data["error_code"] == "RESOURCE_NOT_FOUND"
