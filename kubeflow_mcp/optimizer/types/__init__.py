@@ -316,11 +316,69 @@ def trial_counts_from_cr(status: dict[str, Any]) -> dict[str, int]:
     Preferred over deriving counts from ``OptimizationJob.trials``: Katib tracks
     ``trialsEarlyStopped`` here, a state that never appears on the underlying
     TrainJob and is therefore invisible to the SDK view.
+
+    Counters Katib has not published are omitted rather than reported as zero,
+    so callers that need a stable set of keys should seed their own defaults
+    (see :func:`experiment_summary_from_cr`).
     """
     return {
         key: int(status[field])
         for field, key in _CR_TRIAL_COUNTERS.items()
         if isinstance(status.get(field), int)
+    }
+
+
+def experiment_summary_from_cr(item: dict[str, Any]) -> dict[str, Any]:
+    """Summarize a raw Experiment CR, matching :func:`experiment_summary`'s shape.
+
+    Lets ``list_experiments`` read the Experiment list in a single API call
+    instead of going through ``OptimizerClient.list_jobs()``, which resolves
+    every trial's TrainJob individually. Everything a summary needs is already
+    on the CR.
+
+    The four SDK-derived counters are seeded to 0 before the CR's own counters
+    are applied: Katib omits them entirely until trials exist, and dropping keys
+    the SDK path always emitted would be a silent contract change. Counters only
+    the CR knows about (pending, killed, early stopped) are additive.
+    """
+    metadata = item.get("metadata") or {}
+    status = item.get("status") or {}
+
+    data: dict[str, Any] = {
+        "name": metadata.get("name"),
+        "status": experiment_phase(status),
+        # Left as the raw RFC3339 string Kubernetes emits, as with the
+        # lastTransitionTime values in conditions_to_list.
+        "creation_timestamp": metadata.get("creationTimestamp"),
+        "total_trials": 0,
+        "running_trials": 0,
+        "succeeded_trials": 0,
+        "failed_trials": 0,
+    }
+    data.update(trial_counts_from_cr(status))
+    return data
+
+
+def suggestion_to_dict(item: dict[str, Any]) -> dict[str, Any]:
+    """Serialize a raw Suggestion CR from ``CustomObjectsApi``.
+
+    Shared by ``list_suggestions`` and ``get_suggestion`` so both describe the
+    same resource with the same field names. They previously carried separate
+    serializers that disagreed: one emitted a single ``condition``, the other a
+    ``conditions`` list.
+    """
+    metadata = item.get("metadata") or {}
+    spec = item.get("spec") or {}
+    status = item.get("status") or {}
+    return {
+        "name": metadata.get("name"),
+        "algorithm": (spec.get("algorithm") or {}).get("algorithmName"),
+        "requests": spec.get("requests"),
+        "suggestion_count": status.get("suggestionCount"),
+        "conditions": [
+            {"type": c.get("type"), "status": c.get("status"), "reason": c.get("reason")}
+            for c in (status.get("conditions") or [])
+        ],
     }
 
 

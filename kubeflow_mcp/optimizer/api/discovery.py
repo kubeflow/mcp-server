@@ -15,10 +15,15 @@
 """Discovery tools for Katib experiments, trials, and suggestions.
 
 SDK methods used:
-    - OptimizerClient.list_jobs()    → list_experiments
-    - OptimizerClient.get_job()      → get_experiment, get_experiment_status,
-                                       get_trial, get_successful_trials
-    - CustomObjectsApi               → list_suggestions (no SDK method)
+    - OptimizerClient.get_job()      → get_experiment, get_trial,
+                                       get_successful_trials
+    - CustomObjectsApi               → list_experiments, get_experiment_status,
+                                       list_suggestions
+
+``list_experiments`` reads the Experiment list directly rather than through
+``OptimizerClient.list_jobs()``: the SDK resolves every trial's TrainJob
+individually, so listing a namespace costs one call per trial while a summary
+needs only fields the Experiment CR already carries.
 """
 
 import logging
@@ -51,10 +56,11 @@ from kubeflow_mcp.optimizer.types import (
     conditions_to_list,
     early_stopping_to_dict,
     experiment_phase,
-    experiment_summary,
+    experiment_summary_from_cr,
     experiment_to_dict,
     is_success_status,
     optimal_trial_to_dict,
+    suggestion_to_dict,
     trial_counts_from_cr,
     trial_to_dict,
 )
@@ -89,10 +95,16 @@ def list_experiments(
         return limit_err.model_dump()
 
     try:
-        client = get_optimizer_client_for_namespace(namespace)
-        jobs = client.list_jobs()
+        ns = get_optimizer_effective_namespace(namespace)
+        resp = get_custom_objects_api().list_namespaced_custom_object(
+            group=KATIB_API_GROUP,
+            version=KATIB_API_VERSION,
+            namespace=ns,
+            plural=EXPERIMENT_PLURAL,
+            _request_timeout=K8S_TIMEOUT,
+        )
 
-        experiments = [experiment_summary(job) for job in jobs]
+        experiments = [experiment_summary_from_cr(item) for item in resp.get("items", [])]
         if status:
             want = resolve_status_filter(status)
             experiments = [e for e in experiments if e.get("status") == want]
@@ -344,7 +356,7 @@ def list_suggestions(
             _request_timeout=K8S_TIMEOUT,
         )
 
-        suggestions = [_suggestion_to_dict(item) for item in resp.get("items", [])]
+        suggestions = [suggestion_to_dict(item) for item in resp.get("items", [])]
         return ToolResponse(
             data={
                 "suggestions": suggestions[:limit],
@@ -404,20 +416,3 @@ def _experiment_cr_detail(name: str, namespace: str | None) -> dict[str, Any]:
     # CR counters are authoritative; they supersede the SDK-derived ones.
     detail.update(trial_counts_from_cr(status))
     return detail
-
-
-def _suggestion_to_dict(item: dict[str, Any]) -> dict[str, Any]:
-    """Serialize a raw Suggestion CRD dict from CustomObjectsApi."""
-    metadata = item.get("metadata", {})
-    spec = item.get("spec", {})
-    status = item.get("status", {})
-    algorithm = spec.get("algorithm", {})
-    conditions = status.get("conditions", []) or []
-    latest_condition = conditions[-1].get("type") if conditions else None
-    return {
-        "name": metadata.get("name"),
-        "algorithm": algorithm.get("algorithmName"),
-        "requests": spec.get("requests"),
-        "suggestion_count": status.get("suggestionCount"),
-        "condition": latest_condition,
-    }

@@ -226,7 +226,6 @@ SDK_COMPATIBILITY: dict[str, object] = {
             "sdk_client": "kubeflow.optimizer.OptimizerClient",
             "covered_methods": [
                 "get_job",
-                "list_jobs",
                 "delete_job",
                 "get_best_results",
                 "get_job_logs",
@@ -241,10 +240,17 @@ SDK_COMPATIBILITY: dict[str, object] = {
                 # label are both unreachable through it. create_hpo_experiment
                 # builds the V1beta1Experiment CR directly instead.
                 "optimize",
+                # list_jobs() resolves every trial's TrainJob individually, so
+                # listing a namespace costs one API call per trial. A summary
+                # needs only fields the Experiment CR already carries, so
+                # list_experiments lists the CR directly instead.
+                "list_jobs",
             ],
             "k8s_api_operations": [
                 "create_hpo_experiment (CustomObjectsApi create)",
                 "create_experiment_from_spec (CustomObjectsApi create)",
+                "list_experiments (CustomObjectsApi list)",
+                "get_experiment_status (CustomObjectsApi get)",
                 "list_suggestions (CustomObjectsApi list)",
                 "get_suggestion (CustomObjectsApi get)",
                 "update_experiment (CustomObjectsApi get + patch)",

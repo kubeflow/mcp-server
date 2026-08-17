@@ -14,6 +14,7 @@
 
 """Unit tests for optimizer discovery tools (mocked OptimizerClient)."""
 
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -69,10 +70,38 @@ def _not_found():
 # ─── list_experiments ──────────────────────────────────────────────────────
 
 
+def _listed_experiment(
+    name, *, running=0, succeeded=0, conditions=None, created="2026-01-01T00:00:00Z"
+):
+    """One item of a raw Experiment list, as CustomObjectsApi returns it."""
+    status = {"trials": running + succeeded, "trialsRunning": running}
+    if succeeded:
+        status["trialsSucceeded"] = succeeded
+    if conditions is not None:
+        status["conditions"] = conditions
+    return {"metadata": {"name": name, "creationTimestamp": created}, "status": status}
+
+
+_COMPLETE = [{"type": "Succeeded", "status": "True"}]
+
+
+@contextmanager
+def _experiment_list(items):
+    api = MagicMock()
+    api.list_namespaced_custom_object.return_value = {"items": items}
+    with (
+        patch(f"{_DISC}.get_custom_objects_api", return_value=api),
+        patch(f"{_DISC}.get_optimizer_effective_namespace", return_value="default"),
+    ):
+        yield api
+
+
 def test_list_experiments_happy_path():
-    client = MagicMock()
-    client.list_jobs.return_value = [_job("a", "Running"), _job("b", "Complete")]
-    with patch(f"{_DISC}.get_optimizer_client_for_namespace", return_value=client):
+    items = [
+        _listed_experiment("a", running=1),
+        _listed_experiment("b", succeeded=1, conditions=_COMPLETE),
+    ]
+    with _experiment_list(items):
         result = discovery.list_experiments()
     assert result["success"] is True
     assert result["data"]["total"] == 2
@@ -80,19 +109,62 @@ def test_list_experiments_happy_path():
     assert names == {"a", "b"}
 
 
+def test_list_experiments_reads_the_cr_in_one_call():
+    """The point of listing the CR: cost must not scale with trials.
+
+    ``OptimizerClient.list_jobs()`` resolves every trial's TrainJob one by one,
+    so a namespace of experiments cost one API call per trial. Listing the CR is
+    a single call no matter how many experiments or trials exist.
+    """
+    items = [_listed_experiment(f"exp-{i}", running=50) for i in range(30)]
+    with _experiment_list(items) as api:
+        with patch(f"{_DISC}.get_optimizer_client_for_namespace") as client_factory:
+            result = discovery.list_experiments()
+    assert result["data"]["total"] == 30
+    assert api.list_namespaced_custom_object.call_count == 1
+    client_factory.assert_not_called()
+
+
+def test_list_experiments_reports_counters_even_when_katib_omits_them():
+    """A fresh experiment has no counters on its CR, but the keys must persist."""
+    with _experiment_list([{"metadata": {"name": "fresh"}}]):
+        result = discovery.list_experiments()
+    exp = result["data"]["experiments"][0]
+    assert exp["status"] == "Created"
+    for key in ("total_trials", "running_trials", "succeeded_trials", "failed_trials"):
+        assert exp[key] == 0
+
+
 def test_list_experiments_status_filter():
-    client = MagicMock()
-    client.list_jobs.return_value = [_job("a", "Running"), _job("b", "Complete")]
-    with patch(f"{_DISC}.get_optimizer_client_for_namespace", return_value=client):
+    items = [
+        _listed_experiment("a", running=1),
+        _listed_experiment("b", succeeded=1, conditions=_COMPLETE),
+    ]
+    with _experiment_list(items):
         result = discovery.list_experiments(status="Complete")
     assert result["data"]["total"] == 1
     assert result["data"]["experiments"][0]["name"] == "b"
 
 
+def test_list_experiments_status_filter_accepts_succeeded_alias():
+    """troubleshooting.md documents Succeeded as an alias at the experiment level."""
+    items = [
+        _listed_experiment("a", running=1),
+        _listed_experiment("b", succeeded=1, conditions=_COMPLETE),
+    ]
+    with _experiment_list(items):
+        result = discovery.list_experiments(status="Succeeded")
+    assert result["data"]["total"] == 1
+    assert result["data"]["experiments"][0]["name"] == "b"
+
+
 def test_list_experiments_sdk_error():
-    client = MagicMock()
-    client.list_jobs.side_effect = RuntimeError("boom")
-    with patch(f"{_DISC}.get_optimizer_client_for_namespace", return_value=client):
+    api = MagicMock()
+    api.list_namespaced_custom_object.side_effect = RuntimeError("boom")
+    with (
+        patch(f"{_DISC}.get_custom_objects_api", return_value=api),
+        patch(f"{_DISC}.get_optimizer_effective_namespace", return_value="default"),
+    ):
         result = discovery.list_experiments()
     assert result["success"] is False
     assert result["error_code"] == "SDK_ERROR"
@@ -310,7 +382,7 @@ def test_list_suggestions_happy_path():
     assert result["data"]["total"] == 1
     sugg = result["data"]["suggestions"][0]
     assert sugg["algorithm"] == "random"
-    assert sugg["condition"] == "Succeeded"
+    assert [c["type"] for c in sugg["conditions"]] == ["Succeeded"]
 
 
 def test_list_suggestions_sdk_error():

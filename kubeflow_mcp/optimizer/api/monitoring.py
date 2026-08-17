@@ -57,6 +57,7 @@ from kubeflow_mcp.optimizer.constants import (
 from kubeflow_mcp.optimizer.types import (
     event_to_dict,
     result_to_dict,
+    suggestion_to_dict,
     trial_counts_from_job,
     trial_to_dict,
 )
@@ -210,21 +211,10 @@ def get_suggestion(
             _request_timeout=K8S_TIMEOUT,
         )
 
-        spec = obj.get("spec", {})
-        status = obj.get("status", {})
-        algorithm = spec.get("algorithm", {})
-        conditions = status.get("conditions", []) or []
-        data = {
-            "name": name,
-            "namespace": ns,
-            "algorithm": algorithm.get("algorithmName"),
-            "requests": spec.get("requests"),
-            "suggestion_count": status.get("suggestionCount"),
-            "conditions": [
-                {"type": c.get("type"), "status": c.get("status"), "reason": c.get("reason")}
-                for c in conditions
-            ],
-        }
+        # Same serializer as list_suggestions, so both views of a Suggestion
+        # describe it with the same field names. Only the namespace is extra.
+        data = suggestion_to_dict(obj)
+        data["namespace"] = ns
         return ToolResponse(data=data).model_dump()
 
     except Exception as e:

@@ -75,9 +75,13 @@ def test_clamp_limit_rejects_non_positive(bad):
 
 
 def test_list_experiments_truncates_but_reports_true_total():
-    jobs = [_job() for _ in range(120)]
-    client = MagicMock(list_jobs=MagicMock(return_value=jobs))
-    with patch(f"{_DISC}.get_optimizer_client_for_namespace", return_value=client):
+    items = [{"metadata": {"name": f"exp-{i}"}} for i in range(120)]
+    api = MagicMock()
+    api.list_namespaced_custom_object.return_value = {"items": items}
+    with (
+        patch(f"{_DISC}.get_custom_objects_api", return_value=api),
+        patch(f"{_DISC}.get_optimizer_effective_namespace", return_value="default"),
+    ):
         result = discovery.list_experiments(limit=5)
     assert len(result["data"]["experiments"]) == 5
     assert result["data"]["total"] == 120
