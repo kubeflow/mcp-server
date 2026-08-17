@@ -117,7 +117,7 @@ async def test_kubernetes_e2e_flow(mcp_session: ClientSession) -> None:
             torchtune_runtime_name = name
             break
     if not torchtune_runtime_name:
-        torchtune_runtime_name = runtimes[0]["name"]
+        pytest.skip("No torchtune runtime found in the cluster")
 
     # Pick runtime for run_custom_training (prefer torch-distributed or torch-*)
     custom_runtime_name = None
@@ -129,11 +129,11 @@ async def test_kubernetes_e2e_flow(mcp_session: ClientSession) -> None:
     if not custom_runtime_name:
         for r in runtimes:
             name = r.get("name", "")
-            if name.startswith("torch"):
+            if name.startswith("torch-"):
                 custom_runtime_name = name
                 break
     if not custom_runtime_name:
-        custom_runtime_name = runtimes[0]["name"]
+        pytest.skip("No custom torch- training runtime found in the cluster")
 
     # 5. list_training_jobs() verify test job names are not present
     namespace = "default"
