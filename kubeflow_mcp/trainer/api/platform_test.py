@@ -224,3 +224,11 @@ def test_non_admin_persona_cannot_manage_runtimes():
     assert "patch_runtime" not in allowed_tools
     assert "create_runtime" not in allowed_tools
     assert "delete_runtime" not in allowed_tools
+
+
+# Remaining TODOs are outside this PR's runtime CRUD slice.
+# TODO(test): test inspect_crd — lists all Trainer CRDs
+# TODO(test): test inspect_crd(name) — returns CRD schema and conditions
+# TODO(test): test inspect_crd — invalid CRD name
+# TODO(test): test inspect_controller(view="logs") — returns controller logs
+# TODO(test): test inspect_controller(view="events") — returns controller events
