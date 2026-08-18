@@ -15,7 +15,7 @@
 SHELL = /usr/bin/env bash -o pipefail
 .SHELLFLAGS = -ec
 
-.PHONY: help uv install-dev verify format test-python test-scripts test test-cov benchmark clean inspector release changelog
+.PHONY: help uv install-dev verify format test-python test-scripts test test-e2e test-cov benchmark clean inspector release changelog
 
 PROJECT_DIR := $(shell dirname $(abspath $(lastword $(MAKEFILE_LIST))))
 
@@ -68,6 +68,10 @@ test-scripts: ## Run GitHub Actions script tests
 test: ## Run all tests (unit + integration)
 	@uv sync --all-extras --group dev
 	@uv run pytest tests/ kubeflow_mcp/ -v --tb=short
+
+test-e2e: ## Run Kubernetes E2E tests (requires KUBEFLOW_MCP_E2E=true and Kubeconfig)
+	@uv sync --all-extras --group dev
+	@KUBEFLOW_MCP_E2E=true uv run pytest tests/e2e/test_kubernetes_e2e.py -v
 
 test-cov: ## Run tests with HTML coverage report
 	@uv sync --all-extras --group dev
