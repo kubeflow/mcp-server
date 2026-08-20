@@ -19,6 +19,8 @@ Holds the two blocks that would otherwise be copy-pasted across every tool in
 enforcing MCP ownership before a mutating operation.
 """
 
+import json
+
 from kubeflow_mcp.common import utils as mcp_utils
 from kubeflow_mcp.common.constants import ErrorCode
 from kubeflow_mcp.common.types import ToolError, exception_details, is_k8s_not_found
@@ -31,6 +33,12 @@ _WEBHOOK_HINT = (
     "The Katib control plane is not serving its admission webhooks. Run "
     "katib_pre_flight() to confirm, then check the katib-controller deployment "
     "and its RBAC. No experiment can be created until it reports ready."
+)
+_TIMEOUT_HINT = (
+    "The API server did not answer in time. A write is admitted by Katib's "
+    "webhooks, so this usually means the katib-controller cannot be reached by "
+    "the API server (a network path or endpoint problem) rather than a slow "
+    "cluster. Run katib_pre_flight(), which probes the webhook directly."
 )
 
 # Collection responses are truncated so a large experiment cannot exhaust the
@@ -91,6 +99,45 @@ def _api_status(exc: Exception) -> int | None:
     return None
 
 
+def api_message(exc: Exception) -> str:
+    """The Kubernetes ``status.message`` from an API error, if there is one.
+
+    ``str(ApiException)`` renders the whole response including every HTTP
+    header, which buries the one sentence a reader needs. Tool errors are read
+    by an agent, so they carry the message alone; the full text is still
+    available under ``details``.
+    """
+    for candidate in (exc, exc.__cause__, exc.__context__):
+        body = getattr(candidate, "body", None)
+        if not body:
+            continue
+        try:
+            message = json.loads(body).get("message")
+        except (ValueError, TypeError, AttributeError):
+            continue
+        if message:
+            return str(message)
+    return str(exc).split("\n")[0]
+
+
+def is_request_timeout(exc: Exception) -> bool:
+    """True when the client gave up waiting rather than the server refusing.
+
+    urllib3 surfaces these as ``ReadTimeoutError``/``ConnectTimeoutError``,
+    sometimes wrapped by the SDK, so the cause chain is walked as elsewhere in
+    this module. A timeout carries no HTTP status, so it would otherwise fall
+    through to a bare ``SDK_ERROR`` holding a connection-pool repr.
+    """
+    try:
+        from urllib3.exceptions import TimeoutError as Urllib3Timeout
+    except ImportError:  # pragma: no cover - urllib3 ships with kubernetes
+        return False
+    for candidate in (exc, exc.__cause__, exc.__context__):
+        if isinstance(candidate, (Urllib3Timeout, TimeoutError)):
+            return True
+    return False
+
+
 def _is_webhook_unavailable(exc: Exception) -> bool:
     """True when the API server could not reach Katib's admission webhooks.
 
@@ -139,8 +186,18 @@ def resource_error(exc: Exception, name: str, kind: str = "Experiment") -> ToolE
                 f"with delete_experiment('{name}', confirmed=True)."
             ),
         )
+    if is_request_timeout(exc):
+        # TIMEOUT still counts as an infrastructure failure for the circuit
+        # breaker, but it names what happened instead of surfacing a raw
+        # connection-pool repr with no hint.
+        return ToolError(
+            error=f"Timed out waiting for the API server while operating on {kind} '{name}'",
+            error_code=ErrorCode.TIMEOUT,
+            details=exception_details(exc),
+            hint=_TIMEOUT_HINT,
+        )
     return ToolError(
-        error=str(exc),
+        error=api_message(exc),
         error_code=ErrorCode.SDK_ERROR,
         details=exception_details(exc),
         # Stays SDK_ERROR: an unreachable webhook is a genuine infrastructure

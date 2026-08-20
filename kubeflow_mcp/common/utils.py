@@ -31,6 +31,13 @@ if TYPE_CHECKING:
 
 K8S_TIMEOUT = 5
 
+# Writes that go through admission webhooks need a longer budget than reads.
+# Katib registers a mutating and a validating webhook, each with its own 10s
+# timeout, so a create can legitimately outlive K8S_TIMEOUT while the API server
+# is still waiting on them. Timing out first turns a diagnosable admission
+# failure into an opaque "read timed out", so writes get their own bound.
+K8S_WRITE_TIMEOUT = 30
+
 
 @lru_cache(maxsize=1)
 def _get_api_client() -> "k8s_client.ApiClient":

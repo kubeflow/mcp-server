@@ -29,13 +29,22 @@ from kubeflow_mcp.common.types import (
     exception_details,
     is_k8s_not_found,
 )
+from kubeflow_mcp.optimizer.api._common import api_message
 from kubeflow_mcp.optimizer.constants import (
     EXPERIMENT_CRD_NAME,
+    EXPERIMENT_KIND,
+    EXPERIMENT_PLURAL,
+    KATIB_API_GROUP,
+    KATIB_API_VERSION,
     KATIB_CONTROLLER_LABELS,
     KATIB_CONTROLLER_NAMESPACE_DEFAULT,
 )
 
 logger = logging.getLogger(__name__)
+
+# Name for the dry-run probe in _check_webhook. Never persisted, but a distinct
+# name keeps it obvious in an audit log that this was a readiness check.
+_PROBE_NAME = "katib-pre-flight-probe"
 
 
 class CheckResult(NamedTuple):
@@ -164,6 +173,75 @@ def _check_controller() -> CheckResult:
     return CheckResult(info=info)
 
 
+def _check_webhook() -> CheckResult:
+    """Confirm the API server can actually reach Katib's admission webhooks.
+
+    A Ready controller is not sufficient. Katib registers its webhooks with
+    ``failurePolicy: Fail``, so if the API server cannot reach the controller
+    pod every create is rejected even though the CRD is installed and the pod is
+    healthy. That combination reports a green pre-flight while no experiment can
+    be created, which is the failure this check exists to catch.
+
+    Uses a server-side dry run: admission runs in full, nothing is persisted.
+    """
+    minimal = {
+        "apiVersion": f"{KATIB_API_GROUP}/{KATIB_API_VERSION}",
+        "kind": EXPERIMENT_KIND,
+        "metadata": {"name": _PROBE_NAME},
+        "spec": {
+            "objective": {"type": "maximize", "objectiveMetricName": "probe"},
+            "algorithm": {"algorithmName": "random"},
+            "maxTrialCount": 1,
+            "parallelTrialCount": 1,
+            "parameters": [
+                {
+                    "name": "probe",
+                    "parameterType": "double",
+                    "feasibleSpace": {"min": "0.1", "max": "0.2"},
+                }
+            ],
+            "trialTemplate": {"primaryContainerName": "probe", "trialSpec": {}},
+        },
+    }
+
+    try:
+        namespace = mcp_utils.get_optimizer_effective_namespace(None)
+        mcp_utils.get_custom_objects_api().create_namespaced_custom_object(
+            group=KATIB_API_GROUP,
+            version=KATIB_API_VERSION,
+            namespace=namespace,
+            plural=EXPERIMENT_PLURAL,
+            body=minimal,
+            dry_run="All",
+            _request_timeout=mcp_utils.K8S_WRITE_TIMEOUT,
+        )
+    except Exception as e:
+        status = getattr(e, "status", None)
+        # The probe spec is deliberately minimal, so the validating webhook may
+        # reject it on content. That still proves the webhook was reached, which
+        # is all this check is asking.
+        if status in (400, 422):
+            return CheckResult(info={"webhook_reachable": True})
+        if status == 403:
+            return CheckResult(
+                info={"webhook_reachable": None},
+                warnings=(
+                    "Cannot verify Katib admission webhooks: no permission to dry-run "
+                    "an Experiment create. Creation may still fail at runtime.",
+                ),
+            )
+        return CheckResult(
+            info={"webhook_reachable": False},
+            blockers=(
+                "Katib's admission webhooks are not reachable by the API server, so no "
+                f"experiment can be created: {api_message(e)} A Ready controller pod is "
+                "not sufficient; check that the API server can reach the katib-controller "
+                "Service on its webhook port.",
+            ),
+        )
+    return CheckResult(info={"webhook_reachable": True})
+
+
 def _check_trainer() -> CheckResult:
     """Report whether the trainer client is usable for cross-client workflows.
 
@@ -190,7 +268,9 @@ def katib_pre_flight() -> dict[str, Any]:
 
     1. The Experiment CRD is registered on the cluster
     2. The Katib controller pod is Running **and** passing readiness
-    3. Whether the trainer client is loaded, for cross-client workflows
+    3. The API server can actually reach Katib's admission webhooks, without
+       which every create is rejected however healthy the controller looks
+    4. Whether the trainer client is loaded, for cross-client workflows
 
     Call this FIRST before any optimizer operations. It never raises for an
     unhealthy cluster; problems are reported in ``blockers``.
@@ -198,14 +278,14 @@ def katib_pre_flight() -> dict[str, Any]:
     Returns:
         dict: Response containing ``ready`` (bool), ``blockers`` (issues that
         prevent use), ``warnings`` (non-blocking), ``katib_crd_found``,
-        ``katib_crd_versions``, ``controller_status``, ``controller_ready``
-        and ``trainer_available``.
+        ``katib_crd_versions``, ``controller_status``, ``controller_ready``,
+        ``webhook_reachable`` and ``trainer_available``.
     """
     info: dict[str, Any] = {}
     blockers: list[str] = []
     warnings: list[str] = []
 
-    for check in (_check_experiment_crd, _check_controller, _check_trainer):
+    for check in (_check_experiment_crd, _check_controller, _check_webhook, _check_trainer):
         result = check()
         info.update(result.info)
         blockers.extend(result.blockers)

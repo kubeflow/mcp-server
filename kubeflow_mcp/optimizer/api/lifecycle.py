@@ -220,7 +220,9 @@ def update_experiment(
                 "metadata": {"annotations": annotation_patch},
                 "spec": {"parallelTrialCount": target},
             },
-            _request_timeout=mcp_utils.K8S_TIMEOUT,
+            # Patching an Experiment is admitted by the same webhooks as a
+            # create, so it gets the write budget rather than the read timeout.
+            _request_timeout=mcp_utils.K8S_WRITE_TIMEOUT,
         )
 
         past = "suspended" if action == "suspend" else "resumed"

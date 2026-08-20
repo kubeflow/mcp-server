@@ -279,6 +279,41 @@ def test_duplicate_name_is_actionable_and_does_not_trip_breaker():
     assert is_infrastructure_error(result) is False
 
 
+def test_create_uses_the_longer_write_timeout():
+    """A create is admitted by two webhooks, each with its own 10s budget.
+
+    Sending the 5s read timeout meant the client gave up before the API server
+    could report the admission failure, turning a diagnosable error into an
+    opaque "read timed out".
+    """
+    from kubeflow_mcp.common import utils as mcp_utils
+
+    with cluster() as api:
+        _create(confirmed=True)
+    timeout = api.create_namespaced_custom_object.call_args.kwargs["_request_timeout"]
+    assert timeout == mcp_utils.K8S_WRITE_TIMEOUT
+    assert timeout > mcp_utils.K8S_TIMEOUT
+
+
+def test_client_side_timeout_is_reported_as_timeout_not_opaque_sdk_error():
+    from urllib3.exceptions import ReadTimeoutError
+
+    from kubeflow_mcp.common.constants import is_infrastructure_error
+
+    api = MagicMock()
+    api.create_namespaced_custom_object.side_effect = ReadTimeoutError(
+        None, "/apis", "Read timed out."
+    )
+    with cluster(api):
+        result = _create(confirmed=True)
+
+    assert result["error_code"] == "TIMEOUT"
+    assert "Timed out waiting for the API server" in result["error"]
+    assert "katib_pre_flight()" in result["hint"]
+    # A timeout is still an infrastructure failure, so the breaker should trip.
+    assert is_infrastructure_error(result) is True
+
+
 def test_unreachable_katib_webhook_gets_an_actionable_hint():
     """Observed on a cluster whose katib-controller was Running but not Ready:
     the raw 500 is a wall of HTTP headers that never says what to do."""

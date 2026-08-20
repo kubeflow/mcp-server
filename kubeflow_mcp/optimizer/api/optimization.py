@@ -236,7 +236,9 @@ def _create(experiment: dict[str, Any], namespace: str, name: str) -> dict[str, 
         namespace=namespace,
         plural=EXPERIMENT_PLURAL,
         body=experiment,
-        _request_timeout=mcp_utils.K8S_TIMEOUT,
+        # Creating an Experiment goes through Katib's admission webhooks, so it
+        # needs the longer write budget rather than the read timeout.
+        _request_timeout=mcp_utils.K8S_WRITE_TIMEOUT,
     )
     return ToolResponse(
         data={

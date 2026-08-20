@@ -14,6 +14,7 @@
 
 """Unit tests for katib_pre_flight (CRD + controller + trainer detection)."""
 
+from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -39,18 +40,27 @@ def _pod(phase="Running", namespace="kubeflow", name="katib-controller-abc", rea
     )
 
 
-def _patch(apiext, core, trainer_ok=True):
-    trainer = MagicMock() if trainer_ok else None
+@contextmanager
+def _patch(apiext, core, trainer_ok=True, webhook=None):
+    """Patch every cluster call pre-flight makes.
+
+    ``webhook`` is the CustomObjects API backing the dry-run admission probe. It
+    is always patched: leaving it out lets the check reach a real cluster, which
+    both slows the suite and makes results depend on the developer's kubeconfig.
+    """
     trainer_ctx = (
-        patch(f"{_UTILS}.get_trainer_client", return_value=trainer)
+        patch(f"{_UTILS}.get_trainer_client", return_value=MagicMock())
         if trainer_ok
         else patch(f"{_UTILS}.get_trainer_client", side_effect=RuntimeError("no trainer"))
     )
-    return (
+    with (
         patch(f"{_UTILS}.get_apiextensions_api", return_value=apiext),
         patch(f"{_UTILS}.get_core_v1_api", return_value=core),
         trainer_ctx,
-    )
+        patch(f"{_UTILS}.get_custom_objects_api", return_value=webhook or MagicMock()),
+        patch(f"{_UTILS}.get_optimizer_effective_namespace", return_value="default"),
+    ):
+        yield
 
 
 def test_pre_flight_all_healthy():
@@ -58,8 +68,7 @@ def test_pre_flight_all_healthy():
     apiext.read_custom_resource_definition.return_value = _crd()
     core = MagicMock()
     core.list_namespaced_pod.return_value = SimpleNamespace(items=[_pod()])
-    a, c, t = _patch(apiext, core, trainer_ok=True)
-    with a, c, t:
+    with _patch(apiext, core, trainer_ok=True):
         result = katib_pre_flight()
     assert result["success"] is True
     data = result["data"]
@@ -78,8 +87,7 @@ def test_pre_flight_crd_missing():
     )
     core = MagicMock()
     core.list_namespaced_pod.return_value = SimpleNamespace(items=[_pod()])
-    a, c, t = _patch(apiext, core)
-    with a, c, t:
+    with _patch(apiext, core):
         result = katib_pre_flight()
     data = result["data"]
     assert data["ready"] is False
@@ -92,8 +100,7 @@ def test_pre_flight_controller_not_running():
     apiext.read_custom_resource_definition.return_value = _crd()
     core = MagicMock()
     core.list_namespaced_pod.return_value = SimpleNamespace(items=[_pod(phase="Pending")])
-    a, c, t = _patch(apiext, core)
-    with a, c, t:
+    with _patch(apiext, core):
         result = katib_pre_flight()
     data = result["data"]
     assert data["ready"] is False
@@ -107,8 +114,7 @@ def test_pre_flight_no_controller_pods():
     core = MagicMock()
     core.list_namespaced_pod.return_value = SimpleNamespace(items=[])
     core.list_pod_for_all_namespaces.return_value = SimpleNamespace(items=[])
-    a, c, t = _patch(apiext, core)
-    with a, c, t:
+    with _patch(apiext, core):
         result = katib_pre_flight()
     data = result["data"]
     assert data["ready"] is False
@@ -122,8 +128,7 @@ def test_pre_flight_controller_running_but_not_ready():
     apiext.read_custom_resource_definition.return_value = _crd()
     core = MagicMock()
     core.list_namespaced_pod.return_value = SimpleNamespace(items=[_pod(ready=False)])
-    a, c, t = _patch(apiext, core)
-    with a, c, t:
+    with _patch(apiext, core):
         result = katib_pre_flight()
     data = result["data"]
     assert data["ready"] is False
@@ -137,8 +142,7 @@ def test_pre_flight_ready_controller_sets_controller_ready():
     apiext.read_custom_resource_definition.return_value = _crd()
     core = MagicMock()
     core.list_namespaced_pod.return_value = SimpleNamespace(items=[_pod(ready=True)])
-    a, c, t = _patch(apiext, core)
-    with a, c, t:
+    with _patch(apiext, core):
         result = katib_pre_flight()
     assert result["data"]["controller_ready"] is True
 
@@ -149,8 +153,7 @@ def test_pre_flight_missing_container_statuses_warns_only():
     apiext.read_custom_resource_definition.return_value = _crd()
     core = MagicMock()
     core.list_namespaced_pod.return_value = SimpleNamespace(items=[_pod(ready=None)])
-    a, c, t = _patch(apiext, core)
-    with a, c, t:
+    with _patch(apiext, core):
         result = katib_pre_flight()
     data = result["data"]
     assert data["ready"] is True
@@ -162,14 +165,81 @@ def test_pre_flight_trainer_unavailable_is_warning_not_blocker():
     apiext.read_custom_resource_definition.return_value = _crd()
     core = MagicMock()
     core.list_namespaced_pod.return_value = SimpleNamespace(items=[_pod()])
-    a, c, t = _patch(apiext, core, trainer_ok=False)
-    with a, c, t:
+    with _patch(apiext, core, trainer_ok=False):
         result = katib_pre_flight()
     data = result["data"]
     # Trainer missing must not block optimizer-only usage.
     assert data["ready"] is True
     assert data["trainer_available"] is False
     assert any("Trainer client not available" in w for w in data["warnings"])
+
+
+def _healthy_cluster():
+    apiext = MagicMock()
+    apiext.read_custom_resource_definition.return_value = _crd()
+    core = MagicMock()
+    core.list_namespaced_pod.return_value = SimpleNamespace(items=[_pod()])
+    return apiext, core
+
+
+def test_pre_flight_blocks_when_webhook_is_unreachable():
+    """Regression: a Ready controller whose webhook the API server cannot reach.
+
+    Katib registers its webhooks with failurePolicy=Fail, so every create is
+    rejected while the CRD is installed and the pod looks perfectly healthy.
+    Reporting ready here is a false green.
+    """
+    apiext, core = _healthy_cluster()
+    webhook = MagicMock()
+    webhook.create_namespaced_custom_object.side_effect = ApiException(
+        status=500, reason="Internal Server Error"
+    )
+    with _patch(apiext, core, webhook=webhook):
+        result = katib_pre_flight()
+    data = result["data"]
+    assert data["ready"] is False
+    assert data["webhook_reachable"] is False
+    assert data["controller_ready"] is True, "the pod itself is healthy; only admission is broken"
+    assert any("admission webhooks are not reachable" in b for b in data["blockers"])
+
+
+def test_pre_flight_webhook_probe_is_a_dry_run():
+    """The probe must never persist an Experiment."""
+    apiext, core = _healthy_cluster()
+    webhook = MagicMock()
+    with _patch(apiext, core, webhook=webhook):
+        katib_pre_flight()
+    kwargs = webhook.create_namespaced_custom_object.call_args.kwargs
+    assert kwargs["dry_run"] == "All"
+    assert kwargs["plural"] == "experiments"
+
+
+def test_pre_flight_webhook_rejection_still_counts_as_reachable():
+    """A 400/422 means the webhook answered, which is all the probe asks."""
+    apiext, core = _healthy_cluster()
+    webhook = MagicMock()
+    webhook.create_namespaced_custom_object.side_effect = ApiException(
+        status=422, reason="Unprocessable Entity"
+    )
+    with _patch(apiext, core, webhook=webhook):
+        result = katib_pre_flight()
+    assert result["data"]["ready"] is True
+    assert result["data"]["webhook_reachable"] is True
+
+
+def test_pre_flight_webhook_forbidden_warns_rather_than_blocks():
+    """Without create permission the probe cannot conclude anything."""
+    apiext, core = _healthy_cluster()
+    webhook = MagicMock()
+    webhook.create_namespaced_custom_object.side_effect = ApiException(
+        status=403, reason="Forbidden"
+    )
+    with _patch(apiext, core, webhook=webhook):
+        result = katib_pre_flight()
+    data = result["data"]
+    assert data["ready"] is True
+    assert data["webhook_reachable"] is None
+    assert any("Cannot verify Katib admission webhooks" in w for w in data["warnings"])
 
 
 def test_pre_flight_controller_falls_back_to_all_namespaces():
@@ -181,8 +251,7 @@ def test_pre_flight_controller_falls_back_to_all_namespaces():
     core.list_pod_for_all_namespaces.return_value = SimpleNamespace(
         items=[_pod(namespace="katib-system")]
     )
-    a, c, t = _patch(apiext, core)
-    with a, c, t:
+    with _patch(apiext, core):
         result = katib_pre_flight()
     data = result["data"]
     assert data["ready"] is True
