@@ -15,10 +15,10 @@
 """Monitoring tools for training job logs and events."""
 
 import logging
-import re
 from typing import Any
 
 from kubeflow_mcp.common.constants import ErrorCode
+from kubeflow_mcp.common.failures import extract_failure_hint
 from kubeflow_mcp.common.types import ToolError, ToolResponse, exception_details, is_k8s_not_found
 from kubeflow_mcp.common.utils import (
     get_core_v1_api,
@@ -37,80 +37,6 @@ MAX_LOG_LINES = 1000
 MAX_EVENT_LIMIT = 500
 MAX_WAIT_TIMEOUT = 3600
 MIN_POLLING_INTERVAL = 1
-
-_FAILURE_PATTERNS: list[tuple[re.Pattern[str], str, str]] = [
-    (
-        re.compile(r"CUDA out of memory", re.IGNORECASE),
-        "OOM",
-        "Reduce batch_size, enable quantization (int8/int4), or request a larger GPU.",
-    ),
-    (
-        re.compile(r"OutOfMemoryError", re.IGNORECASE),
-        "OOM",
-        "Reduce batch_size, enable quantization (int8/int4), or request a larger GPU.",
-    ),
-    (
-        re.compile(r"RuntimeError: CUDA error", re.IGNORECASE),
-        "CUDA_ERROR",
-        "Check GPU driver compatibility and CUDA version in the runtime image.",
-    ),
-    (
-        re.compile(r"ModuleNotFoundError: No module named", re.IGNORECASE),
-        "MISSING_MODULE",
-        "Add the missing package to the 'packages' list.",
-    ),
-    (
-        re.compile(r"ImportError", re.IGNORECASE),
-        "IMPORT_ERROR",
-        "Verify package versions; add missing package to 'packages'.",
-    ),
-    (
-        re.compile(r"FileNotFoundError", re.IGNORECASE),
-        "FILE_NOT_FOUND",
-        "Check dataset/model paths and volume mounts.",
-    ),
-    # HF cache pattern MUST come before the generic PermissionError catch-all
-    # so that /.cache/huggingface failures are classified correctly.
-    (
-        re.compile(
-            r"Permission denied.*(?:huggingface|HF_HOME)|(?:huggingface|HF_HOME).*Permission denied",
-            re.IGNORECASE,
-        ),
-        "HF_CACHE_WRITE_ERROR",
-        "Set env var HF_HOME=/workspace to store HuggingFace cache on a writable volume mount.",
-    ),
-    (
-        re.compile(
-            r"PermissionError: \[Errno 13\] Permission denied: '/\.local|Permission denied: '/\.local",
-            re.IGNORECASE,
-        ),
-        "OPENSHIFT_PIP_ERROR",
-        "On OpenShift under a restricted SCC, pip install --user fails on read-only /.local. Do NOT use the 'packages' parameter in run_custom_training(). Instead, install packages inside your script to /workspace/lib using subprocess and append to sys.path. Read trainer://guides/platform-fixes for details.",
-    ),
-    (
-        re.compile(r"PermissionError|Access Denied", re.IGNORECASE),
-        "PERMISSION_ERROR",
-        "Check service account permissions and storage credentials.",
-    ),
-    (
-        re.compile(r"Connection(Error|Refused|Reset)", re.IGNORECASE),
-        "NETWORK_ERROR",
-        "Check network policies, DNS, and endpoint reachability.",
-    ),
-    (
-        re.compile(r"Traceback \(most recent call last\)", re.IGNORECASE),
-        "PYTHON_EXCEPTION",
-        "Review the traceback above for the root cause.",
-    ),
-]
-
-
-def _extract_failure_hint(logs: str) -> dict[str, str] | None:
-    """Pattern-match common failure signatures and return an actionable hint."""
-    for pattern, category, suggestion in _FAILURE_PATTERNS:
-        if pattern.search(logs):
-            return {"category": category, "suggestion": suggestion}
-    return None
 
 
 def _is_pod_for_step(pod: Any, step: str) -> bool:
@@ -220,7 +146,7 @@ def get_training_logs(
             "lines": len(sanitized.split("\n")),
         }
 
-        hint = _extract_failure_hint(logs)
+        hint = extract_failure_hint(logs)
         if hint:
             data["failure_hint"] = hint
             data["next_steps"] = [

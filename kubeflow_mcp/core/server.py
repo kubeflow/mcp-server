@@ -264,7 +264,15 @@ def _sections_for_persona(persona: str) -> list[str]:
     allowed = get_allowed_tools(persona) or set(TOOL_TO_PHASE.keys())
     phases_used = {TOOL_TO_PHASE[t] for t in allowed if t in TOOL_TO_PHASE}
 
-    section_order = ["planning", "monitoring", "training", "platform"]
+    # Canonical ordering is assembled from each client module's SECTION_ORDER
+    # export, so adding a client never requires editing server.py.
+    preferred_order: list[str] = []
+    for module_path in CLIENT_MODULES.values():
+        try:
+            module = importlib.import_module(module_path)
+            preferred_order.extend(getattr(module, "SECTION_ORDER", []))
+        except ImportError:
+            continue
 
     sections_needed: set[str] = set()
     for module_path in CLIENT_MODULES.values():
@@ -278,7 +286,12 @@ def _sections_for_persona(persona: str) -> list[str]:
         except ImportError:
             continue
 
-    return [s for s in section_order if s in sections_needed]
+    ordered = [s for s in preferred_order if s in sections_needed]
+    # Deterministic fallback: a section from a module that exports no
+    # SECTION_ORDER (or a name missing from it) still appears, sorted, so the
+    # result never depends on set iteration order.
+    extra = sorted(sections_needed - set(preferred_order))
+    return ordered + extra
 
 
 def _build_server_instructions(

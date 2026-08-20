@@ -16,6 +16,7 @@
 
 Mirrors kubeflow SDK's client structure:
 - TrainerClient from kubeflow.trainer
+- OptimizerClient from kubeflow.optimizer
 """
 
 import threading
@@ -29,6 +30,13 @@ if TYPE_CHECKING:
     from kubernetes import client as k8s_client
 
 K8S_TIMEOUT = 5
+
+# Writes that go through admission webhooks need a longer budget than reads.
+# Katib registers a mutating and a validating webhook, each with its own 10s
+# timeout, so a create can legitimately outlive K8S_TIMEOUT while the API server
+# is still waiting on them. Timing out first turns a diagnosable admission
+# failure into an opaque "read timed out", so writes get their own bound.
+K8S_WRITE_TIMEOUT = 30
 
 
 @lru_cache(maxsize=1)
@@ -173,9 +181,115 @@ def is_mcp_managed(name: str, namespace: str) -> bool | None:
         return None
 
 
+# =============================================================================
+# Optimizer (Katib) client factories
+# Mirrors the TrainerClient pattern above.
+# =============================================================================
+
+
+@lru_cache(maxsize=1)
+def get_optimizer_client() -> Any:
+    """Get or create OptimizerClient singleton.
+
+    Uses default KubernetesBackendConfig with current kubeconfig context.
+    """
+    from kubeflow.optimizer import OptimizerClient
+
+    return OptimizerClient()
+
+
+_optimizer_ns_client_cache: dict[str, Any] = {}
+_optimizer_ns_client_lock = threading.Lock()
+
+
+def get_optimizer_client_for_namespace(namespace: str | None = None) -> Any:
+    """Return an OptimizerClient targeting the given namespace.
+
+    When *namespace* is ``None`` the shared singleton (default kubeconfig
+    namespace) is returned.  When a namespace is explicitly provided a
+    cached ``OptimizerClient`` scoped to that namespace is returned.
+    """
+    if namespace is None:
+        return get_optimizer_client()
+    with _optimizer_ns_client_lock:
+        if namespace in _optimizer_ns_client_cache:
+            return _optimizer_ns_client_cache[namespace]
+        from kubeflow.common.types import KubernetesBackendConfig
+        from kubeflow.optimizer import OptimizerClient
+
+        client = OptimizerClient(backend_config=KubernetesBackendConfig(namespace=namespace))
+        if len(_optimizer_ns_client_cache) >= _NS_CLIENT_CACHE_MAX:
+            oldest = next(iter(_optimizer_ns_client_cache))
+            del _optimizer_ns_client_cache[oldest]
+        _optimizer_ns_client_cache[namespace] = client
+        return client
+
+
+def get_optimizer_effective_namespace(namespace: str | None = None) -> str:
+    """Namespace for OptimizationJob operations: explicit arg, then SDK backend, else ``default``.
+
+    Aligns direct CustomObjects calls with :class:`OptimizerClient` (Kubernetes backend).
+    """
+    if namespace:
+        return namespace
+    client = get_optimizer_client()
+    backend = client.backend
+    ns = getattr(backend, "namespace", None)
+    if ns is not None:
+        return str(ns)
+    return "default"
+
+
+# Outcomes of an optimizer ownership check. "missing" is kept distinct from
+# "unmanaged" so callers can report a typo'd name as not-found instead of
+# blaming ownership, which sends the caller after RBAC that is not the problem.
+OWNERSHIP_MANAGED = "managed"
+OWNERSHIP_UNMANAGED = "unmanaged"
+OWNERSHIP_MISSING = "missing"
+
+
+def get_optimizer_ownership(name: str, namespace: str) -> str | None:
+    """Classify an Experiment for the MCP ownership gate.
+
+    Returns:
+        ``OWNERSHIP_MANAGED`` if the experiment carries the MCP ownership label,
+        ``OWNERSHIP_UNMANAGED`` if it exists without the label,
+        ``OWNERSHIP_MISSING`` if no such experiment exists, or
+        ``None`` if the check could not be performed (API error, permissions).
+    """
+    from kubeflow_mcp.optimizer.constants import (
+        EXPERIMENT_PLURAL,
+        KATIB_API_GROUP,
+        KATIB_API_VERSION,
+    )
+
+    try:
+        api = get_custom_objects_api()
+        obj = api.get_namespaced_custom_object(
+            group=KATIB_API_GROUP,
+            version=KATIB_API_VERSION,
+            namespace=namespace,
+            plural=EXPERIMENT_PLURAL,
+            name=name,
+            _request_timeout=K8S_TIMEOUT,
+        )
+        labels = obj.get("metadata", {}).get("labels", {})
+        managed = labels.get(MCP_MANAGED_LABEL) == MCP_MANAGED_VALUE
+        return OWNERSHIP_MANAGED if managed else OWNERSHIP_UNMANAGED
+    except Exception as e:
+        from kubeflow_mcp.common.types import is_k8s_not_found
+
+        if is_k8s_not_found(e):
+            return OWNERSHIP_MISSING
+        return None
+
+
 def reset_clients() -> None:
     """Reset all cached clients (for testing or kubeconfig rotation)."""
     get_trainer_client.cache_clear()
+    get_optimizer_client.cache_clear()
     _get_api_client.cache_clear()
     with _ns_client_lock:
         _ns_client_cache.clear()
+    with _optimizer_ns_client_lock:
+        _optimizer_ns_client_cache.clear()
