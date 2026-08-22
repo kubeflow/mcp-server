@@ -28,7 +28,7 @@ from kubeflow_mcp.common.utils import (
     get_trainer_client_for_namespace,
     get_trainer_effective_namespace,
 )
-from kubeflow_mcp.core.security import check_namespace_allowed
+from kubeflow_mcp.core.security import check_namespace_allowed, validate_k8s_name
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +79,11 @@ def list_training_jobs(
         >>> list_training_jobs(status="Running")
         {"data": {"jobs": [{"name": "fine-tune-abc", "status": "Running"}], "total": 1}}
     """
+    if runtime:
+        runtime_err = validate_k8s_name(runtime, "runtime")
+        if runtime_err is not None:
+            return runtime_err.model_dump()
+
     ns_err = check_namespace_allowed(namespace)
     if ns_err is not None:
         return ns_err.model_dump()
@@ -134,6 +139,10 @@ def get_training_job(name: str, namespace: str | None = None) -> dict[str, Any]:
     Raises:
         ToolError: If job not found (``RESOURCE_NOT_FOUND``).
     """
+    name_err = validate_k8s_name(name)
+    if name_err is not None:
+        return name_err.model_dump()
+
     ns_err = check_namespace_allowed(namespace)
     if ns_err is not None:
         return ns_err.model_dump()
@@ -366,6 +375,10 @@ def get_runtime(name: str, include_packages: bool = False) -> dict[str, Any]:
     Raises:
         ToolError: If runtime not found (``RESOURCE_NOT_FOUND``).
     """
+    name_err = validate_k8s_name(name)
+    if name_err is not None:
+        return name_err.model_dump()
+
     try:
         client = get_trainer_client()
         rt = client.get_runtime(name=name)
