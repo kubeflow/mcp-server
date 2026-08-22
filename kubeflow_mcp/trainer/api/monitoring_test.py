@@ -330,20 +330,12 @@ class TestGetTrainingLogs:
         assert result["success"] is True
         assert result["data"]["logs"] == ""
 
-    @patch(PATCH_VALIDATE_NAME)
-    @patch(PATCH_EFF_NS, return_value="default")
-    @patch(PATCH_NS_CHECK, return_value=None)
     @patch(PATCH_CLIENT)
-    def test_fallback_invalid_name_returns_error(self, mock_client_fn, _ns, _eff_ns, mock_validate):
-        from kubeflow_mcp.common.types import ToolError as ToolErrorModel
-
-        mock_client_fn.return_value = _make_mock_client(get_job_logs=[])
-        mock_validate.return_value = ToolErrorModel(
-            error="invalid name", error_code="VALIDATION_ERROR"
-        )
+    def test_invalid_name_rejected_before_sdk_call(self, mock_client_fn):
         result = get_training_logs("bad..name", step="node-0")
         assert result["success"] is False
         assert result["error_code"] == "VALIDATION_ERROR"
+        mock_client_fn.assert_not_called()
 
     @patch(PATCH_VALIDATE_NAME, return_value=None)
     @patch(PATCH_CORE_V1)
@@ -466,6 +458,13 @@ class TestGetTrainingEvents:
         assert result["success"] is False
         assert result["error_code"] == "PERMISSION_DENIED"
 
+    @patch(PATCH_CLIENT)
+    def test_invalid_name_rejected_before_sdk_call(self, mock_client_fn):
+        result = get_training_events("bad..name")
+        assert result["success"] is False
+        assert result["error_code"] == "VALIDATION_ERROR"
+        mock_client_fn.assert_not_called()
+
 
 # ─── wait_for_training (tool-level) ──────────────────────────────────────
 
@@ -555,3 +554,10 @@ class TestWaitForTraining:
         result = wait_for_training("my-job", namespace="forbidden-ns")
         assert result["success"] is False
         assert result["error_code"] == "PERMISSION_DENIED"
+
+    @patch(PATCH_CLIENT)
+    def test_invalid_name_rejected_before_sdk_call(self, mock_client_fn):
+        result = wait_for_training("bad..name")
+        assert result["success"] is False
+        assert result["error_code"] == "VALIDATION_ERROR"
+        mock_client_fn.assert_not_called()
