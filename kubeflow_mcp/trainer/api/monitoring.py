@@ -16,6 +16,7 @@
 
 import logging
 import re
+from collections import deque
 from typing import Any
 
 from kubeflow_mcp.common.constants import ErrorCode
@@ -168,7 +169,9 @@ def get_training_logs(
             ).model_dump()
 
         client = get_trainer_client_for_namespace(namespace)
-        log_lines = list(client.get_job_logs(name=name, step=step, follow=False))
+        log_lines = list(
+            deque(client.get_job_logs(name=name, step=step, follow=False), maxlen=MAX_LOG_LINES)
+        )
         if not log_lines:
             try:
                 eff_ns = get_trainer_effective_namespace(namespace)

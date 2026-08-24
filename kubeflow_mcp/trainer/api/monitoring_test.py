@@ -251,6 +251,21 @@ class TestGetTrainingLogs:
         assert result["success"] is True
         assert "line 499" not in result["data"]["logs"]
         assert f"line {MAX_LOG_LINES + 499}" in result["data"]["logs"]
+        assert result["data"]["lines"] == MAX_LOG_LINES
+
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_log_truncation_with_generator(self, mock_client_fn, _ns):
+        def _log_generator():
+            for i in range(MAX_LOG_LINES + 500):
+                yield f"g{i}"
+
+        mock_client_fn.return_value = _make_mock_client(get_job_logs=_log_generator())
+        result = get_training_logs("big-generator-job")
+        assert result["success"] is True
+        assert "g499\n" not in result["data"]["logs"]
+        assert f"g{MAX_LOG_LINES + 499}" in result["data"]["logs"]
+        assert result["data"]["lines"] == MAX_LOG_LINES
 
     @patch(PATCH_NS_CHECK, return_value=None)
     @patch(PATCH_CLIENT)
