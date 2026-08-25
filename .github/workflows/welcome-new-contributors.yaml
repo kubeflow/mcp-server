@@ -9,7 +9,6 @@ on:
       - opened
 
 permissions:
-  contents: write
   issues: write
   pull-requests: write
 
@@ -17,10 +16,14 @@ jobs:
   welcome:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/first-interaction@v3
-        with:
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          issue_message: |
+      # actions/first-interaction@v3 greets returning contributors on every
+      # PR (its PR check ignores the author, and its skip guard lets any PR
+      # author who has never filed an issue through — see issue #171 and
+      # https://github.com/actions/first-interaction/issues/369). Check the
+      # author's own history via the search API instead.
+      - uses: actions/github-script@v8
+        env:
+          ISSUE_MESSAGE: |
             🎉 **Welcome to the Kubeflow MCP Server!** 🎉
 
             Thanks for opening your first issue! We're happy to have you as part of our community 🚀
@@ -37,7 +40,7 @@ jobs:
             Feel free to ask questions in the comments if you need any help or clarification!
             Thanks again for contributing to Kubeflow! 🙏
 
-          pr_message: |
+          PR_MESSAGE: |
             🎉 **Welcome to the Kubeflow MCP Server!** 🎉
 
             Thanks for opening your first PR! We're happy to have you as part of our community 🚀
@@ -53,3 +56,33 @@ jobs:
 
             Feel free to ask questions in the comments if you need any help or clarification!
             Thanks again for contributing to Kubeflow! 🙏
+        with:
+          script: |
+            const sender = context.payload.sender
+            if (!sender || sender.type === 'Bot') {
+              return core.info('Skipping: bot or missing sender')
+            }
+
+            const isIssue = context.payload.issue !== undefined
+            const number = context.issue.number
+            const type = isIssue ? 'issue' : 'pr'
+
+            // Count the author's earlier issues or PRs in this repo.
+            const query = `repo:${context.repo.owner}/${context.repo.repo} type:${type} author:${sender.login}`
+            const { data } = await github.rest.search.issuesAndPullRequests({
+              q: query,
+              advanced_search: true,
+              per_page: 100,
+            })
+
+            if (data.items.some((item) => item.number < number)) {
+              return core.info(`Skipping: not ${sender.login}'s first ${type}`)
+            }
+
+            core.info(`Welcoming ${sender.login} on their first ${type} (#${number})`)
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: number,
+              body: isIssue ? process.env.ISSUE_MESSAGE : process.env.PR_MESSAGE,
+            })
