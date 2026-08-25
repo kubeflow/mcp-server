@@ -61,6 +61,13 @@ test-python: ## Run unit tests
 	@uv sync --all-extras --group dev
 	@uv run pytest --cov=kubeflow_mcp --cov-report=$(or $(report),term)
 
+.PHONY: update-schema-snapshot
+update-schema-snapshot: ## Regenerate the MCP tool schema snapshot baseline (after an approved schema change)
+	@uv sync --all-extras --group dev
+	@UPDATE_SCHEMA_SNAPSHOT=1 uv run pytest tests/unit/tool_schema_snapshot_test.py -q
+	@echo "Schema snapshot updated: tests/unit/snapshots/tool_schema_platform_admin.json"
+	@echo "Review the diff and commit it alongside your schema change."
+
 test-scripts: ## Run GitHub Actions script tests
 	@uv sync --all-extras --group dev
 	@uv run pytest .github/scripts/test_scripts.py -v
