@@ -21,7 +21,7 @@ jobs:
       # author who has never filed an issue through — see issue #171 and
       # https://github.com/actions/first-interaction/issues/369). Check the
       # author's own history via the search API instead.
-      - uses: actions/github-script@v8
+      - uses: actions/github-script@v9
         env:
           ISSUE_MESSAGE: |
             🎉 **Welcome to the Kubeflow MCP Server!** 🎉
