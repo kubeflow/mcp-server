@@ -173,7 +173,7 @@ claude mcp add kubeflow -- kubeflow-mcp serve
 
 | MCP Server | Kubeflow Trainer | Kubeflow SDK | Python      | Kubernetes |
 |------------|------------------|--------------|-------------|------------|
-| 0.1.x      | >= 2.2.0         | >= 0.4.0     | 3.10 - 3.12 | >= 1.27    |
+| 0.1.x      | == 2.2.0         | >= 0.4.0     | 3.10 - 3.12 | >= 1.27    |
 
 ## CLI Reference
 
