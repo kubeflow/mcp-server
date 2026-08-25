@@ -12,16 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for trainer/api/discovery.py — list/get training jobs and runtimes.
+"""Tests for trainer/api/discovery.py.
 
-Covers input validation and status filter aliasing.
+Covers discovery behavior, input validation, and status filter aliasing.
 K8s API interaction tests require mocking the SDK and are marked as TODOs.
 """
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
+import pytest
 from tests.common import RESOURCE_NOT_FOUND
 
+from kubeflow_mcp.common.constants import ErrorCode
 from kubeflow_mcp.conftest import (
     NOT_FOUND_NAME,
     VALID_JOB_NAME,
@@ -31,7 +35,9 @@ from kubeflow_mcp.conftest import (
 from kubeflow_mcp.trainer.api.discovery import (
     _JOB_STATUS_FILTER_ALIASES,
     _trainjob_runtime_to_mcp,
+    get_runtime,
     get_training_job,
+    list_training_jobs,
 )
 
 
@@ -69,13 +75,41 @@ def test_get_training_job_not_found(mock_trainer_client):
     verify_tool_error(result, error_code=RESOURCE_NOT_FOUND)
 
 
-# TODO(test): list_training_jobs — returns formatted job list with mock SDK
-# TODO(test): list_training_jobs — status filter applies alias
-# TODO(test): list_training_jobs — runtime filter
-# TODO(test): list_training_jobs — namespace policy enforcement
-# TODO(test): get_training_job — returns job details with mock SDK
-# TODO(test): get_training_job — invalid name rejected
-# TODO(test): list_runtimes — returns runtime list
-# TODO(test): get_runtime — returns runtime details
-# TODO(test): get_runtime — include_packages=True spawns pod
-# TODO(test): get_runtime — not found returns RESOURCE_NOT_FOUND
+@pytest.mark.parametrize(
+    ("tool", "kwargs", "client_path"),
+    [
+        (
+            get_training_job,
+            {"name": "INVALID_NAME"},
+            "kubeflow_mcp.trainer.api.discovery.get_trainer_client_for_namespace",
+        ),
+        (
+            get_runtime,
+            {"name": "INVALID_NAME"},
+            "kubeflow_mcp.trainer.api.discovery.get_trainer_client",
+        ),
+        (
+            list_training_jobs,
+            {"runtime": "INVALID_NAME"},
+            "kubeflow_mcp.trainer.api.discovery.get_trainer_client_for_namespace",
+        ),
+    ],
+)
+def test_rejects_invalid_resource_name_before_calling_sdk(tool, kwargs, client_path):
+    with patch(client_path) as mock_client:
+        result = tool(**kwargs)
+
+    assert result["success"] is False
+    assert result["error_code"] == ErrorCode.VALIDATION_ERROR
+    mock_client.assert_not_called()
+
+
+# TODO(test): list_training_jobs - returns formatted job list with mock SDK
+# TODO(test): list_training_jobs - status filter applies alias
+# TODO(test): list_training_jobs - runtime filter
+# TODO(test): list_training_jobs - namespace policy enforcement
+# TODO(test): get_training_job - returns job details with mock SDK
+# TODO(test): list_runtimes - returns runtime list
+# TODO(test): get_runtime - returns runtime details
+# TODO(test): get_runtime - include_packages=True spawns pod
+# TODO(test): get_runtime - not found returns RESOURCE_NOT_FOUND
