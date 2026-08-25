@@ -144,6 +144,10 @@
   color: "74bb61"
   description: "Approve CI for external contributors"
 
+- name: ok-to-test-e2e
+  color: "74bb61"
+  description: "Run the Kubernetes E2E workflow on this PR"
+
 - name: good first issue
   color: "7057ff"
   description: "Good for newcomers"
