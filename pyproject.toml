@@ -19,14 +19,14 @@ dependencies = [
     "pydantic>=2.0",
     "pyyaml>=6.0",
     "click>=8.0",
-    "kubeflow==0.4.0",
+    "kubeflow==0.4.1",
     "huggingface-hub>=0.20",
 ]
 
 [project.optional-dependencies]
-hub = ["kubeflow[hub]==0.4.0"]
-spark = ["kubeflow[spark]==0.4.0"]
-all = ["kubeflow[hub]==0.4.0", "kubeflow[spark]==0.4.0"]
+hub = ["kubeflow[hub]==0.4.1"]
+spark = ["kubeflow[spark]==0.4.1"]
+all = ["kubeflow[hub]==0.4.1", "kubeflow[spark]==0.4.1"]
 
 [dependency-groups]
 dev = [
@@ -90,6 +90,10 @@ constraint-dependencies = [
     "pip>=26.1.2",
     "pydantic-settings>=2.14.2",
     "python-multipart>=0.0.31",
+    "kubernetes>=35.0.0,<36.0.0",
+]
+environments = [
+    "python_version < '3.13'",
 ]
 
 [tool.ruff]
