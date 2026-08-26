@@ -59,7 +59,13 @@ rules:
     resources: ["jobs"]
     verbs: ["get", "list", "watch"]
   - apiGroups: [""]
+  - apiGroups: [""]
     resources: ["pods", "pods/log", "events", "persistentvolumeclaims"]
+    verbs: ["get", "list", "watch"]
+  # get_runtime(include_packages=True) creates and deletes a probe Pod
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create", "delete"]
     verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
