@@ -7,22 +7,20 @@ that agents can reach it over HTTP and drive
 It is intentionally small: one Deployment, one ClusterIP Service, a ServiceAccount
 and least-privilege RBAC. No Ingress, no OIDC, no Helm chart.
 
-## Prerequisites
-
-- A Kubernetes cluster with Kubeflow Trainer installed
-- A namespace to run in. The example uses `kubeflow-user-example-com`, the Profile
-  namespace created by a standard Kubeflow installation
-- `kubectl` pointed at that cluster
-
 ## Quick start
+
+Requires a cluster with Kubeflow Trainer installed, `kubectl`, and an existing
+namespace — the example uses `kubeflow-user-example-com`, the Profile namespace a
+standard Kubeflow install creates. The bearer token is not part of `manifests.yaml`,
+so create it first:
 
 ```bash
 NAMESPACE=kubeflow-user-example-com
 
-# Generate the bearer token and deploy everything in one step. Piping keeps the
-# token out of manifests.yaml, so no credential is ever written to disk.
-sed "s/REPLACE_ME/$(openssl rand -hex 32)/" manifests.yaml | kubectl apply -f -
+kubectl create secret generic kubeflow-mcp-auth -n "$NAMESPACE" \
+  --from-literal=token="$(openssl rand -hex 32)"
 
+kubectl apply -f manifests.yaml
 kubectl rollout status deploy/kubeflow-mcp -n "$NAMESPACE"
 ```
 
@@ -32,33 +30,25 @@ Read the token back when configuring a client:
 kubectl get secret kubeflow-mcp-auth -n "$NAMESPACE" -o jsonpath='{.data.token}' | base64 -d
 ```
 
-To rotate it later, re-run the command above and restart the pod so the new value
-is picked up:
-
-```bash
-kubectl rollout restart deploy/kubeflow-mcp -n "$NAMESPACE"
-```
-
-If you prefer to manage the Secret separately — for example with an external secret
-store — delete the `Secret` document from `manifests.yaml` and create it
-imperatively instead. Leaving the document in place while doing this would reset
-the token to `REPLACE_ME` on the next apply:
+To rotate it, replace the Secret and restart the pod so the new value is picked up.
+`replace` rather than `apply` keeps the new token out of the
+`last-applied-configuration` annotation:
 
 ```bash
 kubectl create secret generic kubeflow-mcp-auth -n "$NAMESPACE" \
-  --from-literal=token="$(openssl rand -hex 32)"
+  --from-literal=token="$(openssl rand -hex 32)" --dry-run=client -o yaml \
+  | kubectl replace -f -
+kubectl rollout restart deploy/kubeflow-mcp -n "$NAMESPACE"
 ```
 
 ## What gets created
 
 | Resource | Purpose |
 |---|---|
-| `Namespace/kubeflow-user-example-com` | Already present on a standard Kubeflow install, where the Profile controller owns it — applying is then a no-op |
 | `ServiceAccount/kubeflow-mcp` | Identity the server uses against the Kubernetes API |
 | `ClusterRole/kubeflow-mcp-read` | Read-only: `ClusterTrainingRuntime`, nodes, namespaces, CRDs |
 | `Role/kubeflow-mcp-trainjobs` | Full TrainJob lifecycle, in this namespace only |
 | `Role/kubeflow-mcp-trainer-version` | Read of the single `kubeflow-trainer-public` ConfigMap in `kubeflow-system`, so the SDK can report the Trainer control-plane version |
-| `Secret/kubeflow-mcp-auth` | Bearer token for the HTTP transport |
 | `Deployment/kubeflow-mcp` | The server, HTTP transport on port 8000 |
 | `Service/kubeflow-mcp` | ClusterIP, reachable at `kubeflow-mcp:8000` in-namespace |
 
@@ -100,36 +90,15 @@ in it.
 
 To use another namespace, replace `kubeflow-user-example-com` everywhere in
 `manifests.yaml` — including inside `KUBEFLOW_MCP_ALLOWED_HOSTS`, which spells out
-the Service DNS names:
+the Service DNS names, and the namespace suffix on both binding names. It leaves
+`kubeflow-system` untouched:
 
 ```bash
-sed -i 's/kubeflow-user-example-com/my-namespace/g' manifests.yaml
+sed -i.bak 's/kubeflow-user-example-com/my-namespace/g' manifests.yaml
 ```
 
-## Choosing what the agent can do
-
-Tool exposure is controlled by the persona, which is separate from RBAC — RBAC
-decides what the ServiceAccount may touch in the Kubernetes API, the persona
-decides which MCP tools exist at all.
-
-| `KUBEFLOW_MCP_PERSONA` | Tools |
-|---|---|
-| `readonly` (default) | Inspection and monitoring only — cannot submit a TrainJob |
-| `data-scientist` (used here) | `readonly` plus `fine_tune`, `run_custom_training`, `wait_for_training`, `delete_training_job` |
-| `ml-engineer` | `data-scientist` plus `run_container_training`, `update_training_job`, `inspect_crd`, `inspect_controller` |
-| `platform-admin` | Everything |
-
-The example uses `data-scientist` because the default `readonly` persona cannot
-submit training jobs, which is the first thing most people want to try. Switch the
-`KUBEFLOW_MCP_PERSONA` env var to change it.
-
-`ml-engineer` additionally reads the Trainer controller's pods and logs, which the
-RBAC in this example does not grant. If you use it, add a read-only Role for the
-controller namespace and set `KUBEFLOW_MCP_CONTROLLER_NAMESPACE`.
-
-For finer control than the built-in personas, mount a policy file at
-`$HOME/.kf-mcp-policy.yaml` in the pod — see the main
-[README](../../README.md) for the format.
+`-i.bak` rather than a bare `-i`: BSD `sed` on macOS reads the next argument as the
+backup suffix and fails without one.
 
 ## Troubleshooting
 
@@ -138,6 +107,10 @@ headers by default, so anything arriving via the Service is rejected.
 `KUBEFLOW_MCP_ALLOWED_HOSTS` must list the exact hostname clients use; only the
 `:*` port wildcard is supported, not a host wildcard. Note that `port-forward`
 does *not* reproduce this, because it sends a loopback `Host` header.
+
+**A browser-based client returns 403** — the `Origin` header is not allowed. Add it
+to `KUBEFLOW_MCP_ALLOWED_ORIGINS`; setting hosts alone leaves origins at their
+loopback-only defaults. Non-browser MCP clients send no `Origin` and are unaffected.
 
 **Tools report an empty namespace, or a 403 listing runtimes** — the pod is running
 outside the namespace whose TrainJobs you expect. See the section above.
@@ -152,10 +125,22 @@ SDK reads the Trainer version from the `kubeflow-trainer-public` ConfigMap in
 same message shows `(403)` instead, the `kubeflow-mcp-trainer-version` Role is
 missing or Trainer runs in a different namespace than `kubeflow-system`.
 
-**Every authenticated request returns 401** — the token still reads `REPLACE_ME`,
-or the client is sending a different one. Compare against the value stored in the
-Secret.
+**Every authenticated request returns 401** — the client is sending a different
+token than the one stored in the Secret.
 
-**Pod stuck in `CreateContainerConfigError`** — the `kubeflow-mcp-auth` Secret is
-missing, which happens if you removed it from `manifests.yaml` without creating it
-imperatively.
+**Pod stuck in `CreateContainerConfigError`** — the `kubeflow-mcp-auth` Secret does
+not exist yet. Create it as shown in the quick start.
+
+**`kubectl apply` fails with `namespaces "kubeflow-system" not found`** — Trainer
+runs somewhere else, so the two `kubeflow-mcp-trainer-version` documents have
+nowhere to go while the Deployment and Service are still created. Point those two
+documents at the Trainer namespace and set `KUBEFLOW_SYSTEM_NAMESPACE` to match.
+
+**The pod is `Ready` but calls still fail** — `/ready` is evaluated once when routes
+are registered and never re-checked, so it carries no more signal than `/health`. If
+the Kubernetes API becomes unreachable the pod stays `Ready` and keeps taking
+traffic from the Service.
+
+**A service mesh blocks traffic to the pod** — the Deployment sets
+`sidecar.istio.io/inject: "false"`. If your mesh enforces strict mTLS, remove that
+annotation and allow the traffic with a `PeerAuthentication`/`DestinationRule`.
