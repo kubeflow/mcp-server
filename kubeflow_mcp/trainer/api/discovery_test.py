@@ -20,7 +20,7 @@ K8s API interaction tests require mocking the SDK and are marked as TODOs.
 
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from tests.common import RESOURCE_NOT_FOUND
@@ -34,6 +34,7 @@ from kubeflow_mcp.conftest import (
 )
 from kubeflow_mcp.trainer.api.discovery import (
     _JOB_STATUS_FILTER_ALIASES,
+    _get_runtime_image,
     _trainjob_runtime_to_mcp,
     get_runtime,
     get_training_job,
@@ -104,12 +105,125 @@ def test_rejects_invalid_resource_name_before_calling_sdk(tool, kwargs, client_p
     mock_client.assert_not_called()
 
 
-# TODO(test): list_training_jobs - returns formatted job list with mock SDK
-# TODO(test): list_training_jobs - status filter applies alias
-# TODO(test): list_training_jobs - runtime filter
-# TODO(test): list_training_jobs - namespace policy enforcement
-# TODO(test): get_training_job - returns job details with mock SDK
-# TODO(test): list_runtimes - returns runtime list
-# TODO(test): get_runtime - returns runtime details
-# TODO(test): get_runtime - include_packages=True spawns pod
-# TODO(test): get_runtime - not found returns RESOURCE_NOT_FOUND
+class TestGetRuntime:
+    @patch("kubeflow_mcp.trainer.api.discovery.get_trainer_client")
+    def test_get_runtime_extracts_sdk_trainer_metadata(self, mock_client_fn):
+        mock_trainer = MagicMock()
+        mock_trainer.framework = "torch"
+        mock_trainer.image = "pytorch/pytorch:2.0"
+        mock_trainer.num_nodes = 2
+        mock_trainer.device = "gpu"
+        mock_trainer.device_count = "4"
+        mock_trainer.trainer_type.value = "CustomTrainer"
+
+        mock_rt = MagicMock()
+        mock_rt.name = "torch-distributed"
+        mock_rt.trainer = mock_trainer
+        mock_rt.pretrained_model = "meta-llama/Llama-3.2-1B"
+        mock_rt.spec = None
+
+        mock_client = MagicMock()
+        mock_client.get_runtime.return_value = mock_rt
+        mock_client_fn.return_value = mock_client
+
+        result = get_runtime("torch-distributed")
+        assert result["success"] is True
+        data = result["data"]
+        assert data["name"] == "torch-distributed"
+        assert data["framework"] == "torch"
+        assert data["image"] == "pytorch/pytorch:2.0"
+        assert data["num_nodes"] == 2
+        assert data["device"] == "gpu"
+        assert data["device_count"] == "4"
+        assert data["trainer_type"] == "CustomTrainer"
+        assert data["pretrained_model"] == "meta-llama/Llama-3.2-1B"
+
+    @patch("kubeflow_mcp.trainer.api.discovery.get_trainer_client")
+    def test_get_runtime_spec_fallback(self, mock_client_fn):
+        mock_rt = MagicMock()
+        mock_rt.name = "custom-runtime"
+        mock_rt.trainer = None
+        mock_rt.pretrained_model = None
+
+        mock_ml_policy = MagicMock()
+        mock_ml_policy.torch = "torch"
+        mock_ml_policy.mpi = None
+
+        mock_replicated_job = MagicMock()
+        mock_replicated_job.name = "worker"
+        mock_replicated_job.template.spec.completions = 4
+
+        mock_spec = MagicMock()
+        mock_spec.ml_policy = mock_ml_policy
+        mock_spec.template.spec.replicated_jobs = [mock_replicated_job]
+        mock_rt.spec = mock_spec
+
+        mock_client = MagicMock()
+        mock_client.get_runtime.return_value = mock_rt
+        mock_client_fn.return_value = mock_client
+
+        result = get_runtime("custom-runtime")
+        assert result["success"] is True
+        data = result["data"]
+        assert data["name"] == "custom-runtime"
+        assert data["framework"] == "torch"
+        assert data["replicated_jobs"] == [{"name": "worker", "replicas": 4}]
+
+    @patch("kubeflow_mcp.trainer.api.discovery.get_trainer_client")
+    def test_get_runtime_not_found(self, mock_client_fn):
+        from kubernetes.client.exceptions import ApiException
+
+        mock_client = MagicMock()
+        mock_client.get_runtime.side_effect = ApiException(status=404, reason="Not Found")
+        mock_client_fn.return_value = mock_client
+
+        result = get_runtime("non-existent-runtime")
+        assert result["success"] is False
+        assert result["error_code"] == ErrorCode.RESOURCE_NOT_FOUND
+
+
+class TestGetRuntimeImage:
+    @patch("kubeflow_mcp.trainer.api.discovery.get_trainer_client")
+    def test_extracts_image_from_sdk_runtime(self, mock_client_fn):
+        mock_rt = MagicMock()
+        mock_rt.trainer.image = "docker.io/kubeflow/trainer:v2"
+        mock_client = MagicMock()
+        mock_client.get_runtime.return_value = mock_rt
+        mock_client_fn.return_value = mock_client
+
+        image = _get_runtime_image("torchtune-llama")
+        assert image == "docker.io/kubeflow/trainer:v2"
+
+    @patch("kubeflow_mcp.trainer.api.discovery.get_custom_objects_api")
+    @patch("kubeflow_mcp.trainer.api.discovery.get_trainer_client")
+    def test_fallback_to_custom_objects_api(self, mock_client_fn, mock_custom_api_fn):
+        mock_client_fn.side_effect = RuntimeError("SDK runtime lookup failed")
+
+        mock_custom_api = MagicMock()
+        mock_custom_api.get_cluster_custom_object.return_value = {
+            "spec": {
+                "template": {
+                    "spec": {
+                        "replicatedJobs": [
+                            {
+                                "template": {
+                                    "spec": {
+                                        "template": {
+                                            "spec": {
+                                                "containers": [
+                                                    {"image": "docker.io/kubeflow/fallback:v1"}
+                                                ]
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+        mock_custom_api_fn.return_value = mock_custom_api
+
+        image = _get_runtime_image("cluster-runtime")
+        assert image == "docker.io/kubeflow/fallback:v1"
