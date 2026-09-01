@@ -192,7 +192,7 @@ def get_training_job(name: str, namespace: str | None = None) -> dict[str, Any]:
 
 
 def list_runtimes() -> dict[str, Any]:
-    """List available ClusterTrainingRuntimes.
+    """List available TrainingRuntimes and ClusterTrainingRuntimes.
 
     Call this if ``fine_tune()`` fails with "runtime not found" to see
     what runtimes are installed in the cluster.
@@ -231,17 +231,23 @@ def list_runtimes() -> dict[str, Any]:
         ).model_dump()
 
 
-def _get_runtime_image(name: str) -> str | None:
-    """Extract container image from a ClusterTrainingRuntime CRD or SDK Runtime."""
-    try:
-        client = get_trainer_client()
-        rt = client.get_runtime(name=name)
-        trainer = getattr(rt, "trainer", None)
+def _get_runtime_image(name: str, runtime_obj: Any = None) -> str | None:
+    """Extract container image from an SDK Runtime or ClusterTrainingRuntime CRD."""
+    if runtime_obj is not None:
+        trainer = getattr(runtime_obj, "trainer", None)
         image = getattr(trainer, "image", None) if trainer is not None else None
         if image:
             return str(image)
-    except Exception:
-        pass
+    else:
+        try:
+            client = get_trainer_client()
+            rt = client.get_runtime(name=name)
+            trainer = getattr(rt, "trainer", None)
+            image = getattr(trainer, "image", None) if trainer is not None else None
+            if image:
+                return str(image)
+        except Exception:
+            pass
 
     try:
         api = get_custom_objects_api()
@@ -268,7 +274,7 @@ def _get_runtime_image(name: str) -> str | None:
     return None
 
 
-def _fetch_packages_via_pod(runtime_name: str) -> dict[str, Any]:
+def _fetch_packages_via_pod(runtime_name: str, runtime_obj: Any = None) -> dict[str, Any]:
     """Create a lightweight Pod to run ``pip list`` using the runtime's image.
 
     Creates a temporary Pod from the runtime's container image to list packages.
@@ -277,7 +283,7 @@ def _fetch_packages_via_pod(runtime_name: str) -> dict[str, Any]:
     The pod includes emptyDir volumes for writable directories so it works
     on platforms with read-only root filesystems.
     """
-    image = _get_runtime_image(runtime_name)
+    image = _get_runtime_image(runtime_name, runtime_obj=runtime_obj)
     if not image:
         return {
             "packages_error": f"Could not extract container image from runtime '{runtime_name}'"
@@ -430,7 +436,7 @@ def _extract_runtime_metadata(rt: Any) -> dict[str, Any]:
 
 
 def get_runtime(name: str, include_packages: bool = False) -> dict[str, Any]:
-    """Get ClusterTrainingRuntime configuration.
+    """Get TrainingRuntime or ClusterTrainingRuntime configuration.
 
     Args:
         name: Runtime name (e.g., ``torch-distributed``).
@@ -454,7 +460,7 @@ def get_runtime(name: str, include_packages: bool = False) -> dict[str, Any]:
         data = _extract_runtime_metadata(rt)
 
         if include_packages:
-            data.update(_fetch_packages_via_pod(name))
+            data.update(_fetch_packages_via_pod(name, runtime_obj=rt))
 
         return ToolResponse(data=data).model_dump()
 

@@ -181,8 +181,35 @@ class TestGetRuntime:
         assert result["success"] is False
         assert result["error_code"] == ErrorCode.RESOURCE_NOT_FOUND
 
+    @patch("kubeflow_mcp.trainer.api.discovery._fetch_packages_via_pod")
+    @patch("kubeflow_mcp.trainer.api.discovery.get_trainer_client")
+    def test_get_runtime_include_packages_passes_runtime_obj(
+        self, mock_client_fn, mock_fetch_packages
+    ):
+        mock_rt = MagicMock()
+        mock_rt.name = "torch-distributed"
+        mock_rt.trainer.image = "pytorch/pytorch:2.0"
+        mock_client = MagicMock()
+        mock_client.get_runtime.return_value = mock_rt
+        mock_client_fn.return_value = mock_client
+        mock_fetch_packages.return_value = {"packages": [{"name": "torch", "version": "2.0"}]}
+
+        result = get_runtime("torch-distributed", include_packages=True)
+        assert result["success"] is True
+        mock_fetch_packages.assert_called_once_with("torch-distributed", runtime_obj=mock_rt)
+        assert result["data"]["packages"] == [{"name": "torch", "version": "2.0"}]
+
 
 class TestGetRuntimeImage:
+    @patch("kubeflow_mcp.trainer.api.discovery.get_trainer_client")
+    def test_extracts_image_from_passed_runtime_obj(self, mock_client_fn):
+        mock_rt = MagicMock()
+        mock_rt.trainer.image = "docker.io/kubeflow/passed:v1"
+
+        image = _get_runtime_image("torchtune-llama", runtime_obj=mock_rt)
+        assert image == "docker.io/kubeflow/passed:v1"
+        mock_client_fn.assert_not_called()
+
     @patch("kubeflow_mcp.trainer.api.discovery.get_trainer_client")
     def test_extracts_image_from_sdk_runtime(self, mock_client_fn):
         mock_rt = MagicMock()
