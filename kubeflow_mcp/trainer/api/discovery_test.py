@@ -139,6 +139,40 @@ class TestGetRuntime:
         assert data["pretrained_model"] == "meta-llama/Llama-3.2-1B"
 
     @patch("kubeflow_mcp.trainer.api.discovery.get_trainer_client")
+    def test_get_runtime_with_real_sdk_runtime_objects(self, mock_client_fn):
+        from kubeflow.trainer.types.types import Runtime, RuntimeTrainer, TrainerType
+
+        real_trainer = RuntimeTrainer(
+            trainer_type=TrainerType.CUSTOM_TRAINER,
+            framework="torch",
+            image="pytorch/pytorch:2.0-cuda11.8",
+            num_nodes=0,
+            device="gpu",
+            device_count="4",
+        )
+        real_rt = Runtime(
+            name="torch-distributed",
+            trainer=real_trainer,
+            pretrained_model="meta-llama/Llama-3.2-1B",
+        )
+
+        mock_client = MagicMock()
+        mock_client.get_runtime.return_value = real_rt
+        mock_client_fn.return_value = mock_client
+
+        result = get_runtime("torch-distributed")
+        assert result["success"] is True
+        data = result["data"]
+        assert data["name"] == "torch-distributed"
+        assert data["framework"] == "torch"
+        assert data["image"] == "pytorch/pytorch:2.0-cuda11.8"
+        assert data["num_nodes"] == 0
+        assert data["device"] == "gpu"
+        assert data["device_count"] == "4"
+        assert data["trainer_type"] == "CustomTrainer"
+        assert data["pretrained_model"] == "meta-llama/Llama-3.2-1B"
+
+    @patch("kubeflow_mcp.trainer.api.discovery.get_trainer_client")
     def test_get_runtime_spec_fallback(self, mock_client_fn):
         mock_rt = MagicMock()
         mock_rt.name = "custom-runtime"
@@ -209,6 +243,19 @@ class TestGetRuntimeImage:
         image = _get_runtime_image("torchtune-llama", runtime_obj=mock_rt)
         assert image == "docker.io/kubeflow/passed:v1"
         mock_client_fn.assert_not_called()
+
+    def test_extracts_image_from_real_sdk_runtime_obj(self):
+        from kubeflow.trainer.types.types import Runtime, RuntimeTrainer, TrainerType
+
+        real_trainer = RuntimeTrainer(
+            trainer_type=TrainerType.CUSTOM_TRAINER,
+            framework="torch",
+            image="docker.io/kubeflow/real-trainer:v1",
+        )
+        real_rt = Runtime(name="real-runtime", trainer=real_trainer)
+
+        image = _get_runtime_image("real-runtime", runtime_obj=real_rt)
+        assert image == "docker.io/kubeflow/real-trainer:v1"
 
     @patch("kubeflow_mcp.trainer.api.discovery.get_trainer_client")
     def test_extracts_image_from_sdk_runtime(self, mock_client_fn):

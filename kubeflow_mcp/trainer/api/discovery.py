@@ -393,7 +393,7 @@ def _extract_runtime_metadata(rt: Any) -> dict[str, Any]:
         if image:
             data["image"] = str(image)
         num_nodes = getattr(trainer, "num_nodes", None)
-        if num_nodes:
+        if num_nodes is not None:
             data["num_nodes"] = num_nodes
         device = getattr(trainer, "device", None)
         if device and device != "UNKNOWN":
