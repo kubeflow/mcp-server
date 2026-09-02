@@ -78,6 +78,7 @@ def list_spark_sessions(
     except ImportError as e:
         return ToolError(error=str(e), error_code=ErrorCode.SDK_ERROR).model_dump()
     except Exception as e:
+        logger.warning("list_spark_sessions() failed: %s", e, exc_info=True)
         return ToolError(
             error=str(e),
             error_code=ErrorCode.SDK_ERROR,
@@ -128,6 +129,7 @@ def get_spark_session(name: str, namespace: str | None = None) -> dict[str, Any]
     except ImportError as e:
         return ToolError(error=str(e), error_code=ErrorCode.SDK_ERROR).model_dump()
     except Exception as e:
+        logger.warning("get_spark_session(%s) failed: %s", name, e, exc_info=True)
         if is_k8s_not_found(e):
             return ToolError(
                 error=f"SparkConnect session '{name}' not found",

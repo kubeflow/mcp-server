@@ -93,6 +93,7 @@ def get_spark_session_logs(
     except ImportError as e:
         return ToolError(error=str(e), error_code=ErrorCode.SDK_ERROR).model_dump()
     except Exception as e:
+        logger.warning("get_spark_session_logs(%s) failed: %s", name, e, exc_info=True)
         if is_k8s_not_found(e):
             return ToolError(
                 error=f"SparkConnect session '{name}' not found",
