@@ -169,6 +169,20 @@ claude mcp add kubeflow -- kubeflow-mcp serve
 | Platform | `inspect_crd`, `inspect_controller`, `patch_runtime`, `create_runtime`, `delete_runtime` | Cluster inspection and runtime management |
 | Health | `health_check`, `get_server_logs` | Server diagnostics |
 
+### Spark tools
+
+Enabled with `--clients trainer,spark` (requires the `kubeflow[spark]` extra):
+
+| Phase | Tools | Description |
+|-------|-------|-------------|
+| Discovery | `list_spark_sessions`, `get_spark_session` | Browse SparkConnect sessions |
+| Sessions | `create_spark_session`, `delete_spark_session` | Provision and tear down SparkConnect sessions (ownership-guarded) |
+| Monitoring | `get_spark_session_logs` | Read driver logs |
+
+Sessions created through MCP are labelled `kubeflow-mcp/managed-by=mcp`. Non-admin
+personas may only delete sessions carrying that label; use the `platform-admin`
+persona to manage sessions created outside MCP.
+
 
 ### Requirements
 

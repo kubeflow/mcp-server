@@ -20,7 +20,7 @@ Mirrors kubeflow SDK's client structure:
 
 import threading
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 # Import at module level to avoid import deadlocks when tools are called rapidly
 from kubeflow.trainer import TrainerClient
@@ -171,6 +171,52 @@ def is_mcp_managed(name: str, namespace: str) -> bool | None:
         if is_k8s_not_found(e):
             return False
         return None
+
+
+_SPARK_CONNECT_GROUP = "sparkoperator.k8s.io"
+_SPARK_CONNECT_VERSION = "v1alpha1"
+_SPARK_CONNECT_PLURAL = "sparkconnects"
+
+
+SparkOwnership = Literal["managed", "unmanaged", "not_found", "unknown"]
+
+
+def get_spark_session_ownership(name: str, namespace: str) -> SparkOwnership:
+    """Classify a SparkConnect session by MCP ownership.
+
+    Unlike :func:`is_mcp_managed` (which collapses a missing TrainJob into
+    "unmanaged"), this distinguishes absence from lack of ownership, because
+    ``docs/CONVENTIONS.md`` requires distinct error codes for the two cases:
+    ``RESOURCE_NOT_FOUND`` for a missing resource, ``VALIDATION_ERROR`` for one
+    that exists but was not created by MCP.
+
+    Returns:
+        ``"managed"``: session carries the MCP ownership label.
+        ``"unmanaged"``: session exists but lacks the label.
+        ``"not_found"``: no such session in *namespace*.
+        ``"unknown"``: the check could not be performed (API error, permissions).
+    """
+    try:
+        api = get_custom_objects_api()
+        obj = api.get_namespaced_custom_object(
+            group=_SPARK_CONNECT_GROUP,
+            version=_SPARK_CONNECT_VERSION,
+            namespace=namespace,
+            plural=_SPARK_CONNECT_PLURAL,
+            name=name,
+            _request_timeout=K8S_TIMEOUT,
+        )
+    except Exception as e:
+        from kubeflow_mcp.common.types import is_k8s_not_found
+
+        if is_k8s_not_found(e):
+            return "not_found"
+        return "unknown"
+
+    labels = (obj or {}).get("metadata", {}).get("labels", {}) or {}
+    if labels.get(MCP_MANAGED_LABEL) == MCP_MANAGED_VALUE:
+        return "managed"
+    return "unmanaged"
 
 
 # ─── Spark client factories ────────────────────────────────────────────────
