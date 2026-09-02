@@ -68,9 +68,8 @@ kubeflow_mcp/                    # Main Python package (unit tests co-located as
  and `CLIENT_RESOURCES`; `optimizer` and `hub` are currently stubs. `core/server.py`
  loads selected clients dynamically.
 - **Workflow phases**: Plan → Discover → Train → Monitor → Lifecycle / Platform / Health.
-- **Confirm gate**: New mutating tools must preview when `confirmed=False` and execute only with
-  `confirmed=True`; `update_training_job` is a legacy exception that currently mutates immediately.
-  Do not copy, weaken, or broaden that exception.
+- **Confirm gate**: All mutating tools must preview when `confirmed=False` and execute only with
+  `confirmed=True`.
 - **Personas**: `readonly`, `data-scientist`, `ml-engineer`, `platform-admin`
   (see `core/policy.py`). New tools must be added to the correct persona allowlists.
 - **Tool modes**: `full`, `progressive`, and `semantic` (see `core/dynamic_tools.py`).

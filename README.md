@@ -122,8 +122,7 @@ Agent calls: fine_tune(..., confirmed=True) → TrainJob "train-gemma-abc" creat
 Agent calls: get_training_logs("train-gemma-abc") → training progress...
 ```
 
-Most mutating tools require `confirmed=True` and return a preview before making changes.
-`update_training_job` is a legacy exception and immediately suspends or resumes a training job.
+All mutating tools require `confirmed=True` and return a preview before making changes.
 
 ### MCP Client Config
 

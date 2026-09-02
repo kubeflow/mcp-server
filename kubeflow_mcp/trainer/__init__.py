@@ -114,7 +114,7 @@ CLIENT_TOOL_DESCRIPTIONS: dict[str, str] = {
     "get_training_events": "Get K8s events for debugging pending/failed jobs. Supports optional namespace.",
     "wait_for_training": "Block until job reaches target status (Complete/Failed). Supports optional namespace.",
     "delete_training_job": "[DESTRUCTIVE] Delete a training job permanently. Set confirmed=True to execute.",
-    "update_training_job": "Suspend or resume a training job. Pass action='suspend' or 'resume'.",
+    "update_training_job": "Suspend or resume a training job. Pass action='suspend' or 'resume'. Set confirmed=True to execute.",
     "inspect_crd": "List Trainer CRDs or get details for a specific one. Pass name= for details.",
     "inspect_controller": "Inspect controller pod. Pass view='logs' or 'events'. Auto-discovers namespace.",
     "patch_runtime": "Strategic merge patch on a ClusterTrainingRuntime. Set confirmed=True to apply.",
@@ -347,7 +347,7 @@ MONITORING AND LIFECYCLE:
 - All monitoring tools accept optional namespace= to query jobs in a different namespace
 - Suspended jobs show status "Created" in the API — this is a known controller behavior
 - delete_training_job(name, confirmed=True) -> remove job permanently (preview first, non-admin personas can only delete MCP-created jobs)
-- update_training_job(name, action="suspend"|"resume") -> pause/resume without deleting (non-admin personas can only modify MCP-created jobs)""",
+- update_training_job(name, action="suspend"|"resume", confirmed=True) -> pause/resume without deleting (preview first, non-admin personas can only modify MCP-created jobs)""",
     },
     "training": {
         "full": """\

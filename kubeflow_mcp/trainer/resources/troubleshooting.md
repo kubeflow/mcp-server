@@ -140,9 +140,9 @@ All jobs created via MCP tools are labeled `kubeflow-mcp/managed-by=mcp`. Non-ad
 ## Recovery Actions
 
 ```
-delete_training_job(name)    # Delete and retry (MCP-created jobs only for non-admin)
-update_training_job(name, action="suspend")   # Pause
-update_training_job(name, action="resume")   # Resume
+delete_training_job(name, confirmed=True)    # Delete and retry (preview first, MCP-created jobs only for non-admin)
+update_training_job(name, action="suspend", confirmed=True)   # Pause (preview first)
+update_training_job(name, action="resume", confirmed=True)   # Resume (preview first)
 ```
 
 ## Parameter Rules (Non-Inferable)

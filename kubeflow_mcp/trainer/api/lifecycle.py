@@ -121,13 +121,17 @@ def update_training_job(
     name: str,
     action: str,
     namespace: str | None = None,
+    confirmed: bool = False,
 ) -> dict[str, Any]:
     """Suspend or resume a training job.
+
+    Requires ``confirmed=True`` to execute. First call returns a preview.
 
     Args:
         name: TrainJob name.
         action: ``"suspend"`` to pause execution, ``"resume"`` to continue.
         namespace: K8s namespace. Uses default from kubeconfig when omitted.
+        confirmed: Set ``True`` to update. ``False`` returns a preview.
 
     Returns:
         dict: Response containing ``job``, ``namespace``, ``action``, ``message``.
@@ -171,6 +175,12 @@ def update_training_job(
                         ),
                     },
                 ).model_dump()
+
+        if not confirmed:
+            return PreviewResponse(
+                message=f"Will {action} training job '{name}'. Set confirmed=True to proceed.",
+                config={"job": name, "namespace": ns, "action": action},
+            ).model_dump()
 
         api = mcp_utils.get_trainer_custom_objects_api()
         body = {"spec": {"suspend": action == "suspend"}}

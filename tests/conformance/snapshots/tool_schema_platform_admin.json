@@ -1670,6 +1670,10 @@
         "action": {
           "type": "string"
         },
+        "confirmed": {
+          "default": false,
+          "type": "boolean"
+        },
         "name": {
           "type": "string"
         },

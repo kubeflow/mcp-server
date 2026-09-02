@@ -51,7 +51,7 @@ Stub: `MODULE_INFO` + `TOOLS = []`. Implemented: all exports above + tests.
 
 **Confirm gate:** Mutators accept `confirmed: bool = False` — preview first, execute at
 `confirmed=True`. `delete_*`: `[DESTRUCTIVE]` in description, `destructiveHint: True`,
-entry in `DESTRUCTIVE_TOOLS`. Legacy exceptions: `update_training_job`; trainer runtime
+entry in `DESTRUCTIVE_TOOLS`. Legacy exceptions: trainer runtime
 previews use `ToolResponse` not `PreviewResponse` — do not extend.
 
 **Annotations** (every tool): `title`, `readOnlyHint`, `destructiveHint`, `idempotentHint`,

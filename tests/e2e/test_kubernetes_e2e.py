@@ -407,7 +407,17 @@ async def test_e2e_confirm_gate(mcp_session: ClientSession) -> None:
         )
         assert create_resp.get("success") is True
 
-        # 3. delete_training_job(confirmed=False) returns preview without deleting
+        # 3. update_training_job(confirmed=False) returns preview
+        upd_prev = await _call_tool(
+            mcp_session,
+            "update_training_job",
+            {"name": job_name, "action": "suspend", "namespace": namespace, "confirmed": False},
+        )
+        assert upd_prev.get("success") is True
+        assert upd_prev.get("status") == "preview"
+        assert "confirmed=True" in upd_prev.get("message", "")
+
+        # 4. delete_training_job(confirmed=False) returns preview without deleting
         del_prev = await _call_tool(
             mcp_session,
             "delete_training_job",
@@ -426,7 +436,7 @@ async def test_e2e_confirm_gate(mcp_session: ClientSession) -> None:
         assert still_there.get("success") is True
         assert still_there.get("data", {}).get("name") == job_name
 
-        # 4. delete_training_job(confirmed=True) executes deletion
+        # 5. delete_training_job(confirmed=True) executes deletion
         del_exec = await _call_tool(
             mcp_session,
             "delete_training_job",
@@ -477,11 +487,20 @@ async def test_e2e_job_lifecycle(mcp_session: ClientSession) -> None:
         assert create_resp.get("success") is True
         assert create_resp.get("data", {}).get("status") == "Created"
 
-        # 2. Suspend job
+        # 2. Suspend job (preview first, then execute with confirmed=True)
+        suspend_prev = await _call_tool(
+            mcp_session,
+            "update_training_job",
+            {"name": job_name, "action": "suspend", "namespace": namespace, "confirmed": False},
+        )
+        assert suspend_prev.get("success") is True
+        assert suspend_prev.get("status") == "preview"
+        assert "confirmed=True" in suspend_prev.get("message", "")
+
         suspend_resp = await _call_tool(
             mcp_session,
             "update_training_job",
-            {"name": job_name, "action": "suspend", "namespace": namespace},
+            {"name": job_name, "action": "suspend", "namespace": namespace, "confirmed": True},
         )
         assert suspend_resp.get("success") is True
         assert suspend_resp.get("data", {}).get("action") == "suspend"
@@ -496,11 +515,20 @@ async def test_e2e_job_lifecycle(mcp_session: ClientSession) -> None:
         assert get_resp.get("success") is True
         assert get_resp.get("data", {}).get("name") == job_name
 
-        # 3. Resume job
+        # 3. Resume job (preview first, then execute with confirmed=True)
+        resume_prev = await _call_tool(
+            mcp_session,
+            "update_training_job",
+            {"name": job_name, "action": "resume", "namespace": namespace, "confirmed": False},
+        )
+        assert resume_prev.get("success") is True
+        assert resume_prev.get("status") == "preview"
+        assert "confirmed=True" in resume_prev.get("message", "")
+
         resume_resp = await _call_tool(
             mcp_session,
             "update_training_job",
-            {"name": job_name, "action": "resume", "namespace": namespace},
+            {"name": job_name, "action": "resume", "namespace": namespace, "confirmed": True},
         )
         assert resume_resp.get("success") is True
         assert resume_resp.get("data", {}).get("action") == "resume"
