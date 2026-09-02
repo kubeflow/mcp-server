@@ -22,8 +22,11 @@ from collections.abc import AsyncGenerator
 from typing import Any
 
 import pytest
+from kubernetes.client import V1Namespace, V1ObjectMeta
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+
+from kubeflow_mcp.common.utils import get_core_v1_api
 
 # Mark all tests in this file as requiring KUBEFLOW_MCP_E2E=true
 pytestmark = pytest.mark.skipif(
@@ -188,49 +191,58 @@ async def test_kubernetes_e2e_flow(mcp_session: ClientSession) -> None:
     assert job_name not in job_names
 
     # 7. run_custom_training(confirmed=True) asserts TrainJob CR exists in cluster (CPU mode)
-    data = await _call_tool(
-        mcp_session,
-        "run_custom_training",
-        {
-            "script": NOOP_TRAIN_SCRIPT,
-            "runtime": custom_runtime_name,
-            "name": custom_job_name,
-            "namespace": namespace,
-            "gpu_per_node": 0,
-            "confirmed": True,
-        },
-    )
-    assert data["success"] is True
-    assert data["data"]["job_name"] == custom_job_name
-    assert data["data"]["status"] == "Created"
+    try:
+        data = await _call_tool(
+            mcp_session,
+            "run_custom_training",
+            {
+                "script": NOOP_TRAIN_SCRIPT,
+                "runtime": custom_runtime_name,
+                "name": custom_job_name,
+                "namespace": namespace,
+                "gpu_per_node": 0,
+                "confirmed": True,
+            },
+        )
+        assert data["success"] is True
+        assert data["data"]["job_name"] == custom_job_name
+        assert data["data"]["status"] == "Created"
 
-    # 8. get_training_job() reads back the created job
-    data = await _call_tool(
-        mcp_session,
-        "get_training_job",
-        {"name": custom_job_name, "namespace": namespace},
-    )
-    assert data["success"] is True
-    assert data["data"]["name"] == custom_job_name
-    assert data["data"]["status"] == "Created"
+        # 8. get_training_job() reads back the created job
+        data = await _call_tool(
+            mcp_session,
+            "get_training_job",
+            {"name": custom_job_name, "namespace": namespace},
+        )
+        assert data["success"] is True
+        assert data["data"]["name"] == custom_job_name
+        assert data["data"]["status"] == "Created"
 
-    # 9. delete_training_job(confirmed=True) removes it, verify gone
-    data = await _call_tool(
-        mcp_session,
-        "delete_training_job",
-        {"name": custom_job_name, "namespace": namespace, "confirmed": True},
-    )
-    assert data["success"] is True
-    assert data["data"]["deleted"] is True
+        # 9. delete_training_job(confirmed=True) removes it, verify gone
+        data = await _call_tool(
+            mcp_session,
+            "delete_training_job",
+            {"name": custom_job_name, "namespace": namespace, "confirmed": True},
+        )
+        assert data["success"] is True
+        assert data["data"]["deleted"] is True
 
-    # Verify job is gone
-    data = await _call_tool(
-        mcp_session,
-        "get_training_job",
-        {"name": custom_job_name, "namespace": namespace},
-    )
-    assert data["success"] is False
-    assert data["error_code"] == "RESOURCE_NOT_FOUND"
+        # Verify job is gone
+        data = await _call_tool(
+            mcp_session,
+            "get_training_job",
+            {"name": custom_job_name, "namespace": namespace},
+        )
+        assert data["success"] is False
+        assert data["error_code"] == "RESOURCE_NOT_FOUND"
+    finally:
+        try:
+            await mcp_session.call_tool(
+                "delete_training_job",
+                arguments={"name": custom_job_name, "namespace": namespace, "confirmed": True},
+            )
+        except Exception:
+            pass
 
 
 @pytest.mark.asyncio
@@ -307,6 +319,22 @@ async def test_e2e_negative_paths(mcp_session: ClientSession) -> None:
         assert resp.get("success") is False
         assert resp.get("error_code") == "VALIDATION_ERROR"
         assert "requires GPUs" in resp.get("error", "")
+
+    # Invalid fine_tune parameter rejects before K8s call
+    resp = await _call_tool(
+        mcp_session,
+        "fine_tune",
+        {
+            "model": "hf://google/gemma-2b",
+            "dataset": "hf://tatsu-lab/alpaca",
+            "runtime": "torch-distributed",
+            "name": "e2e-neg-dtype-job",
+            "dtype": "invalid_dtype",
+            "confirmed": False,
+        },
+    )
+    assert resp.get("success") is False
+    assert resp.get("error_code") == "VALIDATION_ERROR"
 
 
 @pytest.mark.asyncio
@@ -596,10 +624,6 @@ async def test_e2e_platform_tools(mcp_session: ClientSession) -> None:
 @pytest.mark.asyncio
 async def test_e2e_multi_namespace(mcp_session: ClientSession) -> None:
     """Validate multi-namespace job creation, query, and cleanup."""
-    from kubernetes.client import V1Namespace, V1ObjectMeta
-
-    from kubeflow_mcp.common.utils import get_core_v1_api
-
     custom_runtime_name = await _get_custom_runtime_name(mcp_session)
     temp_ns = f"mcp-e2e-{uuid.uuid4().hex[:6]}"
     job_name = f"e2e-ns-{uuid.uuid4().hex[:6]}"
