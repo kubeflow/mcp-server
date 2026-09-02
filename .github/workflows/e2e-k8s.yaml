@@ -1,16 +1,14 @@
 name: E2E Test - Kubernetes
 
-# E2E provisions a large runner + Kind cluster, so it is gated to avoid
-# unnecessary compute (see #174):
-#   - PRs: only when E2E-relevant paths change AND the `ok-to-test-e2e`
-#     label is present (add the label to (re-)trigger the run)
+# E2E provisions a large runner + Kind cluster, gated by path filters:
+#   - PRs: only when E2E-relevant paths change
 #   - push to main: always, for post-merge validation
 #   - workflow_dispatch: manual runs
 on:
   push:
     branches: [main]
   pull_request:
-    types: [opened, synchronize, reopened, labeled]
+    types: [opened, synchronize, reopened]
     paths:
       - "kubeflow_mcp/**"
       - "tests/e2e/**"
@@ -29,9 +27,6 @@ permissions:
 jobs:
   e2e:
     name: E2E Test (Kind Cluster)
-    if: >-
-      github.event_name != 'pull_request' ||
-      contains(github.event.pull_request.labels.*.name, 'ok-to-test-e2e')
     runs-on: oracle-vm-16cpu-64gb-x86-64
     # Successful runs take ~35-40 min (cluster setup + tests); cap well
     # above that so hung runs cannot hold the large runner indefinitely.

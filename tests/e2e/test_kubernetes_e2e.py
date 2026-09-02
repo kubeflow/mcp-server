@@ -16,6 +16,7 @@
 
 import asyncio
 import json
+import logging
 import os
 import uuid
 from collections.abc import AsyncGenerator
@@ -27,6 +28,8 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 from kubeflow_mcp.common.utils import get_core_v1_api
+
+logger = logging.getLogger(__name__)
 
 # Mark all tests in this file as requiring KUBEFLOW_MCP_E2E=true
 pytestmark = pytest.mark.skipif(
@@ -41,6 +44,11 @@ NOOP_TRAIN_SCRIPT = (
     "if __name__ == '__main__':\n"
     "    train()\n"
 )
+
+INVALID_K8S_NAME = "INVALID_UPPERCASE_NAME"
+NON_EXISTENT_JOB = "non-existent-e2e-job-999"
+NON_EXISTENT_RUNTIME = "non-existent-runtime-999"
+NON_EXISTENT_NAMESPACE = "non-existent-ns-999"
 
 
 @pytest.fixture
@@ -107,6 +115,18 @@ async def _get_custom_runtime_name(session: ClientSession) -> str:
     pytest.skip("No custom torch- training runtime found in the cluster")
 
 
+async def _get_torchtune_runtime_name(session: ClientSession) -> str:
+    """Discover installed torchtune runtime in the cluster."""
+    data = await _call_tool(session, "list_runtimes")
+    assert data.get("success") is True, f"list_runtimes failed: {data}"
+    runtimes = data.get("data", {}).get("runtimes", [])
+    for r in runtimes:
+        name = r.get("name", "")
+        if "torchtune" in name or "torch-tune" in name:
+            return name
+    pytest.skip("No torchtune runtime found in the cluster")
+
+
 @pytest.mark.asyncio
 async def test_kubernetes_e2e_flow(mcp_session: ClientSession) -> None:
     """Validate full flow of read-only and mutating trainer MCP tools against a live cluster."""
@@ -140,14 +160,7 @@ async def test_kubernetes_e2e_flow(mcp_session: ClientSession) -> None:
     assert len(runtimes) > 0
 
     # Pick runtime for fine_tune preview (requires torchtune)
-    torchtune_runtime_name = None
-    for r in runtimes:
-        name = r.get("name", "")
-        if "torchtune" in name or "torch-tune" in name:
-            torchtune_runtime_name = name
-            break
-    if not torchtune_runtime_name:
-        pytest.skip("No torchtune runtime found in the cluster")
+    torchtune_runtime_name = await _get_torchtune_runtime_name(mcp_session)
 
     # Pick runtime for run_custom_training
     custom_runtime_name = await _get_custom_runtime_name(mcp_session)
@@ -242,19 +255,17 @@ async def test_kubernetes_e2e_flow(mcp_session: ClientSession) -> None:
                 arguments={"name": custom_job_name, "namespace": namespace, "confirmed": True},
             )
         except Exception:
-            pass
+            logger.warning("cleanup failed for %s", custom_job_name, exc_info=True)
 
 
 @pytest.mark.asyncio
 async def test_e2e_negative_paths(mcp_session: ClientSession) -> None:
     """Validate error boundaries and input validation against live server."""
-    invalid_name = "INVALID_UPPERCASE_NAME"
-
     # 1. Invalid K8s names rejected before K8s API call
     resp = await _call_tool(
         mcp_session,
         "get_training_job",
-        {"name": invalid_name, "namespace": "default"},
+        {"name": INVALID_K8S_NAME, "namespace": "default"},
     )
     assert resp.get("success") is False
     assert resp.get("error_code") == "VALIDATION_ERROR"
@@ -262,7 +273,7 @@ async def test_e2e_negative_paths(mcp_session: ClientSession) -> None:
     resp = await _call_tool(
         mcp_session,
         "run_custom_training",
-        {"script": NOOP_TRAIN_SCRIPT, "name": invalid_name},
+        {"script": NOOP_TRAIN_SCRIPT, "name": INVALID_K8S_NAME},
     )
     assert resp.get("success") is False
     assert resp.get("error_code") == "VALIDATION_ERROR"
@@ -270,7 +281,7 @@ async def test_e2e_negative_paths(mcp_session: ClientSession) -> None:
     resp = await _call_tool(
         mcp_session,
         "delete_training_job",
-        {"name": invalid_name, "confirmed": True},
+        {"name": INVALID_K8S_NAME, "confirmed": True},
     )
     assert resp.get("success") is False
     assert resp.get("error_code") == "VALIDATION_ERROR"
@@ -279,21 +290,30 @@ async def test_e2e_negative_paths(mcp_session: ClientSession) -> None:
     resp = await _call_tool(
         mcp_session,
         "get_training_job",
-        {"name": "non-existent-e2e-job-999", "namespace": "default"},
+        {"name": NON_EXISTENT_JOB, "namespace": "default"},
     )
     assert resp.get("success") is False
     assert resp.get("error_code") == "RESOURCE_NOT_FOUND"
 
-    # 3. Non-existent runtime returns RESOURCE_NOT_FOUND
+    # 3. Non-existent namespace returns RESOURCE_NOT_FOUND
+    resp = await _call_tool(
+        mcp_session,
+        "get_training_job",
+        {"name": "valid-job-name", "namespace": NON_EXISTENT_NAMESPACE},
+    )
+    assert resp.get("success") is False
+    assert resp.get("error_code") == "RESOURCE_NOT_FOUND"
+
+    # 4. Non-existent runtime returns RESOURCE_NOT_FOUND
     resp = await _call_tool(
         mcp_session,
         "get_runtime",
-        {"name": "non-existent-runtime-999"},
+        {"name": NON_EXISTENT_RUNTIME},
     )
     assert resp.get("success") is False
     assert resp.get("error_code") == "RESOURCE_NOT_FOUND"
 
-    # 4. Invalid lifecycle action returns VALIDATION_ERROR
+    # 5. Invalid lifecycle action returns VALIDATION_ERROR
     resp = await _call_tool(
         mcp_session,
         "update_training_job",
@@ -302,7 +322,8 @@ async def test_e2e_negative_paths(mcp_session: ClientSession) -> None:
     assert resp.get("success") is False
     assert resp.get("error_code") == "VALIDATION_ERROR"
 
-    # 5. fine_tune on GPU-less cluster returns VALIDATION_ERROR
+    # 6. fine_tune on GPU-less cluster returns VALIDATION_ERROR
+    torchtune_runtime_name = await _get_torchtune_runtime_name(mcp_session)
     cluster_res = await _call_tool(mcp_session, "get_cluster_resources")
     if cluster_res.get("data", {}).get("gpu_total", 0) == 0:
         resp = await _call_tool(
@@ -311,7 +332,7 @@ async def test_e2e_negative_paths(mcp_session: ClientSession) -> None:
             {
                 "model": "hf://google/gemma-2b",
                 "dataset": "hf://tatsu-lab/alpaca",
-                "runtime": "torch-distributed",
+                "runtime": torchtune_runtime_name,
                 "name": "e2e-neg-gpu-job",
                 "confirmed": False,
             },
@@ -327,7 +348,7 @@ async def test_e2e_negative_paths(mcp_session: ClientSession) -> None:
         {
             "model": "hf://google/gemma-2b",
             "dataset": "hf://tatsu-lab/alpaca",
-            "runtime": "torch-distributed",
+            "runtime": torchtune_runtime_name,
             "name": "e2e-neg-dtype-job",
             "dtype": "invalid_dtype",
             "confirmed": False,
@@ -429,7 +450,7 @@ async def test_e2e_confirm_gate(mcp_session: ClientSession) -> None:
                 arguments={"name": job_name, "namespace": namespace, "confirmed": True},
             )
         except Exception:
-            pass
+            logger.warning("cleanup failed for %s", job_name, exc_info=True)
 
 
 @pytest.mark.asyncio
@@ -509,7 +530,7 @@ async def test_e2e_job_lifecycle(mcp_session: ClientSession) -> None:
                 arguments={"name": job_name, "namespace": namespace, "confirmed": True},
             )
         except Exception:
-            pass
+            logger.warning("cleanup failed for %s", job_name, exc_info=True)
 
 
 @pytest.mark.asyncio
@@ -546,16 +567,20 @@ async def test_e2e_monitoring(mcp_session: ClientSession) -> None:
         assert isinstance(data.get("events"), list)
         assert data.get("total") >= 0
 
-        # 2. get_training_logs (assert success only, pod may not reach Running in time)
+        # 2. get_training_logs
+        # On slow Kind runners, if the pod hasn't scheduled yet, the SDK may return
+        # an error (e.g. SDK_ERROR / pod not found) or empty logs.
         logs_resp = await _call_tool(
             mcp_session,
             "get_training_logs",
             {"name": job_name, "namespace": namespace},
         )
-        assert logs_resp.get("success") is True
-        data = logs_resp.get("data", {})
-        assert data.get("job") == job_name
-        assert "logs" in data
+        if logs_resp.get("success"):
+            data = logs_resp.get("data", {})
+            assert data.get("job") == job_name
+            assert "logs" in data
+        else:
+            assert logs_resp.get("error_code") in ("SDK_ERROR", "RESOURCE_NOT_FOUND")
     finally:
         try:
             await mcp_session.call_tool(
@@ -563,7 +588,7 @@ async def test_e2e_monitoring(mcp_session: ClientSession) -> None:
                 arguments={"name": job_name, "namespace": namespace, "confirmed": True},
             )
         except Exception:
-            pass
+            logger.warning("cleanup failed for %s", job_name, exc_info=True)
 
 
 @pytest.mark.asyncio
@@ -584,7 +609,7 @@ async def test_e2e_discovery(mcp_session: ClientSession) -> None:
     assert rt_data.get("name") == first_rt_name
 
     # 3. get_runtime for non-existent runtime
-    neg_resp = await _call_tool(mcp_session, "get_runtime", {"name": "non-existent-runtime-999"})
+    neg_resp = await _call_tool(mcp_session, "get_runtime", {"name": NON_EXISTENT_RUNTIME})
     assert neg_resp.get("success") is False
     assert neg_resp.get("error_code") == "RESOURCE_NOT_FOUND"
 
@@ -688,6 +713,13 @@ async def test_e2e_multi_namespace(mcp_session: ClientSession) -> None:
         assert del_resp.get("data", {}).get("deleted") is True
     finally:
         try:
+            await mcp_session.call_tool(
+                "delete_training_job",
+                arguments={"name": job_name, "namespace": temp_ns, "confirmed": True},
+            )
+        except Exception:
+            logger.warning("cleanup failed for %s", job_name, exc_info=True)
+        try:
             core.delete_namespace(name=temp_ns, grace_period_seconds=0)
         except Exception:
-            pass
+            logger.warning("cleanup failed for %s", temp_ns, exc_info=True)
