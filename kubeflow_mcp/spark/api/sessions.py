@@ -27,8 +27,15 @@ from kubeflow_mcp.common.types import (
     exception_details,
     is_k8s_not_found,
 )
-from kubeflow_mcp.common.utils import get_spark_client_for_namespace
-from kubeflow_mcp.core.security import check_namespace_allowed
+from kubeflow_mcp.common.utils import (
+    MCP_MANAGED_LABEL,
+    MCP_MANAGED_VALUE,
+    get_spark_client_for_namespace,
+    get_spark_session_ownership,
+    get_trainer_effective_namespace,
+)
+from kubeflow_mcp.core.policy import get_effective_persona
+from kubeflow_mcp.core.security import check_namespace_allowed, validate_k8s_name
 from kubeflow_mcp.spark.types import session_info_to_dict
 
 logger = logging.getLogger(__name__)
@@ -44,7 +51,16 @@ def _generate_session_name() -> str:
 
 
 def _validate_session_name(name: str) -> str | None:
-    """Return an error message if *name* is not a valid session name, else None."""
+    """Return an error message if *name* is not a valid session name, else None.
+
+    Applies the shared :func:`validate_k8s_name` check first (conventions require
+    it for every resource name), then the stricter SparkConnect-specific limit —
+    names become Kubernetes *service* names, so they need more headroom than a
+    generic object name.
+    """
+    shared_err = validate_k8s_name(name)
+    if shared_err is not None:
+        return shared_err.error
     if len(name) > _MAX_NAME_LEN:
         return f"name too long ({len(name)} chars, max {_MAX_NAME_LEN})"
     if not _K8S_NAME_RE.match(name):
@@ -132,7 +148,7 @@ def create_spark_session(
         ).model_dump()
 
     try:
-        from kubeflow.spark import Driver, Executor, Name
+        from kubeflow.spark import Driver, Executor, Labels, Name
 
         client = get_spark_client_for_namespace(namespace)
 
@@ -148,7 +164,9 @@ def create_spark_session(
             spark_conf=spark_conf,
             driver=driver,
             executor=executor,
-            options=[Name(session_name)],
+            # Labels marks the SparkConnect CR as MCP-owned so non-admin personas
+            # may later mutate it (see delete_spark_session's ownership guard).
+            options=[Name(session_name), Labels({MCP_MANAGED_LABEL: MCP_MANAGED_VALUE})],
             timeout=timeout,
             connect_timeout=connect_timeout,
         )
@@ -212,13 +230,57 @@ def delete_spark_session(
     Raises:
         ToolError: If the session is not found (``RESOURCE_NOT_FOUND``).
     """
+    name_err = validate_k8s_name(name)
+    if name_err is not None:
+        return name_err.model_dump()
+
     ns_err = check_namespace_allowed(namespace)
     if ns_err is not None:
         return ns_err.model_dump()
 
+    ns = namespace
+    if ns is None:
+        try:
+            ns = get_trainer_effective_namespace(None)
+        except Exception:
+            ns = None
+
+    # Ownership guard: non-admin personas may only delete sessions MCP created.
+    if get_effective_persona() not in ("platform-admin",):
+        if ns is None:
+            return ToolError(
+                error=f"Cannot verify ownership of SparkConnect session '{name}' "
+                "(namespace could not be resolved)",
+                error_code=ErrorCode.SDK_ERROR,
+                details={"hint": "Pass an explicit namespace, or use platform-admin persona."},
+            ).model_dump()
+        ownership = get_spark_session_ownership(name, ns)
+        if ownership == "not_found":
+            return ToolError(
+                error=f"SparkConnect session '{name}' not found",
+                error_code=ErrorCode.RESOURCE_NOT_FOUND,
+            ).model_dump()
+        if ownership == "unknown":
+            return ToolError(
+                error=f"Cannot verify ownership of SparkConnect session '{name}' (API error)",
+                error_code=ErrorCode.SDK_ERROR,
+                details={"hint": "Retry, or use platform-admin persona to bypass."},
+            ).model_dump()
+        if ownership == "unmanaged":
+            return ToolError(
+                error=f"SparkConnect session '{name}' was not created by MCP",
+                error_code=ErrorCode.VALIDATION_ERROR,
+                details={
+                    "hint": (
+                        "Data scientists can only delete sessions created through MCP tools. "
+                        "Use platform-admin persona to delete externally created sessions."
+                    ),
+                },
+            ).model_dump()
+
     if not confirmed:
         return PreviewResponse(
-            config={"name": name, "namespace": namespace, "action": "delete"},
+            config={"name": name, "namespace": ns, "action": "delete"},
             message=f"Will permanently delete SparkConnect session '{name}'. Set confirmed=True.",
         ).model_dump()
 
