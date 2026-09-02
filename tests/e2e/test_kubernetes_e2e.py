@@ -671,7 +671,7 @@ async def test_e2e_multi_namespace(mcp_session: ClientSession) -> None:
             },
         )
         assert create_resp.get("success") is True
-        assert create_resp.get("data", {}).get("namespace") == temp_ns
+        assert create_resp.get("data", {}).get("job_name") == job_name
 
         # 2. Get job from temp namespace
         get_resp = await _call_tool(
@@ -680,8 +680,16 @@ async def test_e2e_multi_namespace(mcp_session: ClientSession) -> None:
             {"name": job_name, "namespace": temp_ns},
         )
         assert get_resp.get("success") is True
-        assert get_resp.get("data", {}).get("namespace") == temp_ns
         assert get_resp.get("data", {}).get("name") == job_name
+
+        # Verify job is not found in default namespace
+        get_def = await _call_tool(
+            mcp_session,
+            "get_training_job",
+            {"name": job_name, "namespace": "default"},
+        )
+        assert get_def.get("success") is False
+        assert get_def.get("error_code") == "RESOURCE_NOT_FOUND"
 
         # 3. List jobs in temp namespace
         list_temp = await _call_tool(
