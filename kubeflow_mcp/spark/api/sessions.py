@@ -187,8 +187,10 @@ def create_spark_session(
         return ToolResponse(data=data).model_dump()
 
     except ImportError as e:
+        logger.warning("create_spark_session(%s) missing SDK extra: %s", session_name, e)
         return ToolError(error=str(e), error_code=ErrorCode.SDK_ERROR).model_dump()
     except Exception as e:
+        logger.warning("create_spark_session(%s) failed: %s", session_name, e, exc_info=True)
         # connect() waits for readiness and a driver connection, both of which can
         # fail *after* the CR is already created (e.g. the MCP host can't reach the
         # driver). If the session exists, report it as provisioned rather than lost.
@@ -296,8 +298,10 @@ def delete_spark_session(
         ).model_dump()
 
     except ImportError as e:
+        logger.warning("delete_spark_session(%s) missing SDK extra: %s", name, e)
         return ToolError(error=str(e), error_code=ErrorCode.SDK_ERROR).model_dump()
     except Exception as e:
+        logger.warning("delete_spark_session(%s) failed: %s", name, e, exc_info=True)
         if is_k8s_not_found(e):
             return ToolError(
                 error=f"SparkConnect session '{name}' not found",
