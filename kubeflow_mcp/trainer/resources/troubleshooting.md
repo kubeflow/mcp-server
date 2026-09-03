@@ -101,7 +101,7 @@ All three training tools (`fine_tune`, `run_custom_training`, `run_container_tra
 
 ### Suspended Jobs Show "Created" Status
 
-After `update_training_job(name, action="suspend")`, status becomes "Created" not "Suspended". This is controller behavior.
+After `update_training_job(name, action="suspend", confirmed=True)`, status becomes "Created" not "Suspended". This is controller behavior.
 **Workaround**: Check `get_training_events()` for the suspend event.
 
 ### list_training_jobs Status Filter is Client-Side

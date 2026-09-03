@@ -27,6 +27,7 @@ from kubeflow.trainer.constants import constants as trainer_constants
 from kubernetes.client.exceptions import ApiException
 from tests.common import (
     FAILED,
+    PERMISSION_DENIED,
     RESOURCE_NOT_FOUND,
     VALIDATION_ERROR,
     TestCase,
@@ -34,6 +35,8 @@ from tests.common import (
 )
 
 from kubeflow_mcp.common import utils as mcp_utils
+from kubeflow_mcp.common.constants import ErrorCode
+from kubeflow_mcp.common.types import ToolError
 from kubeflow_mcp.trainer.api.lifecycle import delete_training_job, update_training_job
 
 
@@ -87,6 +90,46 @@ class TestDeleteTrainingJob:
         assert result["success"] is True
         assert result["data"]["deleted"] is True
         mock_client.delete_job.assert_called_once_with(name="test-job")
+
+    @patch(
+        "kubeflow_mcp.trainer.api.lifecycle.get_effective_persona", return_value="data-scientist"
+    )
+    @patch("kubeflow_mcp.trainer.api.lifecycle.mcp_utils.is_mcp_managed", return_value=False)
+    @patch(
+        "kubeflow_mcp.trainer.api.lifecycle.mcp_utils.get_trainer_effective_namespace",
+        return_value="default",
+    )
+    def test_non_admin_cannot_delete_non_mcp_job(self, _ns, _managed, _persona):
+        result = delete_training_job(name="external-job", confirmed=False)
+        assert result["success"] is False
+        assert result["error_code"] == VALIDATION_ERROR
+        assert "was not created by MCP" in result["error"]
+
+    @patch(
+        "kubeflow_mcp.trainer.api.lifecycle.get_effective_persona", return_value="platform-admin"
+    )
+    @patch("kubeflow_mcp.trainer.api.lifecycle.mcp_utils.get_trainer_client_for_namespace")
+    @patch(
+        "kubeflow_mcp.trainer.api.lifecycle.mcp_utils.get_trainer_effective_namespace",
+        return_value="default",
+    )
+    def test_confirmed_not_found_returns_resource_not_found(self, _ns, mock_client_fn, _persona):
+        mock_client = MagicMock()
+        mock_client.delete_job.side_effect = ApiException(status=404, reason="Not Found")
+        mock_client_fn.return_value = mock_client
+        result = delete_training_job(name="test-job", confirmed=True)
+        assert result["success"] is False
+        assert result["error_code"] == RESOURCE_NOT_FOUND
+
+    @patch("kubeflow_mcp.trainer.api.lifecycle.check_namespace_allowed")
+    def test_namespace_policy_enforcement(self, mock_ns_check):
+        mock_ns_check.return_value = ToolError(
+            error="Namespace 'restricted-ns' is not allowed",
+            error_code=ErrorCode.PERMISSION_DENIED,
+        )
+        result = delete_training_job(name="test-job", namespace="restricted-ns", confirmed=True)
+        assert result["success"] is False
+        assert result["error_code"] == PERMISSION_DENIED
 
 
 @pytest.mark.parametrize(
@@ -224,3 +267,15 @@ class TestUpdateTrainingJob:
         result = update_training_job(name="test-job", action="suspend", confirmed=True)
         assert result["success"] is False
         assert result["error_code"] == RESOURCE_NOT_FOUND
+
+    @patch("kubeflow_mcp.trainer.api.lifecycle.check_namespace_allowed")
+    def test_namespace_policy_enforcement(self, mock_ns_check):
+        mock_ns_check.return_value = ToolError(
+            error="Namespace 'restricted-ns' is not allowed",
+            error_code=ErrorCode.PERMISSION_DENIED,
+        )
+        result = update_training_job(
+            name="test-job", action="suspend", namespace="restricted-ns", confirmed=True
+        )
+        assert result["success"] is False
+        assert result["error_code"] == PERMISSION_DENIED
