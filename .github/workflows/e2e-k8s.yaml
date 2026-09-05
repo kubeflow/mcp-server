@@ -36,7 +36,7 @@ jobs:
       fail-fast: false
       matrix:
         kubernetes-version: ["1.32.3"]
-        trainer-ref: ["v2.2.1"]
+        trainer-ref: ["v2.3.0"]  # CI baseline; >=2.3.0,<2.4.0 supported at runtime
 
     steps:
       - name: Checkout repository

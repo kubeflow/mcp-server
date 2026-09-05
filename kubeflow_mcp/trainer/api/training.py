@@ -109,7 +109,7 @@ _hf_home_lock = threading.Lock()
 def _inject_trainer_hf_home(hf_home_path: str):
     """Patch SDK to inject HF_HOME into spec.trainer.env for BuiltinTrainer jobs.
 
-    The SDK (v0.4.x) does not support env on BuiltinTrainer.  This context
+    The SDK (v0.5.x) does not support env on BuiltinTrainer.  This context
     manager temporarily patches ``get_trainer_cr_from_builtin_trainer`` so the
     returned TrainerV1alpha1Trainer CR includes the HF_HOME env var, which
     lands on ``spec.trainer.env`` instead of ``spec.runtimePatches``.

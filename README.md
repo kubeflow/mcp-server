@@ -26,12 +26,18 @@ The Kubeflow MCP Server exposes Kubeflow Training operations as [Model Context P
 
 ## Get Started
 
-### Install from source
+### Install from PyPI
+
+```bash
+pip install kubeflow-mcp
+```
+
+### Install from source (development)
 
 ```bash
 git clone https://github.com/kubeflow/mcp-server.git
 cd mcp-server
-pip install .
+make install-dev
 ```
 
 ### Run the server
@@ -39,8 +45,6 @@ pip install .
 ```bash
 kubeflow-mcp serve
 ```
-
-> Once published to PyPI, install with `pip install kubeflow-mcp`.
 
 ### Run with Docker
 
@@ -173,7 +177,8 @@ claude mcp add kubeflow -- kubeflow-mcp serve
 
 | MCP Server | Kubeflow Trainer | Kubeflow SDK | Python      | Kubernetes |
 |------------|------------------|--------------|-------------|------------|
-| 0.1.x      | == 2.2.1         | >= 0.4.0     | 3.10 - 3.12 | >= 1.27    |
+| 0.2.x (upcoming) | >= 2.3.0, < 2.4.0 | >= 0.5.0, < 0.6.0 | 3.10 - 3.12 | >= 1.27    |
+| 0.1.x  | == 2.2.1         | == 0.4.1     | 3.10 - 3.12 | >= 1.27    |
 
 ## CLI Reference
 
