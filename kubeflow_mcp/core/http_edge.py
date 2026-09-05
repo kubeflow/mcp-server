@@ -14,13 +14,21 @@
 
 """HTTP liveness and readiness probes for network transports."""
 
+# pyrefly: ignore [missing-import]
 from fastmcp import FastMCP
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 
-def register_probe_routes(mcp: FastMCP, *, is_ready: bool = True) -> None:
-    """Register unauthenticated probes on the FastMCP HTTP application."""
+def register_probe_routes(
+    mcp: FastMCP,
+    *,
+    is_ready: bool = True,
+    clients: list[str] | None = None,
+    auth_type: str | None = None,
+) -> None:
+    """Register unauthenticated probes and discovery on the FastMCP HTTP application."""
+    from kubeflow_mcp import __version__
 
     @mcp.custom_route("/health", methods=["GET"], include_in_schema=False)
     async def health(_request: Request) -> Response:
@@ -31,3 +39,17 @@ def register_probe_routes(mcp: FastMCP, *, is_ready: bool = True) -> None:
         if not is_ready:
             return JSONResponse({"status": "not_ready"}, status_code=503)
         return JSONResponse({"status": "ready"})
+
+    @mcp.custom_route("/.well-known/mcp.json", methods=["GET"], include_in_schema=False)
+    async def mcp_card(_request: Request) -> Response:
+        card = {
+            "name": "kubeflow-mcp",
+            "version": __version__,
+            "description": "Kubeflow MCP Server",
+            "transports": [{"type": "streamable-http", "url": "/mcp"}],
+            "capabilities": {"tools": True, "resources": True, "prompts": False},
+            "clients": clients or [],
+        }
+        if auth_type:
+            card["authentication"] = {"type": auth_type}
+        return JSONResponse(card)

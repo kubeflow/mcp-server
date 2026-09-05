@@ -24,7 +24,8 @@ def _probe_client(*, authenticated: bool = False, ready: bool = True) -> TestCli
 
     auth = APIKeyVerifier(expected_token="secret") if authenticated else None
     mcp = FastMCP("test-server", auth=auth)
-    register_probe_routes(mcp, is_ready=ready)
+    auth_type = "bearer" if authenticated else None
+    register_probe_routes(mcp, is_ready=ready, clients=["trainer"], auth_type=auth_type)
     return TestClient(mcp.http_app(transport="streamable-http"))
 
 
@@ -82,8 +83,45 @@ def test_probes_remain_available_when_mcp_auth_is_enabled() -> None:
     with _probe_client(authenticated=True) as client:
         health_response = client.get("/health")
         ready_response = client.get("/ready")
+        mcp_card_response = client.get("/.well-known/mcp.json")
         mcp_response = client.post("/mcp")
 
     assert health_response.status_code == 200
     assert ready_response.status_code == 200
+    assert mcp_card_response.status_code == 200
     assert mcp_response.status_code == 401
+
+
+def test_discovery_endpoint_serves_mcp_card() -> None:
+    from kubeflow_mcp import __version__
+
+    with _probe_client(authenticated=True) as client:
+        response = client.get("/.well-known/mcp.json")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["name"] == "kubeflow-mcp"
+    assert data["version"] == __version__
+    assert data["transports"] == [{"type": "streamable-http", "url": "/mcp"}]
+    assert data["authentication"] == {"type": "bearer"}
+    assert data["capabilities"]["tools"] is True
+    assert data["clients"] == ["trainer"]
+
+
+def test_discovery_endpoint_no_auth() -> None:
+    with _probe_client(authenticated=False) as client:
+        response = client.get("/.well-known/mcp.json")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert "authentication" not in data
+
+
+def test_discovery_endpoint_with_create_server() -> None:
+    mcp = create_server(clients=["trainer"])
+    with TestClient(mcp.http_app(transport="streamable-http")) as client:
+        response = client.get("/.well-known/mcp.json")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["clients"] == ["trainer"]
