@@ -155,6 +155,66 @@ class TestDeleteTrainingJob:
         assert result["success"] is False
         assert result["error_code"] == PERMISSION_DENIED
 
+    @patch(
+        "kubeflow_mcp.trainer.api.lifecycle.get_effective_persona",
+        return_value="ml-engineer",
+    )
+    @patch(
+        "kubeflow_mcp.trainer.api.lifecycle.mcp_utils.get_trainer_effective_namespace",
+        return_value="default",
+    )
+    @patch(
+        "kubeflow_mcp.trainer.api.lifecycle.mcp_utils.is_mcp_managed",
+        return_value=None,
+    )
+    def test_ownership_api_error_for_non_admin(self, mock_managed, _ns, _persona):
+        result = delete_training_job(name="test-job", confirmed=True)
+        assert result["success"] is False
+        assert result["error_code"] == "SDK_ERROR"
+        assert "Cannot verify ownership" in result["error"]
+        mock_managed.assert_called_once_with("test-job", "default")
+
+    @patch(
+        "kubeflow_mcp.trainer.api.lifecycle.get_effective_persona",
+        return_value="ml-engineer",
+    )
+    @patch("kubeflow_mcp.trainer.api.lifecycle.mcp_utils.get_trainer_client_for_namespace")
+    @patch(
+        "kubeflow_mcp.trainer.api.lifecycle.mcp_utils.get_trainer_effective_namespace",
+        return_value="default",
+    )
+    @patch(
+        "kubeflow_mcp.trainer.api.lifecycle.mcp_utils.is_mcp_managed",
+        return_value=True,
+    )
+    def test_managed_job_can_be_deleted_by_non_admin(
+        self, mock_managed, _ns, mock_client_fn, _persona
+    ):
+        mock_client = MagicMock()
+        mock_client_fn.return_value = mock_client
+        result = delete_training_job(name="test-job", confirmed=True)
+        assert result["success"] is True
+        mock_managed.assert_called_once_with("test-job", "default")
+        mock_client.delete_job.assert_called_once_with(name="test-job")
+
+    @patch(
+        "kubeflow_mcp.trainer.api.lifecycle.get_effective_persona",
+        return_value="platform-admin",
+    )
+    @patch("kubeflow_mcp.trainer.api.lifecycle.mcp_utils.get_trainer_client_for_namespace")
+    @patch(
+        "kubeflow_mcp.trainer.api.lifecycle.mcp_utils.get_trainer_effective_namespace",
+        return_value="default",
+    )
+    def test_generic_error_returns_sdk_error(self, _ns, mock_client_fn, _persona):
+        mock_client = MagicMock()
+        mock_client.delete_job.side_effect = RuntimeError("cluster unreachable")
+        mock_client_fn.return_value = mock_client
+        result = delete_training_job(name="test-job", confirmed=True)
+        assert result["success"] is False
+        assert result["error_code"] == "SDK_ERROR"
+        assert "cluster unreachable" in result["error"]
+
 
 # ─── MCP ownership enforcement ─────────────────────────────────────────────
 
@@ -416,3 +476,71 @@ class TestUpdateTrainingJob:
         )
         assert result["success"] is False
         assert result["error_code"] == PERMISSION_DENIED
+
+    @patch(
+        "kubeflow_mcp.trainer.api.lifecycle.get_effective_persona",
+        return_value="ml-engineer",
+    )
+    @patch(
+        "kubeflow_mcp.trainer.api.lifecycle.mcp_utils.get_trainer_effective_namespace",
+        return_value="default",
+    )
+    @patch(
+        "kubeflow_mcp.trainer.api.lifecycle.mcp_utils.is_mcp_managed",
+        return_value=None,
+    )
+    def test_ownership_api_error_for_non_admin(self, mock_managed, _ns, _persona):
+        result = update_training_job(name="test-job", action="suspend", confirmed=True)
+        assert result["success"] is False
+        assert result["error_code"] == "SDK_ERROR"
+        assert "Cannot verify ownership" in result["error"]
+        mock_managed.assert_called_once_with("test-job", "default")
+
+    @patch(
+        "kubeflow_mcp.trainer.api.lifecycle.get_effective_persona",
+        return_value="data-scientist",
+    )
+    @patch("kubeflow_mcp.trainer.api.lifecycle.mcp_utils.get_trainer_custom_objects_api")
+    @patch(
+        "kubeflow_mcp.trainer.api.lifecycle.mcp_utils.get_trainer_effective_namespace",
+        return_value="default",
+    )
+    @patch(
+        "kubeflow_mcp.trainer.api.lifecycle.mcp_utils.is_mcp_managed",
+        return_value=True,
+    )
+    def test_managed_job_can_be_updated_by_non_admin(
+        self, mock_managed, _ns, mock_api_fn, _persona
+    ):
+        mock_api = MagicMock()
+        mock_api_fn.return_value = mock_api
+        result = update_training_job(name="test-job", action="suspend", confirmed=True)
+        assert result["success"] is True
+        mock_managed.assert_called_once_with("test-job", "default")
+        mock_api.patch_namespaced_custom_object.assert_called_once_with(
+            group=trainer_constants.GROUP,
+            version=trainer_constants.VERSION,
+            namespace="default",
+            plural=trainer_constants.TRAINJOB_PLURAL,
+            name="test-job",
+            body={"spec": {"suspend": True}},
+            _request_timeout=mcp_utils.K8S_TIMEOUT,
+        )
+
+    @patch(
+        "kubeflow_mcp.trainer.api.lifecycle.get_effective_persona",
+        return_value="platform-admin",
+    )
+    @patch("kubeflow_mcp.trainer.api.lifecycle.mcp_utils.get_trainer_custom_objects_api")
+    @patch(
+        "kubeflow_mcp.trainer.api.lifecycle.mcp_utils.get_trainer_effective_namespace",
+        return_value="default",
+    )
+    def test_generic_error_returns_sdk_error(self, _ns, mock_api_fn, _persona):
+        mock_api = MagicMock()
+        mock_api.patch_namespaced_custom_object.side_effect = RuntimeError("api server down")
+        mock_api_fn.return_value = mock_api
+        result = update_training_job(name="test-job", action="resume", confirmed=True)
+        assert result["success"] is False
+        assert result["error_code"] == "SDK_ERROR"
+        assert "api server down" in result["error"]
