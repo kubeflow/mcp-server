@@ -1,3 +1,51 @@
+# [0.1.2](https://github.com/kubeflow/mcp-server/releases/tag/0.1.2) (2026-09-02)
+
+Patch release — trainer hardening, input validation, E2E test coverage, and upgrade to Kubeflow SDK 0.4.1.
+
+```
+pip install kubeflow-mcp==0.1.2
+```
+
+* [Introducing Kubeflow MCP Server](https://blog.kubeflow.org/introducing-kubeflow-mcp/)
+
+## 🚀 Features
+
+- feat(test): add negative path and lifecycle scenarios to Kubernetes E2E suite ([#196](https://github.com/kubeflow/mcp-server/pull/196) by @priyank766)
+- feat(examples): add manifests for in-cluster deployment ([#160](https://github.com/kubeflow/mcp-server/pull/160) by @szymka117)
+- feat(test): add MCP tool schema snapshot test ([#170](https://github.com/kubeflow/mcp-server/pull/170) by @Kartikeya-trivedi)
+- feat(ci): add Kubernetes E2E tests against live cluster ([#109](https://github.com/kubeflow/mcp-server/pull/109) by @prakharsingh-74)
+- feat: rank model-id suggestions by downloads and suggest on the not-found path ([#66](https://github.com/kubeflow/mcp-server/pull/66) by @AhmedDlshad007)
+
+## 🐛 Bug Fixes
+
+- fix(trainer): extract runtime metadata from SDK Runtime in get_runtime ([#192](https://github.com/kubeflow/mcp-server/pull/192) by @priyank766)
+- fix: validate discovery resource names ([#163](https://github.com/kubeflow/mcp-server/pull/163) by @pratik-naik003)
+- fix(ci): gate E2E workflow behind path filter and ok-to-test-e2e label ([#175](https://github.com/kubeflow/mcp-server/pull/175) by @Kartikeya-trivedi)
+- fix(ci): stop welcoming returning contributors as first-timers ([#172](https://github.com/kubeflow/mcp-server/pull/172) by @Kartikeya-trivedi)
+- fix: validate monitoring job names ([#165](https://github.com/kubeflow/mcp-server/pull/165) by @pratik-naik003)
+- fix(trainer): bound memory when reading training job logs ([#167](https://github.com/kubeflow/mcp-server/pull/167) by @priyank766)
+- fix(core): redact sensitive structured fields ([#159](https://github.com/kubeflow/mcp-server/pull/159) by @pulkit-999)
+
+## ⚙️ Miscellaneous Tasks
+
+- chore(docs): add cross-component client module conventions ([#194](https://github.com/kubeflow/mcp-server/pull/194) by @abhijeet-dhumal)
+- chore(ci): bump github/codeql-action from 4.37.8 to 4.37.9 in the actions group ([#193](https://github.com/kubeflow/mcp-server/pull/193) by @dependabot[bot])
+- chore(deps): bump kubeflow SDK to 0.4.1 with kubernetes constraint ([#187](https://github.com/kubeflow/mcp-server/pull/187) by @myselfkunal)
+- chore(ci): bump actions/github-script from 8 to 9 ([#179](https://github.com/kubeflow/mcp-server/pull/179) by @dependabot[bot])
+- chore(ci): bump github/codeql-action from 4.37.7 to 4.37.8 in the actions group ([#178](https://github.com/kubeflow/mcp-server/pull/178) by @dependabot[bot])
+- chore(ci): ignore kubeflow SDK minor/major bumps in Dependabot ([#176](https://github.com/kubeflow/mcp-server/pull/176) by @myselfkunal)
+- chore(trainer): add unit tests for platform runtime tools ([#97](https://github.com/kubeflow/mcp-server/pull/97) by @Solaris-star)
+- chore(ci): bump actions/github-script from 8 to 9 ([#100](https://github.com/kubeflow/mcp-server/pull/100) by @dependabot[bot])
+- chore(ci): bump github/codeql-action from 4.37.4 to 4.37.7 in the actions group across 1 directory ([#153](https://github.com/kubeflow/mcp-server/pull/153) by @dependabot[bot])
+
+## New Contributors
+
+- @szymka117 made their first contribution in [#160](https://github.com/kubeflow/mcp-server/pull/160)
+- @prakharsingh-74 made their first contribution in [#109](https://github.com/kubeflow/mcp-server/pull/109)
+- @pulkit-999 made their first contribution in [#159](https://github.com/kubeflow/mcp-server/pull/159)
+
+---
+
 # [0.1.1](https://github.com/kubeflow/mcp-server/releases/tag/0.1.1) (2026-08-11)
 
 This is the first official release of the Kubeflow MCP Server.

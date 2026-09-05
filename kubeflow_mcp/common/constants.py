@@ -17,6 +17,7 @@
 This module is the single source of truth for:
 - Error codes and job statuses
 - Tool phase categorization
+- Kubeflow SDK / Trainer version requirements
 
 Import from here to ensure consistency across the codebase.
 """
@@ -114,6 +115,15 @@ MIN_TRAINER_CRD_VERSION = "v1alpha1"
 TRAINER_CRD_GROUP = "trainer.kubeflow.org"
 TRAINER_CRD_NAME = "trainjobs.trainer.kubeflow.org"
 
+# Kubeflow dependency versions — SSOT; mirrors pyproject.toml pins and README table.
+KUBEFLOW_SDK_PACKAGE = "kubeflow"
+KUBEFLOW_SDK_VERSION_MIN = "0.4.1"
+KUBEFLOW_TRAINER_VERSION_MIN = "2.2.1"
+KUBEFLOW_SDK_VERSION_SPEC = f"=={KUBEFLOW_SDK_VERSION_MIN}"
+KUBEFLOW_TRAINER_VERSION_SPEC = f"=={KUBEFLOW_TRAINER_VERSION_MIN}"
+KUBEFLOW_TRAINER_VERSION_LABEL = f"v{KUBEFLOW_TRAINER_VERSION_MIN}"
+KUBERNETES_VERSION_LABEL = f"{MIN_K8S_VERSION[0]}.{MIN_K8S_VERSION[1]}"
+
 # =============================================================================
 # Tool Next-Step Hints
 # Injected into tool responses as _meta.next for clients that don't
@@ -150,9 +160,9 @@ TOOL_NEXT_HINTS: dict[str, str] = {
 
 
 SDK_COMPATIBILITY: dict[str, object] = {
-    "sdk_package": "kubeflow",
-    "sdk_version_min": "0.4.0",
-    "trainer_version_min": "v2.2.0",
+    "sdk_package": KUBEFLOW_SDK_PACKAGE,
+    "sdk_version_min": KUBEFLOW_SDK_VERSION_MIN,
+    "trainer_version_min": KUBEFLOW_TRAINER_VERSION_LABEL,
     "python_requires": ">=3.10",
     "kubernetes_requires": ">=1.27",
     "clients": {
