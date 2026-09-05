@@ -375,7 +375,130 @@ class TestResourceLoading:
         mock_mcp.resource.return_value = lambda fn: fn
 
         register_resources(mock_mcp, {"trainer": trainer_module})
-        assert mock_mcp.resource.call_count == 3
+        # Every CLIENT_RESOURCES entry, every CLIENT_SKILLS alias, plus skill://index.json.
+        expected = len(trainer_module.CLIENT_RESOURCES)
+        expected += sum(len(s["aliases"]) for s in trainer_module.CLIENT_SKILLS.values())
+        expected += 1
+        assert mock_mcp.resource.call_count == expected
+
+
+# ─── Agent Skills (SEP-2640) ───────────────────────────────────────────────
+
+
+class TestAgentSkills:
+    def test_client_skills_defined(self):
+        from kubeflow_mcp.trainer import CLIENT_SKILLS
+
+        assert "kubeflow-training" in CLIENT_SKILLS
+        skill = CLIENT_SKILLS["kubeflow-training"]
+        assert skill["description"]
+        assert len(skill["aliases"]) == 3
+
+    def test_skill_aliases_map_to_existing_resources(self):
+        from kubeflow_mcp.trainer import CLIENT_SKILLS
+
+        for skill_uri, source_uri in CLIENT_SKILLS["kubeflow-training"]["aliases"].items():
+            assert skill_uri.startswith("skill://kubeflow/"), skill_uri
+            assert source_uri in CLIENT_RESOURCES, f"alias source missing: {source_uri}"
+
+    def test_skill_aliases_serve_source_content(self):
+        import kubeflow_mcp.trainer as trainer_module
+        from kubeflow_mcp.core.resources import register_resources
+
+        handlers: dict[str, object] = {}
+
+        def capture(uri, **_kwargs):
+            def decorator(fn):
+                handlers[uri] = fn
+                return fn
+
+            return decorator
+
+        mock_mcp = MagicMock()
+        mock_mcp.resource.side_effect = capture
+
+        register_resources(mock_mcp, {"trainer": trainer_module})
+
+        for skill_uri, source_uri in trainer_module.CLIENT_SKILLS["kubeflow-training"][
+            "aliases"
+        ].items():
+            assert handlers[skill_uri]() == handlers[source_uri]()
+
+    def test_skill_index_lists_all_skills(self):
+        import json
+
+        import kubeflow_mcp.trainer as trainer_module
+        from kubeflow_mcp.core.resources import SKILL_INDEX_URI, register_resources
+
+        handlers: dict[str, object] = {}
+
+        def capture(uri, **_kwargs):
+            def decorator(fn):
+                handlers[uri] = fn
+                return fn
+
+            return decorator
+
+        mock_mcp = MagicMock()
+        mock_mcp.resource.side_effect = capture
+
+        register_resources(mock_mcp, {"trainer": trainer_module})
+
+        index = json.loads(handlers[SKILL_INDEX_URI]())
+        assert index["version"] == 1
+        skills = {s["name"]: s for s in index["skills"]}
+        assert "kubeflow-training" in skills
+        uris = {r["uri"] for r in skills["kubeflow-training"]["resources"]}
+        assert uris == set(trainer_module.CLIENT_SKILLS["kubeflow-training"]["aliases"])
+
+    def test_skill_with_no_resolvable_aliases_is_omitted_from_index(self):
+        from types import SimpleNamespace
+
+        import kubeflow_mcp.trainer as trainer_module
+        from kubeflow_mcp.core.resources import SKILL_INDEX_URI, register_resources
+
+        handlers: dict[str, object] = {}
+
+        def capture(uri, **_kwargs):
+            def decorator(fn):
+                handlers[uri] = fn
+                return fn
+
+            return decorator
+
+        broken_module = SimpleNamespace(
+            __file__=trainer_module.__file__,
+            CLIENT_RESOURCES=trainer_module.CLIENT_RESOURCES,
+            CLIENT_SKILLS={
+                "broken-skill": {
+                    "description": "all aliases dangling",
+                    "aliases": {"skill://broken/a.md": "trainer://does-not-exist"},
+                }
+            },
+        )
+
+        mock_mcp = MagicMock()
+        mock_mcp.resource.side_effect = capture
+
+        complete = register_resources(mock_mcp, {"trainer": broken_module})
+
+        assert complete is False
+        assert "skill://broken/a.md" not in handlers
+        assert SKILL_INDEX_URI not in handlers
+
+    def test_skill_package_files_exist(self):
+        from pathlib import Path
+
+        import kubeflow_mcp
+
+        repo_root = Path(kubeflow_mcp.__file__).parent.parent
+        skill_dir = repo_root / "skills" / "kubeflow-training"
+        skill_md = skill_dir / "SKILL.md"
+        assert skill_md.exists(), "skills/kubeflow-training/SKILL.md missing"
+        content = skill_md.read_text(encoding="utf-8")
+        assert content.startswith("---"), "SKILL.md must begin with YAML frontmatter"
+        assert "name: kubeflow-training" in content
+        assert (skill_dir / "mcp.json").exists(), "skills/kubeflow-training/mcp.json missing"
 
 
 # ─── PHASE_TO_SECTION mapping ─────────────────────────────────────────────
