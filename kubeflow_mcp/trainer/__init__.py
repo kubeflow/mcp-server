@@ -310,6 +310,26 @@ CLIENT_RESOURCES: dict[str, tuple[str, str]] = {
     ),
 }
 
+# ─── Agent Skills (SEP-2640) ───────────────────────────────────────────────
+# Skills re-serve existing guide resources under skill:// URIs so agent
+# harnesses that follow the Agent Skills convention can discover them.
+# Aliases map skill:// URIs to CLIENT_RESOURCES source URIs — same cached
+# content, no duplication.
+
+CLIENT_SKILLS: dict[str, dict] = {
+    "kubeflow-training": {
+        "description": (
+            "Train and fine-tune AI models on Kubernetes with Kubeflow Trainer: "
+            "distributed training patterns, platform-specific fixes, and troubleshooting."
+        ),
+        "aliases": {
+            "skill://kubeflow/training-patterns": "trainer://guides/training-patterns",
+            "skill://kubeflow/platform-fixes": "trainer://guides/platform-fixes",
+            "skill://kubeflow/troubleshooting": "trainer://guides/troubleshooting",
+        },
+    },
+}
+
 # ─── Instruction sections (full tier; compact/minimal auto-derived) ────────
 # Phase-to-section mapping for auto-deriving which sections a persona needs.
 # TOOL_PHASES keys -> instruction section names.
