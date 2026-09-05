@@ -18,7 +18,7 @@ The Kubeflow MCP Server exposes Kubeflow Training operations as [Model Context P
 - **Security-First**: Persona gating, namespace enforcement, input validation, bearer/JWT auth
 - **Multi-Platform**: Auto-detects OpenShift, EKS, GKE with platform-specific guidance
 - **Token-Efficient**: Progressive/semantic modes compress 23 tools into 2-3 meta-tools
-- **Extensible**: Plugin architecture for additional Kubeflow clients (TODO: optimizer, hub)
+- **Extensible**: Plugin architecture for additional Kubeflow clients (trainer, spark; TODO: optimizer, hub)
 
 ## Demo
 
@@ -168,6 +168,20 @@ claude mcp add kubeflow -- kubeflow-mcp serve
 | Platform | `inspect_crd`, `inspect_controller`, `patch_runtime`, `create_runtime`, `delete_runtime` | Cluster inspection and runtime management |
 | Health | `health_check`, `get_server_logs` | Server diagnostics |
 
+### Spark tools
+
+Enabled with `--clients trainer,spark` (requires the `kubeflow[spark]` extra):
+
+| Phase | Tools | Description |
+|-------|-------|-------------|
+| Discovery | `list_spark_sessions`, `get_spark_session` | Browse SparkConnect sessions |
+| Sessions | `create_spark_session`, `delete_spark_session` | Provision and tear down SparkConnect sessions (ownership-guarded) |
+| Monitoring | `get_spark_session_logs` | Read driver logs |
+
+Sessions created through MCP are labelled `kubeflow-mcp/managed-by=mcp`. Non-admin
+personas may only delete sessions carrying that label; use the `platform-admin`
+persona to manage sessions created outside MCP.
+
 
 ### Requirements
 
@@ -180,7 +194,7 @@ claude mcp add kubeflow -- kubeflow-mcp serve
 ### `kubeflow-mcp serve`
 
 ```bash
-# Modules: trainer, optimizer (stub), hub (stub)
+# Modules: trainer, spark, optimizer (stub), hub (stub)
 # Persona: readonly | data-scientist | ml-engineer | platform-admin
 # Mode: full | progressive | semantic
 # Instruction tier: full | compact | minimal
@@ -191,7 +205,7 @@ claude mcp add kubeflow -- kubeflow-mcp serve
 # Log format: console | json (auto-detected if omitted)
 # No banner: suppress the FastMCP startup banner
 kubeflow-mcp serve \
-  --clients trainer \
+  --clients trainer,spark \
   --persona ml-engineer \
   --mode full \
   --instruction-tier full \
@@ -202,6 +216,19 @@ kubeflow-mcp serve \
   --log-format console \
   --no-banner
 ```
+
+| Flag | Values |
+| ---- | ------ |
+| `--clients` | `trainer`, `spark`, `optimizer` (stub), `hub` (stub) |
+| `--persona` | `readonly` \| `data-scientist` \| `ml-engineer` \| `platform-admin` |
+| `--mode` | `full` \| `progressive` \| `semantic` |
+| `--instruction-tier` | `full` \| `compact` \| `minimal` |
+| `--transport` | `stdio` \| `http` \| `sse` |
+| `--auth-token` | bearer token for HTTP auth (dev/staging) |
+| `--otel-endpoint` | OTLP HTTP endpoint (optional tracing) |
+| `--log-level` | `DEBUG` \| `INFO` \| `WARNING` \| `ERROR` |
+| `--log-format` | `console` \| `json` (auto-detected if omitted) |
+| `--no-banner` | suppress startup banner |
 
 `--mode progressive` exposes 3 meta-tools (~85 tokens) for hierarchical discovery. `--mode semantic` exposes 2 meta-tools (~69 tokens) using embedding search. Both reduce token consumption significantly for agent workflows.
 

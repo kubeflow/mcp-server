@@ -20,7 +20,7 @@ Mirrors kubeflow SDK's client structure:
 
 import threading
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 # Import at module level to avoid import deadlocks when tools are called rapidly
 from kubeflow.trainer import TrainerClient
@@ -184,9 +184,119 @@ def get_trainer_ownership(name: str, namespace: str) -> str | None:
         return None
 
 
+_SPARK_CONNECT_GROUP = "sparkoperator.k8s.io"
+_SPARK_CONNECT_VERSION = "v1alpha1"
+_SPARK_CONNECT_PLURAL = "sparkconnects"
+
+
+SparkOwnership = Literal["managed", "unmanaged", "not_found", "unknown"]
+
+
+def get_spark_session_ownership(name: str, namespace: str) -> SparkOwnership:
+    """Classify a SparkConnect session by MCP ownership.
+
+    Unlike :func:`is_mcp_managed` (which collapses a missing TrainJob into
+    "unmanaged"), this distinguishes absence from lack of ownership, because
+    ``docs/CONVENTIONS.md`` requires distinct error codes for the two cases:
+    ``RESOURCE_NOT_FOUND`` for a missing resource, ``VALIDATION_ERROR`` for one
+    that exists but was not created by MCP.
+
+    Returns:
+        ``"managed"``: session carries the MCP ownership label.
+        ``"unmanaged"``: session exists but lacks the label.
+        ``"not_found"``: no such session in *namespace*.
+        ``"unknown"``: the check could not be performed (API error, permissions).
+    """
+    try:
+        api = get_custom_objects_api()
+        obj = api.get_namespaced_custom_object(
+            group=_SPARK_CONNECT_GROUP,
+            version=_SPARK_CONNECT_VERSION,
+            namespace=namespace,
+            plural=_SPARK_CONNECT_PLURAL,
+            name=name,
+            _request_timeout=K8S_TIMEOUT,
+        )
+    except Exception as e:
+        from kubeflow_mcp.common.types import is_k8s_not_found
+
+        if is_k8s_not_found(e):
+            return "not_found"
+        return "unknown"
+
+    labels = (obj or {}).get("metadata", {}).get("labels", {}) or {}
+    if labels.get(MCP_MANAGED_LABEL) == MCP_MANAGED_VALUE:
+        return "managed"
+    return "unmanaged"
+
+
+# ─── Spark client factories ────────────────────────────────────────────────
+# SparkClient lives behind the optional ``kubeflow[spark]`` extra (it pulls in
+# pyspark). Import it lazily so the rest of the server — and the spark module's
+# metadata — load even when the extra is not installed.
+
+_SPARK_EXTRA_HINT = (
+    "SparkClient requires the Spark extra. Install it with: pip install 'kubeflow[spark]' "
+    "(or 'kubeflow-mcp[spark]')."
+)
+
+
+def _import_spark_client() -> Any:
+    """Import ``kubeflow.spark.SparkClient`` or raise a friendly ImportError."""
+    try:
+        from kubeflow.spark import SparkClient
+    except ImportError as e:  # pragma: no cover - exercised via friendly-message test
+        raise ImportError(_SPARK_EXTRA_HINT) from e
+    return SparkClient
+
+
+@lru_cache(maxsize=1)
+def get_spark_client() -> Any:
+    """Get or create the SparkClient singleton (default kubeconfig namespace)."""
+    spark_client_cls = _import_spark_client()
+    return spark_client_cls()
+
+
+_spark_ns_client_cache: dict[str, Any] = {}
+_spark_ns_client_lock = threading.Lock()
+
+
+def get_spark_client_for_namespace(namespace: str | None = None) -> Any:
+    """Return a SparkClient targeting the given namespace.
+
+    When *namespace* is ``None`` the effective default namespace is resolved via
+    the same path :func:`kubeflow_mcp.core.security.check_namespace_allowed` uses
+    (:func:`get_trainer_effective_namespace`) and the client is scoped to it, so
+    the namespace a request is *policy-checked* against always matches the one the
+    SparkClient actually *operates* in — closing a potential namespace-allowlist
+    bypass where the SDK's own default could diverge from the checked namespace.
+    Falls back to the unscoped singleton only if resolution fails.
+    """
+    if namespace is None:
+        try:
+            namespace = get_trainer_effective_namespace(None)
+        except Exception:
+            return get_spark_client()
+    with _spark_ns_client_lock:
+        if namespace in _spark_ns_client_cache:
+            return _spark_ns_client_cache[namespace]
+        spark_client_cls = _import_spark_client()
+        from kubeflow.common.types import KubernetesBackendConfig
+
+        client = spark_client_cls(backend_config=KubernetesBackendConfig(namespace=namespace))
+        if len(_spark_ns_client_cache) >= _NS_CLIENT_CACHE_MAX:
+            oldest = next(iter(_spark_ns_client_cache))
+            del _spark_ns_client_cache[oldest]
+        _spark_ns_client_cache[namespace] = client
+        return client
+
+
 def reset_clients() -> None:
     """Reset all cached clients (for testing or kubeconfig rotation)."""
     get_trainer_client.cache_clear()
+    get_spark_client.cache_clear()
     _get_api_client.cache_clear()
     with _ns_client_lock:
         _ns_client_cache.clear()
+    with _spark_ns_client_lock:
+        _spark_ns_client_cache.clear()

@@ -20,7 +20,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from kubeflow_mcp.common.constants import TOOL_PHASES, TOOL_TO_PHASE
+from kubeflow_mcp.common.constants import TOOL_TO_PHASE
 from kubeflow_mcp.core.health import HEALTH_TOOL_ANNOTATIONS, HEALTH_TOOL_DESCRIPTIONS, HEALTH_TOOLS
 from kubeflow_mcp.core.policy import DESTRUCTIVE_TOOLS, get_allowed_tools
 from kubeflow_mcp.core.server import (
@@ -383,7 +383,12 @@ class TestResourceLoading:
 
 class TestPhaseToSection:
     def test_all_phases_mapped(self):
-        for phase in TOOL_PHASES:
+        # Each client module owns and maps its own phases (the server merges
+        # every module's PHASE_TO_SECTION). Verify the trainer module covers the
+        # phases its own tools use — phases contributed by other modules (e.g.
+        # spark_*) are mapped by those modules, not here.
+        trainer_phases = {TOOL_TO_PHASE[t.__name__] for t in TOOLS if t.__name__ in TOOL_TO_PHASE}
+        for phase in trainer_phases:
             assert phase in PHASE_TO_SECTION, f"Phase '{phase}' not in PHASE_TO_SECTION"
 
     def test_discovery_maps_to_none(self):
