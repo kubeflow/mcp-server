@@ -147,7 +147,7 @@ def get_training_logs(
             "job": name,
             "step": step,
             "logs": sanitized,
-            "lines": len(sanitized.split("\n")),
+            "lines": len(sanitized.splitlines()) if sanitized else 0,
         }
 
         hint = extract_failure_hint(logs)

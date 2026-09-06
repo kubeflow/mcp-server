@@ -224,6 +224,18 @@ class TestGetTrainingLogs:
         assert "epoch 1/3" in result["data"]["logs"]
         assert result["data"]["lines"] >= 3
 
+    @patch(PATCH_EFF_NS, side_effect=RuntimeError("kubeconfig missing"))
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_empty_logs_report_zero_lines(self, mock_client_fn, _ns, _eff_ns):
+        mock_client_fn.return_value = _make_mock_client(get_job_logs=[])
+
+        result = get_training_logs("empty-job")
+
+        assert result["success"] is True
+        assert result["data"]["logs"] == ""
+        assert result["data"]["lines"] == 0
+
     @patch(PATCH_NS_CHECK, return_value=None)
     def test_follow_true_returns_early(self, _ns):
         result = get_training_logs("my-job", follow=True)
