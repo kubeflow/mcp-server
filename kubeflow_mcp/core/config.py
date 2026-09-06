@@ -203,7 +203,7 @@ def _load_yaml_config(path: Path) -> dict[str, Any]:
         logger.warning("PyYAML not installed, skipping config file")
         return {}
     except Exception as e:
-        logger.warning(f"Failed to load config from {path}: {e}")
+        logger.warning("Failed to load config from %s: %s", path, e)
         return {}
 
 
