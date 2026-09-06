@@ -74,6 +74,8 @@ def list_training_jobs(
 
         - ``jobs`` (list): List of jobs with ``name``, ``status``, ``runtime``
         - ``total`` (int): Total matching jobs
+        - ``returned`` (int): Number of jobs included in the response
+        - ``has_more`` (bool): Whether matching jobs were omitted by ``limit``
 
     Example:
         >>> list_training_jobs(status="Running")
@@ -116,7 +118,15 @@ def list_training_jobs(
             want = _JOB_STATUS_FILTER_ALIASES.get(status, status)
             job_list = [j for j in job_list if j.get("status") == want]
 
-        return ToolResponse(data={"jobs": job_list[:limit], "total": len(job_list)}).model_dump()
+        truncated_jobs = job_list[:limit]
+        return ToolResponse(
+            data={
+                "jobs": truncated_jobs,
+                "total": len(job_list),
+                "returned": len(truncated_jobs),
+                "has_more": len(job_list) > limit,
+            }
+        ).model_dump()
 
     except Exception as e:
         return ToolError(
