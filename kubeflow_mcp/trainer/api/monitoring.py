@@ -38,6 +38,8 @@ MAX_LOG_LINES = 1000
 MAX_EVENT_LIMIT = 500
 MAX_WAIT_TIMEOUT = 3600
 MIN_POLLING_INTERVAL = 1
+_TARGET_STATUS_ALIASES = {"Succeeded": "Complete"}
+_VALID_TARGET_STATUSES = frozenset({"Complete", "Failed", "Running", "Created", "Suspended"})
 
 
 def _is_pod_for_step(pod: Any, step: str) -> bool:
@@ -283,6 +285,21 @@ def wait_for_training(
     if ns_err is not None:
         return ns_err.model_dump()
 
+    raw_statuses = [target_statuses] if isinstance(target_statuses, str) else target_statuses
+    if not raw_statuses:
+        return ToolError(
+            error="target_statuses must contain at least one status",
+            error_code=ErrorCode.VALIDATION_ERROR,
+        ).model_dump()
+
+    status_set = {_TARGET_STATUS_ALIASES.get(status, status) for status in raw_statuses}
+    invalid_statuses = sorted(status_set - _VALID_TARGET_STATUSES)
+    if invalid_statuses:
+        return ToolError(
+            error=f"Unsupported target status(es): {', '.join(invalid_statuses)}",
+            error_code=ErrorCode.VALIDATION_ERROR,
+        ).model_dump()
+
     try:
         if timeout_seconds < 1:
             return ToolError(
@@ -297,10 +314,6 @@ def wait_for_training(
         timeout_seconds = min(timeout_seconds, MAX_WAIT_TIMEOUT)
         polling_interval = max(polling_interval, MIN_POLLING_INTERVAL)
         client = get_trainer_client_for_namespace(namespace)
-
-        aliases = {"Succeeded": "Complete"}
-        raw = set(target_statuses) if isinstance(target_statuses, list) else {target_statuses}
-        status_set = {aliases.get(s, s) for s in raw}
 
         job = client.wait_for_job_status(
             name=name,

@@ -540,6 +540,23 @@ class TestWaitForTraining:
         call_kwargs = client.wait_for_job_status.call_args
         assert call_kwargs.kwargs["status"] == {"Complete", "Failed"}
 
+    @pytest.mark.parametrize("target_statuses", ["INVALID_STATUS", ["Complete", "INVALID_STATUS"]])
+    @patch(PATCH_CLIENT)
+    def test_invalid_target_status_rejected_before_sdk_call(self, mock_client_fn, target_statuses):
+        result = wait_for_training("my-job", target_statuses=target_statuses)
+
+        assert result["success"] is False
+        assert result["error_code"] == "VALIDATION_ERROR"
+        mock_client_fn.assert_not_called()
+
+    @patch(PATCH_CLIENT)
+    def test_empty_target_statuses_rejected_before_sdk_call(self, mock_client_fn):
+        result = wait_for_training("my-job", target_statuses=[])
+
+        assert result["success"] is False
+        assert result["error_code"] == "VALIDATION_ERROR"
+        mock_client_fn.assert_not_called()
+
     @patch(PATCH_NS_CHECK, return_value=None)
     @patch(PATCH_CLIENT)
     def test_generic_sdk_error(self, mock_client_fn, _ns):
