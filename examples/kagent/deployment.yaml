@@ -1,0 +1,83 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kubeflow-mcp-http
+  labels:
+    app: kubeflow-mcp-http
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kubeflow-mcp-http
+  template:
+    metadata:
+      labels:
+        app: kubeflow-mcp-http
+        app.kubernetes.io/name: kubeflow-mcp-http
+    spec:
+      serviceAccountName: kubeflow-mcp
+      containers:
+        - name: mcp-server
+          image: ghcr.io/kubeflow/mcp-server:latest
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8000
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+          envFrom:
+            - secretRef:
+                name: kubeflow-mcp-http-auth
+          env:
+            - name: MCP_TRANSPORT
+              value: http
+            - name: KUBEFLOW_MCP_CLIENTS
+              value: trainer
+            - name: KUBEFLOW_MCP_PERSONA
+              value: ml-engineer
+            - name: KUBEFLOW_MCP_MODE
+              value: full
+            - name: KUBEFLOW_MCP_INSTRUCTION_TIER
+              value: compact
+            - name: KUBEFLOW_MCP_ALLOWED_HOSTS
+              value: kubeflow-mcp-http.kagent,kubeflow-mcp-http.kagent:*,kubeflow-mcp-http.kagent.svc,kubeflow-mcp-http.kagent.svc:*,kubeflow-mcp-http.kagent.svc.cluster.local,kubeflow-mcp-http.kagent.svc.cluster.local:*,kagent-model-gateway.agentgateway-system,kagent-model-gateway.agentgateway-system:*,kagent-model-gateway.agentgateway-system.svc,kagent-model-gateway.agentgateway-system.svc:*,kagent-model-gateway.agentgateway-system.svc.cluster.local,kagent-model-gateway.agentgateway-system.svc.cluster.local:*
+            - name: KUBEFLOW_MCP_ALLOWED_ORIGINS
+              value: http://kubeflow-mcp-http.kagent:8000,http://kubeflow-mcp-http.kagent.svc:8000,http://kubeflow-mcp-http.kagent.svc.cluster.local:8000,http://kagent-model-gateway.agentgateway-system:80,http://kagent-model-gateway.agentgateway-system.svc:80,http://kagent-model-gateway.agentgateway-system.svc.cluster.local:80
+            - name: HOME
+              value: /home/kubeflow-mcp
+            - name: HF_HOME
+              value: /home/kubeflow-mcp/.cache/huggingface
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 20
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: home
+              mountPath: /home/kubeflow-mcp
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: home
+          emptyDir: {}

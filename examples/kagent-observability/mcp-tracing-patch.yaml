@@ -1,0 +1,13 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kubeflow-mcp-http
+  namespace: kagent
+spec:
+  template:
+    spec:
+      containers:
+        - name: mcp-server
+          env:
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://otel-collector-collector.observability.svc.cluster.local:4318

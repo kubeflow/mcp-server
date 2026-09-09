@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: kubeflow-mcp-http
+spec:
+  type: ClusterIP
+  selector:
+    app: kubeflow-mcp-http
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
