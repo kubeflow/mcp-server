@@ -37,6 +37,11 @@ class TestAPIKeyVerifier:
         result = await verifier.verify_token("wrong-length")
         assert result is None
 
+    async def test_rejects_non_ascii_token(self):
+        verifier = APIKeyVerifier(expected_token="test-secret")
+        result = await verifier.verify_token("café")
+        assert result is None
+
     # TODO(test): test empty token rejection
     # TODO(test): test timing-safe comparison (statistical test)
 
