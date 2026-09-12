@@ -28,7 +28,11 @@ from kubeflow_mcp.common.utils import (
     get_trainer_client_for_namespace,
     get_trainer_effective_namespace,
 )
-from kubeflow_mcp.core.security import check_namespace_allowed, validate_k8s_name
+from kubeflow_mcp.core.security import (
+    check_namespace_allowed,
+    validate_k8s_name,
+    validate_runtime_name,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +84,7 @@ def list_training_jobs(
         {"data": {"jobs": [{"name": "fine-tune-abc", "status": "Running"}], "total": 1}}
     """
     if runtime:
-        runtime_err = validate_k8s_name(runtime, "runtime")
+        runtime_err = validate_runtime_name(runtime, "runtime")
         if runtime_err is not None:
             return runtime_err.model_dump()
 
@@ -450,7 +454,7 @@ def get_runtime(name: str, include_packages: bool = False) -> dict[str, Any]:
     Raises:
         ToolError: If runtime not found (``RESOURCE_NOT_FOUND``).
     """
-    name_err = validate_k8s_name(name)
+    name_err = validate_runtime_name(name)
     if name_err is not None:
         return name_err.model_dump()
 

@@ -26,6 +26,7 @@ from kubeflow_mcp.core.security import (
     validate_k8s_name,
     validate_namespace,
     validate_resource_limits,
+    validate_runtime_name,
     validate_training_bounds,
 )
 
@@ -77,6 +78,50 @@ def test_validate_k8s_name(test_case):
 def test_validate_k8s_name_custom_field():
     err = validate_k8s_name("", field="runtime")
     assert "runtime" in err.error
+
+
+@pytest.mark.parametrize(
+    "test_case",
+    [
+        TestCase(
+            name="stock torchtune runtime with dots",
+            expected_status=SUCCESS,
+            config={"name": "torchtune-llama3.2-1b"},
+        ),
+        TestCase(
+            name="runtime with several dotted segments",
+            expected_status=SUCCESS,
+            config={"name": "torchtune-qwen2.5-1.5b"},
+        ),
+        TestCase(
+            name="runtime without dots",
+            expected_status=SUCCESS,
+            config={"name": "torch-distributed"},
+        ),
+        TestCase(
+            name="empty runtime name rejected",
+            expected_status=FAILED,
+            config={"name": ""},
+        ),
+        TestCase(
+            name="uppercase rejected",
+            expected_status=FAILED,
+            config={"name": "Torch.Distributed"},
+        ),
+        TestCase(
+            name="empty dot segment rejected",
+            expected_status=FAILED,
+            config={"name": "torch..distributed"},
+        ),
+        TestCase(
+            name="path traversal attempt rejected",
+            expected_status=FAILED,
+            config={"name": "../../etc"},
+        ),
+    ],
+)
+def test_validate_runtime_name(test_case):
+    assert_test_case(test_case, validate_runtime_name)
 
 
 def test_validate_namespace_delegates():
