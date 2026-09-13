@@ -158,6 +158,55 @@ def test_setup_tracing_configures_provider_when_available(monkeypatch: pytest.Mo
     assert telemetry.get_tracer("unit") == "tracer:unit"
 
 
+def test_setup_tracing_sets_exporter_timeout_in_seconds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """OTLPSpanExporter takes seconds; only BatchSpanProcessor takes milliseconds."""
+    calls: dict[str, object] = {}
+
+    class _FakeProvider:
+        def __init__(self, resource: object) -> None:
+            self._processors: list[object] = []
+
+        def add_span_processor(self, processor: object) -> None:
+            self._processors.append(processor)
+
+        def shutdown(self) -> None:
+            pass
+
+    class _FakeResource:
+        @staticmethod
+        def create(data: dict[str, str]) -> dict[str, str]:
+            return data
+
+    class _FakeBatchProcessor:
+        def __init__(self, exporter: object, **kwargs) -> None:
+            self.exporter = exporter
+            calls["export_timeout_millis"] = kwargs.get("export_timeout_millis")
+
+    class _FakeExporter:
+        def __init__(self, endpoint: str, **kwargs) -> None:
+            self.endpoint = endpoint
+            calls["timeout"] = kwargs.get("timeout")
+
+    fake_trace = SimpleNamespace(
+        set_tracer_provider=lambda provider: None,
+        get_tracer=lambda name: f"tracer:{name}",
+        get_tracer_provider=lambda: object(),
+    )
+
+    monkeypatch.setattr(telemetry, "_OTEL_AVAILABLE", True)
+    monkeypatch.setattr(telemetry, "_tracing_initialized", False)
+    monkeypatch.setattr(telemetry, "_configured_endpoint", None, raising=False)
+    monkeypatch.setattr(telemetry, "Resource", _FakeResource, raising=False)
+    monkeypatch.setattr(telemetry, "TracerProvider", _FakeProvider, raising=False)
+    monkeypatch.setattr(telemetry, "BatchSpanProcessor", _FakeBatchProcessor, raising=False)
+    monkeypatch.setattr(telemetry, "OTLPSpanExporter", _FakeExporter, raising=False)
+    monkeypatch.setattr(telemetry, "_otel_trace", fake_trace, raising=False)
+
+    assert telemetry.setup_tracing("http://collector:4318/v1/traces") is True
+    assert calls["timeout"] == 2
+    assert calls["export_timeout_millis"] == 2000
+
+
 def test_setup_tracing_treats_whitespace_endpoint_as_disabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
