@@ -11,6 +11,9 @@ you bump the version locally, open a PR, and merging it drives the rest automati
 
 - [Write](https://docs.github.com/en/organizations/managing-access-to-your-organizations-repositories/repository-permission-levels-for-an-organization#permission-levels-for-repositories-owned-by-an-organization)
   permission for the repository.
+- **Docker** available locally for changelog generation
+  (`make release` uses the same `git-cliff` container flow as the
+  [Kubeflow Trainer release process](https://github.com/kubeflow/trainer/blob/master/Makefile#L308)).
 - A [GitHub token](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens)
   exported as `GITHUB_TOKEN` — `make release` uses it so `git-cliff` can attribute
   changelog entries to their pull requests and authors.
@@ -29,7 +32,7 @@ through `make release` (below).
 ## Release Branches and Tags
 
 - Release branches are `release-X.Y` (e.g. `release-0.1`). `X.Y.Z` releases are cut
-  from the matching `release-X.Y` branch, which the workflow creates automatically.
+  from the matching `release-X.Y` branch, which the workflow creates or updates automatically.
 - Tags are the bare version string, e.g. `0.1.0` (no `v` prefix).
 - To patch an older minor series, cherry-pick your change onto `release-X.Y` and open a
   PR against that branch.
@@ -63,9 +66,14 @@ RC releases skip changelog generation.
 
 ### 1. Update version and changelog
 
+For **the latest minor release**, run from the `main` branch.
+
+For **an older minor-series patch** (e.g. `0.1.1` when `main` is on `0.2.x`), check out
+the corresponding `release-X.Y` branch first.
+
 ```sh
 export GITHUB_TOKEN=<your_github_token>
-make release VERSION=X.Y.Z      # e.g. make release VERSION=0.1.0
+make release VERSION=X.Y.Z GITHUB_TOKEN=$GITHUB_TOKEN
 ```
 
 This updates:
@@ -74,7 +82,6 @@ This updates:
 - `server.json` → top-level and PyPI package `version` fields (MCP Registry metadata)
 - `CHANGELOG/CHANGELOG-X.Y.md` → a new top entry `# [X.Y.Z] (YYYY-MM-DD)`
   (skipped for `rcN`)
-
 ### 2. Open a pull request
 
 - Review `kubeflow_mcp/__init__.py`, `server.json`, and `CHANGELOG/CHANGELOG-X.Y.md`.

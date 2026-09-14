@@ -30,6 +30,9 @@ from typing import Any
 from fastmcp import FastMCP
 
 from kubeflow_mcp.common.constants import (
+    KUBEFLOW_SDK_VERSION_MIN,
+    KUBEFLOW_TRAINER_VERSION_MIN,
+    KUBERNETES_VERSION_LABEL,
     TOOL_NEXT_HINTS,
     TOOL_TO_PHASE,
     ErrorCode,
@@ -249,13 +252,13 @@ CLIENT_MODULES = {
     "hub": "kubeflow_mcp.hub",
 }
 
-_GLOBAL_HEADER = """\
+_GLOBAL_HEADER = f"""\
 Kubeflow MCP Server - AI Model Training on Kubernetes
 
 PREREQUISITES:
-- Kubeflow Trainer v2.2.0+ installed (TrainJob CRD must exist)
-- Kubeflow SDK 0.4.0+ (bundled with MCP server)
-- Kubernetes 1.27+
+- Kubeflow Trainer {KUBEFLOW_TRAINER_VERSION_MIN}+ installed (TrainJob CRD must exist)
+- Kubeflow SDK {KUBEFLOW_SDK_VERSION_MIN}+ (bundled with MCP server)
+- Kubernetes {KUBERNETES_VERSION_LABEL}
 - Any platform: vanilla K8s, Kind, Minikube, OpenShift, EKS, GKE
 
 CRITICAL WORKFLOW - Follow these steps IN ORDER:

@@ -51,11 +51,13 @@ See: docs/CONVENTIONS.md and CONTRIBUTING.md
 from collections.abc import Callable
 from typing import Any
 
+from kubeflow_mcp.common.constants import KUBEFLOW_SDK_VERSION
+
 MODULE_INFO = {
     "name": "hub",
     "description": "Model Registry for artifact versioning",
     "sdk_client": "kubeflow.hub.ModelRegistryClient",
-    "sdk_version": ">=0.4.0",
+    "sdk_version": f">={KUBEFLOW_SDK_VERSION}",
     "status": "stub",
     "planned_tools": 7,
 }
