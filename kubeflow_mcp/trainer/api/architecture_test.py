@@ -382,9 +382,34 @@ class TestResourceLoading:
 
 
 class TestPhaseToSection:
-    def test_all_phases_mapped(self):
-        for phase in TOOL_PHASES:
-            assert phase in PHASE_TO_SECTION, f"Phase '{phase}' not in PHASE_TO_SECTION"
+    def test_all_trainer_phases_mapped(self):
+        """Each client maps only its own phases.
+
+        TOOL_PHASES is global and also carries other clients' phases (e.g. the
+        optimizer's), so assert against the phases this client actually owns
+        rather than every key in the registry.
+        """
+        trainer_phases = {TOOL_TO_PHASE[t.__name__] for t in TOOLS if t.__name__ in TOOL_TO_PHASE}
+        unmapped = trainer_phases - set(PHASE_TO_SECTION)
+        assert not unmapped, f"Trainer phases missing from PHASE_TO_SECTION: {unmapped}"
+
+    def test_every_phase_belongs_to_some_client(self):
+        """No phase may be orphaned: every entry in the global registry must be
+        claimed by a loaded client's PHASE_TO_SECTION."""
+        import importlib
+
+        from kubeflow_mcp.core.server import CLIENT_MODULES
+
+        claimed: set[str] = set()
+        for path in CLIENT_MODULES.values():
+            try:
+                mod = importlib.import_module(path)
+            except ImportError:
+                continue
+            claimed |= set(getattr(mod, "PHASE_TO_SECTION", {}))
+
+        orphaned = set(TOOL_PHASES) - claimed - {"health"}
+        assert not orphaned, f"Phases not claimed by any client: {orphaned}"
 
     def test_discovery_maps_to_none(self):
         assert PHASE_TO_SECTION["discovery"] is None

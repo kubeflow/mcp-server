@@ -16,6 +16,7 @@
 
 import ast
 import re
+from collections.abc import Callable
 from typing import Any
 
 from kubeflow_mcp.common.constants import ErrorCode
@@ -57,15 +58,23 @@ def validate_namespace(namespace: str) -> ToolError | None:
     return validate_k8s_name(namespace, "namespace")
 
 
-def check_namespace_allowed(namespace: str | None) -> ToolError | None:
+def check_namespace_allowed(
+    namespace: str | None,
+    resolver: Callable[[str | None], str] | None = None,
+) -> ToolError | None:
     """Check if namespace is allowed by policy.
 
-    When *namespace* is ``None`` the effective default namespace from the
-    TrainerClient backend is resolved and checked against the allowlist so
-    that implicit-default usage cannot bypass namespace restrictions.
+    When *namespace* is ``None`` the effective default namespace is resolved and
+    checked against the allowlist so that implicit-default usage cannot bypass
+    namespace restrictions.
 
     Args:
         namespace: Namespace to check. ``None`` resolves to the effective default.
+        resolver: Resolves the effective default namespace for the client the
+            caller operates through. Defaults to the trainer client's resolver.
+            Callers acting on another client's resources **must** pass that
+            client's resolver — otherwise the namespace validated here is not the
+            namespace the operation targets, and the allowlist can be bypassed.
 
     Returns:
         ToolError if namespace is restricted, None if allowed
@@ -80,9 +89,11 @@ def check_namespace_allowed(namespace: str | None) -> ToolError | None:
     effective = namespace
     if effective is None:
         try:
-            from kubeflow_mcp.common.utils import get_trainer_effective_namespace
+            if resolver is None:
+                from kubeflow_mcp.common.utils import get_trainer_effective_namespace
 
-            effective = get_trainer_effective_namespace(None)
+                resolver = get_trainer_effective_namespace
+            effective = resolver(None)
         except Exception:
             return ToolError(
                 error="Cannot resolve effective namespace; refusing request (fail closed)",
