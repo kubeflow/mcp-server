@@ -16,12 +16,14 @@
 
 from unittest.mock import patch
 
+import pytest
+
 from kubeflow_mcp.core.health import get_server_logs
 
 
 def test_get_server_logs_rejects_invalid_level():
     with patch("kubeflow_mcp.core.health.get_log_buffer") as mock_get_logs:
-        result = get_server_logs(level="WARN")
+        result = get_server_logs(level="INVALID")
 
     assert result["success"] is False
     assert result["error_code"] == "VALIDATION_ERROR"
@@ -37,3 +39,18 @@ def test_get_server_logs_accepts_case_insensitive_level():
 
     assert result["success"] is True
     assert result["data"]["logs"] == [{"level": "ERROR", "message": "failed"}]
+
+
+@pytest.mark.parametrize(
+    ("alias", "record_level"),
+    [("WARN", "WARNING"), ("FATAL", "CRITICAL")],
+)
+def test_get_server_logs_accepts_standard_level_aliases(alias, record_level):
+    with patch(
+        "kubeflow_mcp.core.health.get_log_buffer",
+        return_value=[{"level": record_level, "message": "failed"}],
+    ):
+        result = get_server_logs(level=alias)
+
+    assert result["success"] is True
+    assert result["data"]["logs"] == [{"level": record_level, "message": "failed"}]

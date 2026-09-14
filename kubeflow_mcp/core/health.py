@@ -91,7 +91,11 @@ def get_server_logs(
             "ERROR": 3,
             "CRITICAL": 4,
         }
-        normalized_level = level.upper()
+        level_aliases = {
+            "WARN": "WARNING",
+            "FATAL": "CRITICAL",
+        }
+        normalized_level = level_aliases.get(level.upper(), level.upper())
         if normalized_level not in level_order:
             return ToolError(
                 error=f"Unsupported log level: {level}",
