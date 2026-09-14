@@ -35,6 +35,7 @@ from kubeflow_mcp.common.constants import (
     ErrorCode,
     is_infrastructure_error,
 )
+from kubeflow_mcp.core.a2a import register_a2a_routes
 from kubeflow_mcp.core.dynamic_tools import get_mode_tools, init_dynamic_tools
 from kubeflow_mcp.core.health import (
     HEALTH_TOOL_ANNOTATIONS,
@@ -508,5 +509,6 @@ def create_server(  # noqa: C901
     # Register MCP resources from client modules (all resources, always)
     resources_ready = register_resources(mcp, loaded_modules)
     register_probe_routes(mcp, is_ready=clients_ready and resources_ready)
+    register_a2a_routes(mcp, clients, persona, auth_provider)
 
     return mcp
