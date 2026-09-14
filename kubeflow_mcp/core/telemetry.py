@@ -115,7 +115,7 @@ def setup_tracing(endpoint: str | None = None, service_name: str = "kubeflow-mcp
 
         exporter = OTLPSpanExporter(
             endpoint=normalized_endpoint,
-            timeout=2000,
+            timeout=2,
         )
         processor = BatchSpanProcessor(exporter, export_timeout_millis=2000)
         current_provider = _otel_trace.get_tracer_provider()

@@ -367,6 +367,28 @@ class TestResourceLoading:
         for uri in CLIENT_RESOURCES:
             assert uri.startswith("trainer://"), f"URI '{uri}' should use trainer:// scheme"
 
+    def test_referenced_resource_uris_are_registered(self):
+        """Every trainer:// URI the shipped code points an agent at must resolve.
+
+        Hints and next_steps fire on the failure path, so an unregistered URI
+        breaks resources/read exactly when the agent follows our own advice.
+        """
+        import re
+        from pathlib import Path
+
+        import kubeflow_mcp
+
+        package = Path(kubeflow_mcp.__file__).parent
+        uri_pattern = re.compile(r"trainer://[\w-]+/[\w-]+")
+        sources = [p for p in package.rglob("*.py") if not p.name.endswith("_test.py")]
+        sources += sorted(package.rglob("*.md"))
+
+        for path in sources:
+            for uri in uri_pattern.findall(path.read_text(encoding="utf-8")):
+                assert uri in CLIENT_RESOURCES, (
+                    f"{path.relative_to(package)} references unregistered resource '{uri}'"
+                )
+
     def test_register_resources_with_mock_mcp(self):
         import kubeflow_mcp.trainer as trainer_module
         from kubeflow_mcp.core.resources import register_resources

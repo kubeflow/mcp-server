@@ -224,6 +224,18 @@ class TestGetTrainingLogs:
         assert "epoch 1/3" in result["data"]["logs"]
         assert result["data"]["lines"] >= 3
 
+    @patch(PATCH_EFF_NS, side_effect=RuntimeError("kubeconfig missing"))
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_empty_logs_report_zero_lines(self, mock_client_fn, _ns, _eff_ns):
+        mock_client_fn.return_value = _make_mock_client(get_job_logs=[])
+
+        result = get_training_logs("empty-job")
+
+        assert result["success"] is True
+        assert result["data"]["logs"] == ""
+        assert result["data"]["lines"] == 0
+
     @patch(PATCH_NS_CHECK, return_value=None)
     def test_follow_true_returns_early(self, _ns):
         result = get_training_logs("my-job", follow=True)
@@ -539,6 +551,37 @@ class TestWaitForTraining:
         assert result["success"] is True
         call_kwargs = client.wait_for_job_status.call_args
         assert call_kwargs.kwargs["status"] == {"Complete", "Failed"}
+
+    @pytest.mark.parametrize(
+        "target_statuses",
+        ["INVALID_STATUS", "Suspended", ["Complete", "INVALID_STATUS"]],
+    )
+    @patch(PATCH_CLIENT)
+    def test_invalid_target_status_rejected_before_sdk_call(self, mock_client_fn, target_statuses):
+        result = wait_for_training("my-job", target_statuses=target_statuses)
+
+        assert result["success"] is False
+        assert result["error_code"] == "VALIDATION_ERROR"
+        mock_client_fn.assert_not_called()
+
+    @patch(PATCH_CLIENT)
+    def test_empty_target_statuses_rejected_before_sdk_call(self, mock_client_fn):
+        result = wait_for_training("my-job", target_statuses=[])
+
+        assert result["success"] is False
+        assert result["error_code"] == "VALIDATION_ERROR"
+        mock_client_fn.assert_not_called()
+
+    @pytest.mark.parametrize("target_statuses", [123, ["Complete", 123], ("Complete",)])
+    @patch(PATCH_CLIENT)
+    def test_malformed_target_statuses_rejected_before_sdk_call(
+        self, mock_client_fn, target_statuses
+    ):
+        result = wait_for_training("my-job", target_statuses=target_statuses)
+
+        assert result["success"] is False
+        assert result["error_code"] == "VALIDATION_ERROR"
+        mock_client_fn.assert_not_called()
 
     @patch(PATCH_NS_CHECK, return_value=None)
     @patch(PATCH_CLIENT)
