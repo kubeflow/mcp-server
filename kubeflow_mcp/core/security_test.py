@@ -376,6 +376,16 @@ def test_truncate_long_output():
 # TODO(test): test exact boundary (max_length characters)
 
 
+class TestValidateK8sNameTrailingNewline:
+    """`re.match` with `$` accepts a trailing newline; names must be rejected."""
+
+    @pytest.mark.parametrize("name", ["job\n", "my-job\n", "job\r\n"])
+    def test_rejects_trailing_newline(self, name):
+        err = validate_k8s_name(name)
+        assert err is not None
+        assert err.error_code == "VALIDATION_ERROR"
+
+
 class TestValidateRuntimeName:
     """Runtime names are K8s object names, so dots are legal."""
 
@@ -425,6 +435,16 @@ class TestValidateRuntimeName:
     )
     def test_rejects_label_over_63_chars(self, name):
         """RFC 1123 caps each label at 63, independently of the 253 total."""
+        err = validate_runtime_name(name)
+        assert err is not None
+        assert err.error_code == "VALIDATION_ERROR"
+
+    @pytest.mark.parametrize(
+        "name",
+        ["runtime\n", "torchtune-llama3.2-1b\n", "runtime\r\n", "runtime\n\n"],
+    )
+    def test_rejects_trailing_newline(self, name):
+        """`$` matches before a trailing newline, so the pattern needs fullmatch."""
         err = validate_runtime_name(name)
         assert err is not None
         assert err.error_code == "VALIDATION_ERROR"

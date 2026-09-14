@@ -46,7 +46,7 @@ def validate_k8s_name(name: str, field: str = "name") -> ToolError | None:
             error_code=ErrorCode.VALIDATION_ERROR,
         )
 
-    if not K8S_NAME_PATTERN.match(name):
+    if not K8S_NAME_PATTERN.fullmatch(name):
         return ToolError(
             error=f"{field} must be lowercase alphanumeric with hyphens",
             error_code=ErrorCode.VALIDATION_ERROR,
@@ -76,7 +76,7 @@ def validate_runtime_name(name: str, field: str = "name") -> ToolError | None:
             error_code=ErrorCode.VALIDATION_ERROR,
         )
 
-    if not K8S_SUBDOMAIN_PATTERN.match(name):
+    if not K8S_SUBDOMAIN_PATTERN.fullmatch(name):
         return ToolError(
             error=f"{field} must be lowercase alphanumeric with hyphens or dots",
             error_code=ErrorCode.VALIDATION_ERROR,
