@@ -20,6 +20,7 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+from fastmcp import Client
 from tests.common import SDK_ERROR, VALIDATION_ERROR
 
 from kubeflow_mcp.common.utils import K8S_TIMEOUT
@@ -30,6 +31,8 @@ from kubeflow_mcp.core.health import (
     get_server_logs,
     health_check,
 )
+from kubeflow_mcp.core.policy import get_effective_persona, set_effective_persona
+from kubeflow_mcp.core.server import create_server
 
 
 class TestHealthCheck:
@@ -88,12 +91,32 @@ class TestGetServerLogs:
             {"timestamp": "2026-09-05T00:00:001Z", "level": "INFO", "message": "info message 2"},
         ]
 
-    def test_reject_limit_less_than_one(self) -> None:
+    @patch("kubeflow_mcp.core.health.get_log_buffer")
+    def test_reject_limit_less_than_one(self, mock_get_buffer: MagicMock) -> None:
         for invalid_limit in [0, -1, -50]:
             result = get_server_logs(limit=invalid_limit)
             assert result["success"] is False
             assert result["error_code"] == VALIDATION_ERROR
             assert f"limit must be >= 1, got {invalid_limit}" in result["error"]
+        mock_get_buffer.assert_not_called()
+
+    @patch("kubeflow_mcp.core.health.get_log_buffer")
+    def test_filter_by_default_level(
+        self, mock_get_buffer: MagicMock, sample_logs: list[dict[str, Any]]
+    ) -> None:
+        mock_get_buffer.return_value = sample_logs
+
+        result = get_server_logs()
+
+        assert result["success"] is True
+        data = result["data"]
+
+        assert data["total"] == 5
+        assert data["buffer_size"] == 6
+
+        levels = [log["level"] for log in data["logs"]]
+        assert "DEBUG" not in levels
+        assert levels == ["INFO", "WARNING", "ERROR", "CRITICAL", "INFO"]
 
     @patch("kubeflow_mcp.core.health.get_log_buffer")
     def test_filter_by_level_warning(
@@ -146,3 +169,38 @@ class TestHealthMetadata:
             assert ann.get("idempotentHint") is True
             assert ann.get("openWorldHint") is False
             assert "health" in ann.get("tags", [])
+
+    @pytest.mark.asyncio
+    async def test_health_tools_registered_on_server(self) -> None:
+        """Integration test: verify health tools are exposed via create_server() with metadata."""
+        previous_persona = get_effective_persona()
+        try:
+            mcp = create_server()
+            async with Client(mcp) as client:
+                tools = await client.list_tools()
+            tool_map = {tool.name: tool for tool in tools}
+
+            assert "health_check" in tool_map
+            assert "get_server_logs" in tool_map
+
+            assert tool_map["health_check"].description == HEALTH_TOOL_DESCRIPTIONS["health_check"]
+            assert (
+                tool_map["get_server_logs"].description
+                == HEALTH_TOOL_DESCRIPTIONS["get_server_logs"]
+            )
+
+            hc_ann = tool_map["health_check"].annotations
+            assert hc_ann is not None
+            assert hc_ann.readOnlyHint is True
+            assert hc_ann.destructiveHint is False
+            assert hc_ann.idempotentHint is True
+            assert "health" in (hc_ann.tags or [])
+
+            logs_ann = tool_map["get_server_logs"].annotations
+            assert logs_ann is not None
+            assert logs_ann.readOnlyHint is True
+            assert logs_ann.destructiveHint is False
+            assert "debug" in (logs_ann.tags or [])
+
+        finally:
+            set_effective_persona(previous_persona)
