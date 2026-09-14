@@ -26,6 +26,7 @@ from kubeflow.trainer.constants import constants as trainer_constants
 from kubeflow_mcp.common import utils as mcp_utils
 from kubeflow_mcp.common.constants import ErrorCode
 from kubeflow_mcp.common.types import ToolError, ToolResponse, exception_details, is_k8s_not_found
+from kubeflow_mcp.core.security import validate_runtime_name
 
 logger = logging.getLogger(__name__)
 
@@ -289,6 +290,10 @@ def patch_runtime(
     Returns:
         dict: Preview or applied patch result.
     """
+    name_err = validate_runtime_name(name)
+    if name_err is not None:
+        return name_err.model_dump()
+
     if not patch:
         return ToolError(
             error="patch parameter is required",
@@ -366,6 +371,10 @@ def create_runtime(
     Returns:
         dict: Preview or creation result.
     """
+    name_err = validate_runtime_name(name)
+    if name_err is not None:
+        return name_err.model_dump()
+
     if not spec:
         return ToolError(
             error="spec parameter is required",
@@ -440,6 +449,10 @@ def delete_runtime(
     Returns:
         dict: Preview with dependent jobs, or deletion result.
     """
+    name_err = validate_runtime_name(name)
+    if name_err is not None:
+        return name_err.model_dump()
+
     try:
         api = mcp_utils.get_custom_objects_api()
 
