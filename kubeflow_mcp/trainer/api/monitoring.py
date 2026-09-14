@@ -199,6 +199,8 @@ def get_training_events(
         - ``events`` (list): Events with fields: ``involved_object_kind``,
           ``involved_object_name``, ``reason``, ``message``, ``event_time``
         - ``total`` (int): Total event count
+        - ``returned`` (int): Number of events included in the response
+        - ``has_more`` (bool): Whether more events were omitted by ``limit``
     """
     name_err = validate_k8s_name(name)
     if name_err is not None:
@@ -236,7 +238,13 @@ def get_training_events(
             )
 
         return ToolResponse(
-            data={"job": name, "events": event_list, "total": len(events)}
+            data={
+                "job": name,
+                "events": event_list,
+                "total": len(events),
+                "returned": len(event_list),
+                "has_more": len(events) > limit,
+            }
         ).model_dump()
 
     except Exception as e:
