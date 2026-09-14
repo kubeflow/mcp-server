@@ -50,53 +50,51 @@ class CircuitBreaker:
     last_failure_time: float = field(default=0.0)
     half_open_calls: int = field(default=0)
     _half_open_successes: int = field(default=0)
-    _half_open_started: float = field(default=0.0)
+    _generation: int = field(default=0)
     _lock: threading.Lock = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         self._lock = threading.Lock()
 
-    def _open_probe_window(self, now: float) -> None:
-        """Start a fresh batch of half-open probes. Caller holds the lock."""
-        self.state = CircuitState.HALF_OPEN
-        self.half_open_calls = 0
-        self._half_open_successes = 0
-        self._half_open_started = now
+    def acquire(self) -> int | None:
+        """Reserve a call and return its probe generation, or None if it is refused.
 
-    def can_execute(self) -> bool:
-        """Check if call is allowed and atomically reserve a slot if half-open."""
+        The generation moves on each time a half-open window opens. Passing it back
+        when recording lets a late report from an older window be ignored.
+        """
         with self._lock:
             if self.state == CircuitState.CLOSED:
-                return True
-
-            now = time.monotonic()
+                return self._generation
 
             if self.state == CircuitState.OPEN:
-                if now - self.last_failure_time >= self.recovery_timeout:
-                    self._open_probe_window(now)
+                if time.monotonic() - self.last_failure_time >= self.recovery_timeout:
+                    self.state = CircuitState.HALF_OPEN
+                    self.half_open_calls = 0
+                    self._half_open_successes = 0
+                    self._generation += 1
                     logger.info("Circuit breaker: OPEN -> HALF_OPEN")
                     self.half_open_calls += 1
-                    return True
-                return False
-
-            # A probe that never reports back holds its slot for good, and the
-            # breaker only leaves HALF_OPEN once a probe does report. Reopening
-            # a stale window keeps that from becoming a permanent outage.
-            if (
-                self.half_open_calls >= self.half_open_max_calls
-                and now - self._half_open_started >= self.recovery_timeout
-            ):
-                self._open_probe_window(now)
-                logger.info("Circuit breaker: reopened a stale half-open probe window")
+                    return self._generation
+                return None
 
             if self.half_open_calls < self.half_open_max_calls:
                 self.half_open_calls += 1
-                return True
-            return False
+                return self._generation
+            return None
 
-    def record_success(self) -> None:
+    def can_execute(self) -> bool:
+        """Check if call is allowed and atomically reserve a slot if half-open."""
+        return self.acquire() is not None
+
+    def _is_stale(self, generation: int | None) -> bool:
+        """Whether a report belongs to an older probe window. Caller holds the lock."""
+        return generation is not None and generation != self._generation
+
+    def record_success(self, generation: int | None = None) -> None:
         """Record successful call."""
         with self._lock:
+            if self._is_stale(generation):
+                return
             if self.state == CircuitState.HALF_OPEN:
                 self._half_open_successes += 1
                 if self._half_open_successes >= self.half_open_max_calls:
@@ -107,9 +105,11 @@ class CircuitBreaker:
             else:
                 self.failure_count = 0
 
-    def record_failure(self) -> None:
+    def record_failure(self, generation: int | None = None) -> None:
         """Record failed call."""
         with self._lock:
+            if self._is_stale(generation):
+                return
             self.failure_count += 1
             self.last_failure_time = time.monotonic()
 
@@ -120,6 +120,18 @@ class CircuitBreaker:
             elif self.failure_count >= self.failure_threshold:
                 self.state = CircuitState.OPEN
                 logger.warning(f"Circuit breaker: CLOSED -> OPEN (failures={self.failure_count})")
+
+    def release(self, generation: int | None = None) -> None:
+        """Hand back a call whose result says nothing about backend health.
+
+        It counts as neither a success nor a failure, so the failure count stays
+        put, and a half-open slot is freed for the next probe.
+        """
+        with self._lock:
+            if self._is_stale(generation):
+                return
+            if self.state == CircuitState.HALF_OPEN and self.half_open_calls > 0:
+                self.half_open_calls -= 1
 
 
 _breakers: dict[str, CircuitBreaker] = {}
@@ -176,15 +188,16 @@ def with_circuit_breaker(
 
         @wraps(func)
         def wrapper(*args: Any, **kwargs: Any) -> T:
-            if not cb.can_execute():
+            generation = cb.acquire()
+            if generation is None:
                 raise RuntimeError(f"Circuit breaker open for {func.__name__}")
 
             try:
                 result = func(*args, **kwargs)
-                cb.record_success()
+                cb.record_success(generation)
                 return result
             except Exception:
-                cb.record_failure()
+                cb.record_failure(generation)
                 raise
 
         return wrapper

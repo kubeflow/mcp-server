@@ -161,7 +161,8 @@ def _audit_wrap(tool_func):
                 }
 
             breaker = get_breaker(tool_name)
-            if not breaker.can_execute():
+            generation = breaker.acquire()
+            if generation is None:
                 duration_ms = int((time.monotonic() - start) * 1000)
                 span.set_attribute("tool.success", False)
                 span.set_attribute("tool.duration_ms", duration_ms)
@@ -181,12 +182,14 @@ def _audit_wrap(tool_func):
                 )
                 span.set_attribute("tool.success", is_success)
                 span.set_attribute("tool.duration_ms", duration_ms)
-                # A non-infrastructure result still resolves the half-open probe,
-                # so it records a success here, matching execute_tool.
-                if is_infrastructure_error(result):
-                    breaker.record_failure()
+                # Only a real success resets the breaker. A result that says nothing
+                # about the backend hands its half-open slot back instead.
+                if is_success:
+                    breaker.record_success(generation)
+                elif is_infrastructure_error(result):
+                    breaker.record_failure(generation)
                 else:
-                    breaker.record_success()
+                    breaker.release(generation)
 
                 logger.info(
                     "tool_call",
@@ -202,7 +205,7 @@ def _audit_wrap(tool_func):
                 return _inject_meta(result, tool_name)
             except Exception as exc:
                 duration_ms = int((time.monotonic() - start) * 1000)
-                breaker.record_failure()
+                breaker.record_failure(generation)
                 span.set_attribute("tool.success", False)
                 span.set_attribute("tool.duration_ms", duration_ms)
                 span.set_attribute("error.type", type(exc).__qualname__)
