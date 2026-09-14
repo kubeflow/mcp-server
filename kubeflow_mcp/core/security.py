@@ -329,21 +329,30 @@ _SENSITIVE_SUBSTRINGS = {
 _SAFE_KEYS = {"public_key", "keyword", "key_format", "key_name"}
 
 
+def is_sensitive_key(key: str) -> bool:
+    """Return True when a key names a credential, e.g. ``api_key`` or ``accessToken``.
+
+    Shared with free-text log redaction so both paths agree on what is sensitive.
+    """
+    k = key.lower()
+    if k in _SAFE_KEYS:
+        return False
+    return (
+        k in _SENSITIVE_EXACT
+        or any(s in k for s in _SENSITIVE_SUBSTRINGS)
+        or k.endswith("_key")
+        or k.endswith("token")
+    )
+
+
 def mask_sensitive_data(data: dict[str, Any]) -> dict[str, Any]:
     """Mask sensitive fields in data for logging."""
     result: dict[str, Any] = {}
 
     for k, v in data.items():
-        k_lower = k.lower()
-        if k_lower in _SAFE_KEYS:
+        if k.lower() in _SAFE_KEYS:
             result[k] = v
-        elif k_lower in _SENSITIVE_EXACT:
-            result[k] = "***"
-        elif any(s in k_lower for s in _SENSITIVE_SUBSTRINGS):
-            result[k] = "***"
-        elif k_lower.endswith("_key") and k_lower not in _SAFE_KEYS:
-            result[k] = "***"
-        elif k_lower.endswith("_token"):
+        elif is_sensitive_key(k):
             result[k] = "***"
         elif isinstance(v, dict):
             result[k] = mask_sensitive_data(v)

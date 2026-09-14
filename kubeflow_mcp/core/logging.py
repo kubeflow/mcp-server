@@ -24,12 +24,40 @@ from contextvars import ContextVar
 from datetime import datetime, timezone
 from typing import Any
 
-from kubeflow_mcp.core.security import mask_sensitive_data
+from kubeflow_mcp.core.security import is_sensitive_key, mask_sensitive_data
 
 correlation_id: ContextVar[str] = ContextVar("correlation_id", default="")
 request_context: ContextVar[dict[str, Any] | None] = ContextVar("request_context", default=None)
 
 _log_buffer: deque[dict[str, Any]] = deque(maxlen=1000)
+
+# A key needs a real ``=`` or ``:`` after it, otherwise prose such as
+# ``bearer auth`` reads as a key and ordinary log lines get mangled.
+_REDACT_KEY = re.compile(r"(?<!\w)(\w+)\s*[=:]\s*")
+# Taking the scheme word too covers ``Authorization: Bearer <jwt>``.
+_REDACT_VALUE = re.compile(r"(?:(?:bearer|basic|digest|token)\s+)?\S+", re.IGNORECASE)
+
+
+def _redact_text(text: str) -> str:
+    """Redact credential values in free text.
+
+    Every log path routes through here. Keys are judged by ``is_sensitive_key``,
+    the same check ``mask_sensitive_data`` uses. A value that follows a harmless
+    key is still scanned, which is how ``user: password=hunter2`` gets caught.
+    """
+    pieces: list[str] = []
+    pos = 0
+    for key in _REDACT_KEY.finditer(text):
+        if key.start() < pos or not is_sensitive_key(key.group(1)):
+            continue
+        value = _REDACT_VALUE.match(text, key.end())
+        if value is None:
+            continue
+        pieces.append(text[pos : key.start()])
+        pieces.append("***")
+        pos = value.end()
+    pieces.append(text[pos:])
+    return "".join(pieces)
 
 
 def _redact_dict(d: Any) -> Any:
@@ -44,13 +72,13 @@ def _redact_dict(d: Any) -> Any:
 
 
 def _apply_pattern(d: Any) -> Any:
-    """Apply _REDACT_PATTERNS to string leaves in an already key-masked structure."""
+    """Apply _redact_text to string leaves in an already key-masked structure."""
     if isinstance(d, dict):
         return {k: _apply_pattern(v) for k, v in d.items()}
     if isinstance(d, list):
         return [_apply_pattern(v) for v in d]
     if isinstance(d, str):
-        return _REDACT_PATTERNS.sub("***", d)
+        return _redact_text(d)
 
     return d
 
@@ -63,12 +91,12 @@ class StructuredFormatter(logging.Formatter):
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "level": record.levelname,
             "logger": record.name,
-            "message": record.getMessage(),
+            "message": _redact_text(record.getMessage()),
             "correlation_id": correlation_id.get() or None,
         }
 
         if record.exc_info:
-            log_dict["exception"] = self.formatException(record.exc_info)
+            log_dict["exception"] = _redact_text(self.formatException(record.exc_info))
 
         ctx = request_context.get()
         if ctx is not None:
@@ -100,36 +128,20 @@ class ConsoleFormatter(logging.Formatter):
         cid = correlation_id.get()
         cid_str = f" [{cid[:8]}]" if cid else ""
         return (
-            f"{color}{record.levelname:8}{self.RESET}{cid_str} {record.name}: {record.getMessage()}"
+            f"{color}{record.levelname:8}{self.RESET}{cid_str} "
+            f"{record.name}: {_redact_text(record.getMessage())}"
         )
-
-
-_REDACT_PATTERNS = re.compile(
-    r"(token|password|secret|bearer|authorization|credential)[=: ]+\S+",
-    re.IGNORECASE,
-)
 
 
 class BufferingHandler(logging.Handler):
     """Handler that stores logs in memory buffer with sensitive data redacted."""
 
     def emit(self, record: logging.LogRecord) -> None:
-        message = record.getMessage()
-        message = _REDACT_PATTERNS.sub(
-            lambda m: (
-                m.group().split("=")[0] + "=***"
-                if "=" in m.group()
-                else m.group().split(":")[0] + ": ***"
-                if ":" in m.group()
-                else m.group().split()[0] + " ***"
-            ),
-            message,
-        )
         log_entry = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "level": record.levelname,
             "logger": record.name,
-            "message": message,
+            "message": _redact_text(record.getMessage()),
         }
         _log_buffer.append(log_entry)
 
