@@ -16,6 +16,8 @@
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from kubeflow_mcp.spark.api import monitoring
 
 
@@ -28,10 +30,35 @@ class TestLogs:
         assert out["data"]["truncated"] is True
         assert out["data"]["logs"].splitlines() == ["line7", "line8", "line9"]
 
-    def test_no_driver_pod_is_validation_error(self):
+    @pytest.mark.parametrize(
+        "message",
+        [
+            # Wording raised by released kubeflow[spark] 0.4.x.
+            "No server pod for SparkConnect: default/x",
+            # Wording matching the `driver_pod_name` field on SDK `main`.
+            "No driver pod for SparkConnect: default/x",
+        ],
+    )
+    def test_missing_server_pod_is_validation_error(self, message):
         client = MagicMock()
-        client.get_session_logs.side_effect = RuntimeError("No driver pod for SparkConnect: d/x")
+        client.get_session_logs.side_effect = RuntimeError(message)
         with patch.object(monitoring, "get_spark_client_for_namespace", return_value=client):
             out = monitoring.get_spark_session_logs("x")
         assert out["success"] is False
         assert out["error_code"] == "VALIDATION_ERROR"
+
+    def test_missing_server_pod_detected_through_cause_chain(self):
+        client = MagicMock()
+        wrapped = RuntimeError("Failed to get logs for SparkConnect: default/x")
+        wrapped.__cause__ = RuntimeError("No server pod for SparkConnect: default/x")
+        client.get_session_logs.side_effect = wrapped
+        with patch.object(monitoring, "get_spark_client_for_namespace", return_value=client):
+            out = monitoring.get_spark_session_logs("x")
+        assert out["error_code"] == "VALIDATION_ERROR"
+
+    def test_unrelated_sdk_failure_stays_sdk_error(self):
+        client = MagicMock()
+        client.get_session_logs.side_effect = RuntimeError("connection refused")
+        with patch.object(monitoring, "get_spark_client_for_namespace", return_value=client):
+            out = monitoring.get_spark_session_logs("x")
+        assert out["error_code"] == "SDK_ERROR"
