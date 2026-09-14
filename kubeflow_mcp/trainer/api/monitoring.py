@@ -39,7 +39,7 @@ MAX_EVENT_LIMIT = 500
 MAX_WAIT_TIMEOUT = 3600
 MIN_POLLING_INTERVAL = 1
 _TARGET_STATUS_ALIASES = {"Succeeded": "Complete"}
-_VALID_TARGET_STATUSES = frozenset({"Complete", "Failed", "Running", "Created", "Suspended"})
+_VALID_TARGET_STATUSES = frozenset({"Complete", "Failed", "Running", "Created"})
 
 
 def _is_pod_for_step(pod: Any, step: str) -> bool:
@@ -262,8 +262,8 @@ def wait_for_training(
     Args:
         name: TrainJob name.
         target_statuses: Status string or list of status strings to wait for.
-            Valid values: ``Complete``, ``Failed``, ``Running``, ``Created``,
-            ``Suspended``. Pass a list to stop on the first match, e.g.
+            Valid values: ``Complete``, ``Failed``, ``Running``, ``Created``.
+            Pass a list to stop on the first match, e.g.
             ``["Complete", "Failed"]``. Defaults to ``"Complete"``.
         namespace: K8s namespace. Uses default from kubeconfig when omitted.
         timeout_seconds: Maximum wait time in seconds. Defaults to 600 (10 min).
@@ -285,7 +285,18 @@ def wait_for_training(
     if ns_err is not None:
         return ns_err.model_dump()
 
-    raw_statuses = [target_statuses] if isinstance(target_statuses, str) else target_statuses
+    if isinstance(target_statuses, str):
+        raw_statuses = [target_statuses]
+    elif isinstance(target_statuses, list) and all(
+        isinstance(status, str) for status in target_statuses
+    ):
+        raw_statuses = target_statuses
+    else:
+        return ToolError(
+            error="target_statuses must be a string or a list of strings",
+            error_code=ErrorCode.VALIDATION_ERROR,
+        ).model_dump()
+
     if not raw_statuses:
         return ToolError(
             error="target_statuses must contain at least one status",
