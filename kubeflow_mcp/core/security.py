@@ -83,6 +83,16 @@ def validate_runtime_name(name: str, field: str = "name") -> ToolError | None:
             details={"value": name, "pattern": K8S_SUBDOMAIN_PATTERN.pattern},
         )
 
+    # RFC 1123 caps each dot-separated label independently of the total length,
+    # so a name under 253 chars can still carry a label the API server rejects.
+    oversized = [label for label in name.split(".") if len(label) > MAX_NAME_LENGTH]
+    if oversized:
+        return ToolError(
+            error=f"{field} has a label longer than {MAX_NAME_LENGTH} characters",
+            error_code=ErrorCode.VALIDATION_ERROR,
+            details={"value": name, "labels": oversized},
+        )
+
     return None
 
 

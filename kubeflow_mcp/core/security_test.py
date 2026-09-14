@@ -412,4 +412,23 @@ class TestValidateRuntimeName:
         assert validate_runtime_name("a" * 254) is not None
 
     def test_accepts_name_at_253_chars(self):
-        assert validate_runtime_name("a" * 253) is None
+        assert validate_runtime_name(".".join(["a" * 62] * 4)) is None
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "a" * 64,
+            "a" * 64 + ".b",
+            "b." + "a" * 64,
+            ".".join(["a" * 64] * 2),
+        ],
+    )
+    def test_rejects_label_over_63_chars(self, name):
+        """RFC 1123 caps each label at 63, independently of the 253 total."""
+        err = validate_runtime_name(name)
+        assert err is not None
+        assert err.error_code == "VALIDATION_ERROR"
+
+    def test_accepts_label_at_63_chars(self):
+        assert validate_runtime_name("a" * 63) is None
+        assert validate_runtime_name(".".join(["a" * 63] * 3)) is None
