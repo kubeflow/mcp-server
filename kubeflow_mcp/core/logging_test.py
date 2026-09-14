@@ -82,6 +82,11 @@ class TestRedactDict:
         result = _redact_dict({"tokenizer": "bert-base-uncased"})
         assert result == {"tokenizer": "bert-base-uncased"}
 
+    def test_glued_token_key_redacted(self):
+        # No underscore before "token", but the suffix still marks these as credentials.
+        result = _redact_dict({"accessToken": "abc", "authtoken": "xyz"})
+        assert result == {"accessToken": "***", "authtoken": "***"}
+
     def test_safe_keys_not_redacted(self):
         result = _redact_dict({"public_key": "ssh-rsa AAAA...", "key_name": "prod"})
         assert result["public_key"] == "ssh-rsa AAAA..."
@@ -187,6 +192,12 @@ class TestRedactText:
             ("kubeconfig has token: abc123def", "abc123def"),
             ("auth failed for credential=hunter2", "hunter2"),
             ("password=hunter2 was used", "hunter2"),
+            ("upload with secret_access_key=AKIA123", "AKIA123"),
+            ("loaded private_key=pk-live-123", "pk-live-123"),
+            ("client api_key=sk-abc123", "sk-abc123"),
+            ("retry s3_secret_access_key: s3-abc999", "s3-abc999"),
+            ("refresh with accessToken=at-abc999", "at-abc999"),
+            ("login failed user: password=hunter2", "hunter2"),
         ],
     )
     def test_credential_is_removed(self, text, leaked):
@@ -208,6 +219,19 @@ class TestRedactText:
             "or KUBEFLOW_MCP_JWKS_URI for JWT verification."
         )
         assert _redact_text(warning) == warning
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "public_key=ssh-rsa AAAA",
+            "key_name=prod",
+            "keyword=llama",
+            "key_format=pem",
+            "tokenizer: bert-base-uncased",
+        ],
+    )
+    def test_safe_key_not_redacted(self, text):
+        assert _redact_text(text) == text
 
 
 class TestLogPathsRedactConsistently:

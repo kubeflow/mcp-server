@@ -24,32 +24,40 @@ from contextvars import ContextVar
 from datetime import datetime, timezone
 from typing import Any
 
-from kubeflow_mcp.core.security import mask_sensitive_data
+from kubeflow_mcp.core.security import is_sensitive_key, mask_sensitive_data
 
 correlation_id: ContextVar[str] = ContextVar("correlation_id", default="")
 request_context: ContextVar[dict[str, Any] | None] = ContextVar("request_context", default=None)
 
 _log_buffer: deque[dict[str, Any]] = deque(maxlen=1000)
 
-# The scheme word is matched too, as in ``Authorization: Bearer <jwt>``. The
-# separator has to be a real ``=`` or ``:``, otherwise prose like ``bearer auth``
-# matches and ordinary log lines get mangled.
-_REDACT_PATTERNS = re.compile(
-    r"(token|password|secret|bearer|authorization|credential)"
-    r"\s*[=:]\s*"
-    r"(?:(?:bearer|basic|digest|token)\s+)?"
-    r"\S+",
-    re.IGNORECASE,
-)
+# A key needs a real ``=`` or ``:`` after it, otherwise prose such as
+# ``bearer auth`` reads as a key and ordinary log lines get mangled.
+_REDACT_KEY = re.compile(r"(?<!\w)(\w+)\s*[=:]\s*")
+# Taking the scheme word too covers ``Authorization: Bearer <jwt>``.
+_REDACT_VALUE = re.compile(r"(?:(?:bearer|basic|digest|token)\s+)?\S+", re.IGNORECASE)
 
 
 def _redact_text(text: str) -> str:
     """Redact credential values in free text.
 
-    Every log path routes through here so a line is redacted the same way
-    whether it lands in the buffer, on stderr, or inside a structured field.
+    Every log path routes through here. Keys are judged by ``is_sensitive_key``,
+    the same check ``mask_sensitive_data`` uses. A value that follows a harmless
+    key is still scanned, which is how ``user: password=hunter2`` gets caught.
     """
-    return _REDACT_PATTERNS.sub("***", text)
+    pieces: list[str] = []
+    pos = 0
+    for key in _REDACT_KEY.finditer(text):
+        if key.start() < pos or not is_sensitive_key(key.group(1)):
+            continue
+        value = _REDACT_VALUE.match(text, key.end())
+        if value is None:
+            continue
+        pieces.append(text[pos : key.start()])
+        pieces.append("***")
+        pos = value.end()
+    pieces.append(text[pos:])
+    return "".join(pieces)
 
 
 def _redact_dict(d: Any) -> Any:
@@ -64,7 +72,7 @@ def _redact_dict(d: Any) -> Any:
 
 
 def _apply_pattern(d: Any) -> Any:
-    """Apply _REDACT_PATTERNS to string leaves in an already key-masked structure."""
+    """Apply _redact_text to string leaves in an already key-masked structure."""
     if isinstance(d, dict):
         return {k: _apply_pattern(v) for k, v in d.items()}
     if isinstance(d, list):
