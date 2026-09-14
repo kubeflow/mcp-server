@@ -114,6 +114,11 @@ def test_validate_k8s_name_custom_field():
             config={"name": "torch..distributed"},
         ),
         TestCase(
+            name="64 character segment rejected",
+            expected_status=FAILED,
+            config={"name": "a" * 64 + ".v1"},
+        ),
+        TestCase(
             name="path traversal attempt rejected",
             expected_status=FAILED,
             config={"name": "../../etc"},

@@ -76,6 +76,12 @@ def validate_runtime_name(name: str, field: str = "name") -> ToolError | None:
             error_code=ErrorCode.VALIDATION_ERROR,
         )
 
+    if any(len(segment) > MAX_NAME_LENGTH for segment in name.split(".")):
+        return ToolError(
+            error=f"{field} segment too long (max {MAX_NAME_LENGTH} between dots)",
+            error_code=ErrorCode.VALIDATION_ERROR,
+        )
+
     if not K8S_SUBDOMAIN_PATTERN.match(name):
         return ToolError(
             error=f"{field} must be lowercase alphanumeric with hyphens or dots",
