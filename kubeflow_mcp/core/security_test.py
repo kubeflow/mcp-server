@@ -422,7 +422,9 @@ class TestValidateRuntimeName:
         assert validate_runtime_name("a" * 254) is not None
 
     def test_accepts_name_at_253_chars(self):
-        assert validate_runtime_name(".".join(["a" * 62] * 4)) is None
+        name = ".".join(["a" * 63, "a" * 63, "a" * 62, "a" * 62])
+        assert len(name) == 253
+        assert validate_runtime_name(name) is None
 
     @pytest.mark.parametrize(
         "name",
