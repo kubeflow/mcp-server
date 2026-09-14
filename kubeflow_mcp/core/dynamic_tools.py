@@ -190,15 +190,26 @@ def execute_tool(tool_name: str, arguments: dict[str, Any] | None = None) -> dic
     if tool_name not in TOOL_REGISTRY:
         return {"error": f"Tool '{tool_name}' not found", "available": list(TOOL_REGISTRY.keys())}
 
+    func = TOOL_REGISTRY[tool_name]["func"]
+    args = arguments or {}
+
+    # Reject bad arguments before touching the breaker: they are a caller mistake,
+    # and returning after can_execute() would also leak a half-open probe slot.
+    try:
+        inspect.signature(func).bind(**args)
+    except TypeError as e:
+        return {
+            "error": f"Invalid arguments for '{tool_name}': {e}",
+            "error_code": ErrorCode.VALIDATION_ERROR,
+            "tool": tool_name,
+        }
+
     breaker = get_breaker(tool_name)
     if not breaker.can_execute():
         return {
             "error": f"Circuit breaker open for '{tool_name}' — K8s API may be degraded. Retries automatically after recovery timeout.",
             "error_code": ErrorCode.CIRCUIT_OPEN,
         }
-
-    func = TOOL_REGISTRY[tool_name]["func"]
-    args = arguments or {}
 
     try:
         with warnings.catch_warnings():
