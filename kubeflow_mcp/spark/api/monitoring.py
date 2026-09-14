@@ -15,6 +15,7 @@
 """Monitoring tools for SparkConnect sessions."""
 
 import logging
+import re
 from collections import deque
 from typing import Any
 
@@ -27,6 +28,22 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_TAIL_LINES = 200
 MAX_TAIL_LINES = 2000
+
+# A session whose server pod has not been scheduled yet has no typed SDK error:
+# the backend raises a plain ``RuntimeError``. Released kubeflow[spark] 0.4.x
+# words it "No server pod for SparkConnect: <ns>/<name>"; SDK ``main`` renamed
+# the field to ``driver_pod_name``, so tolerate either noun. Pinned by
+# ``sdk_contracts_test.py`` against the installed SDK.
+_MISSING_POD_RE = re.compile(r"\bno (?:server|driver) pod\b", re.IGNORECASE)
+
+
+def _is_missing_server_pod(exc: Exception) -> bool:
+    """Return True when *exc* reports a session without a server (driver) pod."""
+    return any(
+        _MISSING_POD_RE.search(str(e))
+        for e in (exc, exc.__cause__, exc.__context__)
+        if e is not None
+    )
 
 
 def get_spark_session_logs(
@@ -99,9 +116,9 @@ def get_spark_session_logs(
                 error=f"SparkConnect session '{name}' not found",
                 error_code=ErrorCode.RESOURCE_NOT_FOUND,
             ).model_dump()
-        # The SDK raises a plain RuntimeError with "No driver pod" before the
-        # session is Ready — surface it as a validation error with a next step.
-        if "no driver pod" in str(e).lower():
+        # Surface a not-yet-scheduled server pod as a validation error with a
+        # next step, rather than an opaque SDK error.
+        if _is_missing_server_pod(e):
             return ToolError(
                 error=(
                     f"SparkConnect session '{name}' has no driver pod yet — it is likely still "
