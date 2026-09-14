@@ -29,6 +29,7 @@ import pytest
 from kubeflow_mcp.common.constants import SDK_COMPATIBILITY
 from kubeflow_mcp.conftest import make_spark_session_info
 from kubeflow_mcp.spark import TOOLS
+from kubeflow_mcp.spark.api.monitoring import _MISSING_POD_RE
 from kubeflow_mcp.spark.types import session_info_to_dict
 
 sdk_spark = pytest.importorskip("kubeflow.spark", reason="requires the kubeflow[spark] extra")
@@ -121,6 +122,18 @@ class TestSDKSurface:
     def test_driver_and_executor_types_available(self):
         assert hasattr(sdk_spark, "Driver")
         assert hasattr(sdk_spark, "Executor")
+
+    def test_missing_pod_error_wording_is_recognized(self):
+        # get_spark_session_logs classifies "session has no server pod yet" from
+        # the message because the SDK raises a bare RuntimeError. Pin that the
+        # installed SDK still phrases it the way the tool matches.
+        from kubeflow.spark.backends.kubernetes.backend import KubernetesBackend
+
+        source = inspect.getsource(KubernetesBackend.get_session_logs)
+        assert _MISSING_POD_RE.search(source), (
+            "SDK no longer raises a 'no server pod' message that "
+            f"get_spark_session_logs recognizes:\n{source}"
+        )
 
 
 # ─── Compatibility bookkeeping ──────────────────────────────────────────────
