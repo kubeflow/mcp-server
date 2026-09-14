@@ -72,6 +72,37 @@ class TestHealthCheck:
 class TestGetServerLogs:
     """Tests for the get_server_logs tool."""
 
+    @patch("kubeflow_mcp.core.health.get_log_buffer")
+    def test_reject_invalid_level(self, mock_get_logs: MagicMock) -> None:
+        result = get_server_logs(level="INVALID")
+        assert result["success"] is False
+        assert result["error_code"] == VALIDATION_ERROR
+
+        mock_get_logs.assert_not_called()
+
+    @patch("kubeflow_mcp.core.health.get_log_buffer")
+    def test_accepts_case_insensitive_level(self, mock_get_logs: MagicMock) -> None:
+        mock_get_logs.return_value = [{"level": "ERROR", "message": "failed"}]
+
+        result = get_server_logs(level="error")
+
+        assert result["success"] is True
+        assert result["data"]["logs"] == [{"level": "ERROR", "message": "failed"}]
+
+    @pytest.mark.parametrize(
+        ("alias", "record_level"),
+        [("WARN", "WARNING"), ("FATAL", "CRITICAL")],
+    )
+    @patch("kubeflow_mcp.core.health.get_log_buffer")
+    def test_accepts_standard_level_aliases(
+        self, mock_get_logs: MagicMock, alias: str, record_level: str
+    ) -> None:
+        mock_get_logs.return_value = [{"level": record_level, "message": "failed"}]
+        result = get_server_logs(level=alias)
+
+        assert result["success"] is True
+        assert result["data"]["logs"] == [{"level": record_level, "message": "failed"}]
+
     @pytest.fixture
     def sample_logs(self) -> list[dict[str, Any]]:
         return [
@@ -204,41 +235,3 @@ class TestHealthMetadata:
 
         finally:
             set_effective_persona(previous_persona)
-
-
-"""Tests for core health tools."""
-
-
-def test_get_server_logs_rejects_invalid_level():
-    with patch("kubeflow_mcp.core.health.get_log_buffer") as mock_get_logs:
-        result = get_server_logs(level="INVALID")
-
-    assert result["success"] is False
-    assert result["error_code"] == "VALIDATION_ERROR"
-    mock_get_logs.assert_not_called()
-
-
-def test_get_server_logs_accepts_case_insensitive_level():
-    with patch(
-        "kubeflow_mcp.core.health.get_log_buffer",
-        return_value=[{"level": "ERROR", "message": "failed"}],
-    ):
-        result = get_server_logs(level="error")
-
-    assert result["success"] is True
-    assert result["data"]["logs"] == [{"level": "ERROR", "message": "failed"}]
-
-
-@pytest.mark.parametrize(
-    ("alias", "record_level"),
-    [("WARN", "WARNING"), ("FATAL", "CRITICAL")],
-)
-def test_get_server_logs_accepts_standard_level_aliases(alias, record_level):
-    with patch(
-        "kubeflow_mcp.core.health.get_log_buffer",
-        return_value=[{"level": record_level, "message": "failed"}],
-    ):
-        result = get_server_logs(level=alias)
-
-    assert result["success"] is True
-    assert result["data"]["logs"] == [{"level": record_level, "message": "failed"}]
