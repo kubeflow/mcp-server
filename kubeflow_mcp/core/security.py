@@ -212,6 +212,9 @@ def truncate_log_output(output: str, max_length: int = 10000) -> str:
     where a failure lands, so cutting from the front drops the part worth
     reading.
     """
+    # A zero limit would slice as output[-0:], which is the whole log.
+    if max_length < 1:
+        raise ValueError(f"max_length must be >= 1, got {max_length}")
     if len(output) > max_length:
         output = f"... (truncated, {len(output)} total chars)\n" + output[-max_length:]
     return output
