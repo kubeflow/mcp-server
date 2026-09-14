@@ -23,6 +23,10 @@ from kubeflow_mcp.common.types import ToolError
 
 K8S_NAME_PATTERN = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
 MAX_NAME_LENGTH = 63
+K8S_SUBDOMAIN_PATTERN = re.compile(
+    r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$"
+)
+MAX_SUBDOMAIN_LENGTH = 253
 
 
 def validate_k8s_name(name: str, field: str = "name") -> ToolError | None:
@@ -47,6 +51,42 @@ def validate_k8s_name(name: str, field: str = "name") -> ToolError | None:
             error=f"{field} must be lowercase alphanumeric with hyphens",
             error_code=ErrorCode.VALIDATION_ERROR,
             details={"value": name, "pattern": K8S_NAME_PATTERN.pattern},
+        )
+
+    return None
+
+
+def validate_runtime_name(name: str, field: str = "name") -> ToolError | None:
+    """Validate a training runtime name.
+
+    Runtime names are Kubernetes object names, so unlike job names they may
+    contain dots, as in ``torchtune-llama3.2-1b``.
+
+    Returns ToolError if invalid, None if valid.
+    """
+    if not name:
+        return ToolError(
+            error=f"{field} cannot be empty",
+            error_code=ErrorCode.VALIDATION_ERROR,
+        )
+
+    if len(name) > MAX_SUBDOMAIN_LENGTH:
+        return ToolError(
+            error=f"{field} too long (max {MAX_SUBDOMAIN_LENGTH})",
+            error_code=ErrorCode.VALIDATION_ERROR,
+        )
+
+    if any(len(segment) > MAX_NAME_LENGTH for segment in name.split(".")):
+        return ToolError(
+            error=f"{field} segment too long (max {MAX_NAME_LENGTH} between dots)",
+            error_code=ErrorCode.VALIDATION_ERROR,
+        )
+
+    if not K8S_SUBDOMAIN_PATTERN.match(name):
+        return ToolError(
+            error=f"{field} must be lowercase alphanumeric with hyphens or dots",
+            error_code=ErrorCode.VALIDATION_ERROR,
+            details={"value": name, "pattern": K8S_SUBDOMAIN_PATTERN.pattern},
         )
 
     return None
