@@ -206,9 +206,17 @@ def is_safe_python_code(code: str) -> tuple[bool, str]:
 
 
 def truncate_log_output(output: str, max_length: int = 10000) -> str:
-    """Truncate log output to a safe length for MCP responses."""
+    """Truncate log output to a safe length for MCP responses.
+
+    Keeps the tail. Callers pass the most recent slice of a workload's log,
+    where a failure lands, so cutting from the front drops the part worth
+    reading.
+    """
+    # A zero limit would slice as output[-0:], which is the whole log.
+    if max_length < 1:
+        raise ValueError(f"max_length must be >= 1, got {max_length}")
     if len(output) > max_length:
-        output = output[:max_length] + f"\n... (truncated, {len(output)} total chars)"
+        output = f"... (truncated, {len(output)} total chars)\n" + output[-max_length:]
     return output
 
 

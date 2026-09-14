@@ -266,6 +266,17 @@ class TestGetTrainingLogs:
 
     @patch(PATCH_NS_CHECK, return_value=None)
     @patch(PATCH_CLIENT)
+    def test_failure_at_end_survives_char_truncation(self, mock_client_fn, _ns):
+        lines = [f"[{i:05d}] downloading shard {i}" for i in range(900)]
+        lines.append("torch.cuda.OutOfMemoryError: CUDA out of memory")
+        mock_client_fn.return_value = _make_mock_client(get_job_logs=lines)
+        result = get_training_logs("oom-at-end-job")
+        assert result["success"] is True
+        assert result["data"]["failure_hint"]["category"] == "OOM"
+        assert "OutOfMemoryError" in result["data"]["logs"]
+
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
     def test_log_truncation_with_generator(self, mock_client_fn, _ns):
         def _log_generator():
             for i in range(MAX_LOG_LINES + 500):
