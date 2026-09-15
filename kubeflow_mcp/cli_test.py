@@ -140,6 +140,7 @@ def test_serve_passes_clients_and_persona():
         mode="full",
         instruction_tier="full",
         auth_provider=None,
+        transport="stdio",
     )
     mock_server.run.assert_called_once()
 
@@ -190,6 +191,7 @@ def test_serve_progressive_mode():
         mode="progressive",
         instruction_tier="full",
         auth_provider=None,
+        transport="stdio",
     )
     mock_server.run.assert_called_once()
 
@@ -207,6 +209,7 @@ def test_serve_semantic_mode():
         mode="semantic",
         instruction_tier="full",
         auth_provider=None,
+        transport="stdio",
     )
 
 

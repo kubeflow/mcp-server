@@ -57,8 +57,9 @@ The server listens on `http://localhost:8000/mcp`.
 Container and Kubernetes probes are available without MCP authentication:
 
 ```text
-GET /health  # liveness: the server process is accepting HTTP requests
-GET /ready   # readiness: configured clients imported and packaged resources loaded
+GET /health                # liveness: the server process is accepting HTTP requests
+GET /ready                 # readiness: configured clients imported and packaged resources loaded
+GET /.well-known/mcp.json  # discovery: dynamic MCP Server Card (clients, version, auth)
 ```
 
 `/ready` returns 200 only when both `clients_ready` and `resources_ready` are true. It does

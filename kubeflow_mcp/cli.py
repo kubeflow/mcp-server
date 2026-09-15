@@ -201,6 +201,7 @@ def serve(
         mode=mode,
         instruction_tier=instruction_tier,
         auth_provider=auth_provider,
+        transport=transport,
     )
 
     show_banner = not no_banner
