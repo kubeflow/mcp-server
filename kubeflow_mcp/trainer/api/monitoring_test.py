@@ -484,6 +484,19 @@ class TestGetTrainingEvents:
         assert result["success"] is False
         assert result["error_code"] == "PERMISSION_DENIED"
 
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_not_found_error(self, mock_client_fn, _ns):
+        from kubernetes.client.exceptions import ApiException
+
+        mock_client_fn.return_value = _make_mock_client(
+            get_job_events=ApiException(status=404, reason="Not Found")
+        )
+        result = get_training_events("missing-job")
+        assert result["success"] is False
+        assert result["error_code"] == "RESOURCE_NOT_FOUND"
+        assert "missing-job" in result["error"]
+
     @patch(PATCH_CLIENT)
     def test_invalid_name_rejected_before_sdk_call(self, mock_client_fn):
         result = get_training_events("bad..name")
@@ -611,6 +624,19 @@ class TestWaitForTraining:
         result = wait_for_training("my-job", namespace="forbidden-ns")
         assert result["success"] is False
         assert result["error_code"] == "PERMISSION_DENIED"
+
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_not_found_error(self, mock_client_fn, _ns):
+        from kubernetes.client.exceptions import ApiException
+
+        mock_client_fn.return_value = _make_mock_client(
+            wait_for_job_status=ApiException(status=404, reason="Not Found")
+        )
+        result = wait_for_training("missing-job")
+        assert result["success"] is False
+        assert result["error_code"] == "RESOURCE_NOT_FOUND"
+        assert "missing-job" in result["error"]
 
     @patch(PATCH_CLIENT)
     def test_invalid_name_rejected_before_sdk_call(self, mock_client_fn):
