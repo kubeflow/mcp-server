@@ -106,6 +106,9 @@ _DANGEROUS_CALLS = frozenset(
         "__import__",
         "compile",
         "execfile",
+        "getattr",
+        "setattr",
+        "delattr",
     }
 )
 _DANGEROUS_ATTR_CALLS = {
@@ -168,6 +171,11 @@ class _ScriptSafetyVisitor(ast.NodeVisitor):
             self.warnings.append(f"Dangerous attribute access: {node.attr} at line {node.lineno}")
         self.generic_visit(node)
 
+    def visit_Name(self, node: ast.Name) -> None:  # noqa: N802
+        if node.id in _DANGEROUS_DUNDER:
+            self.warnings.append(f"Dangerous name access: {node.id} at line {node.lineno}")
+        self.generic_visit(node)
+
 
 def is_safe_python_code(code: str) -> tuple[bool, str]:
     """AST-based scan for dangerous patterns in training scripts.
@@ -181,7 +189,7 @@ def is_safe_python_code(code: str) -> tuple[bool, str]:
 
     **Flagged patterns** (via AST, not substring matching):
 
-    - Calls: ``eval``, ``exec``, ``compile``, ``__import__``
+    - Calls: ``eval``, ``exec``, ``compile``, ``__import__``, ``getattr``, ``setattr``, ``delattr``
     - Module calls: ``os.system``, ``os.popen``, ``subprocess.*``, ``shutil.rmtree``
     - Imports: ``ctypes``, ``socket``
     - Dunder access: ``__builtins__``, ``__subclasses__``, ``__globals__``, ``__code__``
