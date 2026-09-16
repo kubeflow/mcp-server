@@ -16,12 +16,15 @@
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+
 import pytest
 from kubeflow.trainer.constants import constants as trainer_constants
 from kubernetes.client.exceptions import ApiException
 from tests.common import (
     FAILED,
     KUBERNETES_ERROR,
+    PERMISSION_DENIED,
     RESOURCE_NOT_FOUND,
     SUCCESS,
     VALIDATION_ERROR,
@@ -32,7 +35,12 @@ from tests.common import (
 from kubeflow_mcp.common import utils as mcp_utils
 from kubeflow_mcp.conftest import create_mock_trainjob, verify_tool_error, verify_tool_success
 from kubeflow_mcp.core.policy import get_allowed_tools
-from kubeflow_mcp.trainer.api.platform import create_runtime, delete_runtime, patch_runtime
+from kubeflow_mcp.trainer.api.platform import (
+    create_runtime,
+    delete_runtime,
+    inspect_controller,
+    patch_runtime,
+)
 
 # ─── Validation ─────────────────────────────────────────────────────────────
 
@@ -273,6 +281,65 @@ def test_non_admin_persona_cannot_manage_runtimes():
     assert "patch_runtime" not in allowed_tools
     assert "create_runtime" not in allowed_tools
     assert "delete_runtime" not in allowed_tools
+
+
+# ─── inspect_controller ─────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def scan_default_namespaces(monkeypatch):
+    monkeypatch.setattr("kubeflow_mcp.trainer.api.platform._get_controller_namespace", lambda: None)
+
+
+@pytest.mark.parametrize(
+    ("lookup_error", "error_code"),
+    [
+        (ApiException(status=403, reason="Forbidden"), PERMISSION_DENIED),
+        (ApiException(status=500, reason="Internal Server Error"), KUBERNETES_ERROR),
+        (ConnectionError("Connection refused"), KUBERNETES_ERROR),
+    ],
+)
+def test_inspect_controller_reports_failed_lookup_instead_of_missing_pod(
+    mock_k8s_apis, scan_default_namespaces, lookup_error, error_code
+):
+    mock_k8s_apis["core_v1"].list_namespaced_pod.side_effect = lookup_error
+
+    result = inspect_controller()
+
+    error = verify_tool_error(result, error_code=error_code)
+    assert "No controller pod found" not in error["error"]
+
+
+def test_inspect_controller_missing_pod_is_still_not_found(mock_k8s_apis, scan_default_namespaces):
+    mock_k8s_apis["core_v1"].list_namespaced_pod.return_value = MagicMock(items=[])
+
+    result = inspect_controller()
+
+    verify_tool_error(result, error_code=RESOURCE_NOT_FOUND)
+
+
+def test_inspect_controller_finds_pod_despite_forbidden_namespace(
+    mock_k8s_apis, scan_default_namespaces
+):
+    core = mock_k8s_apis["core_v1"]
+    pod = MagicMock()
+    pod.metadata.name = "trainer-controller-manager-0"
+    pod.metadata.namespace = "kubeflow-system"
+    pod.status.phase = "Running"
+
+    def list_pods(namespace, **_kwargs):
+        if namespace == "kubeflow":
+            raise ApiException(status=403, reason="Forbidden")
+        return MagicMock(items=[pod])
+
+    core.list_namespaced_pod.side_effect = list_pods
+    core.read_namespaced_pod_log.return_value = "controller started"
+
+    result = inspect_controller()
+
+    data = verify_tool_success(result)
+    assert data["pod"] == "trainer-controller-manager-0"
+    assert data["namespace"] == "kubeflow-system"
 
 
 # Remaining TODOs are outside this PR's runtime CRUD slice.

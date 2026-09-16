@@ -70,11 +70,15 @@ def _find_controller_pod(namespace: str | None = None):
     1. Explicit ``namespace`` arg (from tool call)
     2. KUBEFLOW_MCP_CONTROLLER_NAMESPACE env var / config file
     3. Scan default namespaces: kubeflow, kubeflow-system
+
+    If no pod is found and any lookup failed, the last error is raised instead of
+    reporting the pod as missing: a failed search is not evidence of absence.
     """
     core = mcp_utils.get_core_v1_api()
     configured_ns = namespace or _get_controller_namespace()
     namespaces = [configured_ns] if configured_ns else _DEFAULT_CONTROLLER_NAMESPACES
 
+    last_error: Exception | None = None
     for ns in namespaces:
         for label in _CONTROLLER_LABELS:
             try:
@@ -85,8 +89,11 @@ def _find_controller_pod(namespace: str | None = None):
                 )
                 if pods.items:
                     return pods.items[0], ns, core
-            except Exception:
-                continue
+            except Exception as e:
+                last_error = e
+
+    if last_error is not None:
+        raise last_error
 
     searched = configured_ns or ", ".join(_DEFAULT_CONTROLLER_NAMESPACES)
     return None, searched, core
@@ -264,6 +271,16 @@ def inspect_controller(
 
     except Exception as e:
         logger.warning("inspect_controller(%s, %s) failed: %s", view, namespace, e, exc_info=True)
+        if getattr(e, "status", None) == 403:
+            return ToolError(
+                error=f"Permission denied while looking up the controller pod: {e}",
+                error_code=ErrorCode.PERMISSION_DENIED,
+                details={
+                    **exception_details(e),
+                    "hint": "Grant the server's service account list access to pods "
+                    "in the controller namespace",
+                },
+            ).model_dump()
         return ToolError(
             error=str(e),
             error_code=ErrorCode.KUBERNETES_ERROR,
