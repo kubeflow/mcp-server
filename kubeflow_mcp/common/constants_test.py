@@ -65,6 +65,13 @@ class TestToolPhases:
             "lifecycle",
             "platform",
             "health",
+            # Optimizer phases are namespaced so they cannot collide with the
+            # trainer phases above.
+            "optimizer_planning",
+            "optimizer_discovery",
+            "optimizer_optimization",
+            "optimizer_monitoring",
+            "optimizer_lifecycle",
         }
         assert set(TOOL_PHASES.keys()) == expected
 
