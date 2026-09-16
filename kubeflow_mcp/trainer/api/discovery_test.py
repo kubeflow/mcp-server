@@ -106,6 +106,29 @@ def test_rejects_invalid_resource_name_before_calling_sdk(tool, kwargs, client_p
     mock_client.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    ("tool", "kwargs", "client_path"),
+    [
+        (
+            get_runtime,
+            {"name": "torchtune-llama3.2-1b"},
+            "kubeflow_mcp.trainer.api.discovery.get_trainer_client",
+        ),
+        (
+            list_training_jobs,
+            {"runtime": "torchtune-qwen2.5-1.5b"},
+            "kubeflow_mcp.trainer.api.discovery.get_trainer_client_for_namespace",
+        ),
+    ],
+)
+def test_accepts_dotted_runtime_names(tool, kwargs, client_path):
+    with patch(client_path) as mock_client:
+        result = tool(**kwargs)
+
+    assert result.get("error_code") != ErrorCode.VALIDATION_ERROR
+    mock_client.assert_called_once()
+
+
 class TestGetRuntime:
     @patch("kubeflow_mcp.trainer.api.discovery.get_trainer_client")
     def test_get_runtime_extracts_sdk_trainer_metadata(self, mock_client_fn):
