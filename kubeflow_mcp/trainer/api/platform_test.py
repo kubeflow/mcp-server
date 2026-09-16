@@ -96,6 +96,21 @@ def test_create_runtime_validation(test_case):
 # ─── Runtime CRUD ───────────────────────────────────────────────────────────
 
 
+@pytest.mark.parametrize(
+    ("tool", "kwargs"),
+    [
+        (patch_runtime, {"patch": {"spec": {"template": {}}}}),
+        (create_runtime, {"spec": {"template": {}}}),
+        (delete_runtime, {}),
+    ],
+)
+def test_runtime_tools_reject_invalid_names_without_api_calls(mock_k8s_apis, tool, kwargs):
+    result = tool("Invalid Runtime", **kwargs)
+
+    verify_tool_error(result, error_code=VALIDATION_ERROR)
+    mock_k8s_apis["custom"].assert_not_called()
+
+
 def test_patch_runtime_confirmed_applies_strategic_patch(mock_k8s_apis):
     api = mock_k8s_apis["custom"]
     api.patch_cluster_custom_object.return_value = {
