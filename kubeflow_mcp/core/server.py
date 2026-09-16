@@ -367,6 +367,7 @@ def create_server(  # noqa: C901
     mode: str = "full",
     instruction_tier: str = "full",
     auth_provider: Any = None,
+    transport: str | None = None,
 ) -> FastMCP:
     """Create MCP server with dynamic client loading.
 
@@ -507,6 +508,14 @@ def create_server(  # noqa: C901
 
     # Register MCP resources from client modules (all resources, always)
     resources_ready = register_resources(mcp, loaded_modules)
-    register_probe_routes(mcp, is_ready=clients_ready and resources_ready)
+
+    auth_type = "bearer" if auth_provider is not None else None
+    register_probe_routes(
+        mcp,
+        is_ready=clients_ready and resources_ready,
+        clients=list(loaded_modules.keys()),
+        auth_type=auth_type,
+        transport=transport,
+    )
 
     return mcp
