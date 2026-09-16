@@ -328,6 +328,8 @@ def test_list_training_jobs_returns_all_when_no_filters():
         result = list_training_jobs()
     assert result["success"] is True
     assert result["data"]["total"] == 2
+    assert result["data"]["returned"] == 2
+    assert result["data"]["has_more"] is False
 
 
 def test_list_training_jobs_filters_by_status():
@@ -364,7 +366,31 @@ def test_list_training_jobs_empty_list_on_fresh_cluster():
         return_value=client,
     ):
         result = list_training_jobs()
-    assert result["data"] == {"jobs": [], "total": 0}
+    assert result["data"] == {
+        "jobs": [],
+        "total": 0,
+        "returned": 0,
+        "has_more": False,
+    }
+
+
+def test_list_training_jobs_reports_truncation_metadata():
+    client = MagicMock()
+    client.list_jobs.return_value = [
+        _fake_job("job-a"),
+        _fake_job("job-b"),
+        _fake_job("job-c"),
+    ]
+    with patch(
+        "kubeflow_mcp.trainer.api.discovery.get_trainer_client_for_namespace",
+        return_value=client,
+    ):
+        result = list_training_jobs(limit=2)
+
+    assert result["data"]["total"] == 3
+    assert result["data"]["returned"] == 2
+    assert result["data"]["has_more"] is True
+    assert [job["name"] for job in result["data"]["jobs"]] == ["job-a", "job-b"]
 
 
 def test_list_training_jobs_sdk_error_wrapped_as_tool_error():
