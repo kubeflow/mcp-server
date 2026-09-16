@@ -23,6 +23,12 @@ Import from here to ensure consistency across the codebase.
 
 from typing import Any
 
+# Supported dependency version ranges (keep in sync with pyproject.toml and README).
+KUBEFLOW_SDK_VERSION_MIN = "0.5.0"
+KUBEFLOW_SDK_VERSION_SPEC = ">=0.5.0,<0.6.0"
+KUBEFLOW_TRAINER_VERSION_MIN = "2.3.0"
+KUBEFLOW_TRAINER_VERSION_SPEC = ">=2.3.0,<2.4.0"
+
 
 class ErrorCode:
     """Standard error codes for tool responses."""
@@ -151,8 +157,8 @@ TOOL_NEXT_HINTS: dict[str, str] = {
 
 SDK_COMPATIBILITY: dict[str, object] = {
     "sdk_package": "kubeflow",
-    "sdk_version_min": "0.4.0",
-    "trainer_version_min": "v2.2.0",
+    "sdk_version": KUBEFLOW_SDK_VERSION_SPEC,
+    "trainer_version": KUBEFLOW_TRAINER_VERSION_SPEC,
     "python_requires": ">=3.10",
     "kubernetes_requires": ">=1.27",
     "clients": {
