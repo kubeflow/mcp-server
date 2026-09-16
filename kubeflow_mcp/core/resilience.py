@@ -50,34 +50,51 @@ class CircuitBreaker:
     last_failure_time: float = field(default=0.0)
     half_open_calls: int = field(default=0)
     _half_open_successes: int = field(default=0)
+    _generation: int = field(default=0)
     _lock: threading.Lock = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         self._lock = threading.Lock()
 
-    def can_execute(self) -> bool:
-        """Check if call is allowed and atomically reserve a slot if half-open."""
+    def acquire(self) -> int | None:
+        """Reserve a call and return its probe generation, or None if it is refused.
+
+        The generation moves on each time a half-open window opens. Passing it back
+        when recording lets a late report from an older window be ignored.
+        """
         with self._lock:
             if self.state == CircuitState.CLOSED:
-                return True
+                return self._generation
 
             if self.state == CircuitState.OPEN:
-                if time.time() - self.last_failure_time >= self.recovery_timeout:
+                if time.monotonic() - self.last_failure_time >= self.recovery_timeout:
                     self.state = CircuitState.HALF_OPEN
                     self.half_open_calls = 0
+                    self._half_open_successes = 0
+                    self._generation += 1
                     logger.info("Circuit breaker: OPEN -> HALF_OPEN")
                     self.half_open_calls += 1
-                    return True
-                return False
+                    return self._generation
+                return None
 
             if self.half_open_calls < self.half_open_max_calls:
                 self.half_open_calls += 1
-                return True
-            return False
+                return self._generation
+            return None
 
-    def record_success(self) -> None:
+    def can_execute(self) -> bool:
+        """Check if call is allowed and atomically reserve a slot if half-open."""
+        return self.acquire() is not None
+
+    def _is_stale(self, generation: int | None) -> bool:
+        """Whether a report belongs to an older probe window. Caller holds the lock."""
+        return generation is not None and generation != self._generation
+
+    def record_success(self, generation: int | None = None) -> None:
         """Record successful call."""
         with self._lock:
+            if self._is_stale(generation):
+                return
             if self.state == CircuitState.HALF_OPEN:
                 self._half_open_successes += 1
                 if self._half_open_successes >= self.half_open_max_calls:
@@ -88,11 +105,13 @@ class CircuitBreaker:
             else:
                 self.failure_count = 0
 
-    def record_failure(self) -> None:
+    def record_failure(self, generation: int | None = None) -> None:
         """Record failed call."""
         with self._lock:
+            if self._is_stale(generation):
+                return
             self.failure_count += 1
-            self.last_failure_time = time.time()
+            self.last_failure_time = time.monotonic()
 
             if self.state == CircuitState.HALF_OPEN:
                 self.state = CircuitState.OPEN
@@ -101,6 +120,18 @@ class CircuitBreaker:
             elif self.failure_count >= self.failure_threshold:
                 self.state = CircuitState.OPEN
                 logger.warning(f"Circuit breaker: CLOSED -> OPEN (failures={self.failure_count})")
+
+    def release(self, generation: int | None = None) -> None:
+        """Hand back a call whose result says nothing about backend health.
+
+        It counts as neither a success nor a failure, so the failure count stays
+        put, and a half-open slot is freed for the next probe.
+        """
+        with self._lock:
+            if self._is_stale(generation):
+                return
+            if self.state == CircuitState.HALF_OPEN and self.half_open_calls > 0:
+                self.half_open_calls -= 1
 
 
 _breakers: dict[str, CircuitBreaker] = {}
@@ -157,15 +188,16 @@ def with_circuit_breaker(
 
         @wraps(func)
         def wrapper(*args: Any, **kwargs: Any) -> T:
-            if not cb.can_execute():
+            generation = cb.acquire()
+            if generation is None:
                 raise RuntimeError(f"Circuit breaker open for {func.__name__}")
 
             try:
                 result = func(*args, **kwargs)
-                cb.record_success()
+                cb.record_success(generation)
                 return result
             except Exception:
-                cb.record_failure()
+                cb.record_failure(generation)
                 raise
 
         return wrapper
@@ -244,13 +276,13 @@ class RateLimiter:
 
     def __post_init__(self) -> None:
         self._tokens = self.capacity
-        self._last_update = time.time()
+        self._last_update = time.monotonic()
         self._lock = threading.Lock()
 
     def acquire(self, tokens: float = 1.0) -> bool:
         """Try to acquire tokens. Returns True if successful."""
         with self._lock:
-            now = time.time()
+            now = time.monotonic()
             elapsed = now - self._last_update
             self._tokens = min(self.capacity, self._tokens + elapsed * self.rate)
             self._last_update = now
@@ -270,10 +302,10 @@ class SessionManager:
 
     def record_activity(self) -> None:
         """Record session activity."""
-        self._timestamps.append(time.time())
+        self._timestamps.append(time.monotonic())
 
     def is_stale(self) -> bool:
         """Check if session appears stale."""
         if not self._timestamps:
             return False
-        return time.time() - self._timestamps[-1] > self.max_age
+        return time.monotonic() - self._timestamps[-1] > self.max_age

@@ -22,6 +22,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from kubeflow_mcp.common.constants import ErrorCode
 from kubeflow_mcp.core import telemetry
 from kubeflow_mcp.core.server import _audit_wrap
 
@@ -62,15 +63,19 @@ class _FakeBreaker:
         self._can_execute = can_execute
         self.successes = 0
         self.failures = 0
+        self.releases = 0
 
-    def can_execute(self) -> bool:
-        return self._can_execute
+    def acquire(self) -> int | None:
+        return 0 if self._can_execute else None
 
-    def record_success(self) -> None:
+    def record_success(self, generation: int | None = None) -> None:
         self.successes += 1
 
-    def record_failure(self) -> None:
+    def record_failure(self, generation: int | None = None) -> None:
         self.failures += 1
+
+    def release(self, generation: int | None = None) -> None:
+        self.releases += 1
 
 
 def test_get_tracer_returns_noop_when_otel_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -421,6 +426,93 @@ def test_audit_wrap_records_exception_on_failure(monkeypatch: pytest.MonkeyPatch
         status = span.status_code
         assert status.status_code == _StatusCode.ERROR
         assert status.description == "boom"
+
+
+def test_audit_wrap_releases_probe_for_non_infrastructure_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A validation error hands the probe back without counting as a success."""
+    import kubeflow_mcp.core.server as server_mod
+
+    breaker = _FakeBreaker()
+    monkeypatch.setattr(server_mod, "_rate_limiter", None)
+    monkeypatch.setattr(server_mod, "with_correlation_id", lambda: "cid-789")
+    monkeypatch.setattr(server_mod, "get_effective_persona", lambda: "readonly")
+    monkeypatch.setattr(server_mod, "get_tracer", lambda _name: _FakeTracer(_FakeSpan()))
+    monkeypatch.setattr(server_mod, "get_breaker", lambda _tool: breaker)
+
+    def rejecting_tool(**_kwargs):
+        return {"success": False, "error": "bad name", "error_code": ErrorCode.VALIDATION_ERROR}
+
+    _audit_wrap(rejecting_tool)()
+
+    assert breaker.releases == 1
+    assert breaker.successes == 0
+    assert breaker.failures == 0
+
+
+def test_audit_wrap_records_failure_for_infrastructure_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import kubeflow_mcp.core.server as server_mod
+
+    breaker = _FakeBreaker()
+    monkeypatch.setattr(server_mod, "_rate_limiter", None)
+    monkeypatch.setattr(server_mod, "with_correlation_id", lambda: "cid-789")
+    monkeypatch.setattr(server_mod, "get_effective_persona", lambda: "readonly")
+    monkeypatch.setattr(server_mod, "get_tracer", lambda _name: _FakeTracer(_FakeSpan()))
+    monkeypatch.setattr(server_mod, "get_breaker", lambda _tool: breaker)
+
+    def failing_tool(**_kwargs):
+        return {"success": False, "error": "api down", "error_code": ErrorCode.SDK_ERROR}
+
+    _audit_wrap(failing_tool)()
+
+    assert breaker.failures == 1
+    assert breaker.successes == 0
+    assert breaker.releases == 0
+
+
+def test_audit_wrap_not_found_during_half_open_does_not_wedge_breaker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The scenario from #221, run through a real breaker."""
+    import kubeflow_mcp.core.server as server_mod
+    from kubeflow_mcp.core.resilience import CircuitBreaker, CircuitState
+
+    breaker = CircuitBreaker(failure_threshold=1, recovery_timeout=0.0, half_open_max_calls=3)
+    monkeypatch.setattr(server_mod, "_rate_limiter", None)
+    monkeypatch.setattr(server_mod, "with_correlation_id", lambda: "cid-221")
+    monkeypatch.setattr(server_mod, "get_effective_persona", lambda: "readonly")
+    monkeypatch.setattr(server_mod, "get_tracer", lambda _name: _FakeTracer(_FakeSpan()))
+    monkeypatch.setattr(server_mod, "get_breaker", lambda _tool: breaker)
+
+    outcomes = iter(
+        [
+            {"success": False, "error": "api down", "error_code": ErrorCode.SDK_ERROR},
+            {"success": True, "data": {}},
+            {"success": True, "data": {}},
+            {"success": False, "error": "no job", "error_code": ErrorCode.RESOURCE_NOT_FOUND},
+            {"success": True, "data": {}},
+        ]
+    )
+
+    def tool(**_kwargs):
+        return next(outcomes)
+
+    wrapped = _audit_wrap(tool)
+    states = []
+    for _ in range(5):
+        wrapped()
+        states.append(breaker.state)
+
+    assert states == [
+        CircuitState.OPEN,
+        CircuitState.HALF_OPEN,
+        CircuitState.HALF_OPEN,
+        CircuitState.HALF_OPEN,
+        CircuitState.CLOSED,
+    ]
 
 
 def test_audit_wrap_circuit_breaker_open(monkeypatch: pytest.MonkeyPatch) -> None:
