@@ -46,7 +46,7 @@ def validate_k8s_name(name: str, field: str = "name") -> ToolError | None:
             error_code=ErrorCode.VALIDATION_ERROR,
         )
 
-    if not K8S_NAME_PATTERN.match(name):
+    if not K8S_NAME_PATTERN.fullmatch(name):
         return ToolError(
             error=f"{field} must be lowercase alphanumeric with hyphens",
             error_code=ErrorCode.VALIDATION_ERROR,
@@ -76,17 +76,21 @@ def validate_runtime_name(name: str, field: str = "name") -> ToolError | None:
             error_code=ErrorCode.VALIDATION_ERROR,
         )
 
-    if any(len(segment) > MAX_NAME_LENGTH for segment in name.split(".")):
-        return ToolError(
-            error=f"{field} segment too long (max {MAX_NAME_LENGTH} between dots)",
-            error_code=ErrorCode.VALIDATION_ERROR,
-        )
-
-    if not K8S_SUBDOMAIN_PATTERN.match(name):
+    if not K8S_SUBDOMAIN_PATTERN.fullmatch(name):
         return ToolError(
             error=f"{field} must be lowercase alphanumeric with hyphens or dots",
             error_code=ErrorCode.VALIDATION_ERROR,
             details={"value": name, "pattern": K8S_SUBDOMAIN_PATTERN.pattern},
+        )
+
+    # RFC 1123 caps each dot-separated label independently of the total length,
+    # so a name under 253 chars can still carry a label the API server rejects.
+    oversized = [label for label in name.split(".") if len(label) > MAX_NAME_LENGTH]
+    if oversized:
+        return ToolError(
+            error=f"{field} has a label longer than {MAX_NAME_LENGTH} characters",
+            error_code=ErrorCode.VALIDATION_ERROR,
+            details={"value": name, "labels": oversized},
         )
 
     return None
@@ -369,21 +373,30 @@ _SENSITIVE_SUBSTRINGS = {
 _SAFE_KEYS = {"public_key", "keyword", "key_format", "key_name"}
 
 
+def is_sensitive_key(key: str) -> bool:
+    """Return True when a key names a credential, e.g. ``api_key`` or ``accessToken``.
+
+    Shared with free-text log redaction so both paths agree on what is sensitive.
+    """
+    k = key.lower()
+    if k in _SAFE_KEYS:
+        return False
+    return (
+        k in _SENSITIVE_EXACT
+        or any(s in k for s in _SENSITIVE_SUBSTRINGS)
+        or k.endswith("_key")
+        or k.endswith("token")
+    )
+
+
 def mask_sensitive_data(data: dict[str, Any]) -> dict[str, Any]:
     """Mask sensitive fields in data for logging."""
     result: dict[str, Any] = {}
 
     for k, v in data.items():
-        k_lower = k.lower()
-        if k_lower in _SAFE_KEYS:
+        if k.lower() in _SAFE_KEYS:
             result[k] = v
-        elif k_lower in _SENSITIVE_EXACT:
-            result[k] = "***"
-        elif any(s in k_lower for s in _SENSITIVE_SUBSTRINGS):
-            result[k] = "***"
-        elif k_lower.endswith("_key") and k_lower not in _SAFE_KEYS:
-            result[k] = "***"
-        elif k_lower.endswith("_token"):
+        elif is_sensitive_key(k):
             result[k] = "***"
         elif isinstance(v, dict):
             result[k] = mask_sensitive_data(v)

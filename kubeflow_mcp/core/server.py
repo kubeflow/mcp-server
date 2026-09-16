@@ -84,18 +84,38 @@ def configure_resilience(
     _rate_limiter = RateLimiter(rate=rate_limit, capacity=rate_capacity)
 
 
+def _is_blocked(result: dict[str, Any]) -> bool:
+    """Report whether a successful response still carries blocking findings.
+
+    ``pre_flight`` and ``check_compatibility`` report their verdict inside
+    ``data`` while the envelope stays successful, so the error check in
+    ``_inject_meta`` cannot see it. Advancing the agent in that state would
+    contradict the blockers the tool just reported.
+    """
+    data = result.get("data")
+    if not isinstance(data, dict):
+        return False
+    scopes = [data]
+    nested = data.get("compatibility")  # pre_flight nests the compatibility report
+    if isinstance(nested, dict):
+        scopes.append(nested)
+    return any(scope.get("compatible") is False or scope.get("blockers") for scope in scopes)
+
+
 def _inject_meta(result: Any, tool_name: str) -> Any:
     """Inject _meta (phase + next hint) into successful tool responses.
 
     Provides workflow guidance for clients that don't consume server
-    instructions or MCP resources (e.g. Ollama, custom agents).
+    instructions or MCP resources (e.g. Ollama, custom agents). The ``next``
+    hint is withheld when the response reports blockers, so the guidance cannot
+    tell the agent to advance past an environment that is not ready.
     """
     if not isinstance(result, dict):
         return result
     if "error" in result or "error_code" in result:
         return result
     phase = TOOL_TO_PHASE.get(tool_name)
-    hint = TOOL_NEXT_HINTS.get(tool_name)
+    hint = None if _is_blocked(result) else TOOL_NEXT_HINTS.get(tool_name)
     if phase or hint:
         meta: dict[str, str] = {}
         if phase:

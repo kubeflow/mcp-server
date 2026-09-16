@@ -93,6 +93,55 @@ def test_create_runtime_validation(test_case):
     assert_test_case(test_case, create_runtime)
 
 
+_BAD_RUNTIME_NAMES = [
+    "",
+    "   ",
+    "UPPER-Case",
+    "bad_underscore",
+    "name with space",
+    "../escape",
+    "name/slash",
+    "-leading",
+    "trailing-",
+    "a" * 300,
+]
+
+
+@pytest.mark.parametrize("bad_name", _BAD_RUNTIME_NAMES)
+def test_runtime_tools_reject_invalid_names_before_api_call(bad_name, mock_k8s_apis):
+    """Runtime CRUD must validate names like every other trainer module.
+
+    The K8s API would reject most of these too, but the tools reported success
+    and issued the call, which is inconsistent with discovery/monitoring and
+    lets an empty name reach a cluster-scoped delete.
+    """
+    api = mock_k8s_apis["custom"]
+
+    for result in (
+        delete_runtime(bad_name, confirmed=True),
+        patch_runtime(bad_name, patch={"spec": {"template": {}}}, confirmed=True),
+        create_runtime(bad_name, spec={"template": {}}, confirmed=True),
+    ):
+        verify_tool_error(result, error_code=VALIDATION_ERROR)
+
+    assert not api.delete_cluster_custom_object.called
+    assert not api.patch_cluster_custom_object.called
+    assert not api.create_cluster_custom_object.called
+
+
+@pytest.mark.parametrize(
+    "good_name",
+    ["torchtune-llama3.2-1b", "torchtune-qwen2.5-1.5b", "torch-distributed", "r1"],
+)
+def test_runtime_tools_accept_dotted_runtime_names(good_name, mock_k8s_apis):
+    """Runtime names are K8s object names, so the torchtune runtimes Trainer
+    ships (which contain dots) must keep working."""
+    result = delete_runtime(good_name, confirmed=False)
+
+    data = verify_tool_success(result)
+    assert data["runtime"] == good_name
+
+
 # ─── Runtime CRUD ───────────────────────────────────────────────────────────
 
 
