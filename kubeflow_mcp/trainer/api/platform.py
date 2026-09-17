@@ -26,7 +26,7 @@ from kubeflow.trainer.constants import constants as trainer_constants
 from kubeflow_mcp.common import utils as mcp_utils
 from kubeflow_mcp.common.constants import ErrorCode
 from kubeflow_mcp.common.types import ToolError, ToolResponse, exception_details, is_k8s_not_found
-from kubeflow_mcp.core.security import validate_runtime_name
+from kubeflow_mcp.core.security import validate_namespace, validate_runtime_name
 
 logger = logging.getLogger(__name__)
 
@@ -187,6 +187,11 @@ def inspect_controller(
         dict: If view="logs": ``pod``, ``namespace``, ``logs``, ``tail_lines``.
             If view="events": ``pod``, ``namespace``, ``events`` list.
     """
+    if namespace is not None:
+        namespace_err = validate_namespace(namespace)
+        if namespace_err is not None:
+            return namespace_err.model_dump()
+
     valid_views = ("logs", "events")
     if view not in valid_views:
         return ToolError(
