@@ -59,6 +59,7 @@ def init_dynamic_tools(
     Must be called before any meta-tool is invoked. Typically called by
     create_server() after collecting tools from client modules.
     """
+    _embedding_cache.reset()
     TOOL_REGISTRY.clear()
     TOOL_HIERARCHY.clear()
 
