@@ -537,9 +537,13 @@ def estimate_resources(
             # caller (and pre_flight, which delegates here) can self-correct.
             if hf_info and hf_info.get("suggestions"):
                 details["suggestions"] = hf_info["suggestions"]
+            # Format validation failures (invalid model ID) are input errors, not
+            # backend/network problems — use VALIDATION_ERROR so agents fix the
+            # input instead of retrying the same bad request.
+            is_format_error = hf_info is not None and str(error_msg).startswith("Invalid")
             return ToolError(
                 error=f"Could not fetch model info from HuggingFace: {error_msg}",
-                error_code=ErrorCode.SDK_ERROR,
+                error_code=ErrorCode.VALIDATION_ERROR if is_format_error else ErrorCode.SDK_ERROR,
                 details=details,
             ).model_dump()
 
