@@ -241,10 +241,13 @@ class _EmbeddingCache:
     def __init__(self):
         self._embeddings: dict[str, list[float]] | None = None
         self._model = None
+        self._unavailable = False
 
     def get(self) -> tuple[dict[str, list[float]] | None, Any]:
         if self._embeddings is not None:
             return self._embeddings, self._model
+        if self._unavailable:
+            return None, None
 
         try:
             from sentence_transformers import SentenceTransformer
@@ -262,11 +265,21 @@ class _EmbeddingCache:
             return self._embeddings, self._model
         except ImportError:
             logger.debug("sentence-transformers not installed, falling back to keyword search")
-            return None, None
+        except Exception as e:
+            logger.warning(
+                "Could not load the embedding model, falling back to keyword search: %s", e
+            )
+
+        # Remember the failure so every find_tools call doesn't retry a download that
+        # just failed. reset() clears it.
+        self._unavailable = True
+        self._model = None
+        return None, None
 
     def reset(self) -> None:
         self._embeddings = None
         self._model = None
+        self._unavailable = False
 
 
 _embedding_cache = _EmbeddingCache()
