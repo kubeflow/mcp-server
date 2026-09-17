@@ -137,6 +137,22 @@ def test_runtime_tools_reject_invalid_names_before_api_call(bad_name, mock_k8s_a
     assert not api.create_cluster_custom_object.called
 
 
+@pytest.mark.parametrize("bad_namespace", ["my namespace", "INVALID_NS", "namespace/name"])
+def test_inspect_controller_rejects_invalid_namespace_before_api_call(bad_namespace, monkeypatch):
+    core_api_requested = False
+
+    def fail_if_core_api_requested():
+        nonlocal core_api_requested
+        core_api_requested = True
+        raise AssertionError("Kubernetes API must not be initialized for invalid namespace")
+
+    monkeypatch.setattr(mcp_utils, "get_core_v1_api", fail_if_core_api_requested)
+    result = inspect_controller(namespace=bad_namespace)
+
+    verify_tool_error(result, error_code=VALIDATION_ERROR)
+    assert not core_api_requested
+
+
 @pytest.mark.parametrize(
     "good_name",
     ["torchtune-llama3.2-1b", "torchtune-qwen2.5-1.5b", "torch-distributed", "r1"],
