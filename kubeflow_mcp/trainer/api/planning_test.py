@@ -242,3 +242,29 @@ def test_estimate_from_params_small_model():
     assert result["params_billions"] == 7.0
     assert result["quantization"] == "bf16"
     assert "weights_gb" in result["breakdown"]
+
+
+# ─── Error code classification ──────────────────────────────────────────────
+
+
+def test_estimate_resources_returns_validation_error_for_invalid_format():
+    """Invalid model ID format (not org/name) must return VALIDATION_ERROR, not SDK_ERROR."""
+    with patch("huggingface_hub.list_models") as mock_list:
+        mock_list.return_value = _fake_models()
+        result = estimate_resources("random gibberish")
+
+    assert result["success"] is False
+    assert result["error_code"] == "VALIDATION_ERROR"
+    assert "Invalid HuggingFace model ID format" in result["error"]
+
+
+def test_estimate_resources_returns_sdk_error_for_api_failure():
+    """Actual API/network failures must still return SDK_ERROR."""
+    with patch(
+        "kubeflow_mcp.trainer.api.planning._get_model_info_from_hf",
+        return_value={"error": "Connection timed out"},
+    ):
+        result = estimate_resources("meta-llama/Llama-3.2-1B")
+
+    assert result["success"] is False
+    assert result["error_code"] == "SDK_ERROR"
