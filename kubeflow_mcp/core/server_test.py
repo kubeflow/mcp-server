@@ -22,8 +22,12 @@ See also: kubeflow_mcp/trainer/api/architecture_test.py for full metadata consis
 
 import hashlib
 
+from fastmcp import Client
+
+from kubeflow_mcp import __version__
 from kubeflow_mcp.common.constants import TOOL_NEXT_HINTS, TOOL_TO_PHASE
-from kubeflow_mcp.core.server import _inject_meta
+from kubeflow_mcp.core.policy import get_effective_persona, set_effective_persona
+from kubeflow_mcp.core.server import _inject_meta, create_server
 from kubeflow_mcp.trainer import CLIENT_TOOL_ANNOTATIONS, CLIENT_TOOL_DESCRIPTIONS
 
 
@@ -143,3 +147,12 @@ class TestInjectMetaBlockedResponses:
             "pre_flight",
         )
         assert result["_meta"]["next"] == TOOL_NEXT_HINTS["pre_flight"]
+
+
+async def test_server_info_reports_package_version():
+    previous = get_effective_persona()
+    try:
+        async with Client(create_server()) as client:
+            assert client.initialize_result.serverInfo.version == __version__
+    finally:
+        set_effective_persona(previous)
