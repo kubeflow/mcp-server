@@ -29,6 +29,7 @@ from typing import Any
 
 from fastmcp import FastMCP
 
+from kubeflow_mcp import __version__
 from kubeflow_mcp.common.constants import (
     TOOL_NEXT_HINTS,
     TOOL_TO_PHASE,
@@ -411,7 +412,7 @@ def create_server(  # noqa: C901
     if auth_provider is not None:
         mcp_kwargs["auth"] = auth_provider
         logger.info("HTTP auth provider attached to server")
-    mcp: FastMCP = FastMCP("kubeflow-mcp-server", **mcp_kwargs)
+    mcp: FastMCP = FastMCP("kubeflow-mcp-server", version=__version__, **mcp_kwargs)
 
     # Bridge FastMCP async context into sync _audit_wrap via ContextVars
     from kubeflow_mcp.core.middleware import AuditIdentityMiddleware
