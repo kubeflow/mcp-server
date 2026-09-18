@@ -1585,7 +1585,7 @@ otel = [
 [package.metadata]
 requires-dist = [
     { name = "click", specifier = ">=8.0" },
-    { name = "fastmcp", specifier = ">=2.0.0" },
+    { name = "fastmcp", specifier = ">=2.9.0" },
     { name = "huggingface-hub", specifier = ">=0.20" },
     { name = "kubeflow", specifier = "==0.4.1" },
     { name = "kubeflow", extras = ["hub"], marker = "extra == 'all'", specifier = "==0.4.1" },
