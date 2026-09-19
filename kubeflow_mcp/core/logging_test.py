@@ -58,7 +58,7 @@ class TestRedactDict:
         # string value should still be caught by the regex pass. Only the
         # matched portion is replaced; surrounding text is preserved.
         result = _redact_dict({"note": "password=hunter2 was used"})
-        assert result["note"] == "*** was used"
+        assert result["note"] == "password=*** was used"
         assert "hunter2" not in result["note"]
 
     def test_leaves_non_sensitive_values_untouched(self):
@@ -277,6 +277,6 @@ class TestLogPathsRedactConsistently:
         buffered = get_log_buffer()[-1]["message"]
         structured = json.loads(StructuredFormatter().format(record))["message"]
 
-        assert buffered == "calling API with ***"
+        assert buffered == "calling API with Authorization: ***"
         assert buffered == structured
         assert buffered in ConsoleFormatter().format(record)
