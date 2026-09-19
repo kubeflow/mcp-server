@@ -15,6 +15,10 @@
 """Tests for common/constants.py — error classification, phase maps."""
 
 from kubeflow_mcp.common.constants import (
+    KUBEFLOW_SDK_PACKAGE,
+    KUBEFLOW_SDK_VERSION_MIN,
+    KUBEFLOW_TRAINER_VERSION_LABEL,
+    SDK_COMPATIBILITY,
     TOOL_NEXT_HINTS,
     TOOL_PHASES,
     TOOL_TO_PHASE,
@@ -91,3 +95,10 @@ class TestToolNextHints:
         for tool, hint in TOOL_NEXT_HINTS.items():
             assert isinstance(hint, str), f"Hint for {tool} is not a string"
             assert len(hint) > 0, f"Hint for {tool} is empty"
+
+
+class TestVersionConstants:
+    def test_sdk_compatibility_uses_module_constants(self):
+        assert SDK_COMPATIBILITY["sdk_package"] == KUBEFLOW_SDK_PACKAGE
+        assert SDK_COMPATIBILITY["sdk_version_min"] == KUBEFLOW_SDK_VERSION_MIN
+        assert SDK_COMPATIBILITY["trainer_version_min"] == KUBEFLOW_TRAINER_VERSION_LABEL
