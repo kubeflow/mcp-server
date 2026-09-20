@@ -34,6 +34,38 @@ cd mcp-server
 pip install .
 ```
 
+### Prerequisites
+
+Before starting the Kubeflow MCP Server, make sure the following requirements
+are available:
+
+- Python 3.10, 3.11, or 3.12
+- A running Kubernetes cluster
+- `kubectl` installed and available in `PATH`
+- A kubeconfig configured for the target cluster
+- Kubeflow Trainer installed in the cluster
+- Kubeflow Trainer CRDs and at least one `ClusterTrainingRuntime`
+- Sufficient Kubernetes permissions for the selected namespace
+
+Verify the Kubernetes connection:
+
+```bash
+kubectl config current-context
+kubectl cluster-info
+kubectl get nodes
+```
+
+Verify Kubeflow Trainer resources:
+
+```bash
+kubectl get crd | grep trainer.kubeflow.org
+kubectl get clustertrainingruntimes
+```
+
+All verification commands should succeed before using training, monitoring, or
+platform tools. If a command fails, configure Kubernetes access or install
+Kubeflow Trainer before starting the MCP server.
+
 ### Run the server
 
 ```bash
