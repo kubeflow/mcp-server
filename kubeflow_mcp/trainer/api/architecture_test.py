@@ -133,6 +133,14 @@ class TestPersonaGating:
         tools = get_allowed_tools("platform-admin")
         assert tools is None
 
+    def test_persona_inheriting_unrestricted_parent_is_unrestricted(self):
+        with patch(
+            "kubeflow_mcp.core.policy._get_custom_personas_dict",
+            return_value={"cluster-admin": {"inherit": "platform-admin"}},
+        ):
+            tools = get_allowed_tools("cluster-admin")
+            assert tools is None
+
     def test_unknown_persona_raises(self):
         with pytest.raises(ValueError, match="Unknown persona"):
             get_allowed_tools("nonexistent")

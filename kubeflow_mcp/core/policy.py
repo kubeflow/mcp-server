@@ -214,12 +214,14 @@ def get_allowed_tools(persona: str, _seen: set[str] | None = None) -> set[str] |
     if config.get("tools") == "*":
         return None
 
-    tools = set(config.get("tools", []))
+    # Fall back to empty list if tools is unspecified or explicitly null in YAML
+    tools = set(config.get("tools") or [])
 
     if "inherit" in config:
         parent = get_allowed_tools(config["inherit"], _seen)
-        if parent:
-            tools.update(parent)
+        if parent is None:
+            return None
+        tools.update(parent)
 
     return tools
 

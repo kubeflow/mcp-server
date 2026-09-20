@@ -26,6 +26,7 @@ from kubeflow_mcp.core.policy import (
     _matches_pattern,
     apply_policy_filters,
     get_allowed_namespaces,
+    get_allowed_tools,
     get_effective_persona,
     is_read_only,
     reload_policy,
@@ -187,7 +188,94 @@ def test_reload_policy_clears_cache():
         assert get_allowed_namespaces() == ["new-ns"]
 
 
-# TODO(test): test reload_policy + get_allowed_namespaces reflects new file
-# TODO(test): test custom persona from YAML with inherit chain
-# TODO(test): test inheritance cycle detection raises ValueError
-# TODO(test): test malformed policy YAML handled gracefully
+# ─── Persona inheritance & gating ───────────────────────────────────────────
+
+
+def test_custom_persona_inherits_unrestricted_parent():
+    """Inheriting from platform-admin or another unrestricted persona must return None."""
+    with patch(
+        "kubeflow_mcp.core.policy._get_custom_personas_dict",
+        return_value={
+            "super-admin": {"inherit": "platform-admin"},
+            "audit-admin": {"inherit": "platform-admin", "tools": ["audit_tool"]},
+            "wildcard-custom": {"tools": "*"},
+            "child-of-wildcard": {"inherit": "wildcard-custom"},
+        },
+    ):
+        assert get_allowed_tools("super-admin") is None
+        assert get_allowed_tools("audit-admin") is None
+        assert get_allowed_tools("wildcard-custom") is None
+        assert get_allowed_tools("child-of-wildcard") is None
+
+
+def test_custom_persona_null_tools_yaml_fallback():
+    """tools: null in YAML policy file should not crash set() and should inherit parent tools."""
+    with patch(
+        "kubeflow_mcp.core.policy._get_custom_personas_dict",
+        return_value={
+            "null-tools-child": {"inherit": "readonly", "tools": None},
+        },
+    ):
+        readonly_tools = get_allowed_tools("readonly")
+        assert readonly_tools is not None
+        assert get_allowed_tools("null-tools-child") == readonly_tools
+
+
+def test_multi_level_inheritance_chain_unrestricted():
+    """Multi-level chain ending in unrestricted persona must propagate None to all descendants."""
+    with patch(
+        "kubeflow_mcp.core.policy._get_custom_personas_dict",
+        return_value={
+            "tier-1": {"inherit": "platform-admin", "tools": ["tier1_tool"]},
+            "tier-2": {"inherit": "tier-1", "tools": ["tier2_tool"]},
+            "tier-3": {"inherit": "tier-2"},
+        },
+    ):
+        assert get_allowed_tools("platform-admin") is None
+        assert get_allowed_tools("tier-1") is None
+        assert get_allowed_tools("tier-2") is None
+        assert get_allowed_tools("tier-3") is None
+
+
+def test_multi_level_inheritance_chain_restricted():
+    """Multi-level chain with restricted personas must properly accumulate tools from all ancestors."""
+    with patch(
+        "kubeflow_mcp.core.policy._get_custom_personas_dict",
+        return_value={
+            "analyst-base": {"inherit": "readonly", "tools": ["run_query"]},
+            "analyst-senior": {"inherit": "analyst-base", "tools": ["export_report"]},
+            "analyst-lead": {"inherit": "analyst-senior", "tools": ["manage_dashboards"]},
+        },
+    ):
+        readonly_tools = get_allowed_tools("readonly")
+        lead_tools = get_allowed_tools("analyst-lead")
+
+        assert readonly_tools is not None
+        assert lead_tools is not None
+        # Must contain all ancestor tools plus own tools
+        assert readonly_tools.issubset(lead_tools)
+        assert {"run_query", "export_report", "manage_dashboards"}.issubset(lead_tools)
+
+
+def test_inheritance_cycle_detection_raises_value_error():
+    """Inheritance cycles must raise ValueError with cycle path."""
+    with patch(
+        "kubeflow_mcp.core.policy._get_custom_personas_dict",
+        return_value={
+            "cycle-a": {"inherit": "cycle-b"},
+            "cycle-b": {"inherit": "cycle-a"},
+        },
+    ):
+        with pytest.raises(ValueError, match="Inheritance cycle detected"):
+            get_allowed_tools("cycle-a")
+
+    with patch(
+        "kubeflow_mcp.core.policy._get_custom_personas_dict",
+        return_value={
+            "node-1": {"inherit": "node-2"},
+            "node-2": {"inherit": "node-3"},
+            "node-3": {"inherit": "node-1"},
+        },
+    ):
+        with pytest.raises(ValueError, match="Inheritance cycle detected"):
+            get_allowed_tools("node-1")
