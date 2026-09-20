@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import threading
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -28,6 +29,7 @@ from kubeflow_mcp.trainer.api.training import (
     _forwarded_train_args,
     _has_required_params,
     _has_train_call,
+    _inject_trainer_hf_home,
     _make_train_func,
     _should_apply_hf_dataset_workaround,
     _uncalled_train_call,
@@ -555,3 +557,85 @@ def test_build_fine_tune_config_masks_secrets():
     assert config["hf_token"] == "***"
     assert config["s3_access_key_id"] == "***"
     assert config["s3_secret_access_key"] == "***"
+
+
+def test_inject_trainer_hf_home_concurrent_isolation():
+    """Verify concurrent _inject_trainer_hf_home calls maintain context isolation and restore original function."""
+    import kubeflow.trainer.backends.kubernetes.utils as k8s_utils
+    from kubeflow.trainer.types import types as sdk_types
+
+    original_func = k8s_utils.get_trainer_cr_from_builtin_trainer
+    runtime_trainer = sdk_types.RuntimeTrainer(
+        trainer_type=sdk_types.TrainerType.BUILTIN_TRAINER,
+        framework="torchtune",
+        image="test:latest",
+    )
+    runtime_trainer.set_command(("torchrun",))
+    runtime = sdk_types.Runtime(name="test-rt", trainer=runtime_trainer)
+    builtin = sdk_types.BuiltinTrainer(config=sdk_types.TorchTuneConfig(batch_size=4, epochs=1))
+
+    barrier = threading.Barrier(4)
+    errors: list[str] = []
+    completed: list[int | str] = []
+
+    def worker(worker_id: int) -> None:
+        try:
+            target_path = f"/workspace/.hf_{worker_id}"
+            with _inject_trainer_hf_home(target_path):
+                barrier.wait(timeout=5.0)
+                cr = k8s_utils.get_trainer_cr_from_builtin_trainer(runtime, builtin)
+                if cr.env is None:
+                    errors.append(f"Worker {worker_id}: cr.env is None")
+                    return
+                hf_env = next((e for e in cr.env if e.name == "HF_HOME"), None)
+                if not hf_env or hf_env.value != target_path:
+                    errors.append(f"Worker {worker_id}: expected {target_path}, got {hf_env}")
+                    return
+                completed.append(worker_id)
+        except Exception as exc:
+            errors.append(f"Worker {worker_id} raised: {exc!r}")
+
+    def uninjected_worker() -> None:
+        try:
+            barrier.wait(timeout=5.0)
+            cr = k8s_utils.get_trainer_cr_from_builtin_trainer(runtime, builtin)
+            if cr.env is not None and any(e.name == "HF_HOME" for e in cr.env):
+                errors.append("Uninjected worker unexpectedly got HF_HOME")
+                return
+            completed.append("uninjected")
+        except Exception as exc:
+            errors.append(f"Uninjected worker raised: {exc!r}")
+
+    threads = [
+        threading.Thread(target=worker, args=(1,)),
+        threading.Thread(target=worker, args=(2,)),
+        threading.Thread(target=worker, args=(3,)),
+        threading.Thread(target=uninjected_worker),
+    ]
+
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10.0)
+        assert not t.is_alive(), "Worker thread timed out"
+
+    assert not errors, f"Concurrency errors encountered: {errors}"
+    assert len(completed) == 4, f"Expected 4 completed workers, got {len(completed)}"
+    assert k8s_utils.get_trainer_cr_from_builtin_trainer is original_func, (
+        "Monkey-patch function identity was not restored to original"
+    )
+
+
+def test_inject_trainer_hf_home_exception_handling():
+    """Verify refcount and monkey-patch cleanly revert if an exception occurs within yield."""
+    import kubeflow.trainer.backends.kubernetes.utils as k8s_utils
+
+    original_func = k8s_utils.get_trainer_cr_from_builtin_trainer
+    with pytest.raises(RuntimeError, match="simulated failure"):
+        with _inject_trainer_hf_home("/workspace/.hf_err"):
+            assert k8s_utils.get_trainer_cr_from_builtin_trainer is not original_func
+            raise RuntimeError("simulated failure")
+
+    assert k8s_utils.get_trainer_cr_from_builtin_trainer is original_func, (
+        "Monkey-patch function identity was not restored after exception"
+    )
