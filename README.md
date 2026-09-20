@@ -257,6 +257,30 @@ make inspector TRANSPORT=http     # Inspector + Streamable HTTP (start server se
 make inspector TRANSPORT=sse      # Inspector + SSE (start server separately)
 ```
 
+### Inspect tools by persona
+
+MCP Inspector shows only the tools allowed for the selected persona. Start the
+Inspector with the `--persona` option when you want to inspect a specific
+access level:
+
+```bash
+npx @modelcontextprotocol/inspector uv run kubeflow-mcp serve \
+  --clients trainer \
+  --persona platform-admin \
+  --mode full
+```
+
+Supported personas are:
+
+- `readonly` — read-only discovery, monitoring, and inspection tools
+- `data-scientist` — data and training workflow tools
+- `ml-engineer` — training, monitoring, and lifecycle tools
+- `platform-admin` — platform and administrative tools
+
+Replace `platform-admin` with any supported persona to inspect that persona's
+available tools. For example, use `--persona readonly` to verify the
+read-only tool set.
+
 ## Community
 
 - **Slack**: Join [#kubeflow-ml-experience](https://www.kubeflow.org/docs/about/community/#kubeflow-slack-channels) on CNCF Slack
