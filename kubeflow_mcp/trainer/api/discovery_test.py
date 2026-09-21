@@ -141,7 +141,12 @@ class TestGetRuntime:
 
     @patch("kubeflow_mcp.trainer.api.discovery.get_trainer_client")
     def test_get_runtime_with_real_sdk_runtime_objects(self, mock_client_fn):
-        from kubeflow.trainer.types.types import Runtime, RuntimeTrainer, TrainerType
+        from kubeflow.trainer.types.types import (
+            Runtime,
+            RuntimeKind,
+            RuntimeTrainer,
+            TrainerType,
+        )
 
         real_trainer = RuntimeTrainer(
             trainer_type=TrainerType.CUSTOM_TRAINER,
@@ -154,6 +159,7 @@ class TestGetRuntime:
         real_rt = Runtime(
             name="torch-distributed",
             trainer=real_trainer,
+            kind=RuntimeKind.CLUSTER_TRAINING_RUNTIME,
             pretrained_model="meta-llama/Llama-3.2-1B",
         )
 
@@ -246,14 +252,18 @@ class TestGetRuntimeImage:
         mock_client_fn.assert_not_called()
 
     def test_extracts_image_from_real_sdk_runtime_obj(self):
-        from kubeflow.trainer.types.types import Runtime, RuntimeTrainer, TrainerType
+        from kubeflow.trainer.types.types import Runtime, RuntimeKind, RuntimeTrainer, TrainerType
 
         real_trainer = RuntimeTrainer(
             trainer_type=TrainerType.CUSTOM_TRAINER,
             framework="torch",
             image="docker.io/kubeflow/real-trainer:v1",
         )
-        real_rt = Runtime(name="real-runtime", trainer=real_trainer)
+        real_rt = Runtime(
+            name="real-runtime",
+            trainer=real_trainer,
+            kind=RuntimeKind.CLUSTER_TRAINING_RUNTIME,
+        )
 
         image = _get_runtime_image("real-runtime", runtime_obj=real_rt)
         assert image == "docker.io/kubeflow/real-trainer:v1"

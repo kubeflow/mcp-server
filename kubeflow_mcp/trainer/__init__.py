@@ -20,6 +20,7 @@ Structure mirrors kubeflow/trainer/:
 └── constants/     # Constants
 """
 
+from kubeflow_mcp.common.constants import KUBEFLOW_SDK_VERSION_SPEC
 from kubeflow_mcp.trainer.api.discovery import (
     get_runtime,
     get_training_job,
@@ -57,6 +58,7 @@ from kubeflow_mcp.trainer.api.training import (
 MODULE_INFO = {
     "name": "trainer",
     "description": "Distributed training and LLM fine-tuning on Kubernetes",
+    "sdk_version": KUBEFLOW_SDK_VERSION_SPEC,
     "status": "implemented",
 }
 

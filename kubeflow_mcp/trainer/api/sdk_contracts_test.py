@@ -186,10 +186,10 @@ class TestSDKTypeInstantiation:
         assert init.storage_uri == "hf://meta-llama/Llama-3.2-1B"
         assert init.access_token == "hf_token123"
 
-    def test_huggingface_model_initializer_validates_prefix(self):
-        """Test that HuggingFaceModelInitializer validates hf:// prefix."""
-        with pytest.raises(ValueError, match="must start with 'hf://'"):
-            sdk_types.HuggingFaceModelInitializer(storage_uri="https://huggingface.co/model")
+    def test_huggingface_model_initializer_accepts_any_uri(self):
+        """Test that HuggingFaceModelInitializer accepts arbitrary URIs (SDK 0.5.0)."""
+        init = sdk_types.HuggingFaceModelInitializer(storage_uri="https://huggingface.co/model")
+        assert init.storage_uri == "https://huggingface.co/model"
 
     def test_huggingface_dataset_initializer(self):
         """Test HuggingFaceDatasetInitializer with hf:// prefix."""
@@ -428,7 +428,7 @@ class TestSDKDataclassFields:
         """Verify Runtime type has fields we extract."""
         field_names = {f.name for f in fields(sdk_types.Runtime)}
 
-        expected = {"name", "trainer"}
+        expected = {"name", "trainer", "kind"}
 
         assert expected.issubset(field_names), f"Missing: {expected - field_names}"
 
@@ -1054,7 +1054,11 @@ class TestMCPToolSignatures:
             image="test:latest",
         )
         runtime_trainer.set_command(("torchrun",))
-        runtime = sdk_types.Runtime(name="torchtune-llama", trainer=runtime_trainer)
+        runtime = sdk_types.Runtime(
+            name="torchtune-llama",
+            trainer=runtime_trainer,
+            kind=sdk_types.RuntimeKind.CLUSTER_TRAINING_RUNTIME,
+        )
         tune_config = sdk_types.TorchTuneConfig(batch_size=4, epochs=1)
         builtin = sdk_types.BuiltinTrainer(config=tune_config)
 
