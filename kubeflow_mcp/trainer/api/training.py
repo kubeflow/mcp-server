@@ -41,6 +41,7 @@ from kubeflow_mcp.core.security import (
     is_safe_python_code,
     mask_sensitive_data,
     validate_k8s_name,
+    validate_resource_limits,
     validate_training_bounds,
 )
 
@@ -326,6 +327,38 @@ def _sdk_error(e: Exception, hint: str | None = None) -> dict[str, Any]:
         details=details,
         hint=hint,
     ).model_dump()
+
+
+def _validate_resources_per_node(resources: dict[str, Any] | None) -> ToolError | None:
+    """Validate the resource values accepted by training tools."""
+    if resources is None:
+        return None
+    if not isinstance(resources, dict):
+        return ToolError(
+            error="resources_per_node must be an object",
+            error_code=ErrorCode.VALIDATION_ERROR,
+        )
+
+    for key in ("cpu", "memory"):
+        value = resources.get(key)
+        if value is not None and not isinstance(value, str):
+            return ToolError(
+                error=f"resources_per_node.{key} must be a string",
+                error_code=ErrorCode.VALIDATION_ERROR,
+            )
+
+    gpu = resources.get("gpu")
+    if gpu is not None and (isinstance(gpu, bool) or not isinstance(gpu, int)):
+        return ToolError(
+            error="resources_per_node.gpu must be an integer",
+            error_code=ErrorCode.VALIDATION_ERROR,
+        )
+
+    return validate_resource_limits(
+        cpu=resources.get("cpu"),
+        memory=resources.get("memory"),
+        gpu=gpu,
+    )
 
 
 def _build_initializer(
@@ -845,6 +878,10 @@ def fine_tune(
         if validation_err:
             return validation_err
 
+        resources_err = _validate_resources_per_node(resources_per_node)
+        if resources_err:
+            return resources_err.model_dump()
+
         optional_fields = [
             ("loss", loss),
             ("resources_per_node", resources_per_node),
@@ -1095,6 +1132,10 @@ def run_custom_training(
             if err:
                 return err.model_dump()
 
+        resources_err = _validate_resources_per_node(resources_per_node)
+        if resources_err:
+            return resources_err.model_dump()
+
         effective_resources = resources_per_node or (
             {"gpu": gpu_per_node} if gpu_per_node > 0 else None
         )
@@ -1295,6 +1336,10 @@ def run_container_training(
             err = validate_k8s_name(name)
             if err:
                 return err.model_dump()
+
+        resources_err = _validate_resources_per_node(resources_per_node)
+        if resources_err:
+            return resources_err.model_dump()
 
         effective_resources = resources_per_node or (
             {"gpu": gpu_per_node} if gpu_per_node > 0 else None

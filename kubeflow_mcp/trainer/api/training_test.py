@@ -260,6 +260,40 @@ def test_run_custom_training_validation(test_case):
         assert_test_case(test_case, run_custom_training)
 
 
+@pytest.mark.parametrize(
+    ("tool", "config"),
+    [
+        (run_custom_training, {"script": "print('hello')", "runtime": "torch-distributed"}),
+        (run_container_training, {"image": "pytorch/pytorch:2.0"}),
+        (
+            fine_tune,
+            {
+                "model": "hf://org/model",
+                "dataset": "hf://org/dataset",
+                "runtime": "torchtune-llama",
+            },
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "bad_resources",
+    [
+        {"cpu": "4cores"},
+        {"memory": "256MB"},
+        {"gpu": -1},
+        {"gpu": "two"},
+        ["gpu", 1],
+    ],
+)
+def test_training_tools_reject_invalid_resources_before_sdk_call(tool, config, bad_resources):
+    with patch(PATCH_CLIENT) as mock_client:
+        result = tool(**config, resources_per_node=bad_resources, confirmed=True)
+
+    assert result["success"] is False
+    assert result["error_code"] == VALIDATION_ERROR
+    mock_client.assert_not_called()
+
+
 class TestRunCustomTrainingConfirmed:
     @patch(PATCH_NS_CHECK, return_value=None)
     @patch(PATCH_CLIENT)
