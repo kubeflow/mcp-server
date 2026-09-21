@@ -36,6 +36,7 @@ from kubeflow_mcp.common.constants import (
     ErrorCode,
     is_infrastructure_error,
 )
+from kubeflow_mcp.core.a2a import register_a2a_routes
 from kubeflow_mcp.core.dynamic_tools import get_mode_tools, init_dynamic_tools
 from kubeflow_mcp.core.health import (
     HEALTH_TOOL_ANNOTATIONS,
@@ -44,6 +45,7 @@ from kubeflow_mcp.core.health import (
 )
 from kubeflow_mcp.core.http_edge import register_probe_routes
 from kubeflow_mcp.core.logging import with_correlation_id
+from kubeflow_mcp.core.mcp_card import register_server_card_routes
 from kubeflow_mcp.core.middleware import get_mcp_request_id, get_mcp_session_id, get_user_id
 from kubeflow_mcp.core.policy import (
     apply_policy_filters,
@@ -466,6 +468,13 @@ def create_server(  # noqa: C901
     # Filter tool funcs to only those allowed by persona + policy
     allowed_funcs = [f for f in all_tool_funcs if f.__name__ in final_allowed]
 
+    # Audit-wrapped callables keyed by name, built once and shared by the MCP
+    # tool registration below and the A2A delegation endpoint. Both interfaces
+    # therefore reach exactly the same persona- and policy-filtered surface,
+    # through the same rate limiting, circuit breaking, and audit logging —
+    # delegation cannot become a way around any of them.
+    audited_by_name = {f.__name__: _audit_wrap(f) for f in allowed_funcs}
+
     logger.debug(f"Final allowed tools after policy: {len(final_allowed)}")
 
     # --- Mode dispatch ---
@@ -491,7 +500,7 @@ def create_server(  # noqa: C901
             tool_name = tool_func.__name__
             annotations = all_annotations.get(tool_name)
             description = all_descriptions.get(tool_name)
-            audited = _audit_wrap(tool_func)
+            audited = audited_by_name[tool_name]
 
             if annotations and description:
                 mcp.tool(description=description, annotations=annotations)(audited)
@@ -509,5 +518,16 @@ def create_server(  # noqa: C901
     # Register MCP resources from client modules (all resources, always)
     resources_ready = register_resources(mcp, loaded_modules)
     register_probe_routes(mcp, is_ready=clients_ready and resources_ready)
+
+    # Discovery and horizontal delegation (Phase 4). Both are mounted on the
+    # HTTP app only; stdio transports simply never serve these routes.
+    register_server_card_routes(mcp)
+    register_a2a_routes(
+        mcp,
+        tools=audited_by_name,
+        loaded_clients=list(loaded_modules.keys()),
+        loaded_modules=loaded_modules,
+        auth_provider=auth_provider,
+    )
 
     return mcp
