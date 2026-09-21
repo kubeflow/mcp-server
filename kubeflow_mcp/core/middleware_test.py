@@ -20,9 +20,11 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
+from fastmcp import Client, FastMCP
 
 from kubeflow_mcp.core.middleware import (
     AuditIdentityMiddleware,
+    ToolErrorMiddleware,
     _request_id_var,
     _session_id_var,
     _user_id_var,
@@ -30,6 +32,8 @@ from kubeflow_mcp.core.middleware import (
     get_mcp_session_id,
     get_user_id,
 )
+from kubeflow_mcp.core.policy import get_effective_persona, set_effective_persona
+from kubeflow_mcp.core.server import create_server
 
 
 def _make_context(
@@ -248,3 +252,46 @@ class TestGetterFunctions:
             _session_id_var.set(None)
             _request_id_var.set(None)
             _user_id_var.set(None)
+
+
+class TestToolErrorMiddleware:
+    @staticmethod
+    def _server() -> FastMCP:
+        mcp = FastMCP("test")
+        mcp.add_middleware(ToolErrorMiddleware())
+
+        @mcp.tool
+        def fails() -> dict:
+            return {"success": False, "error": "bad name", "error_code": "VALIDATION_ERROR"}
+
+        @mcp.tool
+        def works() -> dict:
+            return {"success": True, "items": []}
+
+        return mcp
+
+    async def test_error_result_sets_is_error(self) -> None:
+        async with Client(self._server()) as client:
+            result = await client.call_tool_mcp("fails", {})
+        assert result.isError is True
+        assert result.structuredContent == {
+            "success": False,
+            "error": "bad name",
+            "error_code": "VALIDATION_ERROR",
+        }
+
+    async def test_success_result_keeps_is_error_false(self) -> None:
+        async with Client(self._server()) as client:
+            result = await client.call_tool_mcp("works", {})
+        assert result.isError is False
+        assert result.structuredContent == {"success": True, "items": []}
+
+    async def test_server_marks_validation_error(self) -> None:
+        previous_persona = get_effective_persona()
+        try:
+            async with Client(create_server()) as client:
+                result = await client.call_tool_mcp("get_training_job", {"name": "Bad_Name"})
+        finally:
+            set_effective_persona(previous_persona)
+        assert result.isError is True
+        assert result.structuredContent["error_code"] == "VALIDATION_ERROR"
