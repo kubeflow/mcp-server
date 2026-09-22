@@ -465,6 +465,20 @@ class TestGetTrainingEvents:
 
     @patch(PATCH_NS_CHECK, return_value=None)
     @patch(PATCH_CLIENT)
+    def test_event_truncation_metadata(self, mock_client_fn, _ns):
+        events = [
+            SimpleNamespace(reason=f"r{i}", message=f"m{i}", event_time=None) for i in range(3)
+        ]
+        mock_client_fn.return_value = _make_mock_client(get_job_events=events)
+
+        result = get_training_events("my-job", limit=2)
+
+        assert result["data"]["total"] == 3
+        assert result["data"]["returned"] == 2
+        assert result["data"]["has_more"] is True
+
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
     def test_sdk_error(self, mock_client_fn, _ns):
         mock_client_fn.return_value = _make_mock_client(
             get_job_events=RuntimeError("api unavailable")
