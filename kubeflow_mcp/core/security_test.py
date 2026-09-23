@@ -367,6 +367,23 @@ def test_truncate_short_output_unchanged():
     assert truncate_log_output("hello") == "hello"
 
 
+def test_truncate_keeps_tail():
+    output = "start-of-log\n" + "filler\n" * 500 + "fatal error at the end"
+    result = truncate_log_output(output, max_length=100)
+    assert result.endswith("fatal error at the end")
+    assert "start-of-log" not in result
+
+
+def test_truncate_smallest_max_length_keeps_last_char():
+    assert truncate_log_output("abc", max_length=1) == "... (truncated, 3 total chars)\nc"
+
+
+@pytest.mark.parametrize("max_length", [0, -1])
+def test_truncate_rejects_non_positive_max_length(max_length):
+    with pytest.raises(ValueError, match="max_length must be >= 1"):
+        truncate_log_output("some log line", max_length=max_length)
+
+
 def test_truncate_long_output():
     result = truncate_log_output("x" * 20000, max_length=100)
     assert len(result) < 20000
