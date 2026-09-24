@@ -95,6 +95,10 @@ TOOL_PHASES: dict[str, list[str]] = {
         "delete_runtime",
     ],
     "health": ["health_check", "get_server_logs"],
+    # Spark client (kubeflow.spark.SparkClient) — SparkConnect session management.
+    "spark_discovery": ["list_spark_sessions", "get_spark_session"],
+    "spark_sessions": ["create_spark_session", "delete_spark_session"],
+    "spark_monitoring": ["get_spark_session_logs"],
 }
 
 # Reverse mapping: tool name -> phase
@@ -146,6 +150,16 @@ TOOL_NEXT_HINTS: dict[str, str] = {
     "patch_runtime": "Verify changes with get_runtime(name)",
     "create_runtime": "Verify with list_runtimes() or get_runtime(name)",
     "delete_runtime": "Confirm removal with list_runtimes()",
+    # Spark client
+    "list_spark_sessions": "Call get_spark_session(name) for details on a specific session",
+    "get_spark_session": (
+        "Use get_spark_session_logs(name) for driver output, or delete_spark_session(name) to tear down"
+    ),
+    "get_spark_session_logs": "If errors found, check the session state with get_spark_session(name)",
+    "create_spark_session": (
+        "Monitor with get_spark_session(name); attach with pyspark using the returned connect info"
+    ),
+    "delete_spark_session": "Confirm removal with list_spark_sessions()",
 }
 
 
@@ -194,9 +208,21 @@ SDK_COMPATIBILITY: dict[str, object] = {
             "covered_methods": [],
         },
         "spark": {
-            "status": "planned",
+            "status": "implemented",
             "sdk_client": "kubeflow.spark.SparkClient",
-            "covered_methods": [],
+            "covered_methods": [
+                "connect",  # create mode, via create_spark_session
+                "list_sessions",
+                "get_session",
+                "delete_session",
+                "get_session_logs",
+            ],
+            "uncovered_methods": [
+                "connect(base_url=...)",  # attaching to an existing server returns a live
+                # pyspark SparkSession, which is not serializable over MCP; the data plane
+                # attaches directly using the connect info returned by create_spark_session.
+                "get_session_logs(follow=True)",  # streaming not exposed
+            ],
         },
         "feast": {
             "status": "planned",
