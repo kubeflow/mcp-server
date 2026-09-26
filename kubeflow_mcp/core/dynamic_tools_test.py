@@ -43,6 +43,48 @@ def _registry():
     dynamic_tools.TOOL_HIERARCHY.clear()
 
 
+@pytest.fixture
+def offline_model(monkeypatch):
+    """sentence-transformers is installed, but the model download fails."""
+    import sys
+    from types import SimpleNamespace
+
+    load_attempts = []
+
+    def load_model(*_args, **_kwargs):
+        load_attempts.append(1)
+        raise OSError("We couldn't connect to 'https://huggingface.co' to load this model")
+
+    monkeypatch.setitem(
+        sys.modules, "sentence_transformers", SimpleNamespace(SentenceTransformer=load_model)
+    )
+    dynamic_tools._embedding_cache.reset()
+    yield load_attempts
+    dynamic_tools._embedding_cache.reset()
+
+
+def test_find_tools_falls_back_to_keywords_when_model_cannot_load(offline_model):
+    result = dynamic_tools.find_tools("probe tool")
+
+    assert result["mode"] == "keyword_fallback"
+    assert result["tools"][0]["name"] == "probe_tool"
+
+
+def test_find_tools_does_not_retry_failed_model_load(offline_model):
+    for _ in range(3):
+        dynamic_tools.find_tools("probe tool")
+
+    assert len(offline_model) == 1
+
+
+def test_embedding_cache_reset_retries_model_load(offline_model):
+    dynamic_tools.find_tools("probe tool")
+    dynamic_tools._embedding_cache.reset()
+    dynamic_tools.find_tools("probe tool")
+
+    assert len(offline_model) == 2
+
+
 @pytest.mark.parametrize(
     "arguments",
     [
