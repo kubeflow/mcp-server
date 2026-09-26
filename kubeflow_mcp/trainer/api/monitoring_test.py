@@ -23,6 +23,8 @@ import pytest
 from tests.common import TestCase
 
 from kubeflow_mcp.common.failures import FAILURE_PATTERNS, extract_failure_hint
+from kubeflow_mcp.core.resilience import CircuitState, get_breaker
+from kubeflow_mcp.core.server import _audit_wrap
 from kubeflow_mcp.trainer.api.monitoring import (
     MAX_LOG_LINES,
     _is_pod_for_step,
@@ -484,6 +486,34 @@ class TestGetTrainingEvents:
         assert result["success"] is False
         assert result["error_code"] == "PERMISSION_DENIED"
 
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_not_found_error(self, mock_client_fn, _ns):
+        from kubernetes.client.exceptions import ApiException
+
+        mock_client_fn.return_value = _make_mock_client(
+            get_job_events=ApiException(status=404, reason="Not Found")
+        )
+        result = get_training_events("missing-job")
+        assert result["success"] is False
+        assert result["error_code"] == "RESOURCE_NOT_FOUND"
+        assert "missing-job" in result["error"]
+
+        wrapped = _audit_wrap(get_training_events)
+        breaker = get_breaker("get_training_events")
+
+        for _ in range(5):
+            res = wrapped(name="missing-job")
+            assert res["success"] is False
+            assert res["error_code"] == "RESOURCE_NOT_FOUND"
+
+        assert breaker.state == CircuitState.CLOSED
+        assert breaker.failure_count == 0
+
+        mock_client_fn.return_value = _make_mock_client(get_job_events=[])
+        valid_res = wrapped(name="valid-job")
+        assert valid_res["success"] is True
+
     @patch(PATCH_CLIENT)
     def test_invalid_name_rejected_before_sdk_call(self, mock_client_fn):
         result = get_training_events("bad..name")
@@ -611,6 +641,35 @@ class TestWaitForTraining:
         result = wait_for_training("my-job", namespace="forbidden-ns")
         assert result["success"] is False
         assert result["error_code"] == "PERMISSION_DENIED"
+
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_not_found_error(self, mock_client_fn, _ns):
+        from kubernetes.client.exceptions import ApiException
+
+        mock_client_fn.return_value = _make_mock_client(
+            wait_for_job_status=ApiException(status=404, reason="Not Found")
+        )
+        result = wait_for_training("missing-job")
+        assert result["success"] is False
+        assert result["error_code"] == "RESOURCE_NOT_FOUND"
+        assert "missing-job" in result["error"]
+
+        wrapped = _audit_wrap(wait_for_training)
+        breaker = get_breaker("wait_for_training")
+
+        for _ in range(5):
+            res = wrapped(name="missing-job")
+            assert res["success"] is False
+            assert res["error_code"] == "RESOURCE_NOT_FOUND"
+
+        assert breaker.state == CircuitState.CLOSED
+        assert breaker.failure_count == 0
+
+        job = SimpleNamespace(status="Complete")
+        mock_client_fn.return_value = _make_mock_client(wait_for_job_status=job)
+        valid_res = wrapped(name="valid-job")
+        assert valid_res["success"] is True
 
     @patch(PATCH_CLIENT)
     def test_invalid_name_rejected_before_sdk_call(self, mock_client_fn):

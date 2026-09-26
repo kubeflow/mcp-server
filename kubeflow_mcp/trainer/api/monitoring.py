@@ -240,6 +240,13 @@ def get_training_events(
         ).model_dump()
 
     except Exception as e:
+        if is_k8s_not_found(e):
+            return ToolError(
+                error=f"Training job '{name}' not found",
+                error_code=ErrorCode.RESOURCE_NOT_FOUND,
+                hint="Use list_training_jobs to find available jobs",
+                details=exception_details(e),
+            ).model_dump()
         return ToolError(
             error=str(e),
             error_code=ErrorCode.SDK_ERROR,
@@ -354,6 +361,13 @@ def wait_for_training(
             }
         ).model_dump()
     except Exception as e:
+        if is_k8s_not_found(e):
+            return ToolError(
+                error=f"Training job '{name}' not found",
+                error_code=ErrorCode.RESOURCE_NOT_FOUND,
+                hint="Use list_training_jobs to find available jobs",
+                details=exception_details(e),
+            ).model_dump()
         return ToolError(
             error=str(e),
             error_code=ErrorCode.SDK_ERROR,
