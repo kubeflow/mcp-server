@@ -53,7 +53,7 @@ def _redact_text(text: str) -> str:
         value = _REDACT_VALUE.match(text, key.end())
         if value is None:
             continue
-        pieces.append(text[pos : key.start()])
+        pieces.append(text[pos : key.end()])
         pieces.append("***")
         pos = value.end()
     pieces.append(text[pos:])
