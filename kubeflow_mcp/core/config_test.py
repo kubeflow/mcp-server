@@ -133,9 +133,61 @@ def test_find_config_file_prefers_project_local_config(tmp_path):
         assert _find_config_file() == local_config
 
 
-# TODO(test): test config_path that doesn't exist falls back to default search
-# TODO(test): test malformed YAML handled gracefully
-# TODO(test): test auth config env overrides (KUBEFLOW_MCP_AUTH_TOKEN, KUBEFLOW_MCP_JWKS_URI)
-# TODO(test): test OTEL_EXPORTER_OTLP_ENDPOINT env override
-# TODO(test): test KUBEFLOW_MCP_CONTROLLER_NAMESPACE env override
-# TODO(test): test multiple clients from KUBEFLOW_MCP_CLIENTS env var
+def test_load_config_path_not_exists_falls_back_to_default(tmp_path):
+    missing_path = tmp_path / "missing.yaml"
+    with patch("kubeflow_mcp.core.config._find_config_file", return_value=None) as mock_find:
+        cfg = load_config(config_path=missing_path)
+    mock_find.assert_called_once()
+    assert cfg.server.persona == "readonly"
+
+
+def test_load_config_malformed_yaml(tmp_path, caplog):
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("invalid:\n  - yaml:\n   content")
+
+    cfg = load_config(config_path=config_file)
+    assert cfg.server.persona == "readonly"
+    assert "Failed to load config from" in caplog.text
+
+
+def test_load_config_auth_env_overrides():
+    with (
+        patch("kubeflow_mcp.core.config._find_config_file", return_value=None),
+        patch.dict(
+            "os.environ",
+            {
+                "KUBEFLOW_MCP_AUTH_TOKEN": "test-token",
+                "KUBEFLOW_MCP_JWKS_URI": "https://example.com/jwks",
+            },
+        ),
+    ):
+        cfg = load_config()
+    assert cfg.auth.auth_token == "test-token"
+    assert cfg.auth.jwks_uri == "https://example.com/jwks"
+
+
+def test_load_config_otel_env_override():
+    with (
+        patch("kubeflow_mcp.core.config._find_config_file", return_value=None),
+        patch.dict("os.environ", {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://otel:4318"}),
+    ):
+        cfg = load_config()
+    assert cfg.observability.otel_endpoint == "http://otel:4318"
+
+
+def test_load_config_controller_namespace_override():
+    with (
+        patch("kubeflow_mcp.core.config._find_config_file", return_value=None),
+        patch.dict("os.environ", {"KUBEFLOW_MCP_CONTROLLER_NAMESPACE": "kubeflow-system"}),
+    ):
+        cfg = load_config()
+    assert cfg.trainer.controller_namespace == "kubeflow-system"
+
+
+def test_load_config_multiple_clients_override():
+    with (
+        patch("kubeflow_mcp.core.config._find_config_file", return_value=None),
+        patch.dict("os.environ", {"KUBEFLOW_MCP_CLIENTS": "trainer, optimizer, hub "}),
+    ):
+        cfg = load_config()
+    assert cfg.server.clients == ["trainer", "optimizer", "hub"]
