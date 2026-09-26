@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for core/dynamic_tools.py — execute_tool argument handling and the circuit breaker."""
+"""Tests for dynamic tool discovery, execution, and cache invalidation."""
+
+from unittest.mock import Mock
 
 import pytest
 
@@ -88,3 +90,12 @@ def test_tool_exception_still_counts_as_breaker_failure():
         assert result["error_code"] == ErrorCode.SDK_ERROR
 
     assert breaker.state == CircuitState.OPEN
+
+
+def test_init_dynamic_tools_resets_embedding_cache(monkeypatch):
+    reset = Mock()
+    monkeypatch.setattr(dynamic_tools._embedding_cache, "reset", reset)
+
+    dynamic_tools.init_dynamic_tools([], {})
+
+    reset.assert_called_once_with()
