@@ -23,6 +23,7 @@ import threading
 import uuid
 from collections.abc import Callable
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 
@@ -102,7 +103,10 @@ except ImportError:
 HF_HOME_PATH = "/workspace/.hf"
 
 
+_hf_home_ctx: ContextVar[str | None] = ContextVar("hf_home", default=None)
 _hf_home_lock = threading.Lock()
+_hf_home_refcount = 0
+_original_get_trainer_cr: Callable | None = None
 
 
 @contextmanager
@@ -117,21 +121,35 @@ def _inject_trainer_hf_home(hf_home_path: str):
     import kubeflow.trainer.backends.kubernetes.utils as k8s_utils
     from kubeflow_trainer_api.models import IoK8sApiCoreV1EnvVar
 
-    original = k8s_utils.get_trainer_cr_from_builtin_trainer
+    global _hf_home_refcount, _original_get_trainer_cr
 
-    def _patched(runtime, trainer, initializer=None):
-        cr = original(runtime, trainer, initializer)
-        if not any(e.name == "HF_HOME" for e in (cr.env or [])):
-            hf_env = IoK8sApiCoreV1EnvVar(name="HF_HOME", value=hf_home_path)
-            cr.env = (cr.env or []) + [hf_env]
-        return cr
-
+    token = _hf_home_ctx.set(hf_home_path)
     with _hf_home_lock:
-        k8s_utils.get_trainer_cr_from_builtin_trainer = _patched
-        try:
-            yield
-        finally:
-            k8s_utils.get_trainer_cr_from_builtin_trainer = original
+        if _hf_home_refcount == 0:
+            _original_get_trainer_cr = k8s_utils.get_trainer_cr_from_builtin_trainer
+
+            def _patched(runtime, trainer, initializer=None):
+                if _original_get_trainer_cr is None:
+                    raise RuntimeError("_patched called outside active context")
+                cr = _original_get_trainer_cr(runtime, trainer, initializer)
+                path = _hf_home_ctx.get()
+                if path and not any(e.name == "HF_HOME" for e in (cr.env or [])):
+                    hf_env = IoK8sApiCoreV1EnvVar(name="HF_HOME", value=path)
+                    cr.env = (cr.env or []) + [hf_env]
+                return cr
+
+            k8s_utils.get_trainer_cr_from_builtin_trainer = _patched
+        _hf_home_refcount += 1
+
+    try:
+        yield
+    finally:
+        _hf_home_ctx.reset(token)
+        with _hf_home_lock:
+            _hf_home_refcount -= 1
+            if _hf_home_refcount == 0:
+                k8s_utils.get_trainer_cr_from_builtin_trainer = _original_get_trainer_cr
+                _original_get_trainer_cr = None
 
 
 _TRAINING_SCRIPT_DIR: str | None = None
