@@ -48,6 +48,17 @@ class TestJobStatusFilterAliases:
         assert _JOB_STATUS_FILTER_ALIASES["Succeeded"] == "Complete"
 
 
+@pytest.mark.parametrize("status", ["", "INVALID_STATUS", "completed"])
+def test_list_training_jobs_rejects_invalid_status_before_sdk_call(status):
+    with patch(
+        "kubeflow_mcp.trainer.api.discovery.get_trainer_client_for_namespace"
+    ) as mock_client:
+        result = list_training_jobs(status=status)
+
+    verify_tool_error(result, error_code=ErrorCode.VALIDATION_ERROR)
+    mock_client.assert_not_called()
+
+
 class TestTrainjobRuntimeToMcp:
     def test_none_returns_none(self):
         assert _trainjob_runtime_to_mcp(None) is None

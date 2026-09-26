@@ -39,6 +39,7 @@ _PACKAGES_POLL_INTERVAL = 3
 _JOB_STATUS_FILTER_ALIASES: dict[str, str] = {
     "Succeeded": "Complete",
 }
+_VALID_JOB_STATUSES = frozenset({"Created", "Running", "Complete", "Failed", "Suspended"})
 
 
 def _trainjob_runtime_to_mcp(runtime: object | None) -> dict[str, str] | None:
@@ -84,6 +85,16 @@ def list_training_jobs(
         if runtime_err is not None:
             return runtime_err.model_dump()
 
+    normalized_status = None
+    if status is not None:
+        normalized_status = _JOB_STATUS_FILTER_ALIASES.get(status, status)
+        if normalized_status not in _VALID_JOB_STATUSES:
+            return ToolError(
+                error=f"Unsupported status '{status}'",
+                error_code=ErrorCode.VALIDATION_ERROR,
+                details={"supported_statuses": sorted(_VALID_JOB_STATUSES)},
+            ).model_dump()
+
     ns_err = check_namespace_allowed(namespace)
     if ns_err is not None:
         return ns_err.model_dump()
@@ -112,9 +123,8 @@ def list_training_jobs(
             }
             job_list.append(job_data)
 
-        if status:
-            want = _JOB_STATUS_FILTER_ALIASES.get(status, status)
-            job_list = [j for j in job_list if j.get("status") == want]
+        if normalized_status is not None:
+            job_list = [j for j in job_list if j.get("status") == normalized_status]
 
         return ToolResponse(data={"jobs": job_list[:limit], "total": len(job_list)}).model_dump()
 
