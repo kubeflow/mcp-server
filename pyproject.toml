@@ -30,6 +30,7 @@ all = ["kubeflow[hub]==0.4.1", "kubeflow[spark]==0.4.1"]
 
 [dependency-groups]
 dev = [
+    "hatchling>=1.27",
     "pre-commit>=4.2.0",
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
@@ -66,6 +67,12 @@ path = "kubeflow_mcp/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["kubeflow_mcp"]
+
+# Agent Skills live at the repo top level (skills/<name>/SKILL.md) so that
+# agentskills.io tooling can discover them from a checkout, but they must also
+# ship inside the wheel so PyPI and container installs can serve them.
+[tool.hatch.build.targets.wheel.force-include]
+"skills" = "kubeflow_mcp/skills"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

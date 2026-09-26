@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "kubeflow": {
+      "command": "kubeflow-mcp",
+      "args": ["serve"]
+    }
+  }
+}
