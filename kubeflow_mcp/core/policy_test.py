@@ -23,6 +23,7 @@ from tests.common import TestCase
 
 from kubeflow_mcp.core.policy import (
     _expand_category,
+    _load_policy_file,
     _matches_pattern,
     apply_policy_filters,
     get_allowed_namespaces,
@@ -186,6 +187,38 @@ def test_reload_policy_clears_cache():
         load_policy.return_value = {"policy": {"namespaces": ["new-ns"]}}
         reload_policy()
         assert get_allowed_namespaces() == ["new-ns"]
+
+
+# ─── Policy file loading ─────────────────────────────────────────────────────
+
+
+def test_missing_policy_file_means_no_policy(tmp_policy_file):
+    assert _load_policy_file() == {}
+
+
+def test_valid_policy_file_is_loaded(tmp_policy_file):
+    policy = {"policy": {"read_only": True, "namespaces": ["team-a"]}}
+    tmp_policy_file(policy)
+    assert _load_policy_file() == policy
+
+
+def test_malformed_policy_file_fails_closed(tmp_policy_file):
+    """A typo must not silently drop read_only, namespaces and deny (fail open)."""
+    policy_path = tmp_policy_file({})
+    policy_path.write_text('policy:\n  read_only: true\n  deny: ["delete_*"\n')
+
+    with pytest.raises(RuntimeError, match="Failed to load policy file"):
+        is_read_only()
+    with pytest.raises(RuntimeError, match="Failed to load policy file"):
+        get_allowed_namespaces()
+
+
+def test_policy_file_without_pyyaml_fails_closed(tmp_policy_file):
+    tmp_policy_file({"policy": {"read_only": True}})
+
+    with patch.dict("sys.modules", {"yaml": None}):
+        with pytest.raises(RuntimeError, match="PyYAML is not installed"):
+            _load_policy_file()
 
 
 # ─── Persona inheritance & gating ───────────────────────────────────────────

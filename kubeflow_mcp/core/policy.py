@@ -136,7 +136,12 @@ def _find_policy_file() -> Path | None:
 
 
 def _load_policy_file() -> dict[str, Any]:
-    """Load policy from YAML file."""
+    """Load policy from YAML file.
+
+    A missing file means no policy. A file that exists but cannot be loaded raises
+    instead of returning ``{}``: an empty policy is "no restrictions", so ignoring
+    the file would silently drop ``read_only``, ``namespaces`` and ``deny`` (fail open).
+    """
     path = _find_policy_file()
     if not path:
         return {}
@@ -148,12 +153,10 @@ def _load_policy_file() -> dict[str, Any]:
             data = yaml.safe_load(f)
             logger.debug(f"Loaded policy from {path}")
             return data if data else {}
-    except ImportError:
-        logger.debug("PyYAML not installed, skipping policy file")
-        return {}
+    except ImportError as e:
+        raise RuntimeError(f"Cannot enforce policy file {path}: PyYAML is not installed") from e
     except Exception as e:
-        logger.warning(f"Failed to load policy from {path}: {e}")
-        return {}
+        raise RuntimeError(f"Failed to load policy file {path}: {e}") from e
 
 
 @functools.lru_cache(maxsize=1)
