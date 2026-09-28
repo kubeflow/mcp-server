@@ -252,7 +252,12 @@ class _EmbeddingCache:
 
         try:
             from sentence_transformers import SentenceTransformer
+        except ImportError:
+            logger.debug("sentence-transformers not installed, falling back to keyword search")
+            self._unavailable = True
+            return None, None
 
+        try:
             self._model = SentenceTransformer("all-MiniLM-L6-v2")
             descriptions = [
                 f"{info['description']}. Category: {info['category']}. {info['full_doc'][:200]}"
@@ -264,18 +269,13 @@ class _EmbeddingCache:
                 for name, emb in zip(TOOL_REGISTRY.keys(), embeddings, strict=True)
             }
             return self._embeddings, self._model
-        except ImportError:
-            logger.debug("sentence-transformers not installed, falling back to keyword search")
         except Exception as e:
-            logger.warning(
-                "Could not load the embedding model, falling back to keyword search: %s", e
-            )
-
-        # Remember the failure so every find_tools call doesn't retry a download that
-        # just failed. reset() clears it.
-        self._unavailable = True
-        self._model = None
-        return None, None
+            # Covers the model download and the encode pass: either way there are no
+            # embeddings to search. Remembered so every call doesn't repeat the work.
+            logger.warning("Semantic search is unavailable, falling back to keyword search: %s", e)
+            self._unavailable = True
+            self._model = None
+            return None, None
 
     def reset(self) -> None:
         self._embeddings = None

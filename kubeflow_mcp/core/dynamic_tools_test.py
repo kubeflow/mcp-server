@@ -75,6 +75,33 @@ def test_find_tools_falls_back_to_keywords_when_model_cannot_load(offline_model)
     assert result["tools"][0]["name"] == "probe_tool"
 
 
+@pytest.fixture
+def model_that_cannot_encode(monkeypatch):
+    """The model loads, but encoding the tool descriptions fails."""
+    import sys
+    from types import SimpleNamespace
+
+    class _Model:
+        def encode(self, *_args, **_kwargs):
+            raise RuntimeError("CUDA error: no kernel image is available")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "sentence_transformers",
+        SimpleNamespace(SentenceTransformer=lambda *_a, **_k: _Model()),
+    )
+    dynamic_tools._embedding_cache.reset()
+    yield
+    dynamic_tools._embedding_cache.reset()
+
+
+def test_find_tools_falls_back_when_the_model_cannot_encode(model_that_cannot_encode):
+    result = dynamic_tools.find_tools("probe tool")
+
+    assert result["mode"] == "keyword_fallback"
+    assert result["tools"][0]["name"] == "probe_tool"
+
+
 def test_find_tools_does_not_retry_failed_model_load(offline_model):
     for _ in range(3):
         dynamic_tools.find_tools("probe tool")
