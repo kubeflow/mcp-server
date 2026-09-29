@@ -210,6 +210,15 @@ kubeflow-mcp serve \
 
 `--mode progressive` exposes 3 meta-tools (~85 tokens) for hierarchical discovery. `--mode semantic` exposes 2 meta-tools (~69 tokens) using embedding search. Both reduce token consumption significantly for agent workflows.
 
+`--persona` controls which tools are exposed. Each persona includes the tools of the one above it:
+
+| Persona | Use it for |
+|---|---|
+| `readonly` (default) | Planning, browsing jobs and runtimes, reading logs and events |
+| `data-scientist` | Submitting fine-tuning and custom training, waiting for jobs, deleting MCP-created jobs |
+| `ml-engineer` | Container training, suspending/resuming jobs, inspecting CRDs and the controller |
+| `platform-admin` | All tools, including creating, patching and deleting runtimes |
+
 <details>
 <summary> HTTP Authentication</summary>
 
@@ -261,30 +270,6 @@ make inspector                    # launch MCP Inspector (stdio)
 make inspector TRANSPORT=http     # Inspector + Streamable HTTP (start server separately)
 make inspector TRANSPORT=sse      # Inspector + SSE (start server separately)
 ```
-
-### Inspect tools by persona
-
-MCP Inspector shows only the tools allowed for the selected persona. Start the
-Inspector with the `--persona` option when you want to inspect a specific
-access level:
-
-```bash
-npx @modelcontextprotocol/inspector uv run kubeflow-mcp serve \
-  --clients trainer \
-  --persona platform-admin \
-  --mode full
-```
-
-Supported personas are:
-
-- `readonly` — read-only discovery, monitoring, and inspection tools
-- `data-scientist` — data and training workflow tools
-- `ml-engineer` — training, monitoring, and lifecycle tools
-- `platform-admin` — platform and administrative tools
-
-Replace `platform-admin` with any supported persona to inspect that persona's
-available tools. For example, use `--persona readonly` to verify the
-read-only tool set.
 
 ## Community
 
