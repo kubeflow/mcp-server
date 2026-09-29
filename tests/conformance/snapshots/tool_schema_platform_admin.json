@@ -834,6 +834,17 @@
           "default": false,
           "type": "boolean"
         },
+        "max_lines": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "name": {
           "type": "string"
         },
@@ -841,6 +852,17 @@
           "anyOf": [
             {
               "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "since_line": {
+          "anyOf": [
+            {
+              "type": "integer"
             },
             {
               "type": "null"

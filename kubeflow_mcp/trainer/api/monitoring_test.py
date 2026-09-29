@@ -26,6 +26,7 @@ from kubeflow_mcp.common.failures import FAILURE_PATTERNS, extract_failure_hint
 from kubeflow_mcp.core.resilience import CircuitState, get_breaker
 from kubeflow_mcp.core.server import _audit_wrap
 from kubeflow_mcp.trainer.api.monitoring import (
+    MAX_LINE_CHARS,
     MAX_LOG_LINES,
     _is_pod_for_step,
     get_training_events,
@@ -282,6 +283,18 @@ class TestGetTrainingLogs:
 
     @patch(PATCH_NS_CHECK, return_value=None)
     @patch(PATCH_CLIENT)
+    def test_tail_mode_custom_max_lines(self, mock_client_fn, _ns):
+        lines = [f"line {i}" for i in range(200)]
+        mock_client_fn.return_value = _make_mock_client(get_job_logs=lines)
+        result = get_training_logs("my-job", max_lines=50)
+        assert result["success"] is True
+        assert result["data"]["lines"] == 50
+        assert "line 149" not in result["data"]["logs"]
+        assert "line 150" in result["data"]["logs"]
+        assert "line 199" in result["data"]["logs"]
+
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
     def test_not_found_error(self, mock_client_fn, _ns):
         from kubernetes.client.exceptions import ApiException
 
@@ -395,6 +408,180 @@ class TestGetTrainingLogs:
         result = get_training_logs("crash-job", step="node-0")
         assert result["success"] is True
         assert result["data"]["logs"] == ""
+
+
+# ─── get_training_logs cursor mode ──────────────────────────────────────
+
+
+class TestGetTrainingLogsCursor:
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_lines_past_1000_reachable(self, mock_client_fn, _ns):
+        total = 1500
+        lines = [f"log line {i}" for i in range(total)]
+        mock_client_fn.return_value = _make_mock_client(get_job_logs=lines)
+
+        res = get_training_logs("my-job", since_line=1100, max_lines=100)
+        assert res["success"] is True
+        assert res["data"]["lines"] == 100
+        assert res["data"]["next_offset"] == 1200
+        assert res["data"]["total_lines"] == 1500
+        assert res["data"]["logs"] == "\n".join(lines[1100:1200])
+
+        res_zero = get_training_logs("my-job", since_line=0, max_lines=10)
+        assert res_zero["success"] is True
+        assert res_zero["data"]["lines"] == 10
+        assert res_zero["data"]["next_offset"] == 10
+        assert res_zero["data"]["total_lines"] == 1500
+        assert res_zero["data"]["logs"] == "\n".join(lines[0:10])
+
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_cursor_pagination_multi_step(self, mock_client_fn, _ns):
+        lines = [f"line {i}" for i in range(500)]
+        mock_client_fn.return_value = _make_mock_client(get_job_logs=lines)
+
+        res1 = get_training_logs("my-job", since_line=0)
+        assert res1["success"] is True
+        assert res1["data"]["lines"] == 200
+        assert res1["data"]["next_offset"] == 200
+        assert res1["data"]["total_lines"] == 500
+        assert res1["data"]["logs"] == "\n".join(lines[0:200])
+
+        res2 = get_training_logs("my-job", since_line=res1["data"]["next_offset"])
+        assert res2["success"] is True
+        assert res2["data"]["lines"] == 200
+        assert res2["data"]["next_offset"] == 400
+        assert res2["data"]["total_lines"] == 500
+        assert res2["data"]["logs"] == "\n".join(lines[200:400])
+
+        res3 = get_training_logs("my-job", since_line=res2["data"]["next_offset"])
+        assert res3["success"] is True
+        assert res3["data"]["lines"] == 100
+        assert res3["data"]["next_offset"] == 500
+        assert res3["data"]["total_lines"] == 500
+        assert res3["data"]["logs"] == "\n".join(lines[400:500])
+
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_cursor_at_eof(self, mock_client_fn, _ns):
+        lines = [f"line {i}" for i in range(50)]
+        mock_client_fn.return_value = _make_mock_client(get_job_logs=lines)
+
+        res = get_training_logs("my-job", since_line=50)
+        assert res["success"] is True
+        assert res["data"]["lines"] == 0
+        assert res["data"]["logs"] == ""
+        assert res["data"]["next_offset"] == 50
+        assert res["data"]["total_lines"] == 50
+        assert "log_reset" not in res["data"]
+
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_cursor_log_reset(self, mock_client_fn, _ns):
+        lines = [f"line {i}" for i in range(50)]
+        mock_client_fn.return_value = _make_mock_client(get_job_logs=lines)
+
+        res = get_training_logs("my-job", since_line=100)
+        assert res["success"] is True
+        assert res["data"]["lines"] == 0
+        assert res["data"]["logs"] == ""
+        assert res["data"]["next_offset"] == 0
+        assert res["data"]["total_lines"] == 50
+        assert res["data"]["log_reset"] is True
+
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_char_budget_stops_page(self, mock_client_fn, _ns):
+        lines = ["x" * 1000 for _ in range(20)]
+        mock_client_fn.return_value = _make_mock_client(get_job_logs=lines)
+
+        res = get_training_logs("my-job", since_line=0, max_lines=20)
+        assert res["success"] is True
+        assert res["data"]["lines"] == 9
+        assert res["data"]["next_offset"] == 9
+        assert len(res["data"]["logs"].splitlines()) == 9
+
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_line_truncation(self, mock_client_fn, _ns):
+        long_line = "a" * (MAX_LINE_CHARS + 500)
+        mock_client_fn.return_value = _make_mock_client(get_job_logs=[long_line])
+
+        res = get_training_logs("my-job", since_line=0)
+        assert res["success"] is True
+        assert res["data"]["lines"] == 1
+        assert res["data"]["logs"].endswith("...[truncated]")
+        assert len(res["data"]["logs"]) == MAX_LINE_CHARS + len("...[truncated]")
+
+    @patch(PATCH_NS_CHECK, return_value=None)
+    def test_validation_errors(self, _ns):
+        res1 = get_training_logs("my-job", since_line=-1)
+        assert res1["success"] is False
+        assert res1["error_code"] == "VALIDATION_ERROR"
+        assert "since_line must be >= 0" in res1["error"]
+
+        res2 = get_training_logs("my-job", since_line=0, max_lines=0)
+        assert res2["success"] is False
+        assert res2["error_code"] == "VALIDATION_ERROR"
+        assert "max_lines must be 1-1000" in res2["error"]
+
+        res3 = get_training_logs("my-job", since_line=0, max_lines=1001)
+        assert res3["success"] is False
+        assert res3["error_code"] == "VALIDATION_ERROR"
+        assert "max_lines must be 1-1000" in res3["error"]
+
+    @patch(PATCH_VALIDATE_NAME, return_value=None)
+    @patch(PATCH_CORE_V1)
+    @patch(PATCH_EFF_NS, return_value="default")
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_fallback_guard_fails_when_crash_logs_recovered(
+        self, mock_client_fn, _ns, _eff_ns, mock_v1_fn, _validate
+    ):
+        mock_client_fn.return_value = _make_mock_client(get_job_logs=[])
+        pod = _make_pod({"jobset.sigs.k8s.io/replicatedjob-name": "node-0"})
+        pod.metadata.name = "crash-job-node-0-0"
+        mock_v1 = MagicMock()
+        mock_v1.list_namespaced_pod.return_value = SimpleNamespace(items=[pod])
+        mock_v1.read_namespaced_pod_log.return_value = "previous crash output"
+        mock_v1_fn.return_value = mock_v1
+
+        res = get_training_logs("crash-job", step="node-0", since_line=0)
+        assert res["success"] is False
+        assert res["error_code"] == "VALIDATION_ERROR"
+        assert "cursor mode unavailable" in res["error"]
+        assert "call without since_line" in res["error"]
+
+    @patch(PATCH_EFF_NS, side_effect=RuntimeError("kubeconfig missing"))
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_fallback_guard_both_empty_returns_normal_empty(self, mock_client_fn, _ns, _eff_ns):
+        mock_client_fn.return_value = _make_mock_client(get_job_logs=[])
+
+        res = get_training_logs("empty-job", since_line=0)
+        assert res["success"] is True
+        assert res["data"]["logs"] == ""
+        assert res["data"]["lines"] == 0
+        assert res["data"]["next_offset"] == 0
+        assert res["data"]["total_lines"] == 0
+
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_failure_hint_extracted_from_last_1000_lines(self, mock_client_fn, _ns):
+        lines = [f"line {i}" for i in range(1200)]
+        lines[50] = "RuntimeError: CUDA out of memory. Tried to allocate 4.00 GiB"
+        mock_client_fn.return_value = _make_mock_client(get_job_logs=lines)
+
+        res = get_training_logs("my-job", since_line=0, max_lines=100)
+        assert res["success"] is True
+        assert "failure_hint" not in res["data"]
+
+        lines[1150] = "RuntimeError: CUDA out of memory. Tried to allocate 4.00 GiB"
+        res_with_hint = get_training_logs("my-job", since_line=0, max_lines=100)
+        assert res_with_hint["success"] is True
+        assert "failure_hint" in res_with_hint["data"]
+        assert res_with_hint["data"]["failure_hint"]["category"] == "OOM"
 
 
 # ─── get_training_events (tool-level) ────────────────────────────────────

@@ -35,6 +35,8 @@ from kubeflow_mcp.core.security import (
 logger = logging.getLogger(__name__)
 
 MAX_LOG_LINES = 1000
+MAX_LINE_CHARS = 2000
+MAX_CURSOR_CHARS = 9000  # Response size cap: max characters per cursor-mode page
 MAX_EVENT_LIMIT = 500
 MAX_WAIT_TIMEOUT = 3600
 MIN_POLLING_INTERVAL = 1
@@ -56,11 +58,138 @@ def _is_pod_for_step(pod: Any, step: str) -> bool:
     )
 
 
+def _collect_log_lines(
+    client: Any,
+    name: str,
+    step: str,
+    namespace: str | None,
+    cursor_mode: bool,
+) -> tuple[list[str], bool]:
+    """Fetch log lines and attempt the previous-container fallback if empty.
+
+    Returns (log_lines, fallback_was_used).
+    """
+    if cursor_mode:
+        # No deque cap: cursor mode must be able to address any line index.
+        log_lines: list[str] = list(client.get_job_logs(name=name, step=step, follow=False))
+    else:
+        log_lines = list(
+            deque(client.get_job_logs(name=name, step=step, follow=False), maxlen=MAX_LOG_LINES)
+        )
+
+    if log_lines:
+        return log_lines, False
+
+    # Primary path empty — try previous-container (crash) logs.
+    try:
+        eff_ns = get_trainer_effective_namespace(namespace)
+        v1 = get_core_v1_api()
+        pods = v1.list_namespaced_pod(
+            namespace=eff_ns,
+            label_selector=f"training.kubeflow.org/trainjob-name={name}",
+        )
+        for pod in pods.items:
+            if not _is_pod_for_step(pod, step):
+                continue
+            try:
+                raw = v1.read_namespaced_pod_log(
+                    name=pod.metadata.name,
+                    namespace=eff_ns,
+                    previous=True,
+                    tail_lines=MAX_LOG_LINES,
+                )
+                if raw:
+                    log_lines.extend(raw.splitlines())
+            except Exception as e:
+                logger.debug(
+                    "Failed to read previous pod logs for pod %s/%s: %s",
+                    eff_ns,
+                    pod.metadata.name,
+                    e,
+                )
+    except Exception as e:
+        logger.debug(
+            "Previous-log fallback failed for job %s (namespace=%s): %s",
+            name,
+            namespace,
+            e,
+        )
+    return log_lines, True
+
+
+def _cursor_response(
+    name: str,
+    step: str,
+    log_lines: list[str],
+    since_line: int,
+    effective_max: int,
+) -> dict[str, Any]:
+    """Build the cursor-mode response dict. Called only when since_line is set."""
+    total = len(log_lines)
+
+    if since_line == total:
+        return ToolResponse(
+            data={
+                "job": name,
+                "step": step,
+                "logs": "",
+                "lines": 0,
+                "next_offset": since_line,
+                "total_lines": total,
+            }
+        ).model_dump()
+
+    if since_line > total:
+        return ToolResponse(
+            data={
+                "job": name,
+                "step": step,
+                "logs": "",
+                "lines": 0,
+                "next_offset": 0,
+                "total_lines": total,
+                "log_reset": True,
+            }
+        ).model_dump()
+
+    page = log_lines[since_line : since_line + effective_max]
+    out_lines: list[str] = []
+    char_budget = MAX_CURSOR_CHARS
+    for line in page:
+        if char_budget <= 0:
+            break
+        if len(line) > MAX_LINE_CHARS:
+            line = line[:MAX_LINE_CHARS] + "...[truncated]"
+        out_lines.append(line)
+        char_budget -= len(line)
+
+    # Skip truncate_log_output: per-line cap + char_budget are the backstop;
+    # truncate_log_output would eat lines silently while next_offset already advanced.
+    data: dict[str, Any] = {
+        "job": name,
+        "step": step,
+        "logs": "\n".join(out_lines),
+        "lines": len(out_lines),
+        "next_offset": since_line + len(out_lines),
+        "total_lines": total,
+    }
+    hint = extract_failure_hint("\n".join(log_lines[-MAX_LOG_LINES:]))
+    if hint:
+        data["failure_hint"] = hint
+        data["next_steps"] = [
+            f"Detected {hint['category']}: {hint['suggestion']}",
+            "Read trainer://guides/troubleshooting for detailed fixes",
+        ]
+    return ToolResponse(data=data).model_dump()
+
+
 def get_training_logs(
     name: str,
     step: str = "node-0",
     namespace: str | None = None,
     follow: bool = False,
+    since_line: int | None = None,
+    max_lines: int | None = None,
 ) -> dict[str, Any]:
     """Get pod logs from a training job.
 
@@ -69,17 +198,30 @@ def get_training_logs(
         step: Node/worker to get logs from. Defaults to ``node-0``.
         namespace: K8s namespace. Uses default from kubeconfig when omitted.
         follow: Stream logs continuously (not supported in MCP context).
+        since_line: Start of cursor window. When set, enables cursor mode: returns
+            lines ``[since_line : since_line + max_lines]`` and adds ``next_offset``
+            and ``total_lines`` to the response. Echo ``next_offset`` back as
+            ``since_line`` on the next call to poll incrementally. A page may have
+            fewer than ``max_lines`` lines due to the char budget; use ``next_offset``
+            to advance, not page length — a short page does not mean end of log.
+        max_lines: Lines per page. Tail mode default: 1000 (unchanged). Cursor mode
+            default: 200. Clamped to [1, 1000].
 
     Returns:
         dict: Response containing:
 
         - ``job`` (str): Job name
         - ``step`` (str): Node name
-        - ``logs`` (str): Sanitized log output
-        - ``lines`` (int): Number of log lines
+        - ``logs`` (str): Log output
+        - ``lines`` (int): Number of log lines in this response
+        - ``next_offset`` (int): *Cursor mode only.* Echo as ``since_line`` next call.
+        - ``total_lines`` (int): *Cursor mode only.* Total lines collected.
+        - ``log_reset`` (bool): *Cursor mode only.* True when ``since_line > total_lines``;
+          restart from 0.
 
     Raises:
-        ToolError: If job not found (``RESOURCE_NOT_FOUND``).
+        ToolError: If job not found (``RESOURCE_NOT_FOUND``) or cursor used with crash
+            logs (``VALIDATION_ERROR``).
     """
     name_err = validate_k8s_name(name)
     if name_err is not None:
@@ -88,6 +230,21 @@ def get_training_logs(
     ns_err = check_namespace_allowed(namespace)
     if ns_err is not None:
         return ns_err.model_dump()
+
+    if since_line is not None and since_line < 0:
+        return ToolError(
+            error="since_line must be >= 0",
+            error_code=ErrorCode.VALIDATION_ERROR,
+        ).model_dump()
+
+    _effective_max = (
+        max_lines if max_lines is not None else (200 if since_line is not None else MAX_LOG_LINES)
+    )
+    if not (1 <= _effective_max <= MAX_LOG_LINES):
+        return ToolError(
+            error=f"max_lines must be 1-{MAX_LOG_LINES}, got {_effective_max}",
+            error_code=ErrorCode.VALIDATION_ERROR,
+        ).model_dump()
 
     try:
         if follow:
@@ -101,51 +258,32 @@ def get_training_logs(
             ).model_dump()
 
         client = get_trainer_client_for_namespace(namespace)
-        log_lines = list(
-            deque(client.get_job_logs(name=name, step=step, follow=False), maxlen=MAX_LOG_LINES)
+        log_lines, _fallback_was_used = _collect_log_lines(
+            client, name, step, namespace, cursor_mode=since_line is not None
         )
-        if not log_lines:
-            try:
-                eff_ns = get_trainer_effective_namespace(namespace)
-                v1 = get_core_v1_api()
-                pods = v1.list_namespaced_pod(
-                    namespace=eff_ns,
-                    label_selector=f"training.kubeflow.org/trainjob-name={name}",
-                )
-                for pod in pods.items:
-                    if not _is_pod_for_step(pod, step):
-                        continue
-                    try:
-                        raw = v1.read_namespaced_pod_log(
-                            name=pod.metadata.name,
-                            namespace=eff_ns,
-                            previous=True,
-                            tail_lines=MAX_LOG_LINES,
-                        )
-                        if raw:
-                            log_lines.extend(raw.splitlines())
-                    except Exception as e:
-                        logger.debug(
-                            "Failed to read previous pod logs for pod %s/%s: %s",
-                            eff_ns,
-                            pod.metadata.name,
-                            e,
-                        )
-            except Exception as e:
-                logger.debug(
-                    "Previous-log fallback failed for job %s (namespace=%s): %s",
-                    name,
-                    namespace,
-                    e,
-                )
 
-        if len(log_lines) > MAX_LOG_LINES:
-            log_lines = log_lines[-MAX_LOG_LINES:]
+        if since_line is not None and _fallback_was_used and log_lines:
+            return ToolError(
+                error=(
+                    "cursor mode unavailable: active container logs empty"
+                    " (pod may have restarted); call without since_line to read"
+                    " previous-container logs"
+                ),
+                error_code=ErrorCode.VALIDATION_ERROR,
+            ).model_dump()
+
+        # ── Cursor mode ──────────────────────────────────────────────────────
+        if since_line is not None:
+            return _cursor_response(name, step, log_lines, since_line, _effective_max)
+
+        # ── Tail mode (unchanged) ─────────────────────────────────────────────
+        if len(log_lines) > _effective_max:
+            log_lines = log_lines[-_effective_max:]
 
         logs = "\n".join(log_lines)
         sanitized = truncate_log_output(logs)
 
-        data: dict[str, Any] = {
+        data = {
             "job": name,
             "step": step,
             "logs": sanitized,

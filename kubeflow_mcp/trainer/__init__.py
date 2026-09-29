@@ -110,7 +110,14 @@ CLIENT_TOOL_DESCRIPTIONS: dict[str, str] = {
         "Run training with custom container image. Pass runtime= and command= to "
         "override runtime and entrypoint. Set confirmed=True to submit."
     ),
-    "get_training_logs": "Get pod logs from a training job. Supports optional namespace.",
+    "get_training_logs": (
+        "Get pod logs from a training job. Supports optional namespace. "
+        "Tail mode (default): returns the last max_lines lines. "
+        "Cursor mode (since_line=N): returns lines [N:N+max_lines], adds next_offset and "
+        "total_lines. Echo next_offset as since_line on the next call to poll incrementally. "
+        "A page may have fewer than max_lines lines due to the char budget; use next_offset "
+        "to advance, not page length \u2014 a short page does not mean end of log."
+    ),
     "get_training_events": "Get K8s events for debugging pending/failed jobs. Supports optional namespace.",
     "wait_for_training": "Block until job reaches target status (Complete/Failed). Supports optional namespace.",
     "delete_training_job": "[DESTRUCTIVE] Delete a training job permanently. Set confirmed=True to execute.",
@@ -347,6 +354,7 @@ DISCOVERY (before training):
 MONITORING AND LIFECYCLE:
 - get_training_job(name) -> check status (Created/Running/Complete/Failed/Suspended)
 - get_training_logs(name) -> view output/errors. Failure patterns auto-detected with hints
+- get_training_logs(name, since_line=N) -> cursor mode: returns lines [N:N+max_lines], adds next_offset and total_lines. Echo next_offset as since_line each poll. A page may have fewer than max_lines lines due to the char budget; use next_offset to advance, not page length — a short page does not mean end of log. since_line==total_lines: nothing new yet. since_line>total_lines: log_reset=true, restart from 0. Returns VALIDATION_ERROR if active logs empty (pod restarted); drop since_line to read crash logs
 - get_training_events(name) -> debug scheduling issues, pending pods, image pull errors
 - wait_for_training(name) -> block until Complete/Failed (caution: blocks MCP connection)
 - All monitoring tools accept optional namespace= to query jobs in a different namespace
