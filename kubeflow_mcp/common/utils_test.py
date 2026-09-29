@@ -91,7 +91,8 @@ class TestResetClients:
         reset_clients()
         clients = [MagicMock(name="client-1"), MagicMock(name="client-2")]
         with (
-            patch("kubernetes.config.load_config"),
+            patch("kubernetes.config.load_kube_config"),
+            patch("kubernetes.config.load_incluster_config"),
             patch("kubernetes.client") as mock_client,
         ):
             mock_client.Configuration.get_default_copy.return_value = MagicMock()
@@ -107,6 +108,24 @@ class TestResetClients:
             assert first is clients[0]
             assert second is clients[1]
 
+        reset_clients()
+
+
+class TestGetApiClientConfigLoading:
+    def test_in_cluster_fallback_does_not_write_to_stdout(self, capsys):
+        """The fallback notice must stay off stdout, which is the stdio transport's wire."""
+        reset_clients()
+        with (
+            patch("kubernetes.config.KUBE_CONFIG_DEFAULT_LOCATION", "/nonexistent/kubeconfig"),
+            patch("kubernetes.config.load_kube_config") as mock_kube,
+            patch("kubernetes.config.load_incluster_config") as mock_incluster,
+            patch("kubernetes.client"),
+        ):
+            _get_api_client()
+
+        mock_kube.assert_not_called()
+        mock_incluster.assert_called_once()
+        assert capsys.readouterr().out == ""
         reset_clients()
 
 
