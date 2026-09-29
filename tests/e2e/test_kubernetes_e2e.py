@@ -96,8 +96,8 @@ async def _call_tool(
         f"Expected exactly 1 content block from '{name}', got {len(resp.content)}"
     )
     data = json.loads(resp.content[0].text)
-    assert resp.isError == ("error" in data or "error_code" in data), (
-        f"Tool '{name}' returned isError={resp.isError} for {data}"
+    assert resp.is_error == ("error" in data or "error_code" in data), (
+        f"Tool '{name}' returned is_error={resp.is_error} for {data}"
     )
     return data
 

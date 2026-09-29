@@ -374,7 +374,6 @@ def test_audit_wrap_sets_mcp_context_attributes(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(server_mod, "get_breaker", lambda _tool: breaker)
 
     # Simulate what AuditIdentityMiddleware does: set ContextVars
-    mw_mod._session_id_var.set("sess-abc")
     mw_mod._request_id_var.set("42")
     mw_mod._user_id_var.set("alice@example.com")
 
@@ -385,12 +384,12 @@ def test_audit_wrap_sets_mcp_context_attributes(monkeypatch: pytest.MonkeyPatch)
         wrapped = _audit_wrap(sample_tool)
         wrapped()
 
-        assert span.attributes["mcp.session.id"] == "sess-abc"
+        # The 2026-07-28 protocol is sessionless, so no session ID is recorded.
+        assert "mcp.session.id" not in span.attributes
         assert span.attributes["mcp.request.id"] == "42"
         assert span.attributes["user.id"] == "alice@example.com"
     finally:
         # Clean up ContextVars
-        mw_mod._session_id_var.set(None)
         mw_mod._request_id_var.set(None)
         mw_mod._user_id_var.set(None)
 

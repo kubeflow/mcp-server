@@ -222,16 +222,16 @@ class TestHealthMetadata:
 
             hc_ann = tool_map["health_check"].annotations
             assert hc_ann is not None
-            assert hc_ann.readOnlyHint is True
-            assert hc_ann.destructiveHint is False
-            assert hc_ann.idempotentHint is True
-            assert "health" in (hc_ann.tags or [])
+            assert hc_ann.read_only_hint is True
+            assert hc_ann.destructive_hint is False
+            assert hc_ann.idempotent_hint is True
+            assert "health" in tool_map["health_check"].meta["fastmcp"]["tags"]
 
             logs_ann = tool_map["get_server_logs"].annotations
             assert logs_ann is not None
-            assert logs_ann.readOnlyHint is True
-            assert logs_ann.destructiveHint is False
-            assert "debug" in (logs_ann.tags or [])
+            assert logs_ann.read_only_hint is True
+            assert logs_ann.destructive_hint is False
+            assert "debug" in tool_map["get_server_logs"].meta["fastmcp"]["tags"]
 
         finally:
             set_effective_persona(previous_persona)

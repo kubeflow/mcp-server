@@ -4,12 +4,7 @@
       "destructiveHint": false,
       "idempotentHint": true,
       "openWorldHint": true,
-      "readOnlyHint": true,
-      "tags": [
-        "planning",
-        "preflight",
-        "compatibility"
-      ]
+      "readOnlyHint": true
     },
     "inputSchema": {
       "additionalProperties": false,
@@ -19,19 +14,19 @@
     "outputSchema": {
       "additionalProperties": true,
       "type": "object"
-    }
+    },
+    "tags": [
+      "compatibility",
+      "planning",
+      "preflight"
+    ]
   },
   "create_runtime": {
     "annotations": {
       "destructiveHint": false,
       "idempotentHint": false,
       "openWorldHint": true,
-      "readOnlyHint": false,
-      "tags": [
-        "platform",
-        "runtime",
-        "admin"
-      ]
+      "readOnlyHint": false
     },
     "inputSchema": {
       "additionalProperties": false,
@@ -64,19 +59,19 @@
     "outputSchema": {
       "additionalProperties": true,
       "type": "object"
-    }
+    },
+    "tags": [
+      "admin",
+      "platform",
+      "runtime"
+    ]
   },
   "delete_runtime": {
     "annotations": {
       "destructiveHint": true,
       "idempotentHint": true,
       "openWorldHint": true,
-      "readOnlyHint": false,
-      "tags": [
-        "platform",
-        "runtime",
-        "admin"
-      ]
+      "readOnlyHint": false
     },
     "inputSchema": {
       "additionalProperties": false,
@@ -97,18 +92,19 @@
     "outputSchema": {
       "additionalProperties": true,
       "type": "object"
-    }
+    },
+    "tags": [
+      "admin",
+      "platform",
+      "runtime"
+    ]
   },
   "delete_training_job": {
     "annotations": {
       "destructiveHint": true,
       "idempotentHint": true,
       "openWorldHint": true,
-      "readOnlyHint": false,
-      "tags": [
-        "lifecycle",
-        "cleanup"
-      ]
+      "readOnlyHint": false
     },
     "inputSchema": {
       "additionalProperties": false,
@@ -140,19 +136,18 @@
     "outputSchema": {
       "additionalProperties": true,
       "type": "object"
-    }
+    },
+    "tags": [
+      "cleanup",
+      "lifecycle"
+    ]
   },
   "estimate_resources": {
     "annotations": {
       "destructiveHint": false,
       "idempotentHint": true,
       "openWorldHint": true,
-      "readOnlyHint": true,
-      "tags": [
-        "planning",
-        "resources",
-        "estimation"
-      ]
+      "readOnlyHint": true
     },
     "inputSchema": {
       "additionalProperties": false,
@@ -181,19 +176,19 @@
     "outputSchema": {
       "additionalProperties": true,
       "type": "object"
-    }
+    },
+    "tags": [
+      "estimation",
+      "planning",
+      "resources"
+    ]
   },
   "fine_tune": {
     "annotations": {
       "destructiveHint": false,
       "idempotentHint": false,
       "openWorldHint": true,
-      "readOnlyHint": false,
-      "tags": [
-        "training",
-        "fine-tuning",
-        "llm"
-      ]
+      "readOnlyHint": false
     },
     "inputSchema": {
       "additionalProperties": false,
@@ -644,19 +639,19 @@
     "outputSchema": {
       "additionalProperties": true,
       "type": "object"
-    }
+    },
+    "tags": [
+      "fine-tuning",
+      "llm",
+      "training"
+    ]
   },
   "get_cluster_resources": {
     "annotations": {
       "destructiveHint": false,
       "idempotentHint": true,
       "openWorldHint": true,
-      "readOnlyHint": true,
-      "tags": [
-        "planning",
-        "cluster",
-        "gpu"
-      ]
+      "readOnlyHint": true
     },
     "inputSchema": {
       "additionalProperties": false,
@@ -666,18 +661,19 @@
     "outputSchema": {
       "additionalProperties": true,
       "type": "object"
-    }
+    },
+    "tags": [
+      "cluster",
+      "gpu",
+      "planning"
+    ]
   },
   "get_runtime": {
     "annotations": {
       "destructiveHint": false,
       "idempotentHint": true,
       "openWorldHint": true,
-      "readOnlyHint": true,
-      "tags": [
-        "discovery",
-        "runtimes"
-      ]
+      "readOnlyHint": true
     },
     "inputSchema": {
       "additionalProperties": false,
@@ -698,19 +694,18 @@
     "outputSchema": {
       "additionalProperties": true,
       "type": "object"
-    }
+    },
+    "tags": [
+      "discovery",
+      "runtimes"
+    ]
   },
   "get_server_logs": {
     "annotations": {
       "destructiveHint": false,
       "idempotentHint": true,
       "openWorldHint": false,
-      "readOnlyHint": true,
-      "tags": [
-        "health",
-        "monitoring",
-        "debug"
-      ]
+      "readOnlyHint": true
     },
     "inputSchema": {
       "additionalProperties": false,
@@ -729,19 +724,19 @@
     "outputSchema": {
       "additionalProperties": true,
       "type": "object"
-    }
+    },
+    "tags": [
+      "debug",
+      "health",
+      "monitoring"
+    ]
   },
   "get_training_events": {
     "annotations": {
       "destructiveHint": false,
       "idempotentHint": true,
       "openWorldHint": true,
-      "readOnlyHint": true,
-      "tags": [
-        "monitoring",
-        "events",
-        "debug"
-      ]
+      "readOnlyHint": true
     },
     "inputSchema": {
       "additionalProperties": false,
@@ -773,19 +768,19 @@
     "outputSchema": {
       "additionalProperties": true,
       "type": "object"
-    }
+    },
+    "tags": [
+      "debug",
+      "events",
+      "monitoring"
+    ]
   },
   "get_training_job": {
     "annotations": {
       "destructiveHint": false,
       "idempotentHint": true,
       "openWorldHint": true,
-      "readOnlyHint": true,
-      "tags": [
-        "discovery",
-        "monitoring",
-        "jobs"
-      ]
+      "readOnlyHint": true
     },
     "inputSchema": {
       "additionalProperties": false,
@@ -813,19 +808,19 @@
     "outputSchema": {
       "additionalProperties": true,
       "type": "object"
-    }
+    },
+    "tags": [
+      "discovery",
+      "jobs",
+      "monitoring"
+    ]
   },
   "get_training_logs": {
     "annotations": {
       "destructiveHint": false,
       "idempotentHint": true,
       "openWorldHint": true,
-      "readOnlyHint": true,
-      "tags": [
-        "monitoring",
-        "logs",
-        "debug"
-      ]
+      "readOnlyHint": true
     },
     "inputSchema": {
       "additionalProperties": false,
@@ -861,18 +856,19 @@
     "outputSchema": {
       "additionalProperties": true,
       "type": "object"
-    }
+    },
+    "tags": [
+      "debug",
+      "logs",
+      "monitoring"
+    ]
   },
   "health_check": {
     "annotations": {
       "destructiveHint": false,
       "idempotentHint": true,
       "openWorldHint": false,
-      "readOnlyHint": true,
-      "tags": [
-        "health",
-        "monitoring"
-      ]
+      "readOnlyHint": true
     },
     "inputSchema": {
       "additionalProperties": false,
@@ -882,20 +878,18 @@
     "outputSchema": {
       "additionalProperties": true,
       "type": "object"
-    }
+    },
+    "tags": [
+      "health",
+      "monitoring"
+    ]
   },
   "inspect_controller": {
     "annotations": {
       "destructiveHint": false,
       "idempotentHint": true,
       "openWorldHint": true,
-      "readOnlyHint": true,
-      "tags": [
-        "platform",
-        "logs",
-        "events",
-        "debug"
-      ]
+      "readOnlyHint": true
     },
     "inputSchema": {
       "additionalProperties": false,
@@ -925,18 +919,20 @@
     "outputSchema": {
       "additionalProperties": true,
       "type": "object"
-    }
+    },
+    "tags": [
+      "debug",
+      "events",
+      "logs",
+      "platform"
+    ]
   },
   "inspect_crd": {
     "annotations": {
       "destructiveHint": false,
       "idempotentHint": true,
       "openWorldHint": true,
-      "readOnlyHint": true,
-      "tags": [
-        "platform",
-        "crd"
-      ]
+      "readOnlyHint": true
     },
     "inputSchema": {
       "additionalProperties": false,
@@ -958,18 +954,18 @@
     "outputSchema": {
       "additionalProperties": true,
       "type": "object"
-    }
+    },
+    "tags": [
+      "crd",
+      "platform"
+    ]
   },
   "list_runtimes": {
     "annotations": {
       "destructiveHint": false,
       "idempotentHint": true,
       "openWorldHint": true,
-      "readOnlyHint": true,
-      "tags": [
-        "discovery",
-        "runtimes"
-      ]
+      "readOnlyHint": true
     },
     "inputSchema": {
       "additionalProperties": false,
@@ -979,18 +975,18 @@
     "outputSchema": {
       "additionalProperties": true,
       "type": "object"
-    }
+    },
+    "tags": [
+      "discovery",
+      "runtimes"
+    ]
   },
   "list_training_jobs": {
     "annotations": {
       "destructiveHint": false,
       "idempotentHint": true,
       "openWorldHint": true,
-      "readOnlyHint": true,
-      "tags": [
-        "discovery",
-        "jobs"
-      ]
+      "readOnlyHint": true
     },
     "inputSchema": {
       "additionalProperties": false,
@@ -1038,19 +1034,18 @@
     "outputSchema": {
       "additionalProperties": true,
       "type": "object"
-    }
+    },
+    "tags": [
+      "discovery",
+      "jobs"
+    ]
   },
   "patch_runtime": {
     "annotations": {
       "destructiveHint": false,
       "idempotentHint": false,
       "openWorldHint": true,
-      "readOnlyHint": false,
-      "tags": [
-        "platform",
-        "runtime",
-        "admin"
-      ]
+      "readOnlyHint": false
     },
     "inputSchema": {
       "additionalProperties": false,
@@ -1083,19 +1078,19 @@
     "outputSchema": {
       "additionalProperties": true,
       "type": "object"
-    }
+    },
+    "tags": [
+      "admin",
+      "platform",
+      "runtime"
+    ]
   },
   "pre_flight": {
     "annotations": {
       "destructiveHint": false,
       "idempotentHint": true,
       "openWorldHint": true,
-      "readOnlyHint": true,
-      "tags": [
-        "planning",
-        "preflight",
-        "compound"
-      ]
+      "readOnlyHint": true
     },
     "inputSchema": {
       "additionalProperties": false,
@@ -1122,18 +1117,19 @@
     "outputSchema": {
       "additionalProperties": true,
       "type": "object"
-    }
+    },
+    "tags": [
+      "compound",
+      "planning",
+      "preflight"
+    ]
   },
   "run_container_training": {
     "annotations": {
       "destructiveHint": false,
       "idempotentHint": false,
       "openWorldHint": true,
-      "readOnlyHint": false,
-      "tags": [
-        "training",
-        "container"
-      ]
+      "readOnlyHint": false
     },
     "inputSchema": {
       "additionalProperties": false,
@@ -1374,19 +1370,18 @@
     "outputSchema": {
       "additionalProperties": true,
       "type": "object"
-    }
+    },
+    "tags": [
+      "container",
+      "training"
+    ]
   },
   "run_custom_training": {
     "annotations": {
       "destructiveHint": false,
       "idempotentHint": false,
       "openWorldHint": true,
-      "readOnlyHint": false,
-      "tags": [
-        "training",
-        "custom",
-        "script"
-      ]
+      "readOnlyHint": false
     },
     "inputSchema": {
       "additionalProperties": false,
@@ -1650,19 +1645,19 @@
     "outputSchema": {
       "additionalProperties": true,
       "type": "object"
-    }
+    },
+    "tags": [
+      "custom",
+      "script",
+      "training"
+    ]
   },
   "update_training_job": {
     "annotations": {
       "destructiveHint": false,
       "idempotentHint": true,
       "openWorldHint": true,
-      "readOnlyHint": false,
-      "tags": [
-        "lifecycle",
-        "suspend",
-        "resume"
-      ]
+      "readOnlyHint": false
     },
     "inputSchema": {
       "additionalProperties": false,
@@ -1698,18 +1693,19 @@
     "outputSchema": {
       "additionalProperties": true,
       "type": "object"
-    }
+    },
+    "tags": [
+      "lifecycle",
+      "resume",
+      "suspend"
+    ]
   },
   "wait_for_training": {
     "annotations": {
       "destructiveHint": false,
       "idempotentHint": true,
       "openWorldHint": true,
-      "readOnlyHint": true,
-      "tags": [
-        "monitoring",
-        "blocking"
-      ]
+      "readOnlyHint": true
     },
     "inputSchema": {
       "additionalProperties": false,
@@ -1759,6 +1755,10 @@
     "outputSchema": {
       "additionalProperties": true,
       "type": "object"
-    }
+    },
+    "tags": [
+      "blocking",
+      "monitoring"
+    ]
   }
 }

@@ -15,8 +15,8 @@
 """Middleware to bridge FastMCP async context into sync tool wrappers via ContextVars.
 
 FastMCP's ``CurrentContext()`` dependency injection may not reliably propagate
-into sync wrappers.  This module uses :mod:`contextvars` to capture session,
-request, and user identity from the async middleware layer so that the
+into sync wrappers.  This module uses :mod:`contextvars` to capture request
+and user identity from the async middleware layer so that the
 synchronous ``_audit_wrap`` in :mod:`kubeflow_mcp.core.server` can read them
 without depending on DI.
 """
@@ -28,25 +28,17 @@ import logging
 from typing import Any
 
 from fastmcp.server.middleware import Middleware
-from fastmcp.tools.tool import ToolResult
+from fastmcp.tools import ToolResult
 
 logger = logging.getLogger(__name__)
 
 # ContextVars populated by AuditIdentityMiddleware, read by _audit_wrap
-_session_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
-    "mcp_session_id", default=None
-)
 _request_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "mcp_request_id", default=None
 )
 _user_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "mcp_user_id", default=None
 )
-
-
-def get_mcp_session_id() -> str | None:
-    """Return the MCP session ID for the current request, or None."""
-    return _session_id_var.get()
 
 
 def get_mcp_request_id() -> str | None:
@@ -62,7 +54,7 @@ def get_user_id() -> str | None:
 class AuditIdentityMiddleware:
     """FastMCP-compatible middleware that captures identity into ContextVars.
 
-    Extracts ``session_id``, ``request_id``, and optionally ``user_id``
+    Extracts ``request_id`` and optionally ``user_id``
     from the FastMCP ``MiddlewareContext`` and stores them in module-level
     :class:`contextvars.ContextVar` instances.  Downstream sync code
     (e.g. ``_audit_wrap``) can retrieve these values via the public
@@ -79,11 +71,11 @@ class AuditIdentityMiddleware:
         """Capture identity from context, then delegate to the next handler."""
         # Use tokens so reset() restores the *previous* value rather than
         # unconditionally writing None (correct ContextVar cleanup pattern).
-        session_token = _session_id_var.set(None)
         request_token = _request_id_var.set(None)
         user_token = _user_id_var.set(None)
 
-        # Extract session + request IDs from FastMCP context
+        # Extract the request ID from FastMCP context. There is no session ID to
+        # capture: the 2026-07-28 MCP protocol is sessionless.
         fastmcp_ctx = None
         try:
             fastmcp_ctx = getattr(context, "fastmcp_context", None)
@@ -91,12 +83,6 @@ class AuditIdentityMiddleware:
             pass
 
         if fastmcp_ctx is not None:
-            try:
-                session_id = getattr(fastmcp_ctx, "session_id", None)
-                if session_id is not None:
-                    _session_id_var.set(str(session_id))
-            except Exception:
-                pass
             try:
                 request_id = getattr(fastmcp_ctx, "request_id", None)
                 if request_id is not None:
@@ -123,7 +109,6 @@ class AuditIdentityMiddleware:
             return await call_next(context)
         finally:
             # Restore ContextVars to their previous values
-            _session_id_var.reset(session_token)
             _request_id_var.reset(request_token)
             _user_id_var.reset(user_token)
 

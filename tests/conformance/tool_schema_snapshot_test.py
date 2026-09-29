@@ -79,12 +79,18 @@ async def _build_snapshot() -> dict[str, Any]:
     snapshot: dict[str, Any] = {}
     for tool in sorted(tools, key=lambda t: t.name):
         entry: dict[str, Any] = {
-            "inputSchema": _strip_doc_text(tool.inputSchema),
+            "inputSchema": _strip_doc_text(tool.input_schema),
         }
-        if tool.outputSchema is not None:
-            entry["outputSchema"] = _strip_doc_text(tool.outputSchema)
+        if tool.output_schema is not None:
+            entry["outputSchema"] = _strip_doc_text(tool.output_schema)
         if tool.annotations is not None:
-            entry["annotations"] = _strip_doc_text(tool.annotations.model_dump(exclude_none=True))
+            # by_alias: record the camelCase keys that go over the wire.
+            entry["annotations"] = _strip_doc_text(
+                tool.annotations.model_dump(exclude_none=True, by_alias=True)
+            )
+        tags = (tool.meta or {}).get("fastmcp", {}).get("tags")
+        if tags:
+            entry["tags"] = sorted(tags)
         snapshot[tool.name] = entry
     return snapshot
 

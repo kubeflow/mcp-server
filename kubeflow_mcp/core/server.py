@@ -47,7 +47,7 @@ from kubeflow_mcp.core.health import (
 )
 from kubeflow_mcp.core.http_edge import register_probe_routes
 from kubeflow_mcp.core.logging import with_correlation_id
-from kubeflow_mcp.core.middleware import get_mcp_request_id, get_mcp_session_id, get_user_id
+from kubeflow_mcp.core.middleware import get_mcp_request_id, get_user_id
 from kubeflow_mcp.core.policy import (
     apply_policy_filters,
     get_allowed_tools,
@@ -154,10 +154,7 @@ def _audit_wrap(tool_func):
             if _MCP_PROTOCOL_VERSION:
                 span.set_attribute("mcp.protocol.version", _MCP_PROTOCOL_VERSION)
 
-            # MCP session/request context (populated via AuditIdentityMiddleware ContextVars)
-            session_id = get_mcp_session_id()
-            if session_id:
-                span.set_attribute("mcp.session.id", session_id)
+            # MCP request context (populated via AuditIdentityMiddleware ContextVars)
             request_id = get_mcp_request_id()
             if request_id:
                 span.set_attribute("mcp.request.id", request_id)
@@ -502,14 +499,18 @@ def create_server(  # noqa: C901
             description = all_descriptions.get(tool_name)
             audited = _audit_wrap(tool_func)
 
-            if annotations and description:
-                mcp.tool(description=description, annotations=annotations)(audited)
-            elif description:
-                mcp.tool(description=description)(audited)
-            elif annotations:
-                mcp.tool(annotations=annotations)(audited)
-            else:
-                mcp.tool()(audited)
+            tool_kwargs: dict[str, Any] = {}
+            if description:
+                tool_kwargs["description"] = description
+            if annotations:
+                # MCP SDK v2's ToolAnnotations drops unknown fields, so tags go through
+                # FastMCP's own ``tags`` and reach clients as ``_meta.fastmcp.tags``.
+                annotations = dict(annotations)
+                tags = annotations.pop("tags", None)
+                tool_kwargs["annotations"] = annotations
+                if tags:
+                    tool_kwargs["tags"] = set(tags)
+            mcp.tool(**tool_kwargs)(audited)
             registered += 1
             logger.debug(f"Registered tool: {tool_name}")
 

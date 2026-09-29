@@ -55,7 +55,8 @@ entry in `DESTRUCTIVE_TOOLS`. Legacy exceptions: trainer runtime
 previews use `ToolResponse` not `PreviewResponse` — do not extend.
 
 **Annotations** (every tool): `title`, `readOnlyHint`, `destructiveHint`, `idempotentHint`,
-`openWorldHint`, `tags` (include phase).
+`openWorldHint`, `tags` (include phase). `create_server` passes `tags` to FastMCP separately,
+and clients see them as `_meta.fastmcp.tags`, since MCP `ToolAnnotations` has no `tags` field.
 
 ---
 

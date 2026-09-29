@@ -153,6 +153,8 @@ async def test_server_info_reports_package_version():
     previous = get_effective_persona()
     try:
         async with Client(create_server()) as client:
-            assert client.initialize_result.serverInfo.version == __version__
+            # The sessionless protocol has no initialize handshake; FastMCP exposes
+            # the server info it discovered on both protocol eras.
+            assert client.server_info.version == __version__
     finally:
         set_effective_persona(previous)
