@@ -26,7 +26,11 @@ from kubeflow.trainer.constants import constants as trainer_constants
 from kubeflow_mcp.common import utils as mcp_utils
 from kubeflow_mcp.common.constants import ErrorCode
 from kubeflow_mcp.common.types import ToolError, ToolResponse, exception_details, is_k8s_not_found
-from kubeflow_mcp.core.security import validate_namespace, validate_runtime_name
+from kubeflow_mcp.core.security import (
+    check_namespace_allowed,
+    validate_namespace,
+    validate_runtime_name,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -187,7 +191,8 @@ def inspect_controller(
     Args:
         view: ``"logs"`` for pod logs, ``"events"`` for K8s events.
         namespace: Controller namespace. Omit to auto-discover
-            (scans kubeflow, kubeflow-system by default).
+            (scans kubeflow, kubeflow-system by default). An explicit
+            namespace must be allowed by the namespace policy.
         tail_lines: Log lines to return (only for view="logs"). Default 200.
 
     Returns:
@@ -198,6 +203,13 @@ def inspect_controller(
         namespace_err = validate_namespace(namespace)
         if namespace_err is not None:
             return namespace_err.model_dump()
+        # Only a caller-supplied namespace is policy-checked. Auto-discovery targets
+        # the admin-configured controller namespace, which the caller cannot steer,
+        # and check_namespace_allowed(None) would resolve the TrainJob default
+        # namespace instead of where the controller runs.
+        policy_err = check_namespace_allowed(namespace)
+        if policy_err is not None:
+            return policy_err.model_dump()
 
     valid_views = ("logs", "events")
     if view not in valid_views:

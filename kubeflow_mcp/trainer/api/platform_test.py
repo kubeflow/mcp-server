@@ -358,6 +358,48 @@ def test_inspect_controller_finds_pod_despite_forbidden_namespace(
     assert data["namespace"] == "kubeflow-system"
 
 
+def _controller_pod(namespace: str) -> MagicMock:
+    pod = MagicMock()
+    pod.metadata.name = "trainer-controller-manager-0"
+    pod.metadata.namespace = namespace
+    pod.status.phase = "Running"
+    return pod
+
+
+def test_inspect_controller_rejects_namespace_outside_policy(mock_k8s_apis, tmp_policy_file):
+    tmp_policy_file({"policy": {"namespaces": ["team-a"]}})
+
+    result = inspect_controller(namespace="team-b")
+
+    verify_tool_error(result, error_code=PERMISSION_DENIED)
+    assert not mock_k8s_apis["core_v1"].list_namespaced_pod.called
+
+
+def test_inspect_controller_allows_namespace_in_policy(mock_k8s_apis, tmp_policy_file):
+    tmp_policy_file({"policy": {"namespaces": ["kubeflow-system"]}})
+    core = mock_k8s_apis["core_v1"]
+    core.list_namespaced_pod.return_value = MagicMock(items=[_controller_pod("kubeflow-system")])
+    core.read_namespaced_pod_log.return_value = "controller started"
+
+    result = inspect_controller(namespace="kubeflow-system")
+
+    assert verify_tool_success(result)["namespace"] == "kubeflow-system"
+
+
+def test_inspect_controller_auto_discovery_is_exempt_from_policy(
+    mock_k8s_apis, scan_default_namespaces, tmp_policy_file
+):
+    """Omitting namespace targets the admin-configured controller namespace, not the caller's."""
+    tmp_policy_file({"policy": {"namespaces": ["team-a"]}})
+    core = mock_k8s_apis["core_v1"]
+    core.list_namespaced_pod.return_value = MagicMock(items=[_controller_pod("kubeflow")])
+    core.read_namespaced_pod_log.return_value = "controller started"
+
+    result = inspect_controller()
+
+    assert verify_tool_success(result)["namespace"] == "kubeflow"
+
+
 # Remaining TODOs are outside this PR's runtime CRUD slice.
 # TODO(test): test inspect_crd — lists all Trainer CRDs
 # TODO(test): test inspect_crd(name) — returns CRD schema and conditions
