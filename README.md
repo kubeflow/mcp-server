@@ -75,7 +75,7 @@ dependencies.
 
 | Variable | Default | Description |
 |---|---|---|
-| `MCP_TRANSPORT` | `stdio` | Transport protocol (`http`, `sse`, `stdio`) |
+| `MCP_TRANSPORT` | `stdio` | Transport protocol (`http`, `stdio`; `sse` is deprecated) |
 | `KUBEFLOW_MCP_AUTH_TOKEN` | _(none)_ | Bearer token for HTTP auth |
 | `KUBEFLOW_MCP_JWKS_URI` | _(none)_ | JWKS endpoint for JWT verification (production) |
 | `KUBEFLOW_MCP_JWT_ISSUER` | _(none)_ | Expected JWT issuer |
@@ -189,7 +189,7 @@ claude mcp add kubeflow -- kubeflow-mcp serve
 # Persona: readonly | data-scientist | ml-engineer | platform-admin
 # Mode: full | progressive | semantic
 # Instruction tier: full | compact | minimal
-# Transport: stdio | http | sse
+# Transport: stdio | http | sse (deprecated)
 # Auth token: bearer token for HTTP auth (dev/staging)
 # OTel endpoint: optional OTLP HTTP endpoint for tracing
 # Log level: DEBUG | INFO | WARNING | ERROR
@@ -259,7 +259,7 @@ make verify                       # lint + format check
 make test-python                  # run tests
 make inspector                    # launch MCP Inspector (stdio)
 make inspector TRANSPORT=http     # Inspector + Streamable HTTP (start server separately)
-make inspector TRANSPORT=sse      # Inspector + SSE (start server separately)
+make inspector TRANSPORT=sse      # Inspector + SSE (deprecated; start server separately)
 ```
 
 ## Community

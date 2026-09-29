@@ -52,7 +52,8 @@ def cli() -> None:
     "-t",
     default=None,
     type=click.Choice(["stdio", "http", "sse"]),
-    help="MCP transport protocol. Falls back to MCP_TRANSPORT env var, config file, then 'stdio'.",
+    help="MCP transport protocol ('sse' is deprecated, use 'http'). "
+    "Falls back to MCP_TRANSPORT env var, config file, then 'stdio'.",
 )
 @click.option(
     "--log-level",
@@ -207,6 +208,10 @@ def serve(
     if transport == "stdio":
         server.run(show_banner=show_banner)
     elif transport == "sse":
+        logger.warning(
+            "The SSE transport is deprecated and will be removed in a future release. "
+            "Use --transport http (Streamable HTTP) instead."
+        )
         server.run(transport="sse", show_banner=show_banner, middleware=http_middleware)
     else:
         server.run(

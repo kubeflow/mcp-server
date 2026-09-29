@@ -136,7 +136,7 @@ uv run ruff format path/to/file.py
 ```bash
 uv run pre-commit install
 uv run pre-commit run --all-files
-make inspector                 # MCP Inspector (TRANSPORT=stdio|http|sse, default stdio)
+make inspector                 # MCP Inspector (TRANSPORT=stdio|http|sse, default stdio; sse is deprecated)
 ```
 
 ## Development Workflow for AI Agents

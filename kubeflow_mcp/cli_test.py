@@ -166,6 +166,19 @@ def test_serve_sse_transport_uses_sse():
     assert kwargs.get("transport") == "sse"
 
 
+def test_serve_sse_transport_logs_deprecation_warning():
+    mock_server, _, modules_patch = _make_serve_mocks()
+    logger = modules_patch["kubeflow_mcp.core.logging"].setup_logging.return_value
+
+    with patch.dict(sys.modules, modules_patch):
+        runner = CliRunner()
+        runner.invoke(cli, ["serve", "--transport", "sse"])
+
+    warnings = [c.args[0] for c in logger.warning.call_args_list]
+    assert any("SSE transport is deprecated" in w for w in warnings)
+    mock_server.run.assert_called_once()
+
+
 def test_serve_sse_transport_calls_build_auth_provider():
     mock_server, _, modules_patch = _make_serve_mocks()
     mock_build_auth_provider = modules_patch["kubeflow_mcp.core.auth"].build_auth_provider
