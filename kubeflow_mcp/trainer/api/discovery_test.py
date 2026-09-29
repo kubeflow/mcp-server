@@ -48,7 +48,7 @@ class TestJobStatusFilterAliases:
         assert _JOB_STATUS_FILTER_ALIASES["Succeeded"] == "Complete"
 
 
-@pytest.mark.parametrize("status", ["", "INVALID_STATUS", "completed"])
+@pytest.mark.parametrize("status", ["", "INVALID_STATUS", "completed", "Suspended"])
 def test_list_training_jobs_rejects_invalid_status_before_sdk_call(status):
     with patch(
         "kubeflow_mcp.trainer.api.discovery.get_trainer_client_for_namespace"

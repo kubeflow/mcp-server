@@ -39,7 +39,9 @@ _PACKAGES_POLL_INTERVAL = 3
 _JOB_STATUS_FILTER_ALIASES: dict[str, str] = {
     "Succeeded": "Complete",
 }
-_VALID_JOB_STATUSES = frozenset({"Created", "Running", "Complete", "Failed", "Suspended"})
+# The statuses the Trainer SDK reports. There is no "Suspended": a suspended job
+# reports "Created", so a "Suspended" filter could never match.
+_VALID_JOB_STATUSES = frozenset({"Created", "Running", "Complete", "Failed"})
 
 
 def _trainjob_runtime_to_mcp(runtime: object | None) -> dict[str, str] | None:
@@ -66,7 +68,8 @@ def list_training_jobs(
     Args:
         runtime: Filter by ClusterTrainingRuntime name (e.g., ``torch-tune``).
         status: Filter by TrainJob status: ``Created``, ``Running``, ``Complete``,
-            ``Failed``, ``Suspended``. ``Succeeded`` is accepted as an alias for ``Complete``.
+            ``Failed``. ``Succeeded`` is accepted as an alias for ``Complete``.
+            Suspended jobs report ``Created``.
         namespace: K8s namespace. Uses default from kubeconfig when omitted.
         limit: Maximum jobs to return. Defaults to 50.
 
