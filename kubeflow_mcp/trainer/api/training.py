@@ -17,6 +17,7 @@
 import ast
 import logging
 import os
+import re
 import tempfile
 import textwrap
 import threading
@@ -42,7 +43,6 @@ from kubeflow_mcp.core.security import (
     is_safe_python_code,
     mask_sensitive_data,
     validate_k8s_name,
-    validate_resource_limits,
     validate_training_bounds,
 )
 
@@ -347,6 +347,11 @@ def _sdk_error(e: Exception, hint: str | None = None) -> dict[str, Any]:
     ).model_dump()
 
 
+# Kubernetes resource quantity, e.g. "8", "0.5", "500m", "10G", "1.5Gi". No sign is
+# allowed because a resource request cannot be negative.
+_K8S_QUANTITY_RE = re.compile(r"(\d+(\.\d*)?|\.\d+)([KMGTPE]i|[numkMGTPE]|[eE][+-]?\d+)?")
+
+
 def _validate_resources_per_node(resources: dict[str, Any] | None) -> ToolError | None:
     """Validate the resource values accepted by training tools."""
     if resources is None:
@@ -357,26 +362,33 @@ def _validate_resources_per_node(resources: dict[str, Any] | None) -> ToolError 
             error_code=ErrorCode.VALIDATION_ERROR,
         )
 
-    for key in ("cpu", "memory"):
-        value = resources.get(key)
-        if value is not None and not isinstance(value, str):
+    # Check every key, not only cpu/memory/gpu: the SDK passes extended resources such
+    # as amd.com/gpu straight to Kubernetes. Numbers are accepted like the SDK does.
+    for key, value in resources.items():
+        if value is None or value == "":
             return ToolError(
-                error=f"resources_per_node.{key} must be a string",
+                error=f"resources_per_node.{key} must not be empty",
+                error_code=ErrorCode.VALIDATION_ERROR,
+            )
+        if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+            return ToolError(
+                error=f"resources_per_node.{key} must be a string or a number",
+                error_code=ErrorCode.VALIDATION_ERROR,
+            )
+        if not _K8S_QUANTITY_RE.fullmatch(str(value)):
+            return ToolError(
+                error=f"resources_per_node.{key} has invalid quantity '{value}' "
+                "(use values like '8', '500m', '10G' or '1.5Gi')",
                 error_code=ErrorCode.VALIDATION_ERROR,
             )
 
     gpu = resources.get("gpu")
-    if gpu is not None and (isinstance(gpu, bool) or not isinstance(gpu, int)):
+    if gpu is not None and not isinstance(gpu, int):
         return ToolError(
             error="resources_per_node.gpu must be an integer",
             error_code=ErrorCode.VALIDATION_ERROR,
         )
-
-    return validate_resource_limits(
-        cpu=resources.get("cpu"),
-        memory=resources.get("memory"),
-        gpu=gpu,
-    )
+    return None
 
 
 def _build_initializer(
@@ -879,6 +891,12 @@ def fine_tune(
         For QLoRA set ``quantize_base=True``. For DoRA set ``use_dora=True``.
     """
     try:
+        # Before _validate_fine_tune_params(): its GPU preflight queries the cluster, and
+        # invalid input should never trigger an external call.
+        resources_err = _validate_resources_per_node(resources_per_node)
+        if resources_err:
+            return resources_err.model_dump()
+
         validation_err = _validate_fine_tune_params(
             namespace=namespace,
             name=name,
@@ -895,10 +913,6 @@ def fine_tune(
         )
         if validation_err:
             return validation_err
-
-        resources_err = _validate_resources_per_node(resources_per_node)
-        if resources_err:
-            return resources_err.model_dump()
 
         optional_fields = [
             ("loss", loss),

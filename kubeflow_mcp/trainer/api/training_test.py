@@ -33,6 +33,7 @@ from kubeflow_mcp.trainer.api.training import (
     _make_train_func,
     _should_apply_hf_dataset_workaround,
     _uncalled_train_call,
+    _validate_resources_per_node,
     fine_tune,
     run_container_training,
     run_custom_training,
@@ -286,6 +287,10 @@ def test_run_custom_training_validation(test_case):
         {"memory": "256MB"},
         {"gpu": -1},
         {"gpu": "two"},
+        {"gpu": 1.5},
+        {"cpu": ""},
+        {"memory": None},
+        {"amd.com/gpu": "lots"},
         ["gpu", 1],
     ],
 )
@@ -296,6 +301,35 @@ def test_training_tools_reject_invalid_resources_before_sdk_call(tool, config, b
     assert result["success"] is False
     assert result["error_code"] == VALIDATION_ERROR
     mock_client.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "resources",
+    [
+        {"cpu": 8},
+        {"cpu": 0.5},
+        {"cpu": "500m"},
+        {"memory": "10G"},
+        {"memory": "1.5Gi"},
+        {"gpu": 2},
+        {"amd.com/gpu": 2},
+    ],
+)
+def test_validate_resources_per_node_accepts_kubernetes_quantities(resources):
+    assert _validate_resources_per_node(resources) is None
+
+
+def test_fine_tune_validates_resources_before_gpu_preflight():
+    with patch(PATCH_GPU_CHECK) as gpu_check:
+        result = fine_tune(
+            model="hf://org/model",
+            dataset="hf://org/dataset",
+            runtime="torchtune-llama",
+            resources_per_node={"cpu": "4cores"},
+        )
+
+    assert result["error_code"] == VALIDATION_ERROR
+    gpu_check.assert_not_called()
 
 
 class TestRunCustomTrainingConfirmed:
