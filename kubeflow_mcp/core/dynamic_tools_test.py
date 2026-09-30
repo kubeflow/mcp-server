@@ -117,6 +117,38 @@ def test_embedding_cache_reset_retries_model_load(offline_model):
     assert len(offline_model) == 2
 
 
+@pytest.fixture
+def broken_native_dependency(monkeypatch):
+    """The package is installed, but importing from it fails."""
+    import sys
+
+    class _BrokenModule:
+        def __getattr__(self, name):
+            raise OSError("libtorch_cpu.so: cannot open shared object file")
+
+    monkeypatch.setitem(sys.modules, "sentence_transformers", _BrokenModule())
+    dynamic_tools._embedding_cache.reset()
+    yield
+    dynamic_tools._embedding_cache.reset()
+
+
+def test_find_tools_falls_back_when_the_import_is_broken(broken_native_dependency):
+    result = dynamic_tools.find_tools("probe tool")
+
+    assert result["mode"] == "keyword_fallback"
+    assert result["tools"][0]["name"] == "probe_tool"
+
+
+def test_init_dynamic_tools_lets_the_model_be_retried(offline_model):
+    dynamic_tools.find_tools("probe tool")
+    assert len(offline_model) == 1
+
+    dynamic_tools.init_dynamic_tools([probe_tool, failing_tool], {})
+    dynamic_tools.find_tools("probe tool")
+
+    assert len(offline_model) == 2
+
+
 @pytest.mark.parametrize(
     "arguments",
     [

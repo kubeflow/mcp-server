@@ -254,8 +254,12 @@ class _EmbeddingCache:
             from sentence_transformers import SentenceTransformer
         except ImportError:
             logger.debug("sentence-transformers not installed, falling back to keyword search")
-            self._unavailable = True
-            return None, None
+            return self._mark_unavailable()
+        except Exception as e:
+            # A broken native dependency raises OSError or RuntimeError from the import
+            # itself, which would otherwise escape find_tools().
+            logger.warning("Semantic search is unavailable, falling back to keyword search: %s", e)
+            return self._mark_unavailable()
 
         try:
             self._model = SentenceTransformer("all-MiniLM-L6-v2")
@@ -271,11 +275,19 @@ class _EmbeddingCache:
             return self._embeddings, self._model
         except Exception as e:
             # Covers the model download and the encode pass: either way there are no
-            # embeddings to search. Remembered so every call doesn't repeat the work.
+            # embeddings to search.
             logger.warning("Semantic search is unavailable, falling back to keyword search: %s", e)
-            self._unavailable = True
-            self._model = None
-            return None, None
+            return self._mark_unavailable()
+
+    def _mark_unavailable(self) -> tuple[None, None]:
+        """Remember the failure so every call doesn't repeat work that just failed.
+
+        Cleared by reset(), which init_dynamic_tools() calls, so a rebuilt registry
+        tries the model again once the underlying problem is fixed.
+        """
+        self._unavailable = True
+        self._model = None
+        return None, None
 
     def reset(self) -> None:
         self._embeddings = None
