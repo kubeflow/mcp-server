@@ -14,7 +14,9 @@
 
 """Tests for dynamic tool discovery, execution, and cache invalidation."""
 
-from unittest.mock import Mock
+import math
+import sys
+import types
 
 import pytest
 
@@ -43,6 +45,7 @@ def _registry():
     yield
     dynamic_tools.TOOL_REGISTRY.clear()
     dynamic_tools.TOOL_HIERARCHY.clear()
+    dynamic_tools._embedding_cache.reset()
 
 
 @pytest.mark.parametrize(
@@ -92,10 +95,54 @@ def test_tool_exception_still_counts_as_breaker_failure():
     assert breaker.state == CircuitState.OPEN
 
 
-def test_init_dynamic_tools_resets_embedding_cache(monkeypatch):
-    reset = Mock()
-    monkeypatch.setattr(dynamic_tools._embedding_cache, "reset", reset)
+# Semantic search needs sentence-transformers and numpy, which are not dependencies of
+# this package, so the test fakes both to exercise the embedding path deterministically.
 
-    dynamic_tools.init_dynamic_tools([], {})
 
-    reset.assert_called_once_with()
+class _Vector(list):
+    def tolist(self) -> list[float]:
+        return list(self)
+
+
+class _FakeEmbeddingModel:
+    """Embeds text as keyword counts, standing in for sentence-transformers."""
+
+    _VOCAB = ("alpha", "beta")
+
+    def encode(self, texts: list[str]) -> list[_Vector]:
+        return [_Vector(float(t.lower().count(w)) for w in self._VOCAB) for t in texts]
+
+
+def _dot(a: list[float], b: list[float]) -> float:
+    return sum(x * y for x, y in zip(a, b, strict=True))
+
+
+_FAKE_NUMPY = types.SimpleNamespace(
+    dot=_dot, linalg=types.SimpleNamespace(norm=lambda v: math.sqrt(_dot(v, v)))
+)
+
+
+def alpha_tool() -> dict:
+    """Alpha tool."""
+    return {}
+
+
+def beta_tool() -> dict:
+    """Beta tool."""
+    return {}
+
+
+def test_find_tools_uses_rebuilt_registry_after_reinit(monkeypatch):
+    fake_module = types.SimpleNamespace(SentenceTransformer=lambda _name: _FakeEmbeddingModel())
+    monkeypatch.setitem(sys.modules, "sentence_transformers", fake_module)
+    monkeypatch.setitem(sys.modules, "numpy", _FAKE_NUMPY)
+
+    dynamic_tools.init_dynamic_tools([alpha_tool], {})
+    first = dynamic_tools.find_tools("alpha")  # populates the embedding cache
+    assert [t["name"] for t in first["tools"]] == ["alpha_tool"]
+
+    dynamic_tools.init_dynamic_tools([beta_tool], {})
+    second = dynamic_tools.find_tools("beta")
+
+    assert "mode" not in second  # semantic search, not the keyword fallback
+    assert [t["name"] for t in second["tools"]] == ["beta_tool"]
