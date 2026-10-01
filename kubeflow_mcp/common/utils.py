@@ -44,14 +44,15 @@ def _get_api_client() -> "k8s_client.ApiClient":
     """
     from kubernetes import client, config
 
-    # Same resolution as config.load_config(), which print()s its in-cluster
-    # fallback notice to stdout: the MCP wire under the stdio transport.
-    if os.path.exists(os.path.expanduser(config.KUBE_CONFIG_DEFAULT_LOCATION)):
-        config.load_kube_config()
+    # Not config.load_config(): it print()s its in-cluster fallback notice to
+    # stdout, the MCP wire under the stdio transport. KUBECONFIG is read here
+    # rather than via config.KUBE_CONFIG_DEFAULT_LOCATION, which is fixed at
+    # import time and treats a path list or an empty value as missing.
+    paths = os.getenv("KUBECONFIG") or "~/.kube/config"
+    if any(os.path.exists(os.path.expanduser(p)) for p in paths.split(os.pathsep) if p):
+        config.load_kube_config(config_file=paths)
     else:
-        logger.info(
-            "No kubeconfig at %s, using in-cluster config", config.KUBE_CONFIG_DEFAULT_LOCATION
-        )
+        logger.info("No kubeconfig at %s, using in-cluster config", paths)
         config.load_incluster_config()
     configuration = client.Configuration.get_default_copy()
     configuration.retries = 1

@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import os
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -112,11 +113,58 @@ class TestResetClients:
 
 
 class TestGetApiClientConfigLoading:
-    def test_in_cluster_fallback_does_not_write_to_stdout(self, capsys):
-        """The fallback notice must stay off stdout, which is the stdio transport's wire."""
+    def _load(self, monkeypatch, kubeconfig):
+        if kubeconfig is None:
+            monkeypatch.delenv("KUBECONFIG", raising=False)
+        else:
+            monkeypatch.setenv("KUBECONFIG", kubeconfig)
         reset_clients()
         with (
-            patch("kubernetes.config.KUBE_CONFIG_DEFAULT_LOCATION", "/nonexistent/kubeconfig"),
+            patch("kubernetes.config.load_kube_config") as mock_kube,
+            patch("kubernetes.config.load_incluster_config") as mock_incluster,
+            patch("kubernetes.client"),
+        ):
+            _get_api_client()
+        reset_clients()
+        return mock_kube, mock_incluster
+
+    def test_single_kubeconfig_path(self, monkeypatch, tmp_path):
+        kubeconfig = tmp_path / "config"
+        kubeconfig.touch()
+        mock_kube, mock_incluster = self._load(monkeypatch, str(kubeconfig))
+        mock_kube.assert_called_once_with(config_file=str(kubeconfig))
+        mock_incluster.assert_not_called()
+
+    def test_kubeconfig_path_list(self, monkeypatch, tmp_path):
+        """A KUBECONFIG list loads when any entry exists; the client merges the list."""
+        existing = tmp_path / "b.yaml"
+        existing.touch()
+        paths = os.pathsep.join([str(tmp_path / "missing.yaml"), str(existing)])
+        mock_kube, mock_incluster = self._load(monkeypatch, paths)
+        mock_kube.assert_called_once_with(config_file=paths)
+        mock_incluster.assert_not_called()
+
+    def test_empty_kubeconfig_uses_default_location(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        (tmp_path / ".kube").mkdir()
+        (tmp_path / ".kube" / "config").touch()
+        mock_kube, mock_incluster = self._load(monkeypatch, "")
+        mock_kube.assert_called_once_with(config_file="~/.kube/config")
+        mock_incluster.assert_not_called()
+
+    def test_kubeconfig_read_at_call_time(self, monkeypatch, tmp_path):
+        """KUBECONFIG set after import is honoured (KUBE_CONFIG_DEFAULT_LOCATION is not)."""
+        kubeconfig = tmp_path / "late.yaml"
+        kubeconfig.touch()
+        with patch("kubernetes.config.KUBE_CONFIG_DEFAULT_LOCATION", "/nonexistent/kubeconfig"):
+            mock_kube, _ = self._load(monkeypatch, str(kubeconfig))
+        mock_kube.assert_called_once_with(config_file=str(kubeconfig))
+
+    def test_in_cluster_fallback_does_not_write_to_stdout(self, monkeypatch, capsys):
+        """The fallback notice must stay off stdout, which is the stdio transport's wire."""
+        monkeypatch.setenv("KUBECONFIG", "/nonexistent/kubeconfig")
+        reset_clients()
+        with (
             patch("kubernetes.config.load_kube_config") as mock_kube,
             patch("kubernetes.config.load_incluster_config") as mock_incluster,
             patch("kubernetes.client"),
