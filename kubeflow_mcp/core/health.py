@@ -70,7 +70,7 @@ def get_server_logs(
     Retrieves logs from in-memory buffer.
 
     Args:
-        level: Minimum log level (DEBUG, INFO, WARNING, ERROR)
+        level: Minimum log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
         limit: Maximum number of log entries to return (1-1000)
 
     Returns:
@@ -91,7 +91,17 @@ def get_server_logs(
             "ERROR": 3,
             "CRITICAL": 4,
         }
-        min_level = level_order.get(level.upper(), 1)
+        level_aliases = {
+            "WARN": "WARNING",
+            "FATAL": "CRITICAL",
+        }
+        normalized_level = level_aliases.get(level.upper(), level.upper())
+        if normalized_level not in level_order:
+            return ToolError(
+                error=f"Unsupported log level: {level}",
+                error_code=ErrorCode.VALIDATION_ERROR,
+            ).model_dump()
+        min_level = level_order[normalized_level]
 
         all_logs = get_log_buffer()
         filtered = [

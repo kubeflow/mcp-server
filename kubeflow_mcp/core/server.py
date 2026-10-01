@@ -29,7 +29,11 @@ from typing import Any
 
 from fastmcp import FastMCP
 
+from kubeflow_mcp import __version__
 from kubeflow_mcp.common.constants import (
+    KUBEFLOW_SDK_VERSION_SPEC,
+    KUBEFLOW_TRAINER_VERSION_SPEC,
+    KUBERNETES_VERSION_LABEL,
     TOOL_NEXT_HINTS,
     TOOL_TO_PHASE,
     ErrorCode,
@@ -84,18 +88,38 @@ def configure_resilience(
     _rate_limiter = RateLimiter(rate=rate_limit, capacity=rate_capacity)
 
 
+def _is_blocked(result: dict[str, Any]) -> bool:
+    """Report whether a successful response still carries blocking findings.
+
+    ``pre_flight`` and ``check_compatibility`` report their verdict inside
+    ``data`` while the envelope stays successful, so the error check in
+    ``_inject_meta`` cannot see it. Advancing the agent in that state would
+    contradict the blockers the tool just reported.
+    """
+    data = result.get("data")
+    if not isinstance(data, dict):
+        return False
+    scopes = [data]
+    nested = data.get("compatibility")  # pre_flight nests the compatibility report
+    if isinstance(nested, dict):
+        scopes.append(nested)
+    return any(scope.get("compatible") is False or scope.get("blockers") for scope in scopes)
+
+
 def _inject_meta(result: Any, tool_name: str) -> Any:
     """Inject _meta (phase + next hint) into successful tool responses.
 
     Provides workflow guidance for clients that don't consume server
-    instructions or MCP resources (e.g. Ollama, custom agents).
+    instructions or MCP resources (e.g. Ollama, custom agents). The ``next``
+    hint is withheld when the response reports blockers, so the guidance cannot
+    tell the agent to advance past an environment that is not ready.
     """
     if not isinstance(result, dict):
         return result
     if "error" in result or "error_code" in result:
         return result
     phase = TOOL_TO_PHASE.get(tool_name)
-    hint = TOOL_NEXT_HINTS.get(tool_name)
+    hint = None if _is_blocked(result) else TOOL_NEXT_HINTS.get(tool_name)
     if phase or hint:
         meta: dict[str, str] = {}
         if phase:
@@ -161,7 +185,8 @@ def _audit_wrap(tool_func):
                 }
 
             breaker = get_breaker(tool_name)
-            if not breaker.can_execute():
+            generation = breaker.acquire()
+            if generation is None:
                 duration_ms = int((time.monotonic() - start) * 1000)
                 span.set_attribute("tool.success", False)
                 span.set_attribute("tool.duration_ms", duration_ms)
@@ -181,10 +206,14 @@ def _audit_wrap(tool_func):
                 )
                 span.set_attribute("tool.success", is_success)
                 span.set_attribute("tool.duration_ms", duration_ms)
+                # Only a real success resets the breaker. A result that says nothing
+                # about the backend hands its half-open slot back instead.
                 if is_success:
-                    breaker.record_success()
+                    breaker.record_success(generation)
                 elif is_infrastructure_error(result):
-                    breaker.record_failure()
+                    breaker.record_failure(generation)
+                else:
+                    breaker.release(generation)
 
                 logger.info(
                     "tool_call",
@@ -200,7 +229,7 @@ def _audit_wrap(tool_func):
                 return _inject_meta(result, tool_name)
             except Exception as exc:
                 duration_ms = int((time.monotonic() - start) * 1000)
-                breaker.record_failure()
+                breaker.record_failure(generation)
                 span.set_attribute("tool.success", False)
                 span.set_attribute("tool.duration_ms", duration_ms)
                 span.set_attribute("error.type", type(exc).__qualname__)
@@ -229,13 +258,13 @@ CLIENT_MODULES = {
     "hub": "kubeflow_mcp.hub",
 }
 
-_GLOBAL_HEADER = """\
+_GLOBAL_HEADER = f"""\
 Kubeflow MCP Server - AI Model Training on Kubernetes
 
 PREREQUISITES:
-- Kubeflow Trainer v2.2.0+ installed (TrainJob CRD must exist)
-- Kubeflow SDK 0.4.0+ (bundled with MCP server)
-- Kubernetes 1.27+
+- Kubeflow Trainer {KUBEFLOW_TRAINER_VERSION_SPEC} installed (TrainJob CRD must exist)
+- Kubeflow SDK {KUBEFLOW_SDK_VERSION_SPEC} (bundled with MCP server)
+- Kubernetes {KUBERNETES_VERSION_LABEL}
 - Any platform: vanilla K8s, Kind, Minikube, OpenShift, EKS, GKE
 
 CRITICAL WORKFLOW - Follow these steps IN ORDER:
@@ -391,12 +420,13 @@ def create_server(  # noqa: C901
     if auth_provider is not None:
         mcp_kwargs["auth"] = auth_provider
         logger.info("HTTP auth provider attached to server")
-    mcp: FastMCP = FastMCP("kubeflow-mcp-server", **mcp_kwargs)
+    mcp: FastMCP = FastMCP("kubeflow-mcp-server", version=__version__, **mcp_kwargs)
 
     # Bridge FastMCP async context into sync _audit_wrap via ContextVars
-    from kubeflow_mcp.core.middleware import AuditIdentityMiddleware
+    from kubeflow_mcp.core.middleware import AuditIdentityMiddleware, ToolErrorMiddleware
 
     mcp.add_middleware(AuditIdentityMiddleware())
+    mcp.add_middleware(ToolErrorMiddleware())
 
     # Merge tool metadata from client modules
     all_descriptions: dict[str, str] = {}

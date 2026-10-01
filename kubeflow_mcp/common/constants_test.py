@@ -14,7 +14,18 @@
 
 """Tests for common/constants.py — error classification, phase maps."""
 
+from packaging.specifiers import SpecifierSet
+from packaging.version import Version
+
 from kubeflow_mcp.common.constants import (
+    KUBEFLOW_SDK_VERSION,
+    KUBEFLOW_SDK_VERSION_MIN,
+    KUBEFLOW_SDK_VERSION_SPEC,
+    KUBEFLOW_TRAINER_VERSION_MIN,
+    KUBEFLOW_TRAINER_VERSION_SPEC,
+    KUBERNETES_VERSION_LABEL,
+    MIN_K8S_VERSION,
+    SDK_COMPATIBILITY,
     TOOL_NEXT_HINTS,
     TOOL_PHASES,
     TOOL_TO_PHASE,
@@ -76,6 +87,24 @@ class TestToolPhases:
         for phase, tools in TOOL_PHASES.items():
             for tool in tools:
                 assert TOOL_TO_PHASE[tool] == phase
+
+
+class TestVersionConstants:
+    def test_sdk_version_constants(self):
+        assert KUBEFLOW_SDK_VERSION_MIN == KUBEFLOW_SDK_VERSION
+        assert Version(KUBEFLOW_SDK_VERSION) in SpecifierSet(KUBEFLOW_SDK_VERSION_SPEC)
+
+    def test_trainer_version_min(self):
+        assert Version(KUBEFLOW_TRAINER_VERSION_MIN) in SpecifierSet(KUBEFLOW_TRAINER_VERSION_SPEC)
+
+    def test_kubernetes_version_label(self):
+        assert KUBERNETES_VERSION_LABEL == f"{MIN_K8S_VERSION[0]}.{MIN_K8S_VERSION[1]}+"
+
+    def test_sdk_compatibility_uses_constants(self):
+        assert SDK_COMPATIBILITY["sdk_version_min"] == KUBEFLOW_SDK_VERSION_MIN
+        assert SDK_COMPATIBILITY["trainer_version_min"] == KUBEFLOW_TRAINER_VERSION_MIN
+        assert SDK_COMPATIBILITY["sdk_version"] == KUBEFLOW_SDK_VERSION_SPEC
+        assert SDK_COMPATIBILITY["trainer_version"] == KUBEFLOW_TRAINER_VERSION_SPEC
 
 
 class TestToolNextHints:

@@ -159,7 +159,7 @@ def get_training_job(name: str, namespace: str | None = None) -> dict[str, Any]:
             next_steps = [
                 f"get_training_events(name='{name}') — check for OOM/scheduling issues",
                 f"get_training_logs(name='{name}') — check error output",
-                "Read trainer://workflows/ops",
+                "Read trainer://guides/troubleshooting",
             ]
         elif status == "Running":
             next_steps = [f"get_training_logs(name='{name}') — check progress"]

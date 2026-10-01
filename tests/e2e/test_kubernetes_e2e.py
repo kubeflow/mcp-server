@@ -92,11 +92,14 @@ async def _call_tool(
 ) -> dict[str, Any]:
     """Helper to invoke an MCP tool and parse its single-content JSON response."""
     resp = await session.call_tool(name, arguments=arguments or {})
-    assert not resp.isError, f"Tool '{name}' failed with unexpected MCP protocol error: {resp}"
     assert len(resp.content) == 1, (
         f"Expected exactly 1 content block from '{name}', got {len(resp.content)}"
     )
-    return json.loads(resp.content[0].text)
+    data = json.loads(resp.content[0].text)
+    assert resp.isError == ("error" in data or "error_code" in data), (
+        f"Tool '{name}' returned isError={resp.isError} for {data}"
+    )
+    return data
 
 
 async def _get_custom_runtime_name(session: ClientSession) -> str:

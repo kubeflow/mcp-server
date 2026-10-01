@@ -61,7 +61,7 @@ class APIKeyVerifier(TokenVerifier):
         self._expected = expected_token
 
     async def verify_token(self, token: str) -> AccessToken | None:
-        if hmac.compare_digest(token, self._expected):
+        if hmac.compare_digest(token.encode(), self._expected.encode()):
             return AccessToken(
                 token=token,
                 client_id="api-key",

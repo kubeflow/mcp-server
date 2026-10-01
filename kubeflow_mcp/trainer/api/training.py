@@ -23,6 +23,7 @@ import threading
 import uuid
 from collections.abc import Callable
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 
@@ -102,14 +103,17 @@ except ImportError:
 HF_HOME_PATH = "/workspace/.hf"
 
 
+_hf_home_ctx: ContextVar[str | None] = ContextVar("hf_home", default=None)
 _hf_home_lock = threading.Lock()
+_hf_home_refcount = 0
+_original_get_trainer_cr: Callable | None = None
 
 
 @contextmanager
 def _inject_trainer_hf_home(hf_home_path: str):
     """Patch SDK to inject HF_HOME into spec.trainer.env for BuiltinTrainer jobs.
 
-    The SDK (v0.4.x) does not support env on BuiltinTrainer.  This context
+    The SDK (v0.5.x) does not support env on BuiltinTrainer.  This context
     manager temporarily patches ``get_trainer_cr_from_builtin_trainer`` so the
     returned TrainerV1alpha1Trainer CR includes the HF_HOME env var, which
     lands on ``spec.trainer.env`` instead of ``spec.runtimePatches``.
@@ -117,21 +121,35 @@ def _inject_trainer_hf_home(hf_home_path: str):
     import kubeflow.trainer.backends.kubernetes.utils as k8s_utils
     from kubeflow_trainer_api.models import IoK8sApiCoreV1EnvVar
 
-    original = k8s_utils.get_trainer_cr_from_builtin_trainer
+    global _hf_home_refcount, _original_get_trainer_cr
 
-    def _patched(runtime, trainer, initializer=None):
-        cr = original(runtime, trainer, initializer)
-        if not any(e.name == "HF_HOME" for e in (cr.env or [])):
-            hf_env = IoK8sApiCoreV1EnvVar(name="HF_HOME", value=hf_home_path)
-            cr.env = (cr.env or []) + [hf_env]
-        return cr
-
+    token = _hf_home_ctx.set(hf_home_path)
     with _hf_home_lock:
-        k8s_utils.get_trainer_cr_from_builtin_trainer = _patched
-        try:
-            yield
-        finally:
-            k8s_utils.get_trainer_cr_from_builtin_trainer = original
+        if _hf_home_refcount == 0:
+            _original_get_trainer_cr = k8s_utils.get_trainer_cr_from_builtin_trainer
+
+            def _patched(runtime, trainer, initializer=None):
+                if _original_get_trainer_cr is None:
+                    raise RuntimeError("_patched called outside active context")
+                cr = _original_get_trainer_cr(runtime, trainer, initializer)
+                path = _hf_home_ctx.get()
+                if path and not any(e.name == "HF_HOME" for e in (cr.env or [])):
+                    hf_env = IoK8sApiCoreV1EnvVar(name="HF_HOME", value=path)
+                    cr.env = (cr.env or []) + [hf_env]
+                return cr
+
+            k8s_utils.get_trainer_cr_from_builtin_trainer = _patched
+        _hf_home_refcount += 1
+
+    try:
+        yield
+    finally:
+        _hf_home_ctx.reset(token)
+        with _hf_home_lock:
+            _hf_home_refcount -= 1
+            if _hf_home_refcount == 0:
+                k8s_utils.get_trainer_cr_from_builtin_trainer = _original_get_trainer_cr
+                _original_get_trainer_cr = None
 
 
 _TRAINING_SCRIPT_DIR: str | None = None
@@ -749,7 +767,7 @@ def fine_tune(
 
     Requires a torchtune ClusterTrainingRuntime (e.g. ``torchtune-llama3.2-1b``).
     Returns an error for non-torchtune runtimes — use ``run_custom_training()``
-    with a LoRA script instead (see ``trainer://guides/lora-script-template`` for best practices).
+    with a LoRA script instead (see ``trainer://guides/training-patterns`` for best practices).
 
     Supports HuggingFace (``hf://``) and S3 (``s3://``) model/dataset sources.
     Requires ``confirmed=True`` to submit. First call returns a preview.
@@ -898,7 +916,7 @@ def fine_tune(
                     "fine_tune() requires a torchtune runtime (e.g. torchtune-llama3.2-1b). "
                     "Run list_runtimes() to find available torchtune runtimes. "
                     "For non-torchtune runtimes, use run_custom_training() with a LoRA "
-                    "fine-tuning script instead — see the lora-script-template resource."
+                    "fine-tuning script instead — see trainer://guides/training-patterns."
                 ),
                 error_code=ErrorCode.VALIDATION_ERROR,
             ).model_dump()
@@ -998,7 +1016,7 @@ def fine_tune(
     except Exception as e:
         return _sdk_error(
             e,
-            hint="Use troubleshooting_guide prompt for diagnosis, or resource_planning to check requirements",
+            hint="Read trainer://guides/troubleshooting, or call pre_flight() to check requirements",
         )
 
 
@@ -1209,7 +1227,7 @@ def run_custom_training(
         ).model_dump()
 
     except Exception as e:
-        return _sdk_error(e, hint="Use troubleshooting_guide prompt for diagnosis")
+        return _sdk_error(e, hint="Read trainer://guides/troubleshooting")
 
 
 def run_container_training(
@@ -1378,4 +1396,4 @@ def run_container_training(
         ).model_dump()
 
     except Exception as e:
-        return _sdk_error(e, hint="Use troubleshooting_guide prompt for diagnosis")
+        return _sdk_error(e, hint="Read trainer://guides/troubleshooting")

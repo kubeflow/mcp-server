@@ -32,6 +32,22 @@ class TestAPIKeyVerifier:
         result = await verifier.verify_token("wrong-token")
         assert result is None
 
+    async def test_rejects_non_ascii_token(self):
+        verifier = APIKeyVerifier(expected_token="test-secret")
+        result = await verifier.verify_token("café")
+        assert result is None
+
+    async def test_accepts_valid_non_ascii_token(self):
+        verifier = APIKeyVerifier(expected_token="café")
+        result = await verifier.verify_token("café")
+        assert result is not None
+        assert result.client_id == "api-key"
+
+    async def test_rejects_mismatched_non_ascii_token(self):
+        verifier = APIKeyVerifier(expected_token="café")
+        result = await verifier.verify_token("fancé")
+        assert result is None
+
     async def test_constant_time_comparison(self):
         verifier = APIKeyVerifier(expected_token="correct-token")
         result = await verifier.verify_token("wrong-length")

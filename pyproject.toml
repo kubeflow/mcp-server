@@ -15,18 +15,18 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
-    "fastmcp>=2.0.0",
+    "fastmcp>=3.4.0",
     "pydantic>=2.0",
     "pyyaml>=6.0",
     "click>=8.0",
-    "kubeflow==0.4.1",
+    "kubeflow>=0.5.0,<0.6.0",
     "huggingface-hub>=0.20",
 ]
 
 [project.optional-dependencies]
-hub = ["kubeflow[hub]==0.4.1"]
-spark = ["kubeflow[spark]==0.4.1"]
-all = ["kubeflow[hub]==0.4.1", "kubeflow[spark]==0.4.1"]
+hub = ["kubeflow[hub]>=0.5.0,<0.6.0"]
+spark = ["kubeflow[spark]>=0.5.0,<0.6.0"]
+all = ["kubeflow[hub]>=0.5.0,<0.6.0", "kubeflow[spark]>=0.5.0,<0.6.0"]
 
 [dependency-groups]
 dev = [
@@ -36,6 +36,7 @@ dev = [
     "pytest-benchmark>=5.2.3",
     "pytest-cov>=4.0",
     "ruff>=0.9",
+    "httpx2>=2.13.1",
 ]
 docs = [
     "sphinx>=7.0",

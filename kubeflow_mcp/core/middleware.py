@@ -27,6 +27,9 @@ import contextvars
 import logging
 from typing import Any
 
+from fastmcp.server.middleware import Middleware
+from fastmcp.tools.tool import ToolResult
+
 logger = logging.getLogger(__name__)
 
 # ContextVars populated by AuditIdentityMiddleware, read by _audit_wrap
@@ -123,3 +126,23 @@ class AuditIdentityMiddleware:
             _session_id_var.reset(session_token)
             _request_id_var.reset(request_token)
             _user_id_var.reset(user_token)
+
+
+class ToolErrorMiddleware(Middleware):
+    """Mark tool results that carry ``error`` or ``error_code`` with ``isError``."""
+
+    async def on_call_tool(self, context: Any, call_next: Any) -> ToolResult:
+        result = await call_next(context)
+        data = result.structured_content
+        if (
+            not result.is_error
+            and isinstance(data, dict)
+            and ("error" in data or "error_code" in data)
+        ):
+            return ToolResult(
+                content=result.content,
+                structured_content=data,
+                meta=result.meta,
+                is_error=True,
+            )
+        return result

@@ -145,13 +145,23 @@ _TRAINJOB_VERSION = "v1alpha1"
 _TRAINJOB_PLURAL = "trainjobs"
 
 
-def is_mcp_managed(name: str, namespace: str) -> bool | None:
-    """Check if a TrainJob was created through MCP (has the ownership label).
+# Outcomes of an ownership check. "missing" is kept distinct from "unmanaged"
+# because the two need opposite responses: a job that does not exist is a
+# not-found, while collapsing it into "unmanaged" tells the caller to go fix
+# permissions that were never the problem.
+OWNERSHIP_MANAGED = "managed"
+OWNERSHIP_UNMANAGED = "unmanaged"
+OWNERSHIP_MISSING = "missing"
+
+
+def get_trainer_ownership(name: str, namespace: str) -> str | None:
+    """Classify a TrainJob for the MCP ownership gate.
 
     Returns:
-        True if the job has the MCP ownership label.
-        False if the job exists but lacks the label.
-        None if the check could not be performed (API error, permissions).
+        ``OWNERSHIP_MANAGED`` if the job carries the MCP ownership label,
+        ``OWNERSHIP_UNMANAGED`` if it exists without the label,
+        ``OWNERSHIP_MISSING`` if no such job exists, or
+        ``None`` if the check could not be performed (API error, permissions).
     """
     try:
         api = get_custom_objects_api()
@@ -164,12 +174,13 @@ def is_mcp_managed(name: str, namespace: str) -> bool | None:
             _request_timeout=K8S_TIMEOUT,
         )
         labels = obj.get("metadata", {}).get("labels", {})
-        return labels.get(MCP_MANAGED_LABEL) == MCP_MANAGED_VALUE
+        managed = labels.get(MCP_MANAGED_LABEL) == MCP_MANAGED_VALUE
+        return OWNERSHIP_MANAGED if managed else OWNERSHIP_UNMANAGED
     except Exception as e:
         from kubeflow_mcp.common.types import is_k8s_not_found
 
         if is_k8s_not_found(e):
-            return False
+            return OWNERSHIP_MISSING
         return None
 
 

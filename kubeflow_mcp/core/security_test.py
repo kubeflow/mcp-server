@@ -26,6 +26,7 @@ from kubeflow_mcp.core.security import (
     validate_k8s_name,
     validate_namespace,
     validate_resource_limits,
+    validate_runtime_name,
     validate_training_bounds,
 )
 
@@ -373,3 +374,83 @@ def test_truncate_long_output():
 
 
 # TODO(test): test exact boundary (max_length characters)
+
+
+class TestValidateK8sNameTrailingNewline:
+    """`re.match` with `$` accepts a trailing newline; names must be rejected."""
+
+    @pytest.mark.parametrize("name", ["job\n", "my-job\n", "job\r\n"])
+    def test_rejects_trailing_newline(self, name):
+        err = validate_k8s_name(name)
+        assert err is not None
+        assert err.error_code == "VALIDATION_ERROR"
+
+
+class TestValidateRuntimeName:
+    """Runtime names are K8s object names, so dots are legal."""
+
+    @pytest.mark.parametrize(
+        "name",
+        ["torchtune-llama3.2-1b", "torchtune-qwen2.5-1.5b", "torch-distributed", "r1", "a.b.c"],
+    )
+    def test_accepts_valid_runtime_names(self, name):
+        assert validate_runtime_name(name) is None
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "",
+            "   ",
+            "UPPER",
+            "under_score",
+            "has space",
+            "../escape",
+            "a/b",
+            "-lead",
+            "trail-",
+            ".dotfirst",
+            "dotlast.",
+            "a..b",
+        ],
+    )
+    def test_rejects_invalid_runtime_names(self, name):
+        err = validate_runtime_name(name)
+        assert err is not None
+        assert err.error_code == "VALIDATION_ERROR"
+
+    def test_rejects_name_over_253_chars(self):
+        assert validate_runtime_name("a" * 254) is not None
+
+    def test_accepts_name_at_253_chars(self):
+        name = ".".join(["a" * 63, "a" * 63, "a" * 62, "a" * 62])
+        assert len(name) == 253
+        assert validate_runtime_name(name) is None
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "a" * 64,
+            "a" * 64 + ".b",
+            "b." + "a" * 64,
+            ".".join(["a" * 64] * 2),
+        ],
+    )
+    def test_rejects_label_over_63_chars(self, name):
+        """RFC 1123 caps each label at 63, independently of the 253 total."""
+        err = validate_runtime_name(name)
+        assert err is not None
+        assert err.error_code == "VALIDATION_ERROR"
+
+    @pytest.mark.parametrize(
+        "name",
+        ["runtime\n", "torchtune-llama3.2-1b\n", "runtime\r\n", "runtime\n\n"],
+    )
+    def test_rejects_trailing_newline(self, name):
+        """`$` matches before a trailing newline, so the pattern needs fullmatch."""
+        err = validate_runtime_name(name)
+        assert err is not None
+        assert err.error_code == "VALIDATION_ERROR"
+
+    def test_accepts_label_at_63_chars(self):
+        assert validate_runtime_name("a" * 63) is None
+        assert validate_runtime_name(".".join(["a" * 63] * 3)) is None

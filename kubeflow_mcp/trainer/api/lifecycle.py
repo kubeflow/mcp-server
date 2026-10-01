@@ -34,6 +34,41 @@ from kubeflow_mcp.core.security import check_namespace_allowed, validate_k8s_nam
 logger = logging.getLogger(__name__)
 
 
+def _require_mcp_ownership(name: str, namespace: str, hint: str) -> ToolError | None:
+    """Block non-admin personas from mutating TrainJobs MCP did not create.
+
+    Returns ``None`` when the operation is allowed (admin persona, or the job
+    carries the MCP ownership label), otherwise the ``ToolError`` to return.
+
+    Shared by both mutating tools so the ownership outcomes cannot drift apart.
+    """
+    if get_effective_persona() == "platform-admin":
+        return None
+
+    ownership = mcp_utils.get_trainer_ownership(name, namespace)
+    if ownership is None:
+        return ToolError(
+            error=f"Cannot verify ownership of training job '{name}' (API error)",
+            error_code=ErrorCode.SDK_ERROR,
+            details={"hint": "Retry, or use platform-admin persona to bypass."},
+        )
+    if ownership == mcp_utils.OWNERSHIP_MISSING:
+        # Report the real problem. Falling through to the ownership message
+        # would blame permissions for what is usually a mistyped name, and
+        # would answer differently than it does for the platform-admin persona.
+        return ToolError(
+            error=f"Training job '{name}' not found",
+            error_code=ErrorCode.RESOURCE_NOT_FOUND,
+        )
+    if ownership == mcp_utils.OWNERSHIP_UNMANAGED:
+        return ToolError(
+            error=f"Training job '{name}' was not created by MCP",
+            error_code=ErrorCode.VALIDATION_ERROR,
+            details={"hint": hint},
+        )
+    return None
+
+
 def delete_training_job(
     name: str,
     namespace: str | None = None,
@@ -65,25 +100,14 @@ def delete_training_job(
             return ns_err.model_dump()
 
         ns = mcp_utils.get_trainer_effective_namespace(namespace)
-        if get_effective_persona() not in ("platform-admin",):
-            managed = mcp_utils.is_mcp_managed(name, ns)
-            if managed is None:
-                return ToolError(
-                    error=f"Cannot verify ownership of training job '{name}' (API error)",
-                    error_code=ErrorCode.SDK_ERROR,
-                    details={"hint": "Retry, or use platform-admin persona to bypass."},
-                ).model_dump()
-            if not managed:
-                return ToolError(
-                    error=f"Training job '{name}' was not created by MCP",
-                    error_code=ErrorCode.VALIDATION_ERROR,
-                    details={
-                        "hint": (
-                            "Data scientists can only delete jobs created through MCP tools. "
-                            "Use platform-admin persona to delete externally created jobs."
-                        ),
-                    },
-                ).model_dump()
+        owner_err = _require_mcp_ownership(
+            name,
+            ns,
+            "Data scientists can only delete jobs created through MCP tools. "
+            "Use platform-admin persona to delete externally created jobs.",
+        )
+        if owner_err is not None:
+            return owner_err.model_dump()
 
         if not confirmed:
             return PreviewResponse(
@@ -156,25 +180,14 @@ def update_training_job(
             return ns_err.model_dump()
 
         ns = mcp_utils.get_trainer_effective_namespace(namespace)
-        if get_effective_persona() not in ("platform-admin",):
-            managed = mcp_utils.is_mcp_managed(name, ns)
-            if managed is None:
-                return ToolError(
-                    error=f"Cannot verify ownership of training job '{name}' (API error)",
-                    error_code=ErrorCode.SDK_ERROR,
-                    details={"hint": "Retry, or use platform-admin persona to bypass."},
-                ).model_dump()
-            if not managed:
-                return ToolError(
-                    error=f"Training job '{name}' was not created by MCP",
-                    error_code=ErrorCode.VALIDATION_ERROR,
-                    details={
-                        "hint": (
-                            "Non-admin personas can only suspend/resume jobs created through MCP tools. "
-                            "Use platform-admin persona for externally created jobs."
-                        ),
-                    },
-                ).model_dump()
+        owner_err = _require_mcp_ownership(
+            name,
+            ns,
+            "Non-admin personas can only suspend/resume jobs created through MCP tools. "
+            "Use platform-admin persona for externally created jobs.",
+        )
+        if owner_err is not None:
+            return owner_err.model_dump()
 
         if not confirmed:
             return PreviewResponse(

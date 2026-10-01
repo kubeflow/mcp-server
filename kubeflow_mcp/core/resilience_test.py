@@ -91,7 +91,78 @@ class TestCircuitBreaker:
         cb.record_failure()
         assert cb.state == CircuitState.OPEN
 
-    # TODO(test): test half_open_max_calls limit
+    @pytest.mark.slow
+    def test_half_open_max_calls_limit(self):
+        cb = CircuitBreaker(failure_threshold=1, recovery_timeout=0.05, half_open_max_calls=2)
+        cb.record_failure()
+        time.sleep(0.06)
+
+        assert cb.can_execute() is True
+        assert cb.can_execute() is True
+        assert cb.can_execute() is False
+        assert cb.half_open_calls == 2
+
+    @pytest.mark.slow
+    def test_full_window_is_not_replaced_while_probes_are_out(self):
+        """A slow probe keeps its window, however long it takes to report."""
+        cb = CircuitBreaker(failure_threshold=1, recovery_timeout=0.01, half_open_max_calls=1)
+        cb.record_failure()
+        time.sleep(0.02)
+
+        assert cb.can_execute() is True
+        time.sleep(0.02)
+        assert cb.can_execute() is False
+
+    def test_release_hands_back_a_half_open_slot(self):
+        """A call that says nothing about the backend frees its slot without counting."""
+        cb = CircuitBreaker(failure_threshold=1, recovery_timeout=0.0, half_open_max_calls=2)
+        cb.record_failure()
+
+        first = cb.acquire()
+        cb.acquire()
+        assert cb.acquire() is None
+
+        cb.release(first)
+        assert cb.half_open_calls == 1
+        assert cb.acquire() is not None
+        assert cb.state == CircuitState.HALF_OPEN
+
+    def test_release_does_not_reset_failure_count(self):
+        cb = CircuitBreaker(failure_threshold=3)
+        cb.record_failure()
+        cb.record_failure()
+        cb.release(cb.acquire())
+        assert cb.failure_count == 2
+
+    def test_late_report_from_previous_window_is_ignored(self):
+        cb = CircuitBreaker(failure_threshold=1, recovery_timeout=0.0, half_open_max_calls=3)
+        cb.record_failure()
+
+        slow = cb.acquire()
+        cb.record_failure(cb.acquire())  # sends that window back to OPEN
+        current = cb.acquire()  # and this opens the next one
+
+        cb.record_success(slow)
+        cb.release(slow)
+        cb.record_failure(slow)
+        assert cb.state == CircuitState.HALF_OPEN
+        assert cb.half_open_calls == 1
+
+        # Two fresh successes are one short of closing, so the late one did not count.
+        cb.record_success(current)
+        cb.record_success(current)
+        assert cb.state == CircuitState.HALF_OPEN
+
+    def test_recovery_ignores_wall_clock_jumps(self, monkeypatch):
+        """A wall-clock jump must not release the circuit before its timeout."""
+        cb = CircuitBreaker(failure_threshold=1, recovery_timeout=60.0)
+        cb.record_failure()
+
+        jumped = time.time() + 3600
+        monkeypatch.setattr("time.time", lambda: jumped)
+        assert cb.can_execute() is False
+        assert cb.state == CircuitState.OPEN
+
     # TODO(test): test thread safety with concurrent record_failure/record_success
 
 
@@ -184,6 +255,17 @@ class TestRateLimiter:
         for _ in range(5):
             rl.acquire()
         time.sleep(0.01)
+        assert rl.acquire() is True
+
+    def test_acquire_ignores_wall_clock_jumps(self, monkeypatch):
+        """A backward wall-clock step must not drain the bucket.
+
+        time.time is patched because that is the clock the limiter used to read.
+        Patching monotonic would assert a step it cannot make.
+        """
+        rl = RateLimiter(rate=10.0, capacity=5.0)
+
+        monkeypatch.setattr("time.time", lambda: 0.0)
         assert rl.acquire() is True
 
     # TODO(test): test thread safety with concurrent acquire
