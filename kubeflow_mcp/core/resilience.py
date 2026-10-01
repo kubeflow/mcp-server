@@ -246,9 +246,16 @@ async def retry_with_backoff_async(
     *args: Any,
     max_retries: int = 3,
     base_delay: float = 1.0,
+    max_delay: float = 30.0,
+    jitter: float = 0.1,
     **kwargs: Any,
 ) -> Any:
-    """Async retry with exponential backoff."""
+    """Async retry with exponential backoff, max-delay cap, and jitter.
+
+    Mirrors the behaviour of :func:`retry_with_backoff` for async callables.
+    ``max_delay`` caps the exponential growth; ``jitter`` randomises the delay
+    within ±jitter*delay to avoid the thundering-herd effect.
+    """
     last_exception: Exception | None = None
 
     for attempt in range(max_retries + 1):
@@ -258,7 +265,11 @@ async def retry_with_backoff_async(
             last_exception = e
             if attempt == max_retries:
                 break
-            delay = base_delay * (2**attempt)
+
+            delay = min(base_delay * (2**attempt), max_delay)
+            delay += random.uniform(-jitter * delay, jitter * delay)
+            name = getattr(func, "__name__", repr(func))
+            logger.debug(f"Retry {attempt + 1}/{max_retries} for {name} in {delay:.2f}s")
             await asyncio.sleep(delay)
 
     raise last_exception  # type: ignore
