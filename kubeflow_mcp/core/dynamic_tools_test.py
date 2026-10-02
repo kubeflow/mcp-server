@@ -149,6 +149,39 @@ def test_init_dynamic_tools_lets_the_model_be_retried(offline_model):
     assert len(offline_model) == 2
 
 
+@pytest.fixture
+def slow_offline_model(monkeypatch):
+    """Loading takes a moment before it fails, so threads overlap inside the load."""
+    import sys
+    import time
+    from types import SimpleNamespace
+
+    load_attempts = []
+
+    def load_model(*_args, **_kwargs):
+        load_attempts.append(1)
+        time.sleep(0.05)
+        raise OSError("We couldn't connect to 'https://huggingface.co' to load this model")
+
+    monkeypatch.setitem(
+        sys.modules, "sentence_transformers", SimpleNamespace(SentenceTransformer=load_model)
+    )
+    dynamic_tools._embedding_cache.reset()
+    yield load_attempts
+    dynamic_tools._embedding_cache.reset()
+
+
+def test_concurrent_find_tools_loads_the_model_once(slow_offline_model):
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = [pool.submit(dynamic_tools.find_tools, "probe tool") for _ in range(8)]
+        results = [f.result() for f in futures]
+
+    assert all(result["mode"] == "keyword_fallback" for result in results)
+    assert len(slow_offline_model) == 1
+
+
 @pytest.mark.parametrize(
     "arguments",
     [
