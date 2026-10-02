@@ -291,6 +291,7 @@ def test_run_custom_training_validation(test_case):
         {"cpu": ""},
         {"memory": None},
         {"amd.com/gpu": "lots"},
+        {},
         ["gpu", 1],
     ],
 )

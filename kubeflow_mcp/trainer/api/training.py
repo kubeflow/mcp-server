@@ -361,6 +361,13 @@ def _validate_resources_per_node(resources: dict[str, Any] | None) -> ToolError 
             error="resources_per_node must be an object",
             error_code=ErrorCode.VALIDATION_ERROR,
         )
+    # An empty dict is falsy, so callers' `resources_per_node or (...)` fallback would
+    # silently treat it as omitted and let gpu_per_node override it.
+    if not resources:
+        return ToolError(
+            error="resources_per_node must not be empty; omit it to use the defaults",
+            error_code=ErrorCode.VALIDATION_ERROR,
+        )
 
     # Check every key, not only cpu/memory/gpu: the SDK passes extended resources such
     # as amd.com/gpu straight to Kubernetes. Numbers are accepted like the SDK does.
