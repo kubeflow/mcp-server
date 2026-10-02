@@ -1,0 +1,15 @@
+apiVersion: kagent.dev/v1alpha2
+kind: RemoteMCPServer
+metadata:
+  name: kubeflow-mcp-http
+spec:
+  description: Kubeflow MCP Server over native HTTP
+  protocol: STREAMABLE_HTTP
+  url: http://kagent-model-gateway.agentgateway-system:80/mcp
+  timeout: 120s
+  headersFrom:
+    - name: Authorization
+      valueFrom:
+        type: Secret
+        name: kubeflow-mcp-http-header
+        key: AUTHORIZATION

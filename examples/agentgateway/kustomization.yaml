@@ -1,0 +1,11 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - parameters.yaml
+  - gateway.yaml
+  - mcp-backend.yaml
+  - mcp-route.yaml
+  - mcp-policy.yaml
+  - monitoring.yaml
+  - network-policy.yaml
