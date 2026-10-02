@@ -88,7 +88,7 @@ def _get_model_info_from_hf(model: str) -> dict[str, Any] | None:
             return result
 
         from huggingface_hub import model_info
-        from huggingface_hub.errors import RepositoryNotFoundError
+        from huggingface_hub.errors import GatedRepoError, RepositoryNotFoundError
 
         try:
             info = model_info(model, timeout=10)
@@ -97,7 +97,13 @@ def _get_model_info_from_hf(model: str) -> dict[str, Any] | None:
             # best-effort suggestions so callers still get a "did you mean".
             # Other failures (auth, rate-limit, network, metadata) fall through
             # to the outer handler unchanged, with no extra Hub request.
-            not_found: dict[str, Any] = {"error": str(e), "kind": "not_found"}
+            not_found: dict[str, Any] = {"error": str(e)}
+            # The Hub raises this error for private or gated repos and missing
+            # auth too (401, GatedRepoError). Only a plain 404 is treated as a
+            # nonexistent repo, so access failures are not reported as bad input.
+            status_code = getattr(getattr(e, "response", None), "status_code", None)
+            if status_code == 404 and not isinstance(e, GatedRepoError):
+                not_found["kind"] = "not_found"
             suggestions = _suggest_hf_model_ids(model)
             if suggestions:
                 not_found["suggestions"] = suggestions

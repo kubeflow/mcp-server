@@ -19,7 +19,7 @@ from unittest.mock import patch
 
 import httpx
 import pytest
-from huggingface_hub.errors import RepositoryNotFoundError
+from huggingface_hub.errors import GatedRepoError, RepositoryNotFoundError
 from packaging.version import Version
 from tests.common import TestCase
 
@@ -297,6 +297,30 @@ def test_estimate_resources_returns_validation_error_for_nonexistent_model():
     assert result["success"] is False
     assert result["error_code"] == "VALIDATION_ERROR"
     assert result["details"]["suggestions"] == ["meta-llama/Llama-3.2-1B"]
+
+
+def _hub_error(error_cls: type[RepositoryNotFoundError], status_code: int):
+    request = httpx.Request("GET", "https://huggingface.co/api/models/x")
+    return error_cls("Hub error", response=httpx.Response(status_code, request=request))
+
+
+@pytest.mark.parametrize(
+    "hub_error",
+    [
+        _hub_error(RepositoryNotFoundError, 401),  # private repo or missing auth
+        _hub_error(GatedRepoError, 403),  # gated repo
+    ],
+)
+def test_estimate_resources_keeps_sdk_error_for_access_failures(hub_error):
+    """An inaccessible repo is not a typo, so it must not become VALIDATION_ERROR."""
+    with (
+        patch("huggingface_hub.model_info", side_effect=hub_error),
+        patch("huggingface_hub.list_models", return_value=[]),
+    ):
+        result = estimate_resources("meta-llama/Llama-3.2-1B")
+
+    assert result["success"] is False
+    assert result["error_code"] == "SDK_ERROR"
 
 
 def test_estimate_resources_returns_sdk_error_for_api_failure():
