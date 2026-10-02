@@ -71,10 +71,17 @@ def _suggest_hf_model_ids(model: str, limit: int = 3) -> list[str]:
 
 
 def _get_model_info_from_hf(model: str) -> dict[str, Any] | None:
-    """Fetch model info from HuggingFace Hub."""
+    """Fetch model info from HuggingFace Hub.
+
+    Errors caused by the model ID itself carry ``kind`` (``"format"`` or
+    ``"not_found"``) so callers can tell bad input from an API/network failure.
+    """
     try:
         if not _HF_MODEL_ID_RE.match(model):
-            result: dict[str, Any] = {"error": f"Invalid HuggingFace model ID format: '{model}'"}
+            result: dict[str, Any] = {
+                "error": f"Invalid HuggingFace model ID format: '{model}'",
+                "kind": "format",
+            }
             suggestions = _suggest_hf_model_ids(model)
             if suggestions:
                 result["suggestions"] = suggestions
@@ -90,7 +97,7 @@ def _get_model_info_from_hf(model: str) -> dict[str, Any] | None:
             # best-effort suggestions so callers still get a "did you mean".
             # Other failures (auth, rate-limit, network, metadata) fall through
             # to the outer handler unchanged, with no extra Hub request.
-            not_found: dict[str, Any] = {"error": str(e)}
+            not_found: dict[str, Any] = {"error": str(e), "kind": "not_found"}
             suggestions = _suggest_hf_model_ids(model)
             if suggestions:
                 not_found["suggestions"] = suggestions
@@ -538,13 +545,13 @@ def estimate_resources(
             # caller (and pre_flight, which delegates here) can self-correct.
             if hf_info and hf_info.get("suggestions"):
                 details["suggestions"] = hf_info["suggestions"]
-            # Format validation failures (invalid model ID) are input errors, not
-            # backend/network problems — use VALIDATION_ERROR so agents fix the
+            # A malformed or nonexistent model ID is an input error, not a
+            # backend/network problem — use VALIDATION_ERROR so agents fix the
             # input instead of retrying the same bad request.
-            is_format_error = hf_info is not None and str(error_msg).startswith("Invalid")
+            is_input_error = bool(hf_info) and hf_info.get("kind") in ("format", "not_found")
             return ToolError(
                 error=f"Could not fetch model info from HuggingFace: {error_msg}",
-                error_code=ErrorCode.VALIDATION_ERROR if is_format_error else ErrorCode.SDK_ERROR,
+                error_code=ErrorCode.VALIDATION_ERROR if is_input_error else ErrorCode.SDK_ERROR,
                 details=details,
             ).model_dump()
 

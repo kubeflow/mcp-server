@@ -285,6 +285,20 @@ def test_estimate_resources_returns_validation_error_for_invalid_format():
     assert "Invalid HuggingFace model ID format" in result["error"]
 
 
+def test_estimate_resources_returns_validation_error_for_nonexistent_model():
+    """A well-formed but nonexistent model ID is a user typo, so VALIDATION_ERROR."""
+    with (
+        patch("huggingface_hub.model_info", side_effect=_repo_not_found()),
+        patch("huggingface_hub.list_models") as mock_list,
+    ):
+        mock_list.return_value = _fake_models("meta-llama/Llama-3.2-1B")
+        result = estimate_resources("meta-lama/Llama-3")
+
+    assert result["success"] is False
+    assert result["error_code"] == "VALIDATION_ERROR"
+    assert result["details"]["suggestions"] == ["meta-llama/Llama-3.2-1B"]
+
+
 def test_estimate_resources_returns_sdk_error_for_api_failure():
     """Actual API/network failures must still return SDK_ERROR."""
     with patch(
