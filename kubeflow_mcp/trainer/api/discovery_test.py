@@ -59,6 +59,28 @@ def test_list_training_jobs_rejects_invalid_status_before_sdk_call(status):
     mock_client.assert_not_called()
 
 
+def test_list_training_jobs_invalid_status_lists_supported_values():
+    result = list_training_jobs(status="INVALID_STATUS")
+
+    error = verify_tool_error(result, error_code=ErrorCode.VALIDATION_ERROR)
+    assert error["details"] == {
+        "supported_statuses": ["Complete", "Created", "Failed", "Running"],
+        "aliases": {"Succeeded": "Complete"},
+    }
+
+
+@pytest.mark.parametrize("status", ["Created", "Running", "Complete", "Failed", "Succeeded"])
+def test_list_training_jobs_accepts_supported_statuses(status):
+    with (
+        patch("kubeflow_mcp.trainer.api.discovery.check_namespace_allowed", return_value=None),
+        patch("kubeflow_mcp.trainer.api.discovery.get_trainer_client_for_namespace") as mock_client,
+    ):
+        mock_client.return_value.list_jobs.return_value = []
+        result = list_training_jobs(status=status)
+
+    verify_tool_success(result)
+
+
 class TestTrainjobRuntimeToMcp:
     def test_none_returns_none(self):
         assert _trainjob_runtime_to_mcp(None) is None

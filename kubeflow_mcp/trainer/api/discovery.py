@@ -19,6 +19,8 @@ import time
 import uuid
 from typing import Any
 
+from kubeflow.trainer.constants import constants as trainer_constants
+
 from kubeflow_mcp.common.constants import ErrorCode
 from kubeflow_mcp.common.types import ToolError, ToolResponse, exception_details, is_k8s_not_found
 from kubeflow_mcp.common.utils import (
@@ -39,9 +41,16 @@ _PACKAGES_POLL_INTERVAL = 3
 _JOB_STATUS_FILTER_ALIASES: dict[str, str] = {
     "Succeeded": "Complete",
 }
-# The statuses the Trainer SDK reports. There is no "Suspended": a suspended job
-# reports "Created", so a "Suspended" filter could never match.
-_VALID_JOB_STATUSES = frozenset({"Created", "Running", "Complete", "Failed"})
+# The statuses the Trainer SDK reports, taken from its constants so the list cannot
+# go stale. There is no "Suspended": a suspended job reports "Created".
+_VALID_JOB_STATUSES = frozenset(
+    {
+        trainer_constants.TRAINJOB_CREATED,
+        trainer_constants.TRAINJOB_RUNNING,
+        trainer_constants.TRAINJOB_COMPLETE,
+        trainer_constants.TRAINJOB_FAILED,
+    }
+)
 
 
 def _trainjob_runtime_to_mcp(runtime: object | None) -> dict[str, str] | None:
@@ -95,7 +104,10 @@ def list_training_jobs(
             return ToolError(
                 error=f"Unsupported status '{status}'",
                 error_code=ErrorCode.VALIDATION_ERROR,
-                details={"supported_statuses": sorted(_VALID_JOB_STATUSES)},
+                details={
+                    "supported_statuses": sorted(_VALID_JOB_STATUSES),
+                    "aliases": dict(_JOB_STATUS_FILTER_ALIASES),
+                },
             ).model_dump()
 
     ns_err = check_namespace_allowed(namespace)
