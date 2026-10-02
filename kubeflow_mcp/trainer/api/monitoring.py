@@ -156,12 +156,15 @@ def _cursor_response(
     out_lines: list[str] = []
     char_budget = MAX_CURSOR_CHARS
     for line in page:
-        if char_budget <= 0:
-            break
         if len(line) > MAX_LINE_CHARS:
             line = line[:MAX_LINE_CHARS] + "...[truncated]"
+        cost = len(line) + (1 if out_lines else 0)
+        if out_lines and cost > char_budget:
+            break
         out_lines.append(line)
-        char_budget -= len(line)
+        char_budget -= cost
+        if char_budget <= 0:
+            break
 
     # Skip truncate_log_output: per-line cap + char_budget are the backstop;
     # truncate_log_output would eat lines silently while next_offset already advanced.
@@ -238,13 +241,10 @@ def get_training_logs(
         ).model_dump()
 
     _effective_max = (
-        max_lines if max_lines is not None else (200 if since_line is not None else MAX_LOG_LINES)
+        max(1, min(max_lines, MAX_LOG_LINES))
+        if max_lines is not None
+        else (200 if since_line is not None else MAX_LOG_LINES)
     )
-    if not (1 <= _effective_max <= MAX_LOG_LINES):
-        return ToolError(
-            error=f"max_lines must be 1-{MAX_LOG_LINES}, got {_effective_max}",
-            error_code=ErrorCode.VALIDATION_ERROR,
-        ).model_dump()
 
     try:
         if follow:

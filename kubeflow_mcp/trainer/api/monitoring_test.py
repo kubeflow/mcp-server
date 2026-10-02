@@ -26,6 +26,7 @@ from kubeflow_mcp.common.failures import FAILURE_PATTERNS, extract_failure_hint
 from kubeflow_mcp.core.resilience import CircuitState, get_breaker
 from kubeflow_mcp.core.server import _audit_wrap
 from kubeflow_mcp.trainer.api.monitoring import (
+    MAX_CURSOR_CHARS,
     MAX_LINE_CHARS,
     MAX_LOG_LINES,
     _is_pod_for_step,
@@ -295,6 +296,20 @@ class TestGetTrainingLogs:
 
     @patch(PATCH_NS_CHECK, return_value=None)
     @patch(PATCH_CLIENT)
+    def test_tail_mode_max_lines_clamping(self, mock_client_fn, _ns):
+        lines = [f"line {i}" for i in range(1500)]
+        mock_client_fn.return_value = _make_mock_client(get_job_logs=lines)
+
+        result_large = get_training_logs("my-job", max_lines=2000)
+        assert result_large["success"] is True
+        assert result_large["data"]["lines"] == 1000
+
+        result_zero = get_training_logs("my-job", max_lines=0)
+        assert result_zero["success"] is True
+        assert result_zero["data"]["lines"] == 1
+
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
     def test_not_found_error(self, mock_client_fn, _ns):
         from kubernetes.client.exceptions import ApiException
 
@@ -498,9 +513,28 @@ class TestGetTrainingLogsCursor:
 
         res = get_training_logs("my-job", since_line=0, max_lines=20)
         assert res["success"] is True
-        assert res["data"]["lines"] == 9
-        assert res["data"]["next_offset"] == 9
-        assert len(res["data"]["logs"].splitlines()) == 9
+        assert res["data"]["lines"] == 8
+        assert res["data"]["next_offset"] == 8
+        assert len(res["data"]["logs"].splitlines()) == 8
+        assert len(res["data"]["logs"]) <= MAX_CURSOR_CHARS
+
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_long_line_crosses_budget_boundary_not_appended(self, mock_client_fn, _ns):
+        lines = ["a" * 2000] * 4 + ["b" * 1500] + ["c" * 100]
+        mock_client_fn.return_value = _make_mock_client(get_job_logs=lines)
+
+        res = get_training_logs("my-job", since_line=0, max_lines=10)
+        assert res["success"] is True
+        assert res["data"]["lines"] == 4
+        assert res["data"]["next_offset"] == 4
+        assert len(res["data"]["logs"]) <= MAX_CURSOR_CHARS
+        assert "b" not in res["data"]["logs"]
+
+        res2 = get_training_logs("my-job", since_line=res["data"]["next_offset"], max_lines=10)
+        assert res2["success"] is True
+        assert res2["data"]["lines"] >= 1
+        assert "b" * 1500 in res2["data"]["logs"]
 
     @patch(PATCH_NS_CHECK, return_value=None)
     @patch(PATCH_CLIENT)
@@ -521,15 +555,23 @@ class TestGetTrainingLogsCursor:
         assert res1["error_code"] == "VALIDATION_ERROR"
         assert "since_line must be >= 0" in res1["error"]
 
-        res2 = get_training_logs("my-job", since_line=0, max_lines=0)
-        assert res2["success"] is False
-        assert res2["error_code"] == "VALIDATION_ERROR"
-        assert "max_lines must be 1-1000" in res2["error"]
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_max_lines_clamping(self, mock_client_fn, _ns):
+        lines = [f"line {i}" for i in range(1500)]
+        mock_client_fn.return_value = _make_mock_client(get_job_logs=lines)
 
-        res3 = get_training_logs("my-job", since_line=0, max_lines=1001)
-        assert res3["success"] is False
-        assert res3["error_code"] == "VALIDATION_ERROR"
-        assert "max_lines must be 1-1000" in res3["error"]
+        res_zero = get_training_logs("my-job", since_line=0, max_lines=0)
+        assert res_zero["success"] is True
+        assert res_zero["data"]["lines"] == 1
+
+        res_neg = get_training_logs("my-job", since_line=0, max_lines=-10)
+        assert res_neg["success"] is True
+        assert res_neg["data"]["lines"] == 1
+
+        res_large = get_training_logs("my-job", since_line=0, max_lines=2000)
+        assert res_large["success"] is True
+        assert res_large["data"]["lines"] == 1000
 
     @patch(PATCH_VALIDATE_NAME, return_value=None)
     @patch(PATCH_CORE_V1)
