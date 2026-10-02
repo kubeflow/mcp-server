@@ -42,11 +42,17 @@ jobs:
 
       - name: Parse version
         id: ver
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          V="${{ inputs.version }}"
+          V="$REQUESTED_VERSION"
           if [[ -z "$V" ]]; then
             V="sha-$(git rev-parse --short=12 HEAD)"
+          fi
+          if [[ ! "$V" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+            echo "Invalid image tag: $V" >&2
+            exit 1
           fi
           STABLE=false
           MAJOR_MINOR=""
