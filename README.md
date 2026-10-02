@@ -51,26 +51,31 @@ are available:
 - A kubeconfig configured for the target cluster
 - Kubeflow Trainer installed in the cluster
 - Kubeflow Trainer CRDs and at least one `ClusterTrainingRuntime`
-- Sufficient Kubernetes permissions for the selected namespace
+- Kubernetes permissions for the namespace you train in, plus cluster-scoped
+  read access for planning and runtime discovery (see
+  [RBAC Configuration](ARCHITECTURE.md#rbac-configuration))
 
-Verify the Kubernetes connection:
+Verify the connection and your permissions in the target namespace. Each
+`can-i` command should print `yes`:
 
 ```bash
 kubectl config current-context
-kubectl cluster-info
-kubectl get nodes
+kubectl auth can-i create trainjobs.trainer.kubeflow.org -n <namespace>
+kubectl auth can-i list pods -n <namespace>
+kubectl auth can-i get pods --subresource=log -n <namespace>
 ```
 
-Verify Kubeflow Trainer resources:
+The checks below need cluster-scoped read access, so they can return
+`Forbidden` for a namespace-scoped user even when Kubeflow Trainer is installed
+correctly. Without that access, the tools that read these resources
+(`get_cluster_resources`, `check_compatibility`, `list_runtimes`) fail; tools
+that work on jobs in your namespace are unaffected.
 
 ```bash
-kubectl get crd | grep trainer.kubeflow.org
+kubectl get nodes
+kubectl get crd trainjobs.trainer.kubeflow.org
 kubectl get clustertrainingruntimes
 ```
-
-All verification commands should succeed before using training, monitoring, or
-platform tools. If a command fails, configure Kubernetes access or install
-Kubeflow Trainer before starting the MCP server.
 
 ### Run the server
 
