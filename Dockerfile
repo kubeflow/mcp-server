@@ -19,20 +19,11 @@ COPY --from=ghcr.io/astral-sh/uv:0.11.14 /uv /usr/local/bin/uv
 WORKDIR /app
 
 COPY pyproject.toml uv.lock ./
-ARG INSTALL_OTEL=false
-RUN if [ "$INSTALL_OTEL" = "true" ]; then \
-      uv sync --frozen --no-dev --group otel --no-install-project; \
-    else \
-      uv sync --frozen --no-dev --no-install-project; \
-    fi
+RUN uv sync --frozen --no-dev --group otel --no-install-project
 
 COPY README.md ./
 COPY kubeflow_mcp ./kubeflow_mcp
-RUN if [ "$INSTALL_OTEL" = "true" ]; then \
-      uv sync --frozen --no-dev --group otel --no-editable; \
-    else \
-      uv sync --frozen --no-dev --no-editable; \
-    fi
+RUN uv sync --frozen --no-dev --group otel --no-editable
 
 FROM python:3.12.15-slim AS runtime
 

@@ -7,8 +7,13 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version/tag to build and push (e.g. 0.1.0). Leave blank to build without pushing.'
-        required: false
+        description: 'Image version/tag to publish (e.g. 0.1.0).'
+        required: true
+        type: string
+      ref:
+        description: 'Branch or tag to build from.'
+        required: true
+        default: main
         type: string
   workflow_call:
     inputs:
@@ -33,7 +38,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
         with:
-          ref: ${{ inputs.version || github.ref }}
+          ref: ${{ inputs.ref || (github.event_name == 'workflow_call' && inputs.version) || github.ref }}
 
       - name: Parse version
         id: ver

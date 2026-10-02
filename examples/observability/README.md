@@ -42,9 +42,8 @@ kubectl logs -n observability deployment/otel-collector
 
 The Operator does not provide storage or a dashboard. Configure the collector's `traces` pipeline with an OTLP exporter pointing to the approved Tempo or Jaeger service, then view traces in Grafana or the platform tracing UI. Do not expose the collector publicly.
 
-Tracing requires an MCP image with the optional OpenTelemetry dependencies and
-the `OTEL_EXPORTER_OTLP_ENDPOINT` environment variable. Export failures do not
-block tool calls.
+Tracing requires the `OTEL_EXPORTER_OTLP_ENDPOINT` environment variable.
+Export failures do not block tool calls.
 
 ## Example trace view
 

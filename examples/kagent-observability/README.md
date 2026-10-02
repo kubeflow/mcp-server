@@ -11,14 +11,8 @@ and tracing is required.
 - A trace backend such as Tempo or Jaeger if traces must be viewed in a dashboard.
 
 Create the MCP credentials from the KAgent profile before applying this bundle.
-The collector receives traces only when the MCP image includes its optional
-OpenTelemetry dependencies. Build and publish an image with the optional group
-enabled, then set that image in `mcp-tracing-patch.yaml` before applying:
-
-```bash
-docker build --build-arg INSTALL_OTEL=true -t <registry>/kubeflow-mcp:otel .
-docker push <registry>/kubeflow-mcp:otel
-```
+The published MCP image includes the OpenTelemetry dependencies required for
+trace export.
 
 ## Deploy
 
