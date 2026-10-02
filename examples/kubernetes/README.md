@@ -20,7 +20,7 @@ NAMESPACE=kubeflow-user-example-com
 kubectl create secret generic kubeflow-mcp-auth -n "$NAMESPACE" \
   --from-literal=token="$(openssl rand -hex 32)"
 
-kubectl apply -f manifests.yaml
+kubectl apply -k examples/kubernetes
 kubectl rollout status deploy/kubeflow-mcp -n "$NAMESPACE"
 ```
 
@@ -99,3 +99,44 @@ sed -i.bak 's/kubeflow-user-example-com/my-namespace/g' manifests.yaml
 
 `-i.bak` rather than a bare `-i`: BSD `sed` on macOS reads the next argument as the
 backup suffix and fails without one.
+
+## Troubleshooting
+
+**Requests return HTTP 421** — DNS rebinding protection allows loopback `Host`
+headers by default, so anything arriving via the Service is rejected.
+`KUBEFLOW_MCP_ALLOWED_HOSTS` must list the exact hostname clients use; only the
+`:*` port wildcard is supported, not a host wildcard. `port-forward` does not
+reproduce this because it sends a loopback `Host` header.
+
+**A browser-based client returns 403** — the `Origin` header is not allowed. Add it
+to `KUBEFLOW_MCP_ALLOWED_ORIGINS`; setting hosts alone leaves origins at their
+loopback-only defaults. Non-browser MCP clients send no `Origin` and are unaffected.
+
+**Tools report an empty namespace or a 403 listing runtimes** — the pod is running
+outside the namespace whose TrainJobs you expect. See the namespace section above.
+
+**The agent has no tool for submitting a TrainJob** — the persona is `readonly`.
+Set `KUBEFLOW_MCP_PERSONA` to `data-scientist` or higher.
+
+**Every authenticated request returns 401** — the client is sending a different
+token than the one stored in the Secret.
+
+**Pod stuck in `CreateContainerConfigError`** — the `kubeflow-mcp-auth` Secret does
+not exist yet. Create it as shown in the quick start.
+
+**Trainer control-plane version information is unavailable** — older Trainer
+releases may not create the `kubeflow-trainer-public` ConfigMap in
+`kubeflow-system`. This warning is harmless when the CRD and API checks pass. A
+403 instead usually means the version Role is missing or Trainer runs in a
+different namespace.
+
+**Applying the manifests reports that `kubeflow-system` does not exist** — point
+the Trainer version Role and RoleBinding at the namespace where Trainer is
+installed, and update `KUBEFLOW_SYSTEM_NAMESPACE` to match.
+
+**The pod is `Ready` but calls still fail** — `/ready` does not re-check Kubernetes
+dependencies. Check the server logs and verify cluster connectivity separately.
+
+**A service mesh blocks traffic to the pod** — the Deployment disables automatic
+sidecar injection. If the mesh enforces strict mTLS, remove that annotation and
+allow the traffic with the mesh's peer-authentication and destination rules.

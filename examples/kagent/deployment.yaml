@@ -19,7 +19,7 @@ spec:
       containers:
         - name: mcp-server
           image: ghcr.io/kubeflow/mcp-server:latest
-          imagePullPolicy: Always
+          imagePullPolicy: IfNotPresent
           ports:
             - name: http
               containerPort: 8000

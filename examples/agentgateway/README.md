@@ -47,8 +47,9 @@ The manifests use these neutral reference values:
 - MCP backend: the in-cluster Kubeflow MCP Service
 
 The default Kustomization does not include model routing. Add a
-provider-specific `AgentgatewayBackend` and `HTTPRoute` after replacing the
-placeholder values in `backend.yaml` and `route.yaml`.
+provider-specific `AgentgatewayBackend`, `HTTPRoute`, and matching policy after
+replacing the placeholder values in `backend.yaml`, `route.yaml`, and
+`model-policy.yaml`.
 
 ## 1. Configure MCP gateway authentication
 

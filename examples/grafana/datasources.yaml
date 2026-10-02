@@ -36,5 +36,3 @@ spec:
     url: http://tempo.observability.svc.cluster.local:3200
     editable: false
     jsonData:
-      tracesToLogs:
-        datasourceUid: prometheus

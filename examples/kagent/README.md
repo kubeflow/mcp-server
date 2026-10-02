@@ -58,8 +58,8 @@ printf 'Bearer %s' "$MCP_TOKEN" | kubectl -n "$MCP_NAMESPACE" \
 ## 2. Apply the MCP component
 
 Review [`deployment.yaml`](deployment.yaml) and set the MCP image to the
-required release for your environment. The example uses the `latest` tag and
-pulls it on each rollout. Apply the component:
+required release for your environment. The example pins the image to the
+current release; update it deliberately when upgrading. Apply the component:
 
 ```bash
 kubectl apply -k examples/kagent
@@ -75,7 +75,8 @@ http://kubeflow-mcp-http.<namespace>:8000/mcp
 ```
 
 The `RemoteMCPServer` resource points to the Agentgateway endpoint. Apply
-`examples/agentgateway` before starting an Agent that uses this registration.
+`examples/agentgateway` before applying this profile or starting an Agent that
+uses this registration.
 The Service is an internal Agentgateway target. The NetworkPolicy restricts
 application traffic to the Agentgateway namespace.
 

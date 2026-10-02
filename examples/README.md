@@ -1,12 +1,12 @@
 # Kubeflow MCP Integration Examples
 
-Each directory is an independent profile; install only the profiles and
-operators required by your deployment.
+Each directory is a separate profile. Install the operators and profiles required
+by your deployment; some profiles depend on services created by another profile.
 
 ## Core profiles
 
 - [`kubernetes`](kubernetes/): standalone Kubeflow MCP Server with Trainer RBAC.
-- [`kagent`](kagent/): KAgent RemoteMCPServer integration over Streamable HTTP.
+- [`kagent`](kagent/): KAgent RemoteMCPServer integration over Streamable HTTP; requires Agentgateway.
 - [`agentgateway`](agentgateway/): optional Agentgateway routing and policy layer.
 - [`kagent-observability`](kagent-observability/): KAgent plus an OpenTelemetry
   Collector.
@@ -25,7 +25,13 @@ For the complete KAgent, MCP, Agentgateway, tracing, and Grafana setup:
 1. Install KAgent, Kubeflow Trainer, Agentgateway, OpenTelemetry, and Grafana
    operators with their CRDs.
 2. Follow [`kagent`](kagent/) to create the MCP credentials.
-3. Apply [`kagent-observability`](kagent-observability/), which deploys the MCP
+3. Create the Agentgateway upstream Secret and apply [`agentgateway`](agentgateway/):
+
+   ```bash
+   kubectl apply -k examples/agentgateway
+   ```
+
+4. Apply [`kagent-observability`](kagent-observability/), which deploys the MCP
    server, its KAgent registration, and the OpenTelemetry Collector:
 
    ```bash
@@ -34,12 +40,6 @@ For the complete KAgent, MCP, Agentgateway, tracing, and Grafana setup:
 
    Use [`kagent`](kagent/) instead when tracing is not required; do not apply
    both profiles.
-4. Create the Agentgateway upstream Secret and apply [`agentgateway`](agentgateway/):
-
-   ```bash
-   kubectl apply -k examples/agentgateway
-   ```
-
 5. Configure the Prometheus and Tempo endpoints, then apply [`grafana`](grafana/):
 
    ```bash
