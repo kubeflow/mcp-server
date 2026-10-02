@@ -69,6 +69,7 @@ class TestIsInfrastructureError:
 class TestToolPhases:
     def test_contains_all_expected_phases(self):
         expected = {
+            # Trainer client phases
             "planning",
             "discovery",
             "training",
@@ -76,6 +77,10 @@ class TestToolPhases:
             "lifecycle",
             "platform",
             "health",
+            # Spark client phases
+            "spark_discovery",
+            "spark_sessions",
+            "spark_monitoring",
         }
         assert set(TOOL_PHASES.keys()) == expected
 
