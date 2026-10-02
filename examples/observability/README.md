@@ -7,7 +7,8 @@ bundle is used.
 ## Prerequisites
 
 - The OpenTelemetry Operator and `OpenTelemetryCollector` CRD are installed.
-- The `kagent` namespace exists.
+- The `kagent` namespace exists when this collector is used with the combined
+  `kagent-observability` profile.
 - A trace backend such as Tempo or Jaeger is installed if traces must be viewed in a dashboard.
 
 ## Deploy

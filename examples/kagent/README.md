@@ -58,8 +58,8 @@ printf 'Bearer %s' "$MCP_TOKEN" | kubectl -n "$MCP_NAMESPACE" \
 ## 2. Apply the MCP component
 
 Review [`deployment.yaml`](deployment.yaml) and set the MCP image to the
-required release for your environment. The example pins the image to the
-current release; update it deliberately when upgrading. Apply the component:
+required image tag for your environment. The example uses the latest published
+image; pin it deliberately when reproducibility is required. Apply the component:
 
 ```bash
 kubectl apply -k examples/kagent

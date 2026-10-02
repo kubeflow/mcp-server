@@ -7,8 +7,8 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Image version/tag to publish (e.g. 0.1.0).'
-        required: true
+        description: 'Optional image version/tag to publish (e.g. 0.1.0). Defaults to a commit SHA tag.'
+        required: false
         type: string
       ref:
         description: 'Branch or tag to build from.'
@@ -45,6 +45,9 @@ jobs:
         run: |
           set -euo pipefail
           V="${{ inputs.version }}"
+          if [[ -z "$V" ]]; then
+            V="sha-$(git rev-parse --short=12 HEAD)"
+          fi
           STABLE=false
           MAJOR_MINOR=""
           MAJOR=""
@@ -58,6 +61,7 @@ jobs:
           echo "stable=$STABLE" >> "$GITHUB_OUTPUT"
           echo "major_minor=$MAJOR_MINOR" >> "$GITHUB_OUTPUT"
           echo "major=$MAJOR" >> "$GITHUB_OUTPUT"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
           # Push only when we have a concrete version to publish and it's not a PR.
           if [[ "${{ github.event_name }}" != "pull_request" && -n "$V" ]]; then
             echo "push=true" >> "$GITHUB_OUTPUT"
@@ -87,7 +91,7 @@ jobs:
           # Release versions are PEP 440 (e.g. 0.1.0rc1), which is not valid SemVer,
           # so tags are built with type=raw from the parsed version instead of type=semver.
           tags: |
-            type=raw,value=${{ inputs.version }},enable=${{ inputs.version != '' }}
+            type=raw,value=${{ steps.ver.outputs.version }}
             type=raw,value=${{ steps.ver.outputs.major_minor }},enable=${{ steps.ver.outputs.stable == 'true' }}
             type=raw,value=${{ steps.ver.outputs.major }},enable=${{ steps.ver.outputs.stable == 'true' }}
             type=raw,value=latest,enable=${{ steps.ver.outputs.stable == 'true' }}
@@ -101,7 +105,7 @@ jobs:
           push: ${{ steps.ver.outputs.push == 'true' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          build-args: VERSION=${{ inputs.version }}
+          build-args: VERSION=${{ steps.ver.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
