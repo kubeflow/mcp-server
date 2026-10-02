@@ -20,6 +20,7 @@ from unittest.mock import patch
 import httpx
 import pytest
 from huggingface_hub.errors import GatedRepoError, RepositoryNotFoundError
+from huggingface_hub.utils import hf_raise_for_status
 from packaging.version import Version
 from tests.common import TestCase
 
@@ -285,8 +286,8 @@ def test_estimate_resources_returns_validation_error_for_invalid_format():
     assert "Invalid HuggingFace model ID format" in result["error"]
 
 
-def test_estimate_resources_returns_validation_error_for_nonexistent_model():
-    """A well-formed but nonexistent model ID is a user typo, so VALIDATION_ERROR."""
+def test_estimate_resources_returns_validation_error_for_confirmed_404():
+    """A model ID the Hub confirms missing with a 404 is a user typo, so VALIDATION_ERROR."""
     with (
         patch("huggingface_hub.model_info", side_effect=_repo_not_found()),
         patch("huggingface_hub.list_models") as mock_list,
@@ -318,6 +319,26 @@ def test_estimate_resources_keeps_sdk_error_for_access_failures(hub_error):
         patch("huggingface_hub.list_models", return_value=[]),
     ):
         result = estimate_resources("meta-llama/Llama-3.2-1B")
+
+    assert result["success"] is False
+    assert result["error_code"] == "SDK_ERROR"
+
+
+def test_estimate_resources_keeps_sdk_error_for_anonymous_401():
+    """The Hub answers an anonymous request for a missing model with 401, the same
+    as for a private repo, so it cannot be classified as bad input."""
+    request = httpx.Request("GET", "https://huggingface.co/api/models/meta-lama/Llama-3")
+    response = httpx.Response(
+        401, headers={"X-Error-Message": "Invalid username or password."}, request=request
+    )
+    with pytest.raises(RepositoryNotFoundError) as hub_error:
+        hf_raise_for_status(response)
+
+    with (
+        patch("huggingface_hub.model_info", side_effect=hub_error.value),
+        patch("huggingface_hub.list_models", return_value=[]),
+    ):
+        result = estimate_resources("meta-lama/Llama-3")
 
     assert result["success"] is False
     assert result["error_code"] == "SDK_ERROR"
