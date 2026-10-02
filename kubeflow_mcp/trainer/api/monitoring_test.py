@@ -476,19 +476,31 @@ class TestGetTrainingEvents:
         assert len(result["data"]["events"]) == 500
         assert result["data"]["total"] == 600
 
+    @pytest.mark.parametrize(
+        ("event_count", "limit", "returned", "has_more"),
+        [
+            (3, 2, 2, True),  # truncated
+            (2, 2, 2, False),  # limit == len(events)
+            (2, 5, 2, False),  # limit > len(events)
+            (0, 5, 0, False),  # empty result
+        ],
+    )
     @patch(PATCH_NS_CHECK, return_value=None)
     @patch(PATCH_CLIENT)
-    def test_event_truncation_metadata(self, mock_client_fn, _ns):
+    def test_event_truncation_metadata(
+        self, mock_client_fn, _ns, event_count, limit, returned, has_more
+    ):
         events = [
-            SimpleNamespace(reason=f"r{i}", message=f"m{i}", event_time=None) for i in range(3)
+            SimpleNamespace(reason=f"r{i}", message=f"m{i}", event_time=None)
+            for i in range(event_count)
         ]
         mock_client_fn.return_value = _make_mock_client(get_job_events=events)
 
-        result = get_training_events("my-job", limit=2)
+        result = get_training_events("my-job", limit=limit)
 
-        assert result["data"]["total"] == 3
-        assert result["data"]["returned"] == 2
-        assert result["data"]["has_more"] is True
+        assert result["data"]["total"] == event_count
+        assert result["data"]["returned"] == returned
+        assert result["data"]["has_more"] is has_more
 
     @patch(PATCH_NS_CHECK, return_value=None)
     @patch(PATCH_CLIENT)
