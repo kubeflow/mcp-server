@@ -21,7 +21,9 @@ import inspect
 import threading
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
+from huggingface_hub.errors import GatedRepoError, RepositoryNotFoundError
 from tests.common import FAILED, PREVIEW, VALIDATION_ERROR, TestCase, assert_test_case
 
 from kubeflow_mcp.trainer.api.training import (
@@ -42,6 +44,14 @@ from kubeflow_mcp.trainer.api.training import (
 PATCH_CLIENT = "kubeflow_mcp.trainer.api.training._get_client"
 PATCH_NS_CHECK = "kubeflow_mcp.trainer.api.training.check_namespace_allowed"
 PATCH_GPU_CHECK = "kubeflow_mcp.trainer.api.training._check_gpu_available"
+
+
+@pytest.fixture(autouse=True)
+def _offline_hub(monkeypatch):
+    """fine_tune(confirmed=True) checks hf:// repos on the Hub; keep unit tests offline."""
+    monkeypatch.setattr("huggingface_hub.model_info", MagicMock())
+    monkeypatch.setattr("huggingface_hub.dataset_info", MagicMock())
+
 
 # ─── fine_tune validation ───────────────────────────────────────────────────
 
@@ -331,6 +341,108 @@ def test_fine_tune_validates_resources_before_gpu_preflight():
 
     assert result["error_code"] == VALIDATION_ERROR
     gpu_check.assert_not_called()
+
+
+# ─── fine_tune Hugging Face model/dataset checks ────────────────────────────
+
+
+def _hub_error(error_cls: type[Exception], status_code: int) -> Exception:
+    request = httpx.Request("GET", "https://huggingface.co/api/models/x")
+    return error_cls("Hub error", response=httpx.Response(status_code, request=request))
+
+
+@pytest.mark.parametrize(
+    ("model", "dataset"),
+    [
+        ("hf://not-valid", "hf://org/ds"),
+        ("hf://org/model/extra", "hf://org/ds"),
+        ("hf://org//model", "hf://org/ds"),
+        ("hf://org/bad name", "hf://org/ds"),
+        ("hf://org/model", "hf://ds"),
+        ("hf://org/model", "hf://org//ds"),
+    ],
+)
+def test_fine_tune_preview_rejects_malformed_hf_references(model, dataset):
+    with patch(PATCH_GPU_CHECK) as gpu_check, patch("huggingface_hub.model_info") as hub:
+        result = fine_tune(model=model, dataset=dataset, runtime="torchtune-llama")
+
+    assert result["error_code"] == VALIDATION_ERROR
+    gpu_check.assert_not_called()
+    hub.assert_not_called()
+
+
+def test_fine_tune_preview_accepts_dataset_subpath_without_hub_call():
+    with (
+        patch(PATCH_NS_CHECK, return_value=None),
+        patch(PATCH_GPU_CHECK, return_value=None),
+        patch("huggingface_hub.dataset_info") as hub,
+    ):
+        result = fine_tune(
+            model="hf://org/model", dataset="hf://org/ds/subdir", runtime="torchtune-llama"
+        )
+
+    assert result["status"] == "preview"
+    hub.assert_not_called()
+
+
+def test_fine_tune_reports_bad_model_before_runtime_error():
+    with patch(PATCH_GPU_CHECK, return_value=None):
+        result = fine_tune(model="hf://not-valid", dataset="hf://org/ds", runtime="")
+
+    assert result["error_code"] == VALIDATION_ERROR
+    assert "model reference" in result["error"]
+
+
+@pytest.mark.parametrize(
+    ("hub_function", "missing"),
+    [("huggingface_hub.model_info", "model"), ("huggingface_hub.dataset_info", "dataset")],
+)
+def test_fine_tune_submission_rejects_confirmed_missing_repo(hub_function, missing):
+    with (
+        patch(PATCH_NS_CHECK, return_value=None),
+        patch(PATCH_CLIENT) as client,
+        patch(hub_function, side_effect=_hub_error(RepositoryNotFoundError, 404)),
+        patch("huggingface_hub.list_models", return_value=[]),
+    ):
+        result = fine_tune(
+            model="hf://org/model",
+            dataset="hf://org/ds",
+            runtime="torchtune-llama",
+            confirmed=True,
+        )
+
+    assert result["error_code"] == VALIDATION_ERROR
+    assert f"Hugging Face {missing}" in result["error"]
+    client.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "hub_error",
+    [
+        _hub_error(GatedRepoError, 403),
+        _hub_error(RepositoryNotFoundError, 401),
+        ConnectionError("Hub unreachable"),
+    ],
+    ids=["gated", "private-or-anonymous", "hub-unavailable"],
+)
+def test_fine_tune_submission_not_blocked_by_inaccessible_or_unavailable_hub(hub_error):
+    with (
+        patch(PATCH_NS_CHECK, return_value=None),
+        patch(PATCH_CLIENT) as client_fn,
+        patch("huggingface_hub.model_info", side_effect=hub_error),
+        patch("huggingface_hub.dataset_info", side_effect=hub_error),
+        patch("huggingface_hub.list_models", return_value=[]),
+    ):
+        client_fn.return_value.train.return_value = "train-job"
+        result = fine_tune(
+            model="hf://org/model",
+            dataset="hf://org/ds",
+            runtime="torchtune-llama",
+            confirmed=True,
+        )
+
+    assert result["success"] is True
+    client_fn.return_value.train.assert_called_once()
 
 
 class TestRunCustomTrainingConfirmed:

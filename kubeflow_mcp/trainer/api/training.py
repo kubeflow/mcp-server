@@ -329,6 +329,77 @@ def _should_apply_hf_dataset_workaround(dataset: str) -> bool:
     return bool(hf_repo and len(hf_repo.split("/")) == 2)
 
 
+def _hf_repo_id(uri: str, *, allow_subpath: bool) -> str | None:
+    """Return the ``org/name`` repo ID of an ``hf://`` URI, or None if it is malformed.
+
+    Datasets may point at a subpath (``hf://org/ds/subpath``); models may not.
+    """
+    from kubeflow_mcp.trainer.api.planning import _HF_MODEL_ID_RE
+
+    parts = uri.removeprefix("hf://").rstrip("/").split("/")
+    if len(parts) < 2 or (len(parts) > 2 and not allow_subpath) or "" in parts:
+        return None
+    repo_id = "/".join(parts[:2])
+    return repo_id if _HF_MODEL_ID_RE.fullmatch(repo_id) else None
+
+
+def _validate_hf_reference_formats(model: str, dataset: str) -> ToolError | None:
+    """Check that ``hf://`` model and dataset references are well formed.
+
+    Local check only, so it is safe in preview. Other schemes (e.g. ``s3://``)
+    are left alone.
+    """
+    for field, uri, allow_subpath, example in (
+        ("model", model, False, "hf://<org>/<model>"),
+        ("dataset", dataset, True, "hf://<org>/<dataset>[/<path>]"),
+    ):
+        if uri.startswith("hf://") and _hf_repo_id(uri, allow_subpath=allow_subpath) is None:
+            return ToolError(
+                error=f"Invalid Hugging Face {field} reference '{uri}' (expected {example})",
+                error_code=ErrorCode.VALIDATION_ERROR,
+            )
+    return None
+
+
+def _check_hf_repos_exist(model: str, dataset: str) -> dict[str, Any] | None:
+    """On submission, reject ``hf://`` repos the Hub confirms missing (404).
+
+    Gated, private and unreachable repos do not block submission: without auth
+    the Hub cannot tell a missing repo from an inaccessible one, and a Hub outage
+    must not stop training. Those cases are logged and the job proceeds.
+    """
+    from huggingface_hub import dataset_info
+
+    from kubeflow_mcp.trainer.api.planning import _get_model_info_from_hf, _is_confirmed_missing
+
+    if model.startswith("hf://"):
+        repo_id = _hf_repo_id(model, allow_subpath=False)
+        info = _get_model_info_from_hf(repo_id) or {}
+        if info.get("kind") == "not_found":
+            return ToolError(
+                error=f"Hugging Face model '{repo_id}' does not exist",
+                error_code=ErrorCode.VALIDATION_ERROR,
+                details={"suggestions": info["suggestions"]} if info.get("suggestions") else None,
+            ).model_dump()
+        if "error" in info:
+            logger.warning(
+                "Could not verify model %s, submitting anyway: %s", repo_id, info["error"]
+            )
+
+    if dataset.startswith("hf://"):
+        repo_id = _hf_repo_id(dataset, allow_subpath=True)
+        try:
+            dataset_info(repo_id, timeout=10)
+        except Exception as e:
+            if _is_confirmed_missing(e):
+                return ToolError(
+                    error=f"Hugging Face dataset '{repo_id}' does not exist",
+                    error_code=ErrorCode.VALIDATION_ERROR,
+                ).model_dump()
+            logger.warning("Could not verify dataset %s, submitting anyway: %s", repo_id, e)
+    return None
+
+
 def _sdk_error(e: Exception, hint: str | None = None) -> dict[str, Any]:
     """Convert an exception into a ToolError dict with optional K8s response detail."""
     details: dict[str, Any] | None = None
@@ -569,6 +640,8 @@ def _build_runtime_patch(
 
 
 def _validate_fine_tune_params(
+    model: str,
+    dataset: str,
     namespace: str | None,
     name: str | None,
     dtype: str | None,
@@ -596,6 +669,10 @@ def _validate_fine_tune_params(
         err = validate_k8s_name(name)
         if err:
             return err.model_dump()
+
+    hf_err = _validate_hf_reference_formats(model, dataset)
+    if hf_err:
+        return hf_err.model_dump()
 
     if dtype and dtype not in ("bf16", "fp32"):
         return ToolError(
@@ -632,7 +709,8 @@ def _validate_fine_tune_params(
     )
     if bounds_err:
         return bounds_err.model_dump()
-    return None
+    # The Hub call runs last, on submission only, after every local check passed.
+    return _check_hf_repos_exist(model, dataset) if confirmed else None
 
 
 def _check_gpu_available() -> dict[str, Any] | None:
@@ -905,6 +983,8 @@ def fine_tune(
             return resources_err.model_dump()
 
         validation_err = _validate_fine_tune_params(
+            model=model,
+            dataset=dataset,
             namespace=namespace,
             name=name,
             dtype=dtype,
