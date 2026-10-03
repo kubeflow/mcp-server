@@ -42,6 +42,7 @@ from kubeflow_mcp.core.security import (
     check_namespace_allowed,
     is_safe_python_code,
     mask_sensitive_data,
+    validate_image_reference,
     validate_k8s_name,
     validate_training_bounds,
 )
@@ -1162,7 +1163,7 @@ def run_custom_training(
             gpu_per_node=gpu_per_node,
             script=script,
             packages=packages,
-        )
+        ) or validate_image_reference(image)
         if bounds_err:
             return bounds_err.model_dump()
 
@@ -1367,7 +1368,7 @@ def run_container_training(
         bounds_err = validate_training_bounds(
             num_nodes=num_nodes,
             gpu_per_node=gpu_per_node,
-        )
+        ) or validate_image_reference(image)
         if bounds_err:
             return bounds_err.model_dump()
 
