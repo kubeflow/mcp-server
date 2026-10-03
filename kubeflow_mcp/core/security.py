@@ -182,8 +182,17 @@ class _ScriptSafetyVisitor(ast.NodeVisitor):
         self.warnings: list[str] = []
 
     def visit_Call(self, node: ast.Call) -> None:  # noqa: N802
-        if isinstance(node.func, ast.Name) and node.func.id in _DANGEROUS_CALLS:
-            self.warnings.append(f"Dangerous call: {node.func.id}() at line {node.lineno}")
+        if isinstance(node.func, ast.Name):
+            if node.func.id in _DANGEROUS_CALLS:
+                self.warnings.append(f"Dangerous call: {node.func.id}() at line {node.lineno}")
+            elif node.func.id in {"getattr", "setattr", "delattr"}:
+                if len(node.args) >= 2:
+                    attr_arg = node.args[1]
+                    if isinstance(attr_arg, ast.Constant) and isinstance(attr_arg.value, str):
+                        if attr_arg.value in _DANGEROUS_DUNDER:
+                            self.warnings.append(
+                                f"Dangerous call: {node.func.id}() at line {node.lineno}"
+                            )
         elif isinstance(node.func, ast.Attribute):
             if isinstance(node.func.value, ast.Name):
                 module = node.func.value.id
@@ -212,6 +221,11 @@ class _ScriptSafetyVisitor(ast.NodeVisitor):
             self.warnings.append(f"Dangerous attribute access: {node.attr} at line {node.lineno}")
         self.generic_visit(node)
 
+    def visit_Name(self, node: ast.Name) -> None:  # noqa: N802
+        if node.id in _DANGEROUS_DUNDER:
+            self.warnings.append(f"Dangerous name access: {node.id} at line {node.lineno}")
+        self.generic_visit(node)
+
 
 def is_safe_python_code(code: str) -> tuple[bool, str]:
     """AST-based scan for dangerous patterns in training scripts.
@@ -225,7 +239,8 @@ def is_safe_python_code(code: str) -> tuple[bool, str]:
 
     **Flagged patterns** (via AST, not substring matching):
 
-    - Calls: ``eval``, ``exec``, ``compile``, ``__import__``
+    - Calls: ``eval``, ``exec``, ``compile``, ``__import__``; ``getattr``/``setattr``/``delattr``
+      only when the attribute name is a literal dangerous dunder (e.g. ``"__globals__"``)
     - Module calls: ``os.system``, ``os.popen``, ``subprocess.*``, ``shutil.rmtree``
     - Imports: ``ctypes``, ``socket``
     - Dunder access: ``__builtins__``, ``__subclasses__``, ``__globals__``, ``__code__``
