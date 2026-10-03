@@ -23,6 +23,7 @@ from kubeflow_mcp.core.security import (
     is_safe_python_code,
     mask_sensitive_data,
     truncate_log_output,
+    validate_image_reference,
     validate_k8s_name,
     validate_namespace,
     validate_resource_limits,
@@ -475,3 +476,53 @@ class TestValidateRuntimeName:
     def test_accepts_label_at_63_chars(self):
         assert validate_runtime_name("a" * 63) is None
         assert validate_runtime_name(".".join(["a" * 63] * 3)) is None
+
+
+_SHA256 = "sha256:" + "a" * 64
+
+
+class TestValidateImageReference:
+    """Only clearly malformed references are rejected, so real images keep working."""
+
+    @pytest.mark.parametrize(
+        "image",
+        [
+            "nginx",
+            "ghcr.io/kubeflow/mcp-server:latest",
+            "localhost:5000/img:tag",
+            "registry.example.com:5000/a/b/c:tag",
+            f"img@{_SHA256}",
+            f"img:tag@{_SHA256}",
+            "a/b_c.d-e:tag",
+            "MyRegistry.io/app:1",
+            "pytorch/pytorch:2.0",
+        ],
+    )
+    def test_accepts_valid_references(self, image):
+        assert validate_image_reference(image) is None
+
+    def test_none_is_valid(self):
+        assert validate_image_reference(None) is None
+
+    @pytest.mark.parametrize(
+        "image",
+        [
+            "",
+            "   ",
+            "not a valid image!!",
+            "img!!",
+            "img:",
+            "img::double",
+            "-leading/x",
+            "/img",
+            "a//b",
+            "img/",
+            "img@",
+            "img@sha256",
+            ":tag",
+        ],
+    )
+    def test_rejects_malformed_references(self, image):
+        err = validate_image_reference(image)
+        assert err is not None
+        assert err.error_code == "VALIDATION_ERROR"
