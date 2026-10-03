@@ -132,6 +132,8 @@ def validate_image_reference(image: str | None, field: str = "image") -> ToolErr
     name, has_digest, digest = image.partition("@")
     if has_digest and not _IMAGE_DIGEST.fullmatch(digest):
         return _invalid("has an invalid digest (expected e.g. 'img@sha256:<hex>')")
+    if not name:
+        return _invalid("is missing the image name before '@'")
     if name[:1] in "-./:" or name[-1:] in "/:":
         return _invalid("must not start with a separator or end with '/' or ':'")
     if "//" in name or name.split("/")[-1].count(":") > 1:

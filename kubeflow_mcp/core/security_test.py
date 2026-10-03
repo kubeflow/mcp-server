@@ -656,6 +656,7 @@ class TestValidateImageReference:
             "img/",
             "img@",
             "img@sha256",
+            f"@{_SHA256}",
             ":tag",
         ],
     )
