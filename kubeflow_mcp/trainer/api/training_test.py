@@ -22,6 +22,7 @@ import threading
 from unittest.mock import MagicMock, patch
 
 import pytest
+from kubernetes.client.exceptions import ApiException
 from tests.common import FAILED, PREVIEW, VALIDATION_ERROR, TestCase, assert_test_case
 
 from kubeflow_mcp.trainer.api.training import (
@@ -331,6 +332,64 @@ def test_fine_tune_validates_resources_before_gpu_preflight():
 
     assert result["error_code"] == VALIDATION_ERROR
     gpu_check.assert_not_called()
+
+
+_TRAINING_TOOLS = [
+    (run_custom_training, {"script": "print('hello')", "runtime": "torch-distributed"}),
+    (run_container_training, {"image": "pytorch/pytorch:2.0"}),
+    (
+        fine_tune,
+        {"model": "hf://org/model", "dataset": "hf://org/dataset", "runtime": "torchtune-llama"},
+    ),
+]
+
+
+@pytest.mark.parametrize(("tool", "config"), _TRAINING_TOOLS)
+@pytest.mark.parametrize(
+    "bad_name", ["INVALID_NAME", "bad service account", "sa/name", "", "a" * 254]
+)
+def test_training_tools_reject_invalid_service_account_before_any_call(tool, config, bad_name):
+    with patch(PATCH_CLIENT) as mock_client, patch(PATCH_GPU_CHECK) as gpu_check:
+        result = tool(**config, service_account_name=bad_name, confirmed=True)
+
+    assert result["success"] is False
+    assert result["error_code"] == VALIDATION_ERROR
+    mock_client.assert_not_called()
+    gpu_check.assert_not_called()
+
+
+@pytest.mark.parametrize(("tool", "config"), _TRAINING_TOOLS)
+def test_training_tools_accept_dotted_service_account(tool, config):
+    with patch(PATCH_NS_CHECK, return_value=None), patch(PATCH_GPU_CHECK, return_value=None):
+        result = tool(**config, service_account_name="trainer.sa-1")
+
+    assert result["status"] == "preview"
+
+
+def _forbidden(**_kwargs):
+    """Mimic the SDK, which wraps the Kubernetes ApiException in a RuntimeError."""
+    try:
+        raise ApiException(status=403, reason="Forbidden")
+    except ApiException as e:
+        raise RuntimeError("Failed to create TrainJob") from e
+
+
+@patch(PATCH_NS_CHECK, return_value=None)
+@patch(PATCH_CLIENT)
+def test_forbidden_submission_returns_permission_denied(mock_client_fn, _ns):
+    """A 403 from RBAC or an admission policy is a permission problem, not SDK_ERROR."""
+    mock_client_fn.return_value.train.side_effect = _forbidden
+
+    result = run_custom_training(
+        script="print('hello')",
+        runtime="torch-distributed",
+        service_account_name="privileged-sa",
+        confirmed=True,
+    )
+
+    assert result["success"] is False
+    assert result["error_code"] == "PERMISSION_DENIED"
+    assert "service_account_name" in result["hint"]
 
 
 class TestRunCustomTrainingConfirmed:
