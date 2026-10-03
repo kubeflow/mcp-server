@@ -215,11 +215,19 @@ def test_non_admin_blocked_from_mutating_external_job(tool, call):
     api.patch_namespaced_custom_object.assert_not_called()
 
 
-def test_non_admin_allowed_for_mcp_created_job():
-    with cluster(ownership=mcp_utils.OWNERSHIP_MANAGED) as (_, client, _lookup):
-        result = delete_training_job("ours", confirmed=True)
+@pytest.mark.parametrize(
+    ("tool", "call"),
+    [
+        ("delete", lambda: delete_training_job("ours", confirmed=True)),
+        ("update", lambda: update_training_job("ours", "suspend", confirmed=True)),
+    ],
+)
+def test_non_admin_allowed_for_mcp_created_job(tool, call):
+    with cluster(ownership=mcp_utils.OWNERSHIP_MANAGED) as (api, client, _lookup):
+        result = call()
     assert result["success"] is True
-    client.delete_job.assert_called_once()
+    assert client.delete_job.call_count == (1 if tool == "delete" else 0)
+    assert api.patch_namespaced_custom_object.call_count == (1 if tool == "update" else 0)
 
 
 def test_admin_bypasses_ownership_check_entirely():
@@ -269,11 +277,19 @@ def test_missing_job_end_to_end_from_a_real_404(tool, call):
     client.delete_job.assert_not_called()
 
 
-def test_ownership_lookup_failure_does_not_mutate():
-    with cluster(ownership=None) as (_, client, _lookup):
-        result = delete_training_job("unknown", confirmed=True)
+@pytest.mark.parametrize(
+    ("tool", "call"),
+    [
+        ("delete", lambda: delete_training_job("unknown", confirmed=True)),
+        ("update", lambda: update_training_job("unknown", "suspend", confirmed=True)),
+    ],
+)
+def test_ownership_lookup_failure_does_not_mutate(tool, call):
+    with cluster(ownership=None) as (api, client, _lookup):
+        result = call()
     assert result["error_code"] == SDK_ERROR
     client.delete_job.assert_not_called()
+    api.patch_namespaced_custom_object.assert_not_called()
 
 
 @pytest.mark.parametrize(
