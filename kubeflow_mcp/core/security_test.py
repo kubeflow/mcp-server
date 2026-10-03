@@ -24,6 +24,7 @@ from kubeflow_mcp.core.security import (
     mask_sensitive_data,
     truncate_log_output,
     validate_k8s_name,
+    validate_k8s_subdomain_name,
     validate_namespace,
     validate_resource_limits,
     validate_runtime_name,
@@ -475,3 +476,21 @@ class TestValidateRuntimeName:
     def test_accepts_label_at_63_chars(self):
         assert validate_runtime_name("a" * 63) is None
         assert validate_runtime_name(".".join(["a" * 63] * 3)) is None
+
+
+class TestValidateK8sSubdomainName:
+    """Shared DNS-subdomain check, used for runtime and ServiceAccount names."""
+
+    @pytest.mark.parametrize("name", ["default", "trainer.sa-1", "a" * 63, "a.b." + "c" * 63])
+    def test_accepts_valid_names(self, name):
+        assert validate_k8s_subdomain_name(name, "service_account_name") is None
+
+    @pytest.mark.parametrize(
+        "name",
+        ["", "INVALID_NAME", "bad service account", "sa/name", "a" * 254, "a" * 64 + ".b"],
+    )
+    def test_rejects_invalid_names(self, name):
+        err = validate_k8s_subdomain_name(name, "service_account_name")
+        assert err is not None
+        assert err.error_code == "VALIDATION_ERROR"
+        assert "service_account_name" in err.error

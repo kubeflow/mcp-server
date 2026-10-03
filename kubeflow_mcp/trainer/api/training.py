@@ -43,6 +43,7 @@ from kubeflow_mcp.core.security import (
     is_safe_python_code,
     mask_sensitive_data,
     validate_k8s_name,
+    validate_k8s_subdomain_name,
     validate_training_bounds,
 )
 
@@ -339,6 +340,19 @@ def _sdk_error(e: Exception, hint: str | None = None) -> dict[str, Any]:
             details = {"response": e.response.text}  # type: ignore[union-attr]
         except Exception:
             pass
+    # The SDK wraps the Kubernetes ApiException, so check the cause for a 403. RBAC
+    # or an admission policy (e.g. one restricting service_account_name) denied the
+    # request: that is a permission problem to report, not a transient SDK failure.
+    if any(getattr(err, "status", None) == 403 for err in (e, e.__cause__)):
+        return ToolError(
+            error=str(e),
+            error_code=ErrorCode.PERMISSION_DENIED,
+            details=details,
+            hint=(
+                "The cluster denied this request. Check that you may create TrainJobs in "
+                "this namespace and use the requested service_account_name."
+            ),
+        ).model_dump()
     return ToolError(
         error=str(e),
         error_code=ErrorCode.SDK_ERROR,
@@ -350,6 +364,18 @@ def _sdk_error(e: Exception, hint: str | None = None) -> dict[str, Any]:
 # Kubernetes resource quantity, e.g. "8", "0.5", "500m", "10G", "1.5Gi". No sign is
 # allowed because a resource request cannot be negative.
 _K8S_QUANTITY_RE = re.compile(r"(\d+(\.\d*)?|\.\d+)([KMGTPE]i|[numkMGTPE]|[eE][+-]?\d+)?")
+
+
+def _validate_service_account_name(name: str | None) -> ToolError | None:
+    """Validate the optional ServiceAccount name syntax before any cluster call.
+
+    This only checks the name. Whether the caller may use that account is enforced
+    by the cluster (RBAC or an admission policy); a denial surfaces as
+    PERMISSION_DENIED via _sdk_error().
+    """
+    if name is None:
+        return None
+    return validate_k8s_subdomain_name(name, "service_account_name")
 
 
 def _validate_resources_per_node(resources: dict[str, Any] | None) -> ToolError | None:
@@ -900,9 +926,11 @@ def fine_tune(
     try:
         # Before _validate_fine_tune_params(): its GPU preflight queries the cluster, and
         # invalid input should never trigger an external call.
-        resources_err = _validate_resources_per_node(resources_per_node)
-        if resources_err:
-            return resources_err.model_dump()
+        input_err = _validate_resources_per_node(
+            resources_per_node
+        ) or _validate_service_account_name(service_account_name)
+        if input_err:
+            return input_err.model_dump()
 
         validation_err = _validate_fine_tune_params(
             namespace=namespace,
@@ -1171,9 +1199,11 @@ def run_custom_training(
             if err:
                 return err.model_dump()
 
-        resources_err = _validate_resources_per_node(resources_per_node)
-        if resources_err:
-            return resources_err.model_dump()
+        input_err = _validate_resources_per_node(
+            resources_per_node
+        ) or _validate_service_account_name(service_account_name)
+        if input_err:
+            return input_err.model_dump()
 
         effective_resources = resources_per_node or (
             {"gpu": gpu_per_node} if gpu_per_node > 0 else None
@@ -1376,9 +1406,11 @@ def run_container_training(
             if err:
                 return err.model_dump()
 
-        resources_err = _validate_resources_per_node(resources_per_node)
-        if resources_err:
-            return resources_err.model_dump()
+        input_err = _validate_resources_per_node(
+            resources_per_node
+        ) or _validate_service_account_name(service_account_name)
+        if input_err:
+            return input_err.model_dump()
 
         effective_resources = resources_per_node or (
             {"gpu": gpu_per_node} if gpu_per_node > 0 else None

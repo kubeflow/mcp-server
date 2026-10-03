@@ -360,6 +360,7 @@ For production deployments:
 - [ ] Use stdio transport for local dev; place HTTP behind an authenticated reverse proxy for additional defense-in-depth
 - [ ] Bind the MCP server ServiceAccount to the minimum ClusterRole above
 - [ ] Do not grant `run_custom_training` access to untrusted users
+- [ ] Restrict which ServiceAccounts training jobs may use with an admission policy (Kubernetes RBAC alone does not limit `serviceAccountName`). Training tools only check the `service_account_name` syntax; a 403 from the policy is returned as `PERMISSION_DENIED`
 - [ ] Keep log level at INFO or above in production (DEBUG exposes stack traces in error responses)
 - [ ] Ensure every new tool has a `CLIENT_TOOL_ANNOTATIONS` entry — `read_only` mode is fail-closed: tools without an explicit `readOnlyHint: True` annotation are treated as write tools and excluded
 - [ ] Review audit logs (`tool_call` events with `"audit": true`) for unexpected tool usage
