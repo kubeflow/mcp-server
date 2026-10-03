@@ -20,6 +20,7 @@ import pytest
 from tests.common import FAILED, SUCCESS, TestCase, assert_test_case
 
 from kubeflow_mcp.core.security import (
+    check_namespace_allowed,
     is_safe_python_code,
     mask_sensitive_data,
     truncate_log_output,
@@ -86,10 +87,68 @@ def test_validate_namespace_delegates():
     assert err is not None
 
 
-# TODO(test): test check_namespace_allowed with policy allowing namespace
-# TODO(test): test check_namespace_allowed with policy denying namespace
-# TODO(test): test check_namespace_allowed with None resolving to default
-# TODO(test): test check_namespace_allowed fail-closed when resolution errors
+def test_check_namespace_allowed_without_policy(monkeypatch):
+    monkeypatch.setattr("kubeflow_mcp.core.policy.get_allowed_namespaces", lambda: None)
+
+    assert check_namespace_allowed("default") is None
+
+
+def test_check_namespace_allowed_accepts_allowed_namespace(monkeypatch):
+    monkeypatch.setattr(
+        "kubeflow_mcp.core.policy.get_allowed_namespaces",
+        lambda: ["ml-team"],
+    )
+
+    assert check_namespace_allowed("ml-team") is None
+
+
+def test_check_namespace_allowed_rejects_disallowed_namespace(monkeypatch):
+    monkeypatch.setattr(
+        "kubeflow_mcp.core.policy.get_allowed_namespaces",
+        lambda: ["ml-team"],
+    )
+
+    err = check_namespace_allowed("default")
+
+    assert err is not None
+    assert err.error_code == "PERMISSION_DENIED"
+    assert err.details["effective_namespace"] == "default"
+
+
+def test_check_namespace_allowed_resolves_implicit_default(monkeypatch):
+    monkeypatch.setattr(
+        "kubeflow_mcp.core.policy.get_allowed_namespaces",
+        lambda: ["ml-team"],
+    )
+    monkeypatch.setattr(
+        "kubeflow_mcp.common.utils.get_trainer_effective_namespace",
+        lambda _client: "ml-team",
+    )
+
+    assert check_namespace_allowed(None) is None
+
+
+def test_check_namespace_allowed_fails_closed_when_default_resolution_fails(monkeypatch):
+    monkeypatch.setattr(
+        "kubeflow_mcp.core.policy.get_allowed_namespaces",
+        lambda: ["ml-team"],
+    )
+
+    def fail_to_resolve(_client):
+        raise RuntimeError("namespace unavailable")
+
+    monkeypatch.setattr(
+        "kubeflow_mcp.common.utils.get_trainer_effective_namespace",
+        fail_to_resolve,
+    )
+
+    err = check_namespace_allowed(None)
+
+    assert err is not None
+    assert err.error_code == "PERMISSION_DENIED"
+    assert "fail closed" in err.error
+
+
 
 
 # ─── Resource limits validation ─────────────────────────────────────────────
