@@ -42,6 +42,18 @@ def exploding_tool() -> dict[str, Any]:
     raise RuntimeError("kaboom")
 
 
+def type_error_tool() -> dict[str, Any]:
+    """A tool whose own body raises TypeError, as an SDK call might."""
+    raise TypeError("unsupported operand type(s) inside the tool")
+
+
+def identity_probe() -> dict[str, Any]:
+    """Report the audit identity visible to a tool while it runs."""
+    from kubeflow_mcp.core.middleware import get_user_id
+
+    return {"audit_user": get_user_id()}
+
+
 def _a2a_client(
     *,
     tools: dict[str, Any] | None = None,
@@ -381,6 +393,114 @@ def test_delegation_reports_bad_arguments_as_caller_error() -> None:
         body = client.post(A2A_PATH, json=_send("fine_tune", {"nonexistent": "x"})).json()
 
     assert body["error"]["code"] == -32602
+
+
+def test_delegation_reports_internal_type_error_as_internal_error() -> None:
+    """A TypeError from inside the tool is a server fault, not bad arguments."""
+    with _a2a_client(tools={"type_error_tool": type_error_tool}) as client:
+        body = client.post(A2A_PATH, json=_send("type_error_tool")).json()
+
+    assert body["error"]["code"] == -32603
+    assert "unsupported operand" not in body["error"]["message"]
+
+
+def test_delegation_separates_bad_arguments_from_tool_faults() -> None:
+    """The same tool yields invalid-params for a bad call and internal for its own fault."""
+    with _a2a_client(tools={"type_error_tool": type_error_tool}) as client:
+        bad_args = client.post(A2A_PATH, json=_send("type_error_tool", {"nope": 1})).json()
+        internal = client.post(A2A_PATH, json=_send("type_error_tool")).json()
+
+    assert bad_args["error"]["code"] == -32602
+    assert internal["error"]["code"] == -32603
+
+
+# ─── Audit identity ────────────────────────────────────────
+
+
+def test_delegated_call_records_authenticated_subject() -> None:
+    """A delegated action must be attributable to whoever authenticated."""
+    with _a2a_client(tools={"identity_probe": identity_probe}, authenticated=True) as client:
+        body = client.post(
+            A2A_PATH,
+            json=_send("identity_probe"),
+            headers={"Authorization": "Bearer secret"},
+        ).json()
+
+    assert body["result"]["parts"][0]["data"]["audit_user"] == "api-key"
+
+
+def test_audit_identity_does_not_leak_after_the_call() -> None:
+    from kubeflow_mcp.core.middleware import get_user_id
+
+    with _a2a_client(tools={"identity_probe": identity_probe}, authenticated=True) as client:
+        client.post(
+            A2A_PATH,
+            json=_send("identity_probe"),
+            headers={"Authorization": "Bearer secret"},
+        )
+
+    assert get_user_id() is None
+
+
+def test_unauthenticated_server_records_no_subject() -> None:
+    """With auth disabled there is no verified caller to attribute the call to."""
+    with _a2a_client(tools={"identity_probe": identity_probe}) as client:
+        body = client.post(A2A_PATH, json=_send("identity_probe")).json()
+
+    assert body["result"]["parts"][0]["data"]["audit_user"] is None
+
+
+def test_audit_wrapper_sees_subject_on_a2a_tool_call(monkeypatch) -> None:
+    """End-to-end: the audit wrapper that stamps user.id sees the verified caller.
+
+    Spies on the identity lookup inside ``_audit_wrap`` rather than the probe
+    tool, so the assertion covers the real audit path a delegated call takes.
+    """
+    from kubeflow_mcp.core import server as server_module
+    from kubeflow_mcp.core.auth import APIKeyVerifier
+    from kubeflow_mcp.core.middleware import get_user_id as real_get_user_id
+
+    seen: list[str | None] = []
+
+    def _recording_get_user_id() -> str | None:
+        value = real_get_user_id()
+        seen.append(value)
+        return value
+
+    monkeypatch.setattr(server_module, "get_user_id", _recording_get_user_id)
+
+    auth = APIKeyVerifier(expected_token="secret")
+    mcp = server_module.create_server(persona="readonly", auth_provider=auth)
+    with TestClient(mcp.http_app(transport="streamable-http")) as client:
+        response = client.post(
+            A2A_PATH,
+            json=_send("health_check"),
+            headers={"Authorization": "Bearer secret"},
+        )
+
+    assert response.status_code == 200
+    assert "api-key" in seen, f"audit wrapper never saw the authenticated subject: {seen}"
+
+
+def test_token_subject_prefers_sub_claim_over_client_id() -> None:
+    """Under JWT the caller's own identity is the sub claim, not the client."""
+    from kubeflow_mcp.core.a2a import _token_subject
+
+    class _Token:
+        claims = {"sub": "kunal@example.com"}
+        client_id = "some-client"
+
+    assert _token_subject(_Token()) == "kunal@example.com"
+
+
+def test_token_subject_falls_back_to_client_id() -> None:
+    from kubeflow_mcp.core.a2a import _token_subject
+
+    class _Token:
+        claims: dict[str, Any] = {}
+        client_id = "api-key"
+
+    assert _token_subject(_Token()) == "api-key"
 
 
 def test_delegation_reports_tool_failure_as_internal_error() -> None:

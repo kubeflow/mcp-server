@@ -58,6 +58,7 @@ and streaming can be added later for a consumer that actually needs it.
 
 from __future__ import annotations
 
+import inspect
 import logging
 import uuid
 from collections.abc import Callable, Mapping
@@ -69,6 +70,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 from kubeflow_mcp import __version__
+from kubeflow_mcp.core.middleware import audit_identity
 
 logger = logging.getLogger(__name__)
 
@@ -297,25 +299,53 @@ def extract_delegation(params: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
     )
 
 
-async def _authenticate(request: Request, auth_provider: Any) -> bool:
+def _token_subject(access_token: Any) -> str | None:
+    """Derive the audit subject from a verified token.
+
+    Prefers the ``sub`` claim, which is the caller's own identity under JWT
+    auth. Falls back to ``client_id``, which is all a shared API key can say
+    about who is calling.
+    """
+    claims = getattr(access_token, "claims", None)
+    if isinstance(claims, Mapping):
+        subject = claims.get("sub")
+        if subject:
+            return str(subject)
+
+    client_id = getattr(access_token, "client_id", None)
+    return str(client_id) if client_id else None
+
+
+async def _authenticate(request: Request, auth_provider: Any) -> tuple[bool, str | None]:
     """Verify the bearer token on a delegation request.
 
     ``custom_route`` handlers sit outside FastMCP's MCP-level auth, so the
     check is made here explicitly rather than assumed.
+
+    Returns:
+        Whether the caller is authorized, and the subject to attribute the
+        delegated call to. The subject is carried into the audit context so a
+        delegated action is recorded against whoever authenticated, not
+        anonymously.
     """
     if auth_provider is None:
-        return True
+        return True, None
 
     header = request.headers.get("Authorization", "")
     scheme, _, token = header.partition(" ")
     if scheme.lower() != "bearer" or not token:
-        return False
+        return False, None
 
     try:
-        return await auth_provider.verify_token(token) is not None
+        access_token = await auth_provider.verify_token(token)
     except Exception:
         logger.warning("a2a_token_verification_failed", exc_info=True)
-        return False
+        return False, None
+
+    if access_token is None:
+        return False, None
+
+    return True, _token_subject(access_token)
 
 
 def register_a2a_routes(
@@ -354,7 +384,8 @@ def register_a2a_routes(
 
     @mcp.custom_route(A2A_PATH, methods=["POST"], include_in_schema=False)
     async def a2a_endpoint(request: Request) -> Response:  # noqa: C901
-        if not await _authenticate(request, auth_provider):
+        authorized, subject = await _authenticate(request, auth_provider)
+        if not authorized:
             return JSONResponse(
                 {"error": "unauthorized"},
                 status_code=401,
@@ -405,13 +436,23 @@ def register_a2a_routes(
                 msg_id,
             )
 
+        # Validate the arguments against the tool's signature *before* calling
+        # it. Binding here is the only place a TypeError means "the caller sent
+        # the wrong arguments"; once the tool is running, a TypeError is a
+        # fault inside the tool or the SDK and must not be reported to the
+        # caller as invalid-params.
+        try:
+            inspect.signature(tool_func).bind(**arguments)
+        except TypeError as exc:
+            return _error(_INVALID_PARAMS, f"Invalid arguments for '{tool_name}': {exc}", msg_id)
+
         try:
             # Tools are synchronous; run off the event loop so one delegated
-            # call cannot stall the server for everyone else.
-            result = await run_in_threadpool(lambda: tool_func(**arguments))
-        except TypeError as exc:
-            # A bad argument set is the caller's error, not a server fault.
-            return _error(_INVALID_PARAMS, f"Invalid arguments for '{tool_name}': {exc}", msg_id)
+            # call cannot stall the server for everyone else. The verified
+            # subject is bound for the duration so the audit log records who
+            # the delegated call was made by.
+            with audit_identity(subject):
+                result = await run_in_threadpool(lambda: tool_func(**arguments))
         except Exception:
             logger.error("a2a_delegation_failed", extra={"tool": tool_name}, exc_info=True)
             return _error(_INTERNAL_ERROR, f"Tool '{tool_name}' failed", msg_id)
