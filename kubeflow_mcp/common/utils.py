@@ -203,3 +203,6 @@ def reset_clients() -> None:
     _get_api_client.cache_clear()
     with _ns_client_lock:
         _ns_client_cache.clear()
+    from kubeflow_mcp.trainer.api.kueue import reset_kueue_cache
+
+    reset_kueue_cache()
