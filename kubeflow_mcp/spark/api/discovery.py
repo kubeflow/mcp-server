@@ -20,7 +20,7 @@ from typing import Any
 from kubeflow_mcp.common.constants import ErrorCode
 from kubeflow_mcp.common.types import ToolError, ToolResponse, exception_details, is_k8s_not_found
 from kubeflow_mcp.common.utils import get_spark_client_for_namespace
-from kubeflow_mcp.core.security import check_namespace_allowed
+from kubeflow_mcp.core.security import check_namespace_allowed, validate_k8s_name
 from kubeflow_mcp.spark.types import session_info_to_dict
 
 logger = logging.getLogger(__name__)
@@ -104,6 +104,10 @@ def get_spark_session(name: str, namespace: str | None = None) -> dict[str, Any]
     ns_err = check_namespace_allowed(namespace)
     if ns_err is not None:
         return ns_err.model_dump()
+
+    name_err = validate_k8s_name(name, "session name")
+    if name_err is not None:
+        return name_err.model_dump()
 
     try:
         client = get_spark_client_for_namespace(namespace)

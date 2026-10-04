@@ -22,12 +22,14 @@ from typing import Any
 from kubeflow_mcp.common.constants import ErrorCode
 from kubeflow_mcp.common.types import ToolError, ToolResponse, exception_details, is_k8s_not_found
 from kubeflow_mcp.common.utils import get_spark_client_for_namespace
-from kubeflow_mcp.core.security import check_namespace_allowed
+from kubeflow_mcp.core.security import check_namespace_allowed, validate_k8s_name
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_TAIL_LINES = 200
 MAX_TAIL_LINES = 2000
+MAX_LOG_CHARS = 10_000
+_TRUNCATION_MARKER = "... (logs truncated)\n"
 
 # A session whose server pod has not been scheduled yet has no typed SDK error:
 # the backend raises a plain ``RuntimeError``. Released kubeflow[spark] 0.4.x
@@ -54,7 +56,8 @@ def get_spark_session_logs(
     """Get driver-pod logs from a SparkConnect session.
 
     Streaming (``follow=True``) is intentionally not exposed — a stateless MCP
-    tool returns a bounded snapshot. Use ``tail_lines`` to control volume.
+    tool returns a bounded snapshot. Use ``tail_lines`` to control volume;
+    output is also capped at ``MAX_LOG_CHARS`` characters.
 
     Args:
         name: The SparkConnect session name.
@@ -67,7 +70,7 @@ def get_spark_session_logs(
         - ``name`` (str): The session name
         - ``logs`` (str): The captured driver-pod log lines
         - ``lines`` (int): Number of lines returned
-        - ``truncated`` (bool): True if older lines were dropped to honor ``tail_lines``
+        - ``truncated`` (bool): True if log lines or characters were dropped to honor limits
 
     Raises:
         ToolError: If the session is not found (``RESOURCE_NOT_FOUND``) or has no
@@ -76,6 +79,10 @@ def get_spark_session_logs(
     ns_err = check_namespace_allowed(namespace)
     if ns_err is not None:
         return ns_err.model_dump()
+
+    name_err = validate_k8s_name(name, "session name")
+    if name_err is not None:
+        return name_err.model_dump()
 
     if tail_lines < 1:
         return ToolError(
@@ -90,18 +97,40 @@ def get_spark_session_logs(
         # ``tail_lines`` via a bounded deque so a chatty driver can't exhaust
         # memory, while counting the total to report truncation.
         log_iter = client.get_session_logs(name, follow=False)
-        window: deque[str] = deque(maxlen=tail_lines)
+        window: deque[str] = deque()
+        window_chars = 0
         total = 0
+        truncated = False
         for line in log_iter:
+            # Keep memory bounded even if the SDK yields a single enormous line.
+            if len(line) > MAX_LOG_CHARS:
+                line = line[-MAX_LOG_CHARS:]
+                truncated = True
             window.append(line)
+            window_chars += len(line)
+            if len(window) > tail_lines:
+                window_chars -= len(window.popleft())
+                truncated = True
+            while window and window_chars + max(0, len(window) - 1) > MAX_LOG_CHARS:
+                window_chars -= len(window.popleft())
+                truncated = True
+            # Count each source line, including lines dropped to enforce either bound.
             total += 1
         lines = list(window)
-        truncated = total > tail_lines
+        truncated = truncated or total > len(lines)
+        logs = "\n".join(lines)
+        if truncated:
+            budget = MAX_LOG_CHARS - len(_TRUNCATION_MARKER)
+            logs = _TRUNCATION_MARKER + logs[-budget:]
+            # The character trim can cut further than the line window did (and
+            # can split the oldest surviving line), so recount from the final
+            # payload instead of reporting the pre-trim window size.
+            lines = logs.splitlines()[1:]
 
         return ToolResponse(
             data={
                 "name": name,
-                "logs": "\n".join(lines),
+                "logs": logs,
                 "lines": len(lines),
                 "truncated": truncated,
             }
