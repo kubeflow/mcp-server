@@ -12,7 +12,7 @@ for the security model and RBAC YAML see [ARCHITECTURE.md](../ARCHITECTURE.md).
 |-------------|-------|
 | **Python** 3.10 – 3.12 | Check the [compatibility matrix](../README.md#requirements) for exact SDK versions |
 | **Kubernetes** ≥ 1.27 | `kubectl` configured and pointing at your cluster (`kubectl cluster-info`) |
-| **Kubeflow Trainer** ≥ 2.3.0 | CRD must be installed; verify with `kubectl get crd trainjobs.trainer.kubeflow.org` |
+| **Kubeflow Trainer** | Version depends on the MCP server release, see the [compatibility matrix](../README.md#requirements). CRD must be installed; verify with `kubectl get crd trainjobs.trainer.kubeflow.org` |
 | **MCP client** | Cursor, Claude Code, VS Code, or any client that speaks MCP |
 
 > **Note:** The server itself does not need GPU resources — only the training jobs it submits do.
@@ -35,9 +35,12 @@ Pre-built multi-arch images are published to GHCR on every release:
 ```bash
 docker run --rm -p 8000:8000 \
   -e KUBEFLOW_MCP_AUTH_TOKEN=my-secret-token \
-  -v ~/.kube:/root/.kube:ro \
+  -e KUBECONFIG=/kube/config \
+  -v ~/.kube/config:/kube/config:ro \
   ghcr.io/kubeflow/mcp-server:latest
 ```
+
+> **Note:** The mounted `kubeconfig` file must be readable by the container user (`uid 65532`). On a Linux host, a `0600` kubeconfig owned by your own user will not be readable.
 
 The server listens at `http://localhost:8000/mcp`.
 For in-cluster deployment with Kubernetes manifests see [`examples/kubernetes/`](../examples/kubernetes/).
@@ -131,8 +134,8 @@ curl http://localhost:8000/ready    # readiness — clients loaded, resources re
 ```
 
 `/ready` returns `200` only when both `clients_ready` and `resources_ready` are `true`. It does
-**not** contact Kubernetes; a 503 means a packaged resource file is missing — check server logs, not
-cluster health.
+**not** contact Kubernetes; a 503 means a client module failed to load or a packaged resource file
+is missing — check server logs, not cluster health.
 
 ### 3. MCP Inspector (no LLM required)
 
@@ -336,7 +339,7 @@ make inspector
 | Symptom | Cause | Fix |
 |---------|-------|-----|
 | `"kubernetes": false` in `health_check` | Server cannot reach the K8s API | Check `kubectl cluster-info`; verify kubeconfig or ServiceAccount permissions |
-| `Trainer CRD not found` | Kubeflow Trainer not installed or wrong version | Install Trainer ≥ 2.3.0; check the [compatibility matrix](../README.md#requirements) |
+| `Trainer CRD not found` | Kubeflow Trainer not installed or wrong version | Install the Trainer version the [compatibility matrix](../README.md#requirements) lists for your MCP server release |
 | `"status": "degraded"` from `/ready` | A packaged Markdown resource file is missing | Check server logs; reinstall the package |
 | Agent has no tool for submitting a job | Persona is `readonly` | Set `KUBEFLOW_MCP_PERSONA=data-scientist` or higher |
 | `"was not created by MCP"` when deleting | Job was not submitted through MCP tools | Use `platform-admin` persona, or re-create the job via MCP tools |
