@@ -26,6 +26,8 @@ The Kubeflow MCP Server exposes Kubeflow Training operations as [Model Context P
 
 ## Get Started
 
+> New here? See the **[Quickstart & Troubleshooting guide](docs/quickstart.md)** for a step-by-step path from installation to a working MCP client.
+
 ### Install from PyPI
 
 ```bash
@@ -316,6 +318,7 @@ make inspector TRANSPORT=sse      # Inspector + SSE (deprecated; start server se
 
 ## Documentation
 
+- **[Quickstart & Troubleshooting](docs/quickstart.md)**: Install, connect a client, verify connectivity, and diagnose common failures
 - **[CONTRIBUTING](CONTRIBUTING.md)**: Development workflow and PR guidelines
 - **[ROADMAP](ROADMAP.md)**: Project roadmap
 - **[SECURITY](SECURITY.md)**: Vulnerability reporting; see [ARCHITECTURE.md#security-model](ARCHITECTURE.md#security-model) for threat model, RBAC, and hardening
