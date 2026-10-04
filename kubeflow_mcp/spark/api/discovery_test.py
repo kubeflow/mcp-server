@@ -60,6 +60,14 @@ class TestListSessions:
 
 
 class TestGetSession:
+    def test_invalid_session_name_is_rejected_before_sdk_call(self):
+        client = MagicMock()
+        with patch.object(discovery, "get_spark_client_for_namespace", return_value=client):
+            out = discovery.get_spark_session("Not a valid/name")
+        assert out["success"] is False
+        assert out["error_code"] == "VALIDATION_ERROR"
+        client.get_session.assert_not_called()
+
     def test_get_ok(self, mock_spark_client):
         mock_spark_client.get_session.return_value = make_spark_session_info("x")
         out = discovery.get_spark_session("x")
