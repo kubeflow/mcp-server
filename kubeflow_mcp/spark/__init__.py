@@ -34,7 +34,7 @@ MODULE_INFO = {
     "name": "spark",
     "description": "SparkConnect session management on Kubernetes",
     "sdk_client": "kubeflow.spark.SparkClient",
-    "sdk_version": ">=0.4.0",
+    "sdk_version": ">=0.5.0",
     "extra": "spark",
     "status": "implemented",
 }
