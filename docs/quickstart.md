@@ -340,7 +340,7 @@ make inspector
 |---------|-------|-----|
 | `"kubernetes": false` in `health_check` | Server cannot reach the K8s API | Check `kubectl cluster-info`; verify kubeconfig or ServiceAccount permissions |
 | `Trainer CRD not found` | Kubeflow Trainer not installed or wrong version | Install the Trainer version the [compatibility matrix](../README.md#requirements) lists for your MCP server release |
-| `"status": "degraded"` from `/ready` | A packaged Markdown resource file is missing | Check server logs; reinstall the package |
+| `/ready` returns `503` (`{"status": "not_ready"}`) | A client module failed to load or a packaged resource file is missing | Check server logs; reinstall the package if a resource file is missing |
 | Agent has no tool for submitting a job | Persona is `readonly` | Set `KUBEFLOW_MCP_PERSONA=data-scientist` or higher |
 | `"was not created by MCP"` when deleting | Job was not submitted through MCP tools | Use `platform-admin` persona, or re-create the job via MCP tools |
 | Empty namespace or 403 listing runtimes | In-cluster pod running in the wrong namespace | Deploy in the same namespace as your TrainJobs (see [`examples/kubernetes/`](../examples/kubernetes/)) |
