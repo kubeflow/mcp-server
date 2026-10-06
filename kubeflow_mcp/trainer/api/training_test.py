@@ -51,6 +51,7 @@ def _offline_hub(monkeypatch):
     """fine_tune(confirmed=True) checks hf:// repos on the Hub; keep unit tests offline."""
     monkeypatch.setattr("huggingface_hub.model_info", MagicMock())
     monkeypatch.setattr("huggingface_hub.dataset_info", MagicMock())
+    monkeypatch.setattr("huggingface_hub.list_models", MagicMock(return_value=[]))
 
 
 # ─── fine_tune validation ───────────────────────────────────────────────────
@@ -358,13 +359,20 @@ def _hub_error(error_cls: type[Exception], status_code: int) -> Exception:
         ("hf://org/model/extra", "hf://org/ds"),
         ("hf://org//model", "hf://org/ds"),
         ("hf://org/bad name", "hf://org/ds"),
+        (" hf://org/model", "hf://org/ds"),  # leading whitespace skips the hf:// check
         ("hf://org/model", "hf://ds"),
         ("hf://org/model", "hf://org//ds"),
+        ("hf://org/model", "hf://org/ds/my path"),  # whitespace in the dataset subpath
+        ("hf://org/model", "hf://org/ds/../other"),  # path traversal in the subpath
     ],
 )
 def test_fine_tune_preview_rejects_malformed_hf_references(model, dataset):
     with patch(PATCH_GPU_CHECK) as gpu_check, patch("huggingface_hub.model_info") as hub:
-        result = fine_tune(model=model, dataset=dataset, runtime="torchtune-llama")
+        result = fine_tune(
+            model=model,
+            dataset=dataset,
+            runtime="torchtune-llama",
+        )
 
     assert result["error_code"] == VALIDATION_ERROR
     gpu_check.assert_not_called()

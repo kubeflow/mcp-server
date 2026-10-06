@@ -339,6 +339,9 @@ def _hf_repo_id(uri: str, *, allow_subpath: bool) -> str | None:
     parts = uri.removeprefix("hf://").rstrip("/").split("/")
     if len(parts) < 2 or (len(parts) > 2 and not allow_subpath) or "" in parts:
         return None
+    # A subpath is not checked against the repo pattern, so block path traversal here.
+    if any(part in (".", "..") for part in parts):
+        return None
     repo_id = "/".join(parts[:2])
     return repo_id if _HF_MODEL_ID_RE.fullmatch(repo_id) else None
 
@@ -353,6 +356,13 @@ def _validate_hf_reference_formats(model: str, dataset: str) -> ToolError | None
         ("model", model, False, "hf://<org>/<model>"),
         ("dataset", dataset, True, "hf://<org>/<dataset>[/<path>]"),
     ):
+        # Before the scheme check: " hf://org/model" does not start with "hf://", so it
+        # would otherwise skip validation and reach the initializer.
+        if any(ch.isspace() for ch in uri):
+            return ToolError(
+                error=f"Invalid Hugging Face {field} reference '{uri}' (must not contain whitespace)",
+                error_code=ErrorCode.VALIDATION_ERROR,
+            )
         if uri.startswith("hf://") and _hf_repo_id(uri, allow_subpath=allow_subpath) is None:
             return ToolError(
                 error=f"Invalid Hugging Face {field} reference '{uri}' (expected {example})",
