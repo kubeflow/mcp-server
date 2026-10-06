@@ -47,7 +47,7 @@ kubectl rollout restart deploy/kubeflow-mcp -n "$NAMESPACE"
 |---|---|
 | `ServiceAccount/kubeflow-mcp` | Identity the server uses against the Kubernetes API |
 | `ClusterRole/kubeflow-mcp-read` | Read-only: `ClusterTrainingRuntime`, nodes, namespaces, CRDs |
-| `Role/kubeflow-mcp-trainjobs` | Full TrainJob lifecycle, in this namespace only |
+| `Role/kubeflow-mcp-trainjobs` | Full TrainJob lifecycle and Kueue workload visibility, in this namespace only |
 | `Role/kubeflow-mcp-trainer-version` | Read of the single `kubeflow-trainer-public` ConfigMap in `kubeflow-system`, so the SDK can report the Trainer control-plane version |
 | `Deployment/kubeflow-mcp` | The server, HTTP transport on port 8000 |
 | `Service/kubeflow-mcp` | ClusterIP, reachable at `kubeflow-mcp:8000` in-namespace |

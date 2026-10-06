@@ -45,12 +45,15 @@ NEGATIVE_CACHE_TTL = 60.0
 # Negative: (None, expire_time) - cached for NEGATIVE_CACHE_TTL
 _discovery_cache: dict[str, tuple[str | None, float | None]] = {}
 _cache_lock = threading.Lock()
+_warned_workload_rbac = False
 
 
 def reset_kueue_cache() -> None:
     """Reset the Kueue API discovery cache (for testing or context rotation)."""
+    global _warned_workload_rbac
     with _cache_lock:
         _discovery_cache.clear()
+        _warned_workload_rbac = False
 
 
 def discover_kueue_version() -> str | None:
@@ -65,6 +68,7 @@ def discover_kueue_version() -> str | None:
         api_client = _get_api_client()
         host = getattr(api_client.configuration, "host", "default")
     except Exception:
+        api_client = None
         host = "default"
 
     with _cache_lock:
@@ -77,7 +81,7 @@ def discover_kueue_version() -> str | None:
                 return None
 
     try:
-        apis_api = k8s_client.ApisApi(_get_api_client())
+        apis_api = k8s_client.ApisApi(api_client)
         group_list = apis_api.get_api_versions(_request_timeout=K8S_TIMEOUT)
         served_version: str | None = None
         for group in getattr(group_list, "groups", []):
@@ -164,7 +168,25 @@ def get_trainjob_queue_status(
                 _request_timeout=K8S_TIMEOUT,
             )
         except Exception as e:
-            logger.debug("Failed to list Kueue Workloads for %s/%s: %s", namespace, name, e)
+            if getattr(e, "status", None) in (403, "403"):
+                global _warned_workload_rbac
+                should_warn = False
+                with _cache_lock:
+                    if not _warned_workload_rbac:
+                        _warned_workload_rbac = True
+                        should_warn = True
+                if should_warn:
+                    logger.warning(
+                        "Permission denied listing Kueue Workloads for %s/%s: %s. "
+                        "Grant 'list' on workloads.kueue.x-k8s.io to enable queue status visibility.",
+                        namespace,
+                        name,
+                        e,
+                    )
+                else:
+                    logger.debug("Failed to list Kueue Workloads for %s/%s: %s", namespace, name, e)
+            else:
+                logger.debug("Failed to list Kueue Workloads for %s/%s: %s", namespace, name, e)
             return None
 
         items = workloads.get("items", [])

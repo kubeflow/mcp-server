@@ -362,7 +362,7 @@ class TestGetTrainjobQueueStatus:
         return_value="v1beta1",
     )
     @patch("kubeflow_mcp.trainer.api.kueue.get_custom_objects_api")
-    def test_rbac_403_fails_open(self, mock_custom_api_fn, _disc):
+    def test_rbac_403_fails_open(self, mock_custom_api_fn, _disc, caplog):
         mock_api = MagicMock()
         mock_api.get_namespaced_custom_object.return_value = {
             "metadata": {"name": "llama-lora", "uid": "123"}
@@ -370,8 +370,45 @@ class TestGetTrainjobQueueStatus:
         mock_api.list_namespaced_custom_object.side_effect = ApiException(status=403)
         mock_custom_api_fn.return_value = mock_api
 
-        res = get_trainjob_queue_status("llama-lora", "default", job_status="Created")
-        assert res is None
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="kubeflow_mcp.trainer.api.kueue"):
+            res = get_trainjob_queue_status("llama-lora", "default", job_status="Created")
+            assert res is None
+            assert "Permission denied listing Kueue Workloads" in caplog.text
+            assert "workloads.kueue.x-k8s.io" in caplog.text
+
+            # Verify it only warns once across subsequent calls
+            caplog.clear()
+            res2 = get_trainjob_queue_status("llama-lora", "default", job_status="Created")
+            assert res2 is None
+            assert "Permission denied listing Kueue Workloads" not in caplog.text
+
+            # After reset_kueue_cache, it can warn again
+            reset_kueue_cache()
+            res3 = get_trainjob_queue_status("llama-lora", "default", job_status="Created")
+            assert res3 is None
+            assert "Permission denied listing Kueue Workloads" in caplog.text
+
+    @patch(
+        "kubeflow_mcp.trainer.api.kueue.discover_kueue_version",
+        return_value="v1beta1",
+    )
+    @patch("kubeflow_mcp.trainer.api.kueue.get_custom_objects_api")
+    def test_non_403_error_does_not_warn(self, mock_custom_api_fn, _disc, caplog):
+        mock_api = MagicMock()
+        mock_api.get_namespaced_custom_object.return_value = {
+            "metadata": {"name": "llama-lora", "uid": "123"}
+        }
+        mock_api.list_namespaced_custom_object.side_effect = ApiException(status=500)
+        mock_custom_api_fn.return_value = mock_api
+
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="kubeflow_mcp.trainer.api.kueue"):
+            res = get_trainjob_queue_status("llama-lora", "default", job_status="Created")
+            assert res is None
+            assert caplog.text == ""
 
     @patch(
         "kubeflow_mcp.trainer.api.kueue.discover_kueue_version",
