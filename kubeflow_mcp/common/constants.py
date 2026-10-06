@@ -22,7 +22,12 @@ This module is the single source of truth for:
 Import from here to ensure consistency across the codebase.
 """
 
-from typing import Any
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from kubeflow_mcp.core.resilience import CircuitBreaker
 
 
 class ErrorCode:
@@ -49,6 +54,29 @@ def is_infrastructure_error(result: Any) -> bool:
         return False
     code = result.get("error_code", "")
     return code in (ErrorCode.KUBERNETES_ERROR, ErrorCode.SDK_ERROR, ErrorCode.TIMEOUT)
+
+
+def record_tool_result(
+    breaker: CircuitBreaker,
+    result: Any,
+    generation: int | None = None,
+) -> bool:
+    """Record a tool execution outcome on the circuit breaker.
+
+    Only real successes reset the breaker. Real infrastructure errors record
+    a failure. Neutral errors (validation, not found) release the reserved slot.
+    Returns True if the result was a success, False otherwise.
+    """
+    is_success = (
+        "error_code" not in result and "error" not in result if isinstance(result, dict) else True
+    )
+    if is_success:
+        breaker.record_success(generation)
+    elif is_infrastructure_error(result):
+        breaker.record_failure(generation)
+    else:
+        breaker.release(generation)
+    return is_success
 
 
 class JobStatus:

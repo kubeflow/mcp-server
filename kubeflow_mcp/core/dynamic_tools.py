@@ -40,7 +40,7 @@ from kubeflow_mcp.common.constants import (
     TOOL_PHASES,
     TOOL_TO_PHASE,
     ErrorCode,
-    is_infrastructure_error,
+    record_tool_result,
 )
 from kubeflow_mcp.core.resilience import get_breaker
 
@@ -218,17 +218,7 @@ def execute_tool(tool_name: str, arguments: dict[str, Any] | None = None) -> dic
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=Warning, module="urllib3")
             result = func(**args)
-        is_success = (
-            "error_code" not in result and "error" not in result
-            if isinstance(result, dict)
-            else True
-        )
-        if is_success:
-            breaker.record_success(generation)
-        elif is_infrastructure_error(result):
-            breaker.record_failure(generation)
-        else:
-            breaker.release(generation)
+        record_tool_result(breaker, result, generation)
         if isinstance(result, dict):
             return result
         return {"result": result}

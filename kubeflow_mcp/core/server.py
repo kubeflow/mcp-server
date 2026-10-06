@@ -37,7 +37,7 @@ from kubeflow_mcp.common.constants import (
     TOOL_NEXT_HINTS,
     TOOL_TO_PHASE,
     ErrorCode,
-    is_infrastructure_error,
+    record_tool_result,
 )
 from kubeflow_mcp.core.dynamic_tools import get_mode_tools, init_dynamic_tools
 from kubeflow_mcp.core.health import (
@@ -218,21 +218,9 @@ def _audit_wrap(tool_func):
             try:
                 result = tool_func(**kwargs)
                 duration_ms = int((time.monotonic() - start) * 1000)
-                is_success = (
-                    "error_code" not in result and "error" not in result
-                    if isinstance(result, dict)
-                    else True
-                )
+                is_success = record_tool_result(breaker, result, generation)
                 span.set_attribute("tool.success", is_success)
                 span.set_attribute("tool.duration_ms", duration_ms)
-                # Only a real success resets the breaker. A result that says nothing
-                # about the backend hands its half-open slot back instead.
-                if is_success:
-                    breaker.record_success(generation)
-                elif is_infrastructure_error(result):
-                    breaker.record_failure(generation)
-                else:
-                    breaker.release(generation)
 
                 logger.info(
                     "tool_call",
