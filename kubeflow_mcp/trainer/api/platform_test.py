@@ -39,6 +39,7 @@ from kubeflow_mcp.trainer.api.platform import (
     create_runtime,
     delete_runtime,
     inspect_controller,
+    inspect_crd,
     patch_runtime,
 )
 
@@ -297,6 +298,18 @@ def test_non_admin_persona_cannot_manage_runtimes():
     assert "patch_runtime" not in allowed_tools
     assert "create_runtime" not in allowed_tools
     assert "delete_runtime" not in allowed_tools
+
+
+# ─── inspect_crd ─────────────────────────────────────────────────────────────
+
+
+def test_inspect_crd_not_found(mock_k8s_apis):
+    api = mock_k8s_apis["apiextensions"]
+    api.read_custom_resource_definition.side_effect = ApiException(status=404, reason="Not Found")
+
+    result = inspect_crd("missing.trainer.kubeflow.org")
+
+    verify_tool_error(result, error_code=RESOURCE_NOT_FOUND)
 
 
 # ─── inspect_controller ─────────────────────────────────────────────────────
