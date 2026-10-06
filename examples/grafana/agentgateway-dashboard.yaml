@@ -1,0 +1,14 @@
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: agentgateway
+  namespace: observability
+spec:
+  instanceSelector:
+    matchLabels:
+      app.kubernetes.io/name: kubeflow-observability
+  folder: Agentgateway
+  url: https://raw.githubusercontent.com/agentgateway/agentgateway/v1.5.0/controller/install/helm/agentgateway/files/agentgateway-dashboard.json
+  datasources:
+    - inputName: datasource
+      datasourceName: prometheus

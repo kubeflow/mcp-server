@@ -1,0 +1,51 @@
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: kubeflow-mcp
+  namespace: observability
+spec:
+  instanceSelector:
+    matchLabels:
+      app.kubernetes.io/name: kubeflow-observability
+  folder: Kubeflow
+  datasources:
+    - inputName: datasource
+      datasourceName: prometheus
+  json: |
+    {
+      "uid": "kubeflow-mcp",
+      "title": "Kubeflow MCP",
+      "schemaVersion": 39,
+      "time": {"from": "now-1h", "to": "now"},
+      "templating": {"list": []},
+      "panels": [
+        {
+          "id": 1,
+          "type": "timeseries",
+          "title": "MCP requests by method",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+          "targets": [{
+            "expr": "sum by (gateway, method) (rate(agentgateway_mcp_requests_total[5m]))",
+            "legendFormat": "{{gateway}} / {{method}}",
+            "refId": "A"
+          }],
+          "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []},
+          "options": {"legend": {"displayMode": "list"}, "tooltip": {"mode": "multi"}}
+        },
+        {
+          "id": 2,
+          "type": "timeseries",
+          "title": "MCP tool calls",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+          "targets": [{
+            "expr": "sum by (server, resource) (rate(agentgateway_mcp_requests_total{method=\"tools/call\"}[5m]))",
+            "legendFormat": "{{server}} / {{resource}}",
+            "refId": "A"
+          }],
+          "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []},
+          "options": {"legend": {"displayMode": "list"}, "tooltip": {"mode": "multi"}}
+        }
+      ]
+    }
