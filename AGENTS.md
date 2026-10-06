@@ -47,6 +47,8 @@ kubeflow_mcp/                    # Main Python package (unit tests co-located as
 │   ├── resilience.py            # Rate limiter and circuit breaker
 │   ├── dynamic_tools.py         # full / progressive / semantic tool modes
 │   ├── health.py                # health_check, get_server_logs
+│   ├── mcp_card.py              # MCP Server Card (SEP-2127) discovery routes
+│   ├── a2a.py                   # A2A Agent Card and /a2a delegation endpoint
 │   ├── telemetry.py             # Optional OpenTelemetry tracing
 │   ├── middleware.py            # Audit identity ContextVars
 │   ├── config.py                # Config precedence (CLI > env > file)

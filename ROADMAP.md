@@ -47,7 +47,7 @@ natively into `kubeflow-mcp serve`:
 - Native OIDC / OAuth 2.1 discovery (`core/auth.py`) — no IdP proxy required for standard deployments
 - Per-caller Kubernetes RBAC via `SubjectAccessReview` — tool access bound to the caller's actual K8s identity — [kubeflow/sdk#281](https://github.com/kubeflow/sdk/issues/281)
 - Per-user rate limiting bucketed by `sub` claim (`core/resilience.py`)
-- MCP Server Card at `/.well-known/mcp.json` for HTTP auto-discovery
+- MCP Server Card at `/mcp/server-card` (aliased at `/.well-known/mcp-server-card`) for HTTP auto-discovery, per [SEP-2127](https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2127)
 - A2A delegation endpoint (`/a2a`) for orchestrator frameworks (LangGraph, OpenAI Agents SDK)
 - Helm chart and Kustomize overlays for cluster deployment; stateless HTTP mode as the default for horizontal scaling
 - Resource quota checks before training jobs are submitted
