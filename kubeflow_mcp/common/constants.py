@@ -68,7 +68,7 @@ def record_tool_result(
     Returns True if the result was a success, False otherwise.
     """
     is_success = (
-        "error_code" not in result and "error" not in result if isinstance(result, dict) else True
+        ("error_code" not in result and "error" not in result) if isinstance(result, dict) else True
     )
     if is_success:
         breaker.record_success(generation)

@@ -218,13 +218,14 @@ def execute_tool(tool_name: str, arguments: dict[str, Any] | None = None) -> dic
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=Warning, module="urllib3")
             result = func(**args)
-        record_tool_result(breaker, result, generation)
-        if isinstance(result, dict):
-            return result
-        return {"result": result}
     except Exception as e:
         breaker.record_failure(generation)
         return {"error": str(e), "error_code": ErrorCode.SDK_ERROR, "tool": tool_name}
+
+    record_tool_result(breaker, result, generation)
+    if isinstance(result, dict):
+        return result
+    return {"result": result}
 
 
 PROGRESSIVE_TOOLS: list[Callable] = [list_tools, describe_tools, execute_tool]
