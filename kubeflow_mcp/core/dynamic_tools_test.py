@@ -229,6 +229,76 @@ def test_tool_exception_still_counts_as_breaker_failure():
     assert breaker.state == CircuitState.OPEN
 
 
+def test_execute_tool_threads_generation_to_record_success(monkeypatch):
+    breaker = get_breaker("probe_tool")
+    recorded: list[int | None] = []
+    orig = breaker.record_success
+
+    def spy_record_success(generation: int | None = None) -> None:
+        recorded.append(generation)
+        orig(generation)
+
+    monkeypatch.setattr(breaker, "record_success", spy_record_success)
+
+    result = dynamic_tools.execute_tool("probe_tool", {"name": "ok"})
+    assert result == {"success": True, "data": {"name": "ok"}}
+    assert len(recorded) == 1
+    assert recorded[0] is not None
+
+
+def test_execute_tool_threads_generation_to_record_failure(monkeypatch):
+    breaker = get_breaker("failing_tool")
+    recorded: list[int | None] = []
+    orig = breaker.record_failure
+
+    def spy_record_failure(generation: int | None = None) -> None:
+        recorded.append(generation)
+        orig(generation)
+
+    monkeypatch.setattr(breaker, "record_failure", spy_record_failure)
+
+    result = dynamic_tools.execute_tool("failing_tool", {"name": "x"})
+    assert result["error_code"] == ErrorCode.SDK_ERROR
+    assert len(recorded) == 1
+    assert recorded[0] is not None
+
+
+def test_execute_tool_stale_probe_does_not_advance_new_half_open_window():
+    breaker = get_breaker("stale_test_tool")
+
+    def stale_test_tool(name: str) -> dict:
+        breaker.state = CircuitState.OPEN
+        breaker.last_failure_time = 0.0
+        breaker.acquire()
+        return {"success": True, "data": {"name": name}}
+
+    dynamic_tools.init_dynamic_tools([stale_test_tool], {})
+    breaker = get_breaker("stale_test_tool")
+    breaker.state = CircuitState.HALF_OPEN
+    breaker.half_open_calls = 0
+    breaker._half_open_successes = 0
+
+    dynamic_tools.execute_tool("stale_test_tool", {"name": "x"})
+
+    assert breaker._half_open_successes == 0
+
+
+def test_execute_tool_neutral_result_releases_slot_instead_of_success():
+    def neutral_tool(name: str) -> dict:
+        return {"error": "not found", "error_code": "RESOURCE_NOT_FOUND"}
+
+    dynamic_tools.init_dynamic_tools([neutral_tool], {})
+    breaker = get_breaker("neutral_tool")
+    breaker.state = CircuitState.HALF_OPEN
+    breaker.half_open_calls = 0
+    breaker._half_open_successes = 0
+
+    dynamic_tools.execute_tool("neutral_tool", {"name": "x"})
+
+    assert breaker.half_open_calls == 0
+    assert breaker._half_open_successes == 0
+
+
 # Semantic search needs sentence-transformers and numpy, which are not dependencies of
 # this package, so the test fakes both to exercise the embedding path deterministically.
 
