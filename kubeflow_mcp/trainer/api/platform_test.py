@@ -266,7 +266,69 @@ def test_delete_runtime_preview_lists_dependent_trainjobs(mock_k8s_apis):
         {"name": "job-b", "namespace": "ml"},
     ]
     assert "2 TrainJob(s)" in data["warning"]
+    assert data["dependents_checked"] is True
     api.delete_cluster_custom_object.assert_not_called()
+
+
+def test_delete_runtime_preview_reports_failed_dependency_check(mock_k8s_apis):
+    api = mock_k8s_apis["custom"]
+    api.list_cluster_custom_object.side_effect = ApiException(status=403, reason="Forbidden")
+
+    result = delete_runtime("torchtune-llama", confirmed=False)
+
+    data = verify_tool_success(result)
+    assert data["dependents_checked"] is False
+    assert data["dependent_count"] == 0
+    assert data["warning"].startswith("Could not check which TrainJobs use this runtime")
+    assert data["dependency_check_error"]["exception"] == "ApiException"
+    api.delete_cluster_custom_object.assert_not_called()
+
+
+def test_delete_runtime_confirmed_after_failed_check_warns(mock_k8s_apis):
+    api = mock_k8s_apis["custom"]
+    api.list_cluster_custom_object.side_effect = ApiException(status=403, reason="Forbidden")
+
+    result = delete_runtime("torchtune-llama", confirmed=True)
+
+    data = verify_tool_success(result)
+    assert data["deleted"] is True
+    assert data["dependents_checked"] is False
+    assert data["dependent_jobs_affected"] == 0
+    assert data["warning"].startswith("Could not check which TrainJobs use this runtime")
+    assert data["dependency_check_error"]["exception"] == "ApiException"
+    api.delete_cluster_custom_object.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    ("runtime_ref", "counted"),
+    [
+        ({"name": "torchtune-llama"}, True),
+        ({"name": "torchtune-llama", "kind": "ClusterTrainingRuntime"}, True),
+        (
+            {
+                "name": "torchtune-llama",
+                "kind": "ClusterTrainingRuntime",
+                "apiGroup": trainer_constants.GROUP,
+            },
+            True,
+        ),
+        ({"name": "torchtune-llama", "kind": "TrainingRuntime"}, False),
+        ({"name": "torchtune-llama", "apiGroup": "example.com"}, False),
+        ({"name": "other-runtime"}, False),
+    ],
+)
+def test_delete_runtime_counts_only_jobs_on_the_cluster_runtime(
+    mock_k8s_apis, runtime_ref, counted
+):
+    job = create_mock_trainjob(name="job-a", namespace="ml")
+    job["spec"]["runtimeRef"] = runtime_ref
+    api = mock_k8s_apis["custom"]
+    api.list_cluster_custom_object.return_value = {"items": [job]}
+
+    result = delete_runtime("torchtune-llama", confirmed=False)
+
+    data = verify_tool_success(result)
+    assert data["dependent_count"] == (1 if counted else 0)
 
 
 def test_delete_runtime_confirmed_removes_runtime(mock_k8s_apis):

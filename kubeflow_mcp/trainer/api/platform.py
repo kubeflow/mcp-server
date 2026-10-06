@@ -46,6 +46,7 @@ _LOG_TAIL_DEFAULT = 200
 _DEFAULT_CONTROLLER_NAMESPACES = ["kubeflow", "kubeflow-system"]
 
 _PATCH_ALLOWED_KEYS = frozenset({"spec", "metadata"})
+_CLUSTER_RUNTIME_KIND = "ClusterTrainingRuntime"
 _SPEC_ALLOWED_KEYS = frozenset({"template", "labels", "annotations"})
 
 
@@ -468,6 +469,21 @@ def create_runtime(
         ).model_dump()
 
 
+def _uses_cluster_runtime(job: dict[str, Any], name: str) -> bool:
+    """Whether a TrainJob's runtimeRef points at the ClusterTrainingRuntime ``name``.
+
+    ``kind`` and ``apiGroup`` are optional in a runtimeRef and default to
+    ClusterTrainingRuntime and the Trainer group, so a bare ``{"name": ...}``
+    still counts. A namespaced TrainingRuntime with the same name does not.
+    """
+    ref = job.get("spec", {}).get("runtimeRef", {})
+    return (
+        ref.get("name") == name
+        and (ref.get("kind") or _CLUSTER_RUNTIME_KIND) == _CLUSTER_RUNTIME_KIND
+        and (ref.get("apiGroup") or trainer_constants.GROUP) == trainer_constants.GROUP
+    )
+
+
 def delete_runtime(
     name: str,
     confirmed: bool = False,
@@ -481,7 +497,10 @@ def delete_runtime(
         confirmed: Must be True to delete. False returns a preview with dependents.
 
     Returns:
-        dict: Preview with dependent jobs, or deletion result.
+        dict: Preview with dependent jobs, or deletion result. Both carry
+        ``dependents_checked``; when it is False the TrainJob listing failed, so an
+        empty ``dependent_jobs`` and a zero count do not mean nothing depends on
+        the runtime.
     """
     name_err = validate_runtime_name(name)
     if name_err is not None:
@@ -491,6 +510,7 @@ def delete_runtime(
         api = mcp_utils.get_custom_objects_api()
 
         dependent_jobs = []
+        check_error: dict[str, Any] | None = None
         try:
             jobs = api.list_cluster_custom_object(
                 group=trainer_constants.GROUP,
@@ -499,33 +519,47 @@ def delete_runtime(
                 _request_timeout=mcp_utils.K8S_TIMEOUT,
             )
             for job in jobs.get("items", []):
-                runtime_ref = job.get("spec", {}).get("runtimeRef", {})
-                if runtime_ref.get("name") == name:
+                if _uses_cluster_runtime(job, name):
                     dependent_jobs.append(
                         {
                             "name": job["metadata"]["name"],
                             "namespace": job["metadata"].get("namespace", "unknown"),
                         }
                     )
-        except Exception:
-            logger.debug("Could not list dependent jobs for runtime %s", name)
+        except Exception as e:
+            check_error = exception_details(e)
+            logger.warning("Could not list TrainJobs that use runtime %s: %s", name, e)
+
+        # An empty list only means "no dependents" if the listing worked, so every
+        # response says whether it did.
+        checked = check_error is None
+        unchecked_warning = (
+            "Could not check which TrainJobs use this runtime, so any that do "
+            "will fail if it is deleted. Confirm none remain before deleting."
+        )
 
         if not confirmed:
-            return ToolResponse(
-                data={
-                    "action": "preview",
-                    "runtime": name,
-                    "dependent_jobs": dependent_jobs,
-                    "dependent_count": len(dependent_jobs),
-                    "warning": (
-                        f"{len(dependent_jobs)} TrainJob(s) reference this runtime. "
-                        "They will fail if the runtime is deleted."
-                        if dependent_jobs
-                        else "No dependent TrainJobs found."
-                    ),
-                    "message": "Set confirmed=True to delete this runtime.",
-                }
-            ).model_dump()
+            if not checked:
+                warning = unchecked_warning
+            elif dependent_jobs:
+                warning = (
+                    f"{len(dependent_jobs)} TrainJob(s) reference this runtime. "
+                    "They will fail if the runtime is deleted."
+                )
+            else:
+                warning = "No dependent TrainJobs found."
+            data: dict[str, Any] = {
+                "action": "preview",
+                "runtime": name,
+                "dependent_jobs": dependent_jobs,
+                "dependent_count": len(dependent_jobs),
+                "dependents_checked": checked,
+                "warning": warning,
+                "message": "Set confirmed=True to delete this runtime.",
+            }
+            if check_error is not None:
+                data["dependency_check_error"] = check_error
+            return ToolResponse(data=data).model_dump()
 
         api.delete_cluster_custom_object(
             group=trainer_constants.GROUP,
@@ -535,14 +569,17 @@ def delete_runtime(
             _request_timeout=mcp_utils.K8S_TIMEOUT,
         )
 
-        return ToolResponse(
-            data={
-                "runtime": name,
-                "deleted": True,
-                "message": f"ClusterTrainingRuntime '{name}' deleted successfully",
-                "dependent_jobs_affected": len(dependent_jobs),
-            }
-        ).model_dump()
+        result: dict[str, Any] = {
+            "runtime": name,
+            "deleted": True,
+            "message": f"ClusterTrainingRuntime '{name}' deleted successfully",
+            "dependent_jobs_affected": len(dependent_jobs),
+            "dependents_checked": checked,
+        }
+        if check_error is not None:
+            result["warning"] = unchecked_warning
+            result["dependency_check_error"] = check_error
+        return ToolResponse(data=result).model_dump()
 
     except Exception as e:
         logger.warning("delete_runtime(%s) failed: %s", name, e, exc_info=True)
