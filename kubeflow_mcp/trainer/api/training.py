@@ -340,10 +340,11 @@ def _sdk_error(e: Exception, hint: str | None = None) -> dict[str, Any]:
             details = {"response": e.response.text}  # type: ignore[union-attr]
         except Exception:
             pass
-    # The SDK wraps the Kubernetes ApiException, so check the cause for a 403. RBAC
-    # or an admission policy (e.g. one restricting service_account_name) denied the
+    # The SDK wraps the Kubernetes ApiException, so check the cause for a 403 (and the
+    # context, for errors raised without ``from``, as is_k8s_not_found does). RBAC or
+    # an admission policy (e.g. one restricting service_account_name) denied the
     # request: that is a permission problem to report, not a transient SDK failure.
-    if any(getattr(err, "status", None) == 403 for err in (e, e.__cause__)):
+    if any(getattr(err, "status", None) == 403 for err in (e, e.__cause__ or e.__context__)):
         return ToolError(
             error=str(e),
             error_code=ErrorCode.PERMISSION_DENIED,

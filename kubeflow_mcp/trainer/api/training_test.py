@@ -374,11 +374,20 @@ def _forbidden(**_kwargs):
         raise RuntimeError("Failed to create TrainJob") from e
 
 
+def _forbidden_without_from(**_kwargs):
+    """Wrap the 403 without ``from``, so it is only on ``__context__``."""
+    try:
+        raise ApiException(status=403, reason="Forbidden")
+    except ApiException:
+        raise RuntimeError("Failed to create TrainJob")  # noqa: B904
+
+
+@pytest.mark.parametrize("raise_forbidden", [_forbidden, _forbidden_without_from])
 @patch(PATCH_NS_CHECK, return_value=None)
 @patch(PATCH_CLIENT)
-def test_forbidden_submission_returns_permission_denied(mock_client_fn, _ns):
+def test_forbidden_submission_returns_permission_denied(mock_client_fn, _ns, raise_forbidden):
     """A 403 from RBAC or an admission policy is a permission problem, not SDK_ERROR."""
-    mock_client_fn.return_value.train.side_effect = _forbidden
+    mock_client_fn.return_value.train.side_effect = raise_forbidden
 
     result = run_custom_training(
         script="print('hello')",
