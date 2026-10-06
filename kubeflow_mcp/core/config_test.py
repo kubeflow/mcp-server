@@ -23,6 +23,7 @@ import yaml
 from tests.common import TestCase
 
 from kubeflow_mcp.core.config import (
+    ResilienceConfig,
     ServerConfig,
     _find_config_file,
     load_config,
@@ -49,6 +50,15 @@ def test_load_config_defaults_when_no_file():
         cfg = load_config()
     assert cfg.server.persona == "readonly"
     assert cfg.resilience.rate_limit == 10.0
+
+
+@pytest.mark.parametrize(
+    ("rate_limit", "rate_capacity"),
+    [(0.0, 20.0), (-1.0, 20.0), (10.0, 0.0), (10.0, -1.0)],
+)
+def test_resilience_config_rejects_non_positive_values(rate_limit, rate_capacity):
+    with pytest.raises(ValueError):
+        ResilienceConfig(rate_limit=rate_limit, rate_capacity=rate_capacity)
 
 
 @pytest.mark.parametrize(

@@ -286,12 +286,19 @@ class RateLimiter:
     _lock: threading.Lock = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
+        if self.rate <= 0:
+            raise ValueError("rate must be greater than zero")
+        if self.capacity <= 0:
+            raise ValueError("capacity must be greater than zero")
         self._tokens = self.capacity
         self._last_update = time.monotonic()
         self._lock = threading.Lock()
 
     def acquire(self, tokens: float = 1.0) -> bool:
         """Try to acquire tokens. Returns True if successful."""
+        if tokens <= 0:
+            raise ValueError("tokens must be greater than zero")
+
         with self._lock:
             now = time.monotonic()
             elapsed = now - self._last_update
