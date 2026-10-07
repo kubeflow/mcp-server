@@ -355,12 +355,13 @@ def _hub_error(error_cls: type[Exception], status_code: int) -> Exception:
 @pytest.mark.parametrize(
     ("model", "dataset"),
     [
-        ("hf://not-valid", "hf://org/ds"),
+        ("hf://", "hf://org/ds"),
+        ("hf://bad!name", "hf://org/ds"),
         ("hf://org/model/extra", "hf://org/ds"),
         ("hf://org//model", "hf://org/ds"),
         ("hf://org/bad name", "hf://org/ds"),
         (" hf://org/model", "hf://org/ds"),  # leading whitespace skips the hf:// check
-        ("hf://org/model", "hf://ds"),
+        ("hf://org/model", "hf://squad"),  # datasets need org/name, unlike models
         ("hf://org/model", "hf://org//ds"),
         ("hf://org/model", "hf://org/ds/my path"),  # whitespace in the dataset subpath
         ("hf://org/model", "hf://org/ds/../other"),  # path traversal in the subpath
@@ -379,33 +380,44 @@ def test_fine_tune_preview_rejects_malformed_hf_references(model, dataset):
     hub.assert_not_called()
 
 
-def test_fine_tune_preview_accepts_dataset_subpath_without_hub_call():
+@pytest.mark.parametrize(
+    ("model", "dataset"),
+    [
+        ("hf://org/model", "hf://org/ds/subdir"),
+        ("hf://gpt2", "hf://org/ds"),  # the Hub still serves unscoped model names
+    ],
+)
+def test_fine_tune_preview_accepts_valid_hf_references_without_hub_call(model, dataset):
     with (
         patch(PATCH_NS_CHECK, return_value=None),
         patch(PATCH_GPU_CHECK, return_value=None),
-        patch("huggingface_hub.dataset_info") as hub,
+        patch("huggingface_hub.model_info") as model_hub,
+        patch("huggingface_hub.dataset_info") as dataset_hub,
     ):
-        result = fine_tune(
-            model="hf://org/model", dataset="hf://org/ds/subdir", runtime="torchtune-llama"
-        )
+        result = fine_tune(model=model, dataset=dataset, runtime="torchtune-llama")
 
     assert result["status"] == "preview"
-    hub.assert_not_called()
+    model_hub.assert_not_called()
+    dataset_hub.assert_not_called()
 
 
 def test_fine_tune_reports_bad_model_before_runtime_error():
     with patch(PATCH_GPU_CHECK, return_value=None):
-        result = fine_tune(model="hf://not-valid", dataset="hf://org/ds", runtime="")
+        result = fine_tune(model="hf://a/b/c", dataset="hf://org/ds", runtime="")
 
     assert result["error_code"] == VALIDATION_ERROR
     assert "model reference" in result["error"]
 
 
 @pytest.mark.parametrize(
-    ("hub_function", "missing"),
-    [("huggingface_hub.model_info", "model"), ("huggingface_hub.dataset_info", "dataset")],
+    ("hub_function", "model", "missing"),
+    [
+        ("huggingface_hub.model_info", "hf://org/model", "model"),
+        ("huggingface_hub.model_info", "hf://gpt3-typo", "model"),  # unscoped model
+        ("huggingface_hub.dataset_info", "hf://org/model", "dataset"),
+    ],
 )
-def test_fine_tune_submission_rejects_confirmed_missing_repo(hub_function, missing):
+def test_fine_tune_submission_rejects_confirmed_missing_repo(hub_function, model, missing):
     with (
         patch(PATCH_NS_CHECK, return_value=None),
         patch(PATCH_CLIENT) as client,
@@ -413,7 +425,7 @@ def test_fine_tune_submission_rejects_confirmed_missing_repo(hub_function, missi
         patch("huggingface_hub.list_models", return_value=[]),
     ):
         result = fine_tune(
-            model="hf://org/model",
+            model=model,
             dataset="hf://org/ds",
             runtime="torchtune-llama",
             confirmed=True,
@@ -421,6 +433,7 @@ def test_fine_tune_submission_rejects_confirmed_missing_repo(hub_function, missi
 
     assert result["error_code"] == VALIDATION_ERROR
     assert f"Hugging Face {missing}" in result["error"]
+    assert "does not exist" in result["error"]  # the Hub check, not the format check
     client.assert_not_called()
 
 
