@@ -333,6 +333,44 @@ def test_fine_tune_validates_resources_before_gpu_preflight():
     gpu_check.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    ("tool", "config"),
+    [
+        (run_custom_training, {"script": "print('hello')", "runtime": "torch-distributed"}),
+        (run_container_training, {}),
+    ],
+)
+@pytest.mark.parametrize("bad_image", ["   ", "img::double", "-leading/x"])
+def test_training_tools_reject_invalid_image_before_sdk_call(tool, config, bad_image):
+    with patch(PATCH_CLIENT) as mock_client:
+        result = tool(**config, image=bad_image, confirmed=True)
+
+    assert result["success"] is False
+    assert result["error_code"] == VALIDATION_ERROR
+    mock_client.assert_not_called()
+
+
+def test_run_container_training_rejects_empty_image():
+    """The image is required here, so "" is an error, unlike run_custom_training."""
+    with patch(PATCH_CLIENT) as mock_client:
+        result = run_container_training(image="", confirmed=True)
+
+    assert result["error_code"] == VALIDATION_ERROR
+    mock_client.assert_not_called()
+
+
+# "" counts as unset: agents often send it for unused optional fields, and the SDK
+# then falls back to the runtime image.
+@pytest.mark.parametrize("image", [None, "", "localhost:5000/team/trainer:v1"])
+def test_run_custom_training_accepts_valid_or_missing_image(image):
+    with patch(PATCH_NS_CHECK, return_value=None):
+        result = run_custom_training(
+            script="print('hello')", runtime="torch-distributed", image=image
+        )
+
+    assert result["status"] == "preview"
+
+
 class TestRunCustomTrainingConfirmed:
     @patch(PATCH_NS_CHECK, return_value=None)
     @patch(PATCH_CLIENT)
