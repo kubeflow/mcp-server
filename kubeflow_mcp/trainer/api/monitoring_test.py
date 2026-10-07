@@ -904,6 +904,15 @@ class TestWaitForTraining:
         assert result["data"]["hint"] == "Use get_training_events to check for scheduling issues"
 
     @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_EFF_NS, return_value="default")
+    @patch(PATCH_CLIENT, side_effect=TimeoutError())
+    def test_timeout_before_client_is_bound(self, _client_fn, _eff_ns, _ns):
+        # get_trainer_client_for_namespace raises TimeoutError before `client` is ever
+        # assigned; the handler must not NameError/UnboundLocalError on client.backend.
+        result = wait_for_training("job-a", timeout_seconds=5)
+        assert result["data"]["reached"] is False
+
+    @patch(PATCH_NS_CHECK, return_value=None)
     def test_timeout_seconds_less_than_one(self, _ns):
         result = wait_for_training("my-job", timeout_seconds=0)
         assert result["success"] is False

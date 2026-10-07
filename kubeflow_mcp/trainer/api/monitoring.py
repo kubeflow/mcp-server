@@ -518,9 +518,7 @@ def wait_for_training(
         ).model_dump()
 
     except TimeoutError:
-        effective_ns = namespace or str(
-            getattr(getattr(client, "backend", None), "namespace", None) or "default"
-        )
+        effective_ns = get_trainer_effective_namespace(namespace)
         queue_status = None
         try:
             queue_status = get_trainjob_queue_status(name=name, namespace=effective_ns)
