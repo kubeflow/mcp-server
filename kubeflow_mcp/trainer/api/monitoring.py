@@ -485,6 +485,7 @@ def wait_for_training(
             error_code=ErrorCode.VALIDATION_ERROR,
         ).model_dump()
 
+    client: Any = None
     try:
         if timeout_seconds < 1:
             return ToolError(
@@ -518,10 +519,14 @@ def wait_for_training(
         ).model_dump()
 
     except TimeoutError:
-        effective_ns = get_trainer_effective_namespace(namespace)
         queue_status = None
         try:
-            queue_status = get_trainjob_queue_status(name=name, namespace=effective_ns)
+            effective_ns = (
+                namespace
+                or getattr(getattr(client, "backend", None), "namespace", None)
+                or get_trainer_effective_namespace(namespace)
+            )
+            queue_status = get_trainjob_queue_status(name=name, namespace=str(effective_ns))
         except Exception as e:
             logger.debug("Failed to resolve Kueue status for %s on timeout: %s", name, e)
         data: dict[str, Any] = {
