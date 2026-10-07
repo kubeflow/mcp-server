@@ -114,13 +114,15 @@ Once the client is connected, ask:
 
 > *"Check if my cluster is compatible with Kubeflow Training."*
 
-The agent calls `pre_flight()` then `check_compatibility()`. A healthy response looks like:
+The agent calls `pre_flight()`. A healthy response (as summarized by the agent) looks like:
 
 ```
 ✅ Kubernetes 1.29 reachable
 ✅ Kubeflow Trainer CRD installed (v2.3.0)
 ✅ SDK version compatible
 ```
+
+*(Note: The checkmarks are an example of an agent's summary in chat, not the raw tool output)*
 
 If the agent returns an error, jump to [Troubleshooting](#troubleshooting) below.
 
@@ -189,7 +191,7 @@ operations. Expand access as needed:
 | Persona | Adds |
 |---------|------|
 | `readonly` | `list_*`, `get_*`, planning, monitoring (default) |
-| `data-scientist` | + `fine_tune`, `run_*`, delete own MCP-created resources |
+| `data-scientist` | + `fine_tune`, `run_custom_training`, delete own MCP-created resources |
 | `ml-engineer` | + `update_*`, platform inspect, advanced submit |
 | `platform-admin` | all tools |
 
@@ -316,7 +318,7 @@ make inspector
 | `ModuleNotFoundError: kubeflow_mcp` | Package not installed | `pip install kubeflow-mcp` |
 | Unsupported Python version error | Wrong Python version | Use Python 3.10 – 3.12 |
 | Server exits immediately on stdio | The MCP client is not reading from the process stdin | Start with `--transport http` first to isolate config errors |
-| `Policy file … could not be loaded` | Syntax error in `~/.kf-mcp-policy.yaml` | Fix YAML syntax; a bad policy file is fatal by design |
+| `Failed to load policy file <path>:` or `Cannot enforce policy file <path>: PyYAML is not installed` | Syntax error in `~/.kf-mcp-policy.yaml` or missing PyYAML | Fix YAML syntax; a bad policy file is fatal by design |
 | `PyYAML not installed, skipping config file` | Optional YAML dep missing | `pip install pyyaml` |
 
 ---
