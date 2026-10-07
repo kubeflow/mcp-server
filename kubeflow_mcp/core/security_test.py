@@ -119,6 +119,28 @@ def test_check_namespace_allowed_with_policy_denying(mock_get_allowed):
     assert "not allowed by policy" in err.error
 
 
+@pytest.mark.parametrize("namespace", ["Bad_NS!", "has space", "UPPER", "", "a" * 64])
+@patch("kubeflow_mcp.core.policy.get_allowed_namespaces", return_value=None)
+def test_check_namespace_allowed_rejects_malformed_namespace_without_policy(
+    mock_get_allowed, namespace
+):
+    """With no allowlist the policy check passes anything, so the format check must not."""
+    from kubeflow_mcp.core.security import check_namespace_allowed
+
+    err = check_namespace_allowed(namespace)
+    assert err is not None
+    assert err.error_code == "VALIDATION_ERROR"
+    assert "namespace" in err.error
+
+
+@patch("kubeflow_mcp.core.policy.get_allowed_namespaces", return_value=None)
+def test_check_namespace_allowed_accepts_valid_namespace_without_policy(mock_get_allowed):
+    from kubeflow_mcp.core.security import check_namespace_allowed
+
+    assert check_namespace_allowed("team-a") is None
+    assert check_namespace_allowed(None) is None
+
+
 @patch("kubeflow_mcp.common.utils.get_trainer_effective_namespace", return_value="kubeflow")
 @patch("kubeflow_mcp.core.policy.get_allowed_namespaces", return_value={"kubeflow"})
 def test_check_namespace_allowed_with_none_resolving_to_default(mock_get_allowed, mock_get_eff):
