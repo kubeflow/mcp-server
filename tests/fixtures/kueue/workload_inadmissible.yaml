@@ -1,0 +1,18 @@
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: Workload
+metadata:
+  name: trainjob-llama-lora-c8e9b
+  namespace: default
+  labels:
+    kueue.x-k8s.io/job-uid: "7b4d1a58-3cf2-4c6e-8a21-9d1a3b5c7e90"
+    kueue.x-k8s.io/queue-name: "non-existent-queue"
+spec:
+  active: true
+  queueName: non-existent-queue
+status:
+  conditions:
+  - type: QuotaReserved
+    status: "False"
+    reason: Inadmissible
+    message: "LocalQueue non-existent-queue doesn't exist"
+    lastTransitionTime: "2026-10-03T01:00:00Z"

@@ -228,6 +228,10 @@ class TestGetTrainerEffectiveNamespace:
         mock_trainer.return_value = SimpleNamespace(backend=SimpleNamespace())
         assert get_trainer_effective_namespace(None) == "default"
 
+    @patch(PATCH_TRAINER_CLIENT, side_effect=RuntimeError("no kubeconfig"))
+    def test_falls_back_to_default_on_error(self, mock_trainer):
+        assert get_trainer_effective_namespace(None) == "default"
+
 
 class TestGetTrainerClientForNamespace:
     @patch(PATCH_TRAINER_CLIENT)

@@ -357,7 +357,7 @@ class TestInstructionComposition:
 
 class TestResourceLoading:
     def test_client_resources_defined(self):
-        assert len(CLIENT_RESOURCES) == 3
+        assert len(CLIENT_RESOURCES) == 4
 
     def test_resource_files_exist(self):
         from pathlib import Path
@@ -405,7 +405,7 @@ class TestResourceLoading:
         mock_mcp.resource.return_value = lambda fn: fn
 
         register_resources(mock_mcp, {"trainer": trainer_module})
-        assert mock_mcp.resource.call_count == 3
+        assert mock_mcp.resource.call_count == 4
 
 
 # ─── PHASE_TO_SECTION mapping ─────────────────────────────────────────────

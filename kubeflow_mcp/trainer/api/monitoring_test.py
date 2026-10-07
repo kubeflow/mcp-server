@@ -808,10 +808,108 @@ class TestWaitForTraining:
         client = MagicMock()
         client.wait_for_job_status.side_effect = TimeoutError("timed out")
         mock_client_fn.return_value = client
-        result = wait_for_training("my-job", timeout_seconds=10)
+        with patch(
+            "kubeflow_mcp.trainer.api.monitoring.get_trainjob_queue_status",
+            return_value=None,
+        ):
+            result = wait_for_training("my-job", timeout_seconds=10)
         assert result["success"] is True
         assert result["data"]["reached"] is False
         assert "Timeout" in result["data"]["message"]
+        assert "queue_status" not in result["data"]
+        assert result["data"]["hint"] == "Use get_training_events to check for scheduling issues"
+
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_timeout_with_queued_kueue_job(self, mock_client_fn, _ns):
+        client = MagicMock()
+        client.wait_for_job_status.side_effect = TimeoutError("timed out")
+        mock_client_fn.return_value = client
+        queue_status = {
+            "queue_name": "gpu-pool",
+            "state": "queued",
+            "reason": "Pending",
+        }
+        with patch(
+            "kubeflow_mcp.trainer.api.monitoring.get_trainjob_queue_status",
+            return_value=queue_status,
+        ):
+            result = wait_for_training("my-job", timeout_seconds=10)
+        assert result["success"] is True
+        assert result["data"]["reached"] is False
+        assert result["data"]["queue_status"] == queue_status
+        assert "Job is still queued in 'gpu-pool'" in result["data"]["hint"]
+        assert "trainer://guides/queue-states" in result["data"]["hint"]
+
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_timeout_with_inadmissible_kueue_job(self, mock_client_fn, _ns):
+        client = MagicMock()
+        client.wait_for_job_status.side_effect = TimeoutError("timed out")
+        mock_client_fn.return_value = client
+        queue_status = {
+            "queue_name": "wrong-queue",
+            "state": "inadmissible",
+            "reason": "Inadmissible",
+            "message": "LocalQueue wrong-queue doesn't exist",
+        }
+        with patch(
+            "kubeflow_mcp.trainer.api.monitoring.get_trainjob_queue_status",
+            return_value=queue_status,
+        ):
+            result = wait_for_training("my-job", timeout_seconds=10)
+        assert result["success"] is True
+        assert result["data"]["reached"] is False
+        assert result["data"]["queue_status"] == queue_status
+        assert "Job cannot be admitted by queue 'wrong-queue'" in result["data"]["hint"]
+        assert "trainer://guides/queue-states" in result["data"]["hint"]
+
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_timeout_with_evicted_kueue_job(self, mock_client_fn, _ns):
+        client = MagicMock()
+        client.wait_for_job_status.side_effect = TimeoutError("timed out")
+        mock_client_fn.return_value = client
+        queue_status = {
+            "queue_name": "gpu-pool",
+            "state": "evicted",
+            "reason": "Preempted",
+        }
+        with patch(
+            "kubeflow_mcp.trainer.api.monitoring.get_trainjob_queue_status",
+            return_value=queue_status,
+        ):
+            result = wait_for_training("my-job", timeout_seconds=10)
+        assert result["success"] is True
+        assert result["data"]["reached"] is False
+        assert result["data"]["queue_status"] == queue_status
+        assert "Job was evicted (Preempted) from queue 'gpu-pool'" in result["data"]["hint"]
+        assert "trainer://guides/queue-states" in result["data"]["hint"]
+
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_timeout_when_kueue_status_resolution_raises_fails_open(self, mock_client_fn, _ns):
+        client = MagicMock()
+        client.wait_for_job_status.side_effect = TimeoutError("timed out")
+        mock_client_fn.return_value = client
+        with patch(
+            "kubeflow_mcp.trainer.api.monitoring.get_trainjob_queue_status",
+            side_effect=RuntimeError("K8s API boom"),
+        ):
+            result = wait_for_training("my-job", timeout_seconds=10)
+        assert result["success"] is True
+        assert result["data"]["reached"] is False
+        assert "Timeout after 10s" in result["data"]["message"]
+        assert "queue_status" not in result["data"]
+        assert result["data"]["hint"] == "Use get_training_events to check for scheduling issues"
+
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT, side_effect=TimeoutError())
+    def test_timeout_before_client_is_bound(self, _client_fn, _ns):
+        # get_trainer_client_for_namespace raises TimeoutError before `client` is ever
+        # assigned; the handler must not NameError/UnboundLocalError on client.backend.
+        result = wait_for_training("job-a", timeout_seconds=5)
+        assert result["data"]["reached"] is False
 
     @patch(PATCH_NS_CHECK, return_value=None)
     def test_timeout_seconds_less_than_one(self, _ns):
