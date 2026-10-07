@@ -133,6 +133,10 @@ Some runtimes enforce `num_nodes=1` via webhook. Check `get_runtime()` before re
 
 The `env` parameter is not available on `fine_tune()`. If you need custom environment variables, use `run_custom_training()` with a LoRA script instead (see trainer://guides/training-patterns).
 
+### fine_tune() Repo Existence Check Needs HF_TOKEN
+
+On submission, `fine_tune()` rejects an `hf://` model or dataset only when the Hugging Face Hub confirms it missing (404). Without `HF_TOKEN` on the MCP host, the Hub answers 401 for a missing repo, so the check cannot tell a typo from a private repo and the job is submitted anyway. A typo then fails later in the initializer; check `get_training_logs()`.
+
 ### MCP Ownership Label
 
 All jobs created via MCP tools are labeled `kubeflow-mcp/managed-by=mcp`. Non-admin personas can only delete MCP-labeled jobs. Platform-admin bypasses this check.
