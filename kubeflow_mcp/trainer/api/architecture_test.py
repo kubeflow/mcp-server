@@ -15,6 +15,7 @@
 """Tests for the plugin architecture: instruction composition, resource loading,
 persona gating, tool metadata consistency, and tier derivation."""
 
+import inspect
 from dataclasses import dataclass
 from unittest.mock import MagicMock, patch
 
@@ -93,6 +94,36 @@ class TestToolMetadataConsistency:
             "delete_runtime",
         }
         assert platform_tools.issubset(tool_names)
+
+
+# ─── Namespace validation ──────────────────────────────────────────────────
+
+# Arguments each tool needs, besides namespace, to get as far as its namespace check.
+_NAMESPACE_TOOL_ARGS = {
+    "fine_tune": {"model": "hf://google/gemma-2b", "dataset": "hf://tatsu-lab/alpaca"},
+    "run_container_training": {"image": "busybox:1.36"},
+    "run_custom_training": {"script": "print('hi')"},
+    "update_training_job": {"name": "job-a", "action": "suspend"},
+}
+_NAMESPACE_TOOLS = [t for t in TOOLS if "namespace" in inspect.signature(t).parameters]
+
+
+@pytest.mark.parametrize("tool", _NAMESPACE_TOOLS, ids=lambda t: t.__name__)
+def test_malformed_namespace_is_rejected_before_any_api_request(tool):
+    """A tool that takes a namespace must not send a malformed one to the API."""
+    params = inspect.signature(tool).parameters
+    args = _NAMESPACE_TOOL_ARGS.get(tool.__name__, {"name": "job-a"} if "name" in params else {})
+
+    with (
+        patch("kubernetes.config.load_kube_config"),
+        patch("kubernetes.config.load_incluster_config"),
+        patch("kubernetes.client.ApiClient.call_api") as call_api,
+    ):
+        result = tool(**args, namespace="Bad_NS!")
+
+    assert result["error_code"] == "VALIDATION_ERROR", result
+    assert "namespace" in result["error"]
+    call_api.assert_not_called()
 
 
 # ─── Persona gating ────────────────────────────────────────────────────────
