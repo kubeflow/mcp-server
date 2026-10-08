@@ -68,12 +68,13 @@ jobs:
           push: false
           tags: ghcr.io/kubeflow/mcp-server:sha-${{ github.sha }}
           build-args: VERSION=${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: |
+            type=gha,scope=image-smoke
+            type=gha
+          cache-to: type=gha,scope=image-smoke,mode=max
 
       - name: Run smoke tests
         run: |
-          chmod +x .github/scripts/image_smoke_test.sh
           .github/scripts/image_smoke_test.sh \
             "ghcr.io/kubeflow/mcp-server:sha-${{ github.sha }}"
 

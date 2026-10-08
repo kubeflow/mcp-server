@@ -126,29 +126,42 @@ fi
 
 # Test 3: No dev/test packages
 _log "Test 3: no-dev-packages"
-dev_found=""
-for pkg in pytest ruff pre_commit; do
-    if docker run --rm --entrypoint python "$IMAGE" -c "import $pkg" > /dev/null 2>&1; then
-        dev_found="${dev_found} ${pkg}"
-    fi
-done
+dev_exit=0
+dev_out=$(docker run --rm --entrypoint python "$IMAGE" -c '
+import importlib.metadata as md
+import kubeflow_mcp
+found = []
+for dist in ("pytest", "ruff", "pre-commit"):
+    try:
+        md.distribution(dist)
+        found.append(dist)
+    except md.PackageNotFoundError:
+        pass
+print(" ".join(found))
+' 2>&1) || dev_exit=$?
 
-if [ -z "$dev_found" ]; then
+if [ "$dev_exit" -eq 0 ] && [ -z "$dev_out" ]; then
     _pass "no-dev-packages: pytest, ruff, pre-commit are absent"
 else
-    _fail "no-dev-packages" "unexpected dev packages in image:${dev_found}"
+    _fail "no-dev-packages" "exit=${dev_exit}, output: ${dev_out}"
 fi
 
 
 # Test 4: OTel absent from base image
 _log "Test 4: no-otel-in-base"
 otel_exit=0
-docker run --rm --entrypoint python "$IMAGE" -c "import opentelemetry.sdk" > /dev/null 2>&1 \
-    || otel_exit=$?
-if [ "$otel_exit" -ne 0 ]; then
-    _pass "no-otel-in-base: ImportError as expected (opentelemetry is an optional dep group)"
+otel_out=$(docker run --rm --entrypoint python "$IMAGE" -c '
+import importlib.metadata as md
+import kubeflow_mcp
+try:
+    print(md.version("opentelemetry-sdk"))
+except md.PackageNotFoundError:
+    pass
+' 2>&1) || otel_exit=$?
+if [ "$otel_exit" -eq 0 ] && [ -z "$otel_out" ]; then
+    _pass "no-otel-in-base: opentelemetry-sdk is not installed (optional otel group)"
 else
-    _fail "no-otel-in-base" "opentelemetry was importable — should not be present in base image"
+    _fail "no-otel-in-base" "exit=${otel_exit}, output: ${otel_out}"
 fi
 
 # Server tests
@@ -160,7 +173,6 @@ docker run -d \
     --name "$CONTAINER_NAME" \
     -p "${HOST_PORT}:8000" \
     -e KUBECONFIG=/nonexistent \
-    -e KUBEFLOW_MCP_DNS_REBINDING_PROTECTION=false \
     "$IMAGE"
 
 _wait_for_server "$HOST_PORT" "$MAX_WAIT"
@@ -261,6 +273,19 @@ else
         _fail "mcp-tools-list" \
             "exit=${tools_exit}, tools found: $(printf '%s\n' "$tool_names" | tr '\n' ' ')"
     fi
+fi
+
+# Test 9: DNS rebinding protection is on by default
+_log "Test 9: dns-rebinding-default"
+rebind_code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -X POST "$MCP_URL" \
+    -H "Host: attacker.example" \
+    -H "Content-Type: application/json" \
+    -H "Accept: application/json, text/event-stream" \
+    -d '{"jsonrpc":"2.0","id":3,"method":"tools/list","params":{}}' || true)
+if [ "$rebind_code" = "421" ]; then
+    _pass "dns-rebinding-default: foreign Host rejected with 421"
+else
+    _fail "dns-rebinding-default" "expected 421 for a foreign Host, got: ${rebind_code}"
 fi
 
 # Summary
