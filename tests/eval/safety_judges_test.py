@@ -31,8 +31,12 @@ import pytest
 from fastmcp import Client
 
 from kubeflow_mcp.core.policy import get_allowed_tools
-from kubeflow_mcp.core.server import create_server
+from kubeflow_mcp.core.server import CLIENT_MODULES, create_server
 from tests.eval.conftest import GATE_ARGS, payload
+
+# Every registered client is loaded, not only the default one, so a new client's
+# tools are judged as soon as it is added to CLIENT_MODULES.
+CLIENTS = list(CLIENT_MODULES)
 
 PERSONAS = ["readonly", "data-scientist", "ml-engineer", "platform-admin"]
 PROXY_MODES = ["progressive", "semantic"]
@@ -49,7 +53,7 @@ def is_preview(name: str, body: dict[str, Any]) -> bool:
 
 
 async def _list_tools(persona: str) -> dict[str, Any]:
-    async with Client(create_server(persona=persona)) as client:
+    async with Client(create_server(clients=CLIENTS, persona=persona)) as client:
         return {tool.name: tool for tool in await client.list_tools()}
 
 
@@ -73,7 +77,7 @@ async def test_every_mutating_tool_has_gate_arguments():
 
 @pytest.mark.parametrize("tool_name", sorted(GATE_ARGS))
 async def test_unconfirmed_call_previews_without_writing(tool_name, k8s):
-    async with Client(create_server(persona="platform-admin")) as client:
+    async with Client(create_server(clients=CLIENTS, persona="platform-admin")) as client:
         result = await client.call_tool(
             tool_name, {**GATE_ARGS[tool_name], "confirmed": False}, raise_on_error=False
         )
@@ -85,7 +89,7 @@ async def test_unconfirmed_call_previews_without_writing(tool_name, k8s):
 
 async def test_confirmed_call_does_write(k8s):
     """Control: the fake API does see writes, so an empty write list means something."""
-    async with Client(create_server(persona="platform-admin")) as client:
+    async with Client(create_server(clients=CLIENTS, persona="platform-admin")) as client:
         await client.call_tool(
             "update_training_job",
             {**GATE_ARGS["update_training_job"], "confirmed": True},
@@ -98,7 +102,9 @@ async def test_confirmed_call_does_write(k8s):
 @pytest.mark.parametrize("tool_name", sorted(GATE_ARGS))
 async def test_proxied_unconfirmed_call_previews_without_writing(mode, tool_name, k8s):
     """The gate must hold when a tool is reached through the execute_tool meta-tool."""
-    async with Client(create_server(persona="platform-admin", mode=mode)) as client:
+    async with Client(
+        create_server(clients=CLIENTS, persona="platform-admin", mode=mode)
+    ) as client:
         result = await client.call_tool(
             "execute_tool",
             {"tool_name": tool_name, "arguments": {**GATE_ARGS[tool_name], "confirmed": False}},
@@ -128,7 +134,7 @@ async def test_readonly_persona_exposes_no_mutating_tool():
 @pytest.mark.parametrize("persona", ["readonly", "data-scientist", "ml-engineer"])
 async def test_hidden_tools_cannot_be_called(persona, k8s):
     hidden = sorted(set(GATE_ARGS) - get_allowed_tools(persona))
-    async with Client(create_server(persona=persona)) as client:
+    async with Client(create_server(clients=CLIENTS, persona=persona)) as client:
         for name in hidden:
             result = await client.call_tool(
                 name, {**GATE_ARGS[name], "confirmed": True}, raise_on_error=False
@@ -141,7 +147,7 @@ async def test_hidden_tools_cannot_be_called(persona, k8s):
 @pytest.mark.parametrize("persona", ["readonly", "data-scientist", "ml-engineer"])
 async def test_proxied_hidden_tools_cannot_be_called(mode, persona, k8s):
     hidden = sorted(set(GATE_ARGS) - get_allowed_tools(persona))
-    async with Client(create_server(persona=persona, mode=mode)) as client:
+    async with Client(create_server(clients=CLIENTS, persona=persona, mode=mode)) as client:
         for name in hidden:
             result = await client.call_tool(
                 "execute_tool",
