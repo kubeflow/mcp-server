@@ -158,6 +158,13 @@ def list_training_jobs(
         ).model_dump()
 
     except Exception as e:
+        if runtime and is_k8s_not_found(e):
+            return ToolError(
+                error=f"TrainingRuntime '{runtime}' not found",
+                error_code=ErrorCode.RESOURCE_NOT_FOUND,
+                hint="Use list_runtimes to find available runtimes",
+                details=exception_details(e),
+            ).model_dump()
         return ToolError(
             error=str(e),
             error_code=ErrorCode.SDK_ERROR,
