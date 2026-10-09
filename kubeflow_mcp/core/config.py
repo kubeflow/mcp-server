@@ -139,8 +139,10 @@ class ResilienceConfig(BaseModel):
 
     rate_limit: float = Field(default=10.0, description="Requests/second refill rate")
     rate_capacity: float = Field(default=20.0, description="Max burst capacity")
-    cb_failure_threshold: int = Field(default=5, description="Failures before circuit opens")
-    cb_recovery_timeout: float = Field(default=30.0, description="Seconds before half-open retry")
+    cb_failure_threshold: int = Field(default=5, gt=0, description="Failures before circuit opens")
+    cb_recovery_timeout: float = Field(
+        default=30.0, ge=0, description="Seconds before half-open retry"
+    )
 
 
 class OptimizerConfig(BaseModel):

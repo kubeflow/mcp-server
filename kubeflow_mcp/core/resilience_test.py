@@ -58,6 +58,26 @@ def clock(monkeypatch: pytest.MonkeyPatch) -> Callable[[float], None]:
 
 
 class TestCircuitBreaker:
+    @pytest.mark.parametrize(
+        ("kwargs", "message"),
+        [
+            ({"failure_threshold": 0}, "failure_threshold"),
+            ({"failure_threshold": -1}, "failure_threshold"),
+            ({"recovery_timeout": -0.1}, "recovery_timeout"),
+            ({"half_open_max_calls": 0}, "half_open_max_calls"),
+            ({"half_open_max_calls": -1}, "half_open_max_calls"),
+        ],
+    )
+    def test_rejects_invalid_configuration(self, kwargs, message):
+        with pytest.raises(ValueError, match=message):
+            CircuitBreaker(**kwargs)
+
+    def test_zero_recovery_timeout_is_allowed(self):
+        cb = CircuitBreaker(failure_threshold=1, recovery_timeout=0.0)
+        cb.record_failure()
+        assert cb.acquire() is not None
+        assert cb.state == CircuitState.HALF_OPEN
+
     def test_starts_closed(self):
         cb = CircuitBreaker()
         assert cb.state == CircuitState.CLOSED
@@ -191,6 +211,21 @@ class TestCircuitBreaker:
 
 
 class TestGetBreaker:
+    @pytest.mark.parametrize(
+        ("failure_threshold", "recovery_timeout", "message"),
+        [
+            (0, 30.0, "failure_threshold"),
+            (-1, 30.0, "failure_threshold"),
+            (5, -0.1, "recovery_timeout"),
+        ],
+    )
+    def test_configure_rejects_invalid_values(self, failure_threshold, recovery_timeout, message):
+        with pytest.raises(ValueError, match=message):
+            configure_circuit_breaker(
+                failure_threshold=failure_threshold,
+                recovery_timeout=recovery_timeout,
+            )
+
     def test_returns_same_instance(self):
         a = get_breaker("tool_a")
         b = get_breaker("tool_a")

@@ -54,6 +54,12 @@ class CircuitBreaker:
     _lock: threading.Lock = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
+        if self.failure_threshold <= 0:
+            raise ValueError("failure_threshold must be greater than zero")
+        if self.recovery_timeout < 0:
+            raise ValueError("recovery_timeout must be non-negative")
+        if self.half_open_max_calls <= 0:
+            raise ValueError("half_open_max_calls must be greater than zero")
         self._lock = threading.Lock()
 
     def acquire(self) -> int | None:
@@ -147,6 +153,10 @@ def configure_circuit_breaker(
     recovery_timeout: float = 30.0,
 ) -> None:
     """Set default thresholds for new circuit breakers. Call once at startup."""
+    if failure_threshold <= 0:
+        raise ValueError("failure_threshold must be greater than zero")
+    if recovery_timeout < 0:
+        raise ValueError("recovery_timeout must be non-negative")
     _cb_defaults["failure_threshold"] = failure_threshold
     _cb_defaults["recovery_timeout"] = recovery_timeout
 

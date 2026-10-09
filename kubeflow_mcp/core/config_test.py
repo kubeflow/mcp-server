@@ -20,9 +20,11 @@ from unittest.mock import patch
 
 import pytest
 import yaml
+from pydantic import ValidationError
 from tests.common import TestCase
 
 from kubeflow_mcp.core.config import (
+    ResilienceConfig,
     ServerConfig,
     _find_config_file,
     load_config,
@@ -49,6 +51,24 @@ def test_load_config_defaults_when_no_file():
         cfg = load_config()
     assert cfg.server.persona == "readonly"
     assert cfg.resilience.rate_limit == 10.0
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("cb_failure_threshold", 0),
+        ("cb_failure_threshold", -1),
+        ("cb_recovery_timeout", -0.1),
+    ],
+)
+def test_resilience_config_rejects_invalid_circuit_breaker_values(field, value):
+    with pytest.raises(ValidationError):
+        ResilienceConfig(**{field: value})
+
+
+def test_resilience_config_allows_zero_recovery_timeout():
+    cfg = ResilienceConfig(cb_recovery_timeout=0.0)
+    assert cfg.cb_recovery_timeout == 0.0
 
 
 @pytest.mark.parametrize(
