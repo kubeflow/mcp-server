@@ -40,7 +40,6 @@ from typing import Any
 import pytest
 from fastmcp import Client
 
-from kubeflow_mcp.core.policy import get_effective_persona, set_effective_persona
 from kubeflow_mcp.core.server import create_server
 
 # platform-admin exposes every tool, so its snapshot covers the full surface.
@@ -51,14 +50,6 @@ _UPDATE_ENV = "UPDATE_SCHEMA_SNAPSHOT"
 
 # Text fields stripped from the snapshot so wording edits don't churn it.
 _DOC_KEYS = {"description", "title"}
-
-
-@pytest.fixture
-def _restore_persona():
-    """create_server() mutates the process-global persona; restore it."""
-    previous = get_effective_persona()
-    yield
-    set_effective_persona(previous)
 
 
 def _strip_doc_text(node: Any) -> Any:
@@ -99,7 +90,7 @@ def _render(snapshot: dict[str, Any]) -> str:
     return json.dumps(snapshot, indent=2, sort_keys=True) + "\n"
 
 
-async def test_tool_schema_matches_snapshot(_restore_persona):
+async def test_tool_schema_matches_snapshot():
     """Fail with a diff if the tools/list surface drifts from the baseline."""
     current = _render(await _build_snapshot())
 

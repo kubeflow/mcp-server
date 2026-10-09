@@ -51,6 +51,9 @@ import fnmatch
 import functools
 import logging
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
@@ -111,20 +114,32 @@ PERSONAS: dict[str, dict[str, Any]] = {
 DESTRUCTIVE_TOOLS = {"delete_training_job", "delete_runtime"}
 
 # ─── Runtime persona ───────────────────────
-# Set once at server startup by create_server(); tools read via get_effective_persona().
+# Set for each tool invocation; tools read via get_effective_persona().
 
-_effective_persona: str = "readonly"
+_effective_persona: ContextVar[str] = ContextVar("effective_persona", default="readonly")
 
 
 def set_effective_persona(persona: str) -> None:
-    """Store the resolved persona at server startup."""
-    global _effective_persona
-    _effective_persona = persona
+    """Set the effective persona in the current execution context.
+
+    Prefer :func:`effective_persona_context` when setting a persona temporarily.
+    """
+    _effective_persona.set(persona)
 
 
 def get_effective_persona() -> str:
-    """Return the persona resolved at server startup."""
-    return _effective_persona
+    """Return the persona active in the current execution context."""
+    return _effective_persona.get()
+
+
+@contextmanager
+def effective_persona_context(persona: str) -> Iterator[None]:
+    """Temporarily set the effective persona and restore the prior value."""
+    token = _effective_persona.set(persona)
+    try:
+        yield
+    finally:
+        _effective_persona.reset(token)
 
 
 def _find_policy_file() -> Path | None:

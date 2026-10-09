@@ -39,7 +39,7 @@ from kubeflow_mcp.common.constants import (
     ErrorCode,
     is_infrastructure_error,
 )
-from kubeflow_mcp.core.dynamic_tools import get_mode_tools, init_dynamic_tools
+from kubeflow_mcp.core.dynamic_tools import DynamicToolRegistry, get_mode_tools
 from kubeflow_mcp.core.health import (
     HEALTH_TOOL_ANNOTATIONS,
     HEALTH_TOOL_DESCRIPTIONS,
@@ -50,8 +50,8 @@ from kubeflow_mcp.core.logging import with_correlation_id
 from kubeflow_mcp.core.middleware import get_mcp_request_id, get_user_id
 from kubeflow_mcp.core.policy import (
     apply_policy_filters,
+    effective_persona_context,
     get_allowed_tools,
-    get_effective_persona,
     is_read_only,
 )
 from kubeflow_mcp.core.resilience import RateLimiter, get_breaker
@@ -152,15 +152,15 @@ def _inject_meta(result: Any, tool_name: str) -> Any:
     return result
 
 
-def _audit_wrap(tool_func):
+def _audit_wrap(tool_func, persona: str = "readonly"):
     """Wrap a tool function with rate limiting, circuit breaking, audit logging, and response metadata."""
     tracer = get_tracer("kubeflow_mcp.tools")
+    effective_persona = persona
 
     @functools.wraps(tool_func)
     def wrapper(**kwargs):
         tool_name = tool_func.__name__
         cid = with_correlation_id()
-        persona = get_effective_persona()
         start = time.monotonic()
 
         span_kwargs: dict[str, Any] = {}
@@ -185,7 +185,7 @@ def _audit_wrap(tool_func):
                 span.set_attribute("user.id", user_id)
 
             # Custom Kubeflow enrichment
-            span.set_attribute("kubeflow.persona", persona)
+            span.set_attribute("kubeflow.persona", effective_persona)
             span.set_attribute("correlation_id", cid)
             masked = mask_sensitive_data(kwargs) if kwargs else {}
             span.set_attribute(
@@ -216,7 +216,8 @@ def _audit_wrap(tool_func):
                 }
 
             try:
-                result = tool_func(**kwargs)
+                with effective_persona_context(effective_persona):
+                    result = tool_func(**kwargs)
                 duration_ms = int((time.monotonic() - start) * 1000)
                 is_success = (
                     "error_code" not in result and "error" not in result
@@ -415,10 +416,6 @@ def create_server(  # noqa: C901
     if clients is None:
         clients = ["trainer"]
 
-    from kubeflow_mcp.core.policy import set_effective_persona
-
-    set_effective_persona(persona)
-
     # Single import per client — cache module refs for reuse
     loaded_modules: dict[str, Any] = {}
     clients_ready = True
@@ -502,11 +499,13 @@ def create_server(  # noqa: C901
         raise ValueError(f"Invalid mode '{mode}'. Must be one of: {', '.join(valid_modes)}")
 
     if mode in ("progressive", "semantic"):
-        init_dynamic_tools(allowed_funcs, all_descriptions)
-        meta_tools = get_mode_tools(mode)
+        dynamic_registry = DynamicToolRegistry(allowed_funcs, all_descriptions)
+        meta_tools = [
+            getattr(dynamic_registry, meta_func.__name__) for meta_func in get_mode_tools(mode)
+        ]
 
         for meta_func in meta_tools:
-            audited = _audit_wrap(meta_func)
+            audited = _audit_wrap(meta_func, persona)
             mcp.tool()(audited)
             logger.debug(f"Registered meta-tool: {meta_func.__name__}")
 
@@ -519,7 +518,7 @@ def create_server(  # noqa: C901
             tool_name = tool_func.__name__
             annotations = all_annotations.get(tool_name)
             description = all_descriptions.get(tool_name)
-            audited = _audit_wrap(tool_func)
+            audited = _audit_wrap(tool_func, persona)
 
             tool_kwargs: dict[str, Any] = {}
             if description:

@@ -30,7 +30,6 @@ from kubeflow_mcp.core.middleware import (
     get_mcp_request_id,
     get_user_id,
 )
-from kubeflow_mcp.core.policy import get_effective_persona, set_effective_persona
 from kubeflow_mcp.core.server import create_server
 
 
@@ -269,11 +268,7 @@ class TestToolErrorMiddleware:
         assert result.structured_content == {"success": True, "items": []}
 
     async def test_server_marks_validation_error(self) -> None:
-        previous_persona = get_effective_persona()
-        try:
-            async with Client(create_server()) as client:
-                result = await client.call_tool_mcp("get_training_job", {"name": "Bad_Name"})
-        finally:
-            set_effective_persona(previous_persona)
+        async with Client(create_server()) as client:
+            result = await client.call_tool_mcp("get_training_job", {"name": "Bad_Name"})
         assert result.is_error is True
         assert result.structured_content["error_code"] == "VALIDATION_ERROR"

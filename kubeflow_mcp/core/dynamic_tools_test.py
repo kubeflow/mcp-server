@@ -38,14 +38,26 @@ def failing_tool(name: str) -> dict:
     raise RuntimeError("cluster unreachable")
 
 
+_admin_calls: list[str] = []
+
+
+def admin_tool(name: str) -> dict:
+    """Harmless admin-only stub used to verify registry isolation."""
+    _admin_calls.append(name)
+    return {"success": True, "data": {"admin_name": name}}
+
+
 @pytest.fixture(autouse=True)
 def _registry():
     _calls.clear()
+    _admin_calls.clear()
+    dynamic_tools._EmbeddingCache._shared_model = None
     dynamic_tools.init_dynamic_tools([probe_tool, failing_tool], {})
     yield
     dynamic_tools.TOOL_REGISTRY.clear()
     dynamic_tools.TOOL_HIERARCHY.clear()
     dynamic_tools._embedding_cache.reset()
+    dynamic_tools._EmbeddingCache._shared_model = None
 
 
 @pytest.fixture
@@ -229,6 +241,32 @@ def test_tool_exception_still_counts_as_breaker_failure():
     assert breaker.state == CircuitState.OPEN
 
 
+def test_dynamic_tool_registries_are_independent():
+    registry_a = dynamic_tools.DynamicToolRegistry([probe_tool], {})
+    registry_b = dynamic_tools.DynamicToolRegistry([admin_tool], {})
+
+    listed_a = registry_a.list_tools("tool")["matching_tools"]
+    listed_b = registry_b.list_tools("tool")["matching_tools"]
+    assert [tool["name"] for tool in listed_a] == ["probe_tool"]
+    assert [tool["name"] for tool in listed_b] == ["admin_tool"]
+
+    described_a = registry_a.describe_tools(["probe_tool", "admin_tool"])["tools"]
+    described_b = registry_b.describe_tools(["probe_tool", "admin_tool"])["tools"]
+    assert described_a[0]["name"] == "probe_tool"
+    assert described_a[1] == {"name": "admin_tool", "error": "Tool not found"}
+    assert described_b[0] == {"name": "probe_tool", "error": "Tool not found"}
+    assert described_b[1]["name"] == "admin_tool"
+
+    result_a = registry_a.execute_tool("admin_tool", {"name": "hidden"})
+    assert result_a["error"] == "Tool 'admin_tool' not found"
+    assert result_a["available"] == ["probe_tool"]
+    assert _admin_calls == []
+
+    result_b = registry_b.execute_tool("admin_tool", {"name": "allowed"})
+    assert result_b == {"success": True, "data": {"admin_name": "allowed"}}
+    assert _admin_calls == ["allowed"]
+
+
 # Semantic search needs sentence-transformers and numpy, which are not dependencies of
 # this package, so the test fakes both to exercise the embedding path deterministically.
 
@@ -264,6 +302,64 @@ def alpha_tool() -> dict:
 def beta_tool() -> dict:
     """Beta tool."""
     return {}
+
+
+def test_semantic_search_is_isolated_between_registries(monkeypatch):
+    fake_module = types.SimpleNamespace(SentenceTransformer=lambda _name: _FakeEmbeddingModel())
+    monkeypatch.setitem(sys.modules, "sentence_transformers", fake_module)
+    monkeypatch.setitem(sys.modules, "numpy", _FAKE_NUMPY)
+
+    registry_a = dynamic_tools.DynamicToolRegistry([alpha_tool], {})
+    registry_b = dynamic_tools.DynamicToolRegistry([beta_tool], {})
+
+    results_a = registry_a.find_tools("alpha")["tools"]
+    results_b = registry_b.find_tools("beta")["tools"]
+
+    assert [tool["name"] for tool in results_a] == ["alpha_tool"]
+    assert [tool["name"] for tool in results_b] == ["beta_tool"]
+    assert registry_a._embedding_cache is not registry_b._embedding_cache
+    assert registry_a._embedding_cache._embeddings is not registry_b._embedding_cache._embeddings
+
+
+def test_embedding_model_is_shared_between_registries(monkeypatch):
+    fake_module = types.SimpleNamespace(SentenceTransformer=lambda _name: _FakeEmbeddingModel())
+    monkeypatch.setitem(sys.modules, "sentence_transformers", fake_module)
+    monkeypatch.setitem(sys.modules, "numpy", _FAKE_NUMPY)
+    monkeypatch.setattr(dynamic_tools._EmbeddingCache, "_shared_model", None)
+
+    registry_a = dynamic_tools.DynamicToolRegistry([alpha_tool], {})
+    registry_b = dynamic_tools.DynamicToolRegistry([beta_tool], {})
+
+    registry_a.find_tools("alpha")
+    registry_b.find_tools("beta")
+
+    assert registry_a._embedding_cache._model is registry_b._embedding_cache._model
+    assert registry_a._embedding_cache._embeddings is not registry_b._embedding_cache._embeddings
+    assert "alpha_tool" in registry_a._embedding_cache._embeddings
+    assert "beta_tool" in registry_b._embedding_cache._embeddings
+    assert "beta_tool" not in registry_a._embedding_cache._embeddings
+    assert "alpha_tool" not in registry_b._embedding_cache._embeddings
+
+
+def test_keyword_fallback_is_isolated_between_registries(monkeypatch):
+    def fail_model_load(*_args, **_kwargs):
+        raise OSError("model unavailable")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "sentence_transformers",
+        types.SimpleNamespace(SentenceTransformer=fail_model_load),
+    )
+    registry_a = dynamic_tools.DynamicToolRegistry([alpha_tool], {})
+    registry_b = dynamic_tools.DynamicToolRegistry([beta_tool], {})
+
+    results_a = registry_a.find_tools("beta")
+    results_b = registry_b.find_tools("beta")
+
+    assert results_a["mode"] == "keyword_fallback"
+    assert results_a["tools"] == []
+    assert results_b["mode"] == "keyword_fallback"
+    assert [tool["name"] for tool in results_b["tools"]] == ["beta_tool"]
 
 
 def test_find_tools_uses_rebuilt_registry_after_reinit(monkeypatch):
