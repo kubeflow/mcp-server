@@ -19,7 +19,7 @@ name: Image Smoke Tests
 # broken entrypoints, missing runtime deps, wrong user, health probe failures,
 # and MCP protocol regressions inside the container context.
 #
-# See .github/scripts/image_smoke_test.sh for the full test matrix (T1–T8).
+# See .github/scripts/image_smoke_test.sh for the full test matrix (T1–T9).
 
 on:
   push:

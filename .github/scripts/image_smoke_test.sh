@@ -148,6 +148,8 @@ fi
 
 
 # Test 4: OTel absent from base image
+# TODO: Issue #307 plans to install the OTel group in the image. Once that happens,
+# flip this check so it asserts that opentelemetry-sdk IS present instead of absent.
 _log "Test 4: no-otel-in-base"
 otel_exit=0
 otel_out=$(docker run --rm --entrypoint python "$IMAGE" -c '
