@@ -1,0 +1,88 @@
+# Copyright The Kubeflow Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Image Smoke Tests
+
+# Builds the runtime Docker image (no push) and runs focused black-box smoke
+# tests against it to catch gaps that source-level unit/conformance tests miss:
+# broken entrypoints, missing runtime deps, wrong user, health probe failures,
+# and MCP protocol regressions inside the container context.
+#
+# See .github/scripts/image_smoke_test.sh for the full test matrix (T1–T9).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    paths:
+      - "Dockerfile"
+      - ".dockerignore"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "README.md"
+      - "kubeflow_mcp/**"
+      - ".github/workflows/image-smoke.yaml"
+      - ".github/scripts/image_smoke_test.sh"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: Runtime image smoke tests
+    runs-on: ubuntu-latest
+    # Image build: ~3-5 min on a cold cache; tests: ~1-2 min. 15 min is a
+    # generous cap that prevents hung runs from blocking the runner.
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      # Build for the native runner architecture (linux/amd64).  Multi-arch
+      # builds require push: true and a registry; single-platform + load: true
+      # keeps everything local and avoids registry auth on PRs.
+      - name: Build image (linux/amd64, no push)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          push: false
+          tags: ghcr.io/kubeflow/mcp-server:sha-${{ github.sha }}
+          build-args: VERSION=${{ github.sha }}
+          cache-from: |
+            type=gha,scope=image-smoke
+            type=gha
+          cache-to: type=gha,scope=image-smoke,mode=max
+
+      - name: Run smoke tests
+        run: |
+          .github/scripts/image_smoke_test.sh \
+            "ghcr.io/kubeflow/mcp-server:sha-${{ github.sha }}"
+
+      # Dump container logs captured by the script's _cleanup trap to aid
+      # debugging.  The trap writes to /tmp/smoke-container.log before removing
+      # the container, so this step can still read them after teardown.
+      - name: Dump container logs on failure
+        if: failure()
+        run: |
+          cat /tmp/smoke-container.log 2>/dev/null \
+            || echo "No container logs captured (server may not have started)."
