@@ -806,6 +806,13 @@ def test_get_training_job_keeps_failed_step_beyond_the_cap():
 class TestFetchPackagesPodLog:
     """How the pip-list pod's log is read and interpreted."""
 
+    PIP_COLUMNS = (
+        "Package                                  Version              Editable project location\n"
+        "---------------------------------------- -------------------- -------------------------\n"
+        "accelerate                               1.11.0\n"
+        "torch                                    2.5.1+cu121\n"
+    )
+
     def _fetch(self, logs, persona="data-scientist", read_only=False):
         from kubeflow_mcp.trainer.api.discovery import _fetch_packages_via_pod
 
@@ -878,6 +885,23 @@ class TestFetchPackagesPodLog:
         kwargs = self.core.read_namespaced_pod_log.call_args.kwargs
         assert "tail_lines" not in kwargs
         assert kwargs["limit_bytes"] >= 1024 * 1024
+
+    def test_header_and_separator_rows_are_not_packages(self):
+        result = self._fetch(self.PIP_COLUMNS)
+        assert result == {
+            "packages": [
+                {"name": "accelerate", "version": "1.11.0"},
+                {"name": "torch", "version": "2.5.1+cu121"},
+            ],
+            "total": 2,
+        }
+
+    @pytest.mark.parametrize("width", [3, 7, 40])
+    def test_separator_row_of_any_width_is_skipped(self, width):
+        dashes = "-" * width
+        result = self._fetch(f"Package Version\n{dashes} {dashes}\nnumpy 2.0.0\n")
+        assert result["packages"] == [{"name": "numpy", "version": "2.0.0"}]
+        assert result["total"] == 1
 
 
 @pytest.fixture(autouse=True)
