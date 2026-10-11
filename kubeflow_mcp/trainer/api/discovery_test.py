@@ -545,3 +545,46 @@ def test_get_training_job_namespace_not_allowed_short_circuits():
 
     assert result["success"] is False
     assert result["error_code"] == ErrorCode.PERMISSION_DENIED
+
+
+class TestFetchPackagesViaPod:
+    PIP_COLUMNS = (
+        "Package                                  Version              Editable project location\n"
+        "---------------------------------------- -------------------- -------------------------\n"
+        "accelerate                               1.11.0\n"
+        "torch                                    2.5.1+cu121\n"
+    )
+
+    def _fetch(self, logs):
+        from kubeflow_mcp.trainer.api.discovery import _fetch_packages_via_pod
+
+        pod = MagicMock()
+        pod.status.phase = "Succeeded"
+        core = MagicMock()
+        core.read_namespaced_pod.return_value = pod
+        core.read_namespaced_pod_log.return_value = logs
+        mod = "kubeflow_mcp.trainer.api.discovery"
+        with (
+            patch(f"{mod}._get_runtime_image", return_value="img"),
+            patch(f"{mod}.get_trainer_effective_namespace", return_value="ns"),
+            patch(f"{mod}.check_namespace_allowed", return_value=None),
+            patch(f"{mod}.get_core_v1_api", return_value=core),
+        ):
+            return _fetch_packages_via_pod("rt")
+
+    def test_header_and_separator_rows_are_not_packages(self):
+        result = self._fetch(self.PIP_COLUMNS)
+        assert result == {
+            "packages": [
+                {"name": "accelerate", "version": "1.11.0"},
+                {"name": "torch", "version": "2.5.1+cu121"},
+            ],
+            "total": 2,
+        }
+
+    @pytest.mark.parametrize("width", [3, 7, 40])
+    def test_separator_row_of_any_width_is_skipped(self, width):
+        dashes = "-" * width
+        result = self._fetch(f"Package Version\n{dashes} {dashes}\nnumpy 2.0.0\n")
+        assert result["packages"] == [{"name": "numpy", "version": "2.0.0"}]
+        assert result["total"] == 1
