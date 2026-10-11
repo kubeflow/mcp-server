@@ -71,6 +71,31 @@ def _validate_session_name(name: str) -> str | None:
     return None
 
 
+def _provisioned_session_or_none(
+    exc: Exception, session_name: str, namespace: str | None
+) -> dict[str, Any] | None:
+    """Return the session's metadata if it exists despite *exc*, else ``None``.
+
+    ``connect()`` waits for readiness and for a driver connection, either of
+    which can fail *after* the SparkConnect CR has already been created (the MCP
+    host may not be able to reach the driver, or a client-side import may fail).
+    Reporting only the error would leave a running, MCP-labelled session that the
+    caller does not know about.
+    """
+    try:
+        client = get_spark_client_for_namespace(namespace)
+        info = client.get_session(session_name)
+    except Exception:
+        return None
+
+    data = session_info_to_dict(info)
+    data["warning"] = (
+        "Session was provisioned, but the server could not confirm the driver "
+        f"connection: {exc}. Poll get_spark_session(name='{session_name}') for readiness."
+    )
+    return ToolResponse(data=data).model_dump()
+
+
 def create_spark_session(
     name: str | None = None,
     num_executors: int | None = None,
@@ -187,28 +212,25 @@ def create_spark_session(
         return ToolResponse(data=data).model_dump()
 
     except ImportError as e:
+        # A missing client-side dependency can surface *after* connect() has already
+        # created the CR (pyspark imports pandas only when building the session), so
+        # this path needs the same provisioned-session check as any other failure —
+        # otherwise a running session is reported as a pure failure and leaks.
         logger.warning("create_spark_session(%s) missing SDK extra: %s", session_name, e)
+        provisioned = _provisioned_session_or_none(e, session_name, namespace)
+        if provisioned is not None:
+            return provisioned
         return ToolError(error=str(e), error_code=ErrorCode.SDK_ERROR).model_dump()
     except Exception as e:
         logger.warning("create_spark_session(%s) failed: %s", session_name, e, exc_info=True)
-        # connect() waits for readiness and a driver connection, both of which can
-        # fail *after* the CR is already created (e.g. the MCP host can't reach the
-        # driver). If the session exists, report it as provisioned rather than lost.
-        try:
-            client = get_spark_client_for_namespace(namespace)
-            info = client.get_session(session_name)
-            data = session_info_to_dict(info)
-            data["warning"] = (
-                "Session was provisioned, but the server could not confirm the driver "
-                f"connection: {e}. Poll get_spark_session(name='{session_name}') for readiness."
-            )
-            return ToolResponse(data=data).model_dump()
-        except Exception:
-            return ToolError(
-                error=str(e),
-                error_code=ErrorCode.SDK_ERROR,
-                details=exception_details(e),
-            ).model_dump()
+        provisioned = _provisioned_session_or_none(e, session_name, namespace)
+        if provisioned is not None:
+            return provisioned
+        return ToolError(
+            error=str(e),
+            error_code=ErrorCode.SDK_ERROR,
+            details=exception_details(e),
+        ).model_dump()
 
 
 def delete_spark_session(

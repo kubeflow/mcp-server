@@ -71,6 +71,37 @@ class TestCreateSession:
         assert name_opts and name_opts[0].name == "etl"
 
 
+class TestCreateFailsAfterProvisioning:
+    """``connect()`` can fail after the CR exists. Reporting only the error would
+    leave a running, MCP-labelled session the caller never hears about."""
+
+    def test_import_error_after_create_reports_the_live_session(self, mock_spark_client):
+        # pyspark imports pandas only when building the SparkSession, so a missing
+        # or incompatible dependency surfaces *after* the CR has been created.
+        mock_spark_client.connect.side_effect = ImportError(
+            "[PACKAGE_NOT_INSTALLED] Pandas >= 2.2.0 must be installed"
+        )
+        out = sessions.create_spark_session(name="etl", namespace="default", confirmed=True)
+        assert out["success"] is True
+        assert "warning" in out["data"]
+        assert out["data"]["name"] == "spark-connect-ab12"
+
+    def test_generic_failure_after_create_reports_the_live_session(self, mock_spark_client):
+        mock_spark_client.connect.side_effect = RuntimeError("driver unreachable")
+        out = sessions.create_spark_session(name="etl", namespace="default", confirmed=True)
+        assert out["success"] is True
+        assert "warning" in out["data"]
+
+    def test_missing_extra_with_no_session_still_errors(self):
+        # Nothing was provisioned, so the friendly install hint must survive.
+        err = ImportError("SparkClient requires the Spark extra.")
+        with patch.object(sessions, "get_spark_client_for_namespace", side_effect=err):
+            out = sessions.create_spark_session(name="etl", namespace="default", confirmed=True)
+        assert out["success"] is False
+        assert out["error_code"] == "SDK_ERROR"
+        assert "Spark extra" in out["error"]
+
+
 class TestDeleteOwnershipGuard:
     """CONVENTIONS.md: non-admin personas may only mutate MCP-labelled resources,
     and a missing resource must be distinguishable from an unowned one."""
