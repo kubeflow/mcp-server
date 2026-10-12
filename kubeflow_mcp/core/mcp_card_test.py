@@ -15,7 +15,6 @@
 from pathlib import Path
 
 import pytest
-import tomllib
 from fastmcp import FastMCP
 from starlette.testclient import TestClient
 
@@ -130,17 +129,36 @@ def test_server_json_is_force_included_in_the_wheel() -> None:
 
     The runtime preference for the packaged path is only useful if the build
     actually puts server.json there, so assert the force-include is declared.
+    Read as text rather than parsed: ``tomllib`` is 3.11+ and this package
+    supports 3.10.
     """
-    pyproject = Path(kubeflow_mcp.__file__).resolve().parent.parent / "pyproject.toml"
+    repo_root = Path(kubeflow_mcp.__file__).resolve().parent.parent
+    pyproject = repo_root / "pyproject.toml"
     if not pyproject.exists():  # pragma: no cover - installed package, not a checkout
         pytest.skip("pyproject.toml is not part of an installed package")
 
-    with open(pyproject, "rb") as handle:
-        config = tomllib.load(handle)
+    content = pyproject.read_text(encoding="utf-8")
 
-    force_include = config["tool"]["hatch"]["build"]["targets"]["wheel"].get("force-include", {})
+    assert '"server.json" = "kubeflow_mcp/server.json"' in content
+    assert "[tool.hatch.build.targets.wheel.force-include]" in content
 
-    assert force_include.get("server.json") == "kubeflow_mcp/server.json"
+
+def test_docker_build_context_includes_server_json() -> None:
+    """The wheel build fails outright if force-include cannot find its source.
+
+    The Dockerfile copies files individually, so server.json has to be copied
+    before the build step or the image build breaks.
+    """
+    repo_root = Path(kubeflow_mcp.__file__).resolve().parent.parent
+    dockerfile = repo_root / "Dockerfile"
+    if not dockerfile.exists():  # pragma: no cover - installed package, not a checkout
+        pytest.skip("Dockerfile is not part of an installed package")
+
+    lines = [line.strip() for line in dockerfile.read_text(encoding="utf-8").splitlines()]
+    copy_index = next(i for i, line in enumerate(lines) if line.startswith("COPY server.json"))
+    build_index = next(i for i, line in enumerate(lines) if "--no-editable" in line)
+
+    assert copy_index < build_index, "server.json must be copied before the wheel is built"
 
 
 def test_server_card_uses_the_real_identity_when_server_json_is_present() -> None:

@@ -22,6 +22,9 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
 COPY README.md ./
+# server.json is force-included into the wheel (see pyproject.toml) so the MCP
+# Server Card can be served from an installed package, so the build needs it.
+COPY server.json ./
 COPY kubeflow_mcp ./kubeflow_mcp
 RUN uv sync --frozen --no-dev --no-editable
 
