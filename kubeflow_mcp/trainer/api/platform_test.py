@@ -315,6 +315,7 @@ def test_delete_runtime_confirmed_after_failed_check_warns(mock_k8s_apis):
         ({"name": "torchtune-llama", "kind": "TrainingRuntime"}, False),
         ({"name": "torchtune-llama", "apiGroup": "example.com"}, False),
         ({"name": "other-runtime"}, False),
+        (None, False),
     ],
 )
 def test_delete_runtime_counts_only_jobs_on_the_cluster_runtime(
@@ -328,6 +329,7 @@ def test_delete_runtime_counts_only_jobs_on_the_cluster_runtime(
     result = delete_runtime("torchtune-llama", confirmed=False)
 
     data = verify_tool_success(result)
+    assert data["dependents_checked"] is True
     assert data["dependent_count"] == (1 if counted else 0)
 
 

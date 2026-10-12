@@ -476,7 +476,7 @@ def _uses_cluster_runtime(job: dict[str, Any], name: str) -> bool:
     ClusterTrainingRuntime and the Trainer group, so a bare ``{"name": ...}``
     still counts. A namespaced TrainingRuntime with the same name does not.
     """
-    ref = job.get("spec", {}).get("runtimeRef", {})
+    ref = (job.get("spec") or {}).get("runtimeRef") or {}
     return (
         ref.get("name") == name
         and (ref.get("kind") or _CLUSTER_RUNTIME_KIND) == _CLUSTER_RUNTIME_KIND
