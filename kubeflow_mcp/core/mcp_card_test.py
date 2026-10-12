@@ -12,10 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from pathlib import Path
+
 import pytest
+import tomllib
 from fastmcp import FastMCP
 from starlette.testclient import TestClient
 
+import kubeflow_mcp
 from kubeflow_mcp.core.mcp_card import (
     SERVER_CARD_PATH,
     SERVER_CARD_SCHEMA,
@@ -105,6 +109,48 @@ def test_server_card_stays_public_when_auth_is_enabled() -> None:
     """Discovery has to work before the caller holds a credential."""
     with _card_client(authenticated=True) as client:
         assert client.get(SERVER_CARD_PATH).status_code == 200
+
+
+def test_server_json_is_looked_up_inside_the_package_first() -> None:
+    """A pip or container install has no repository root to read from.
+
+    The packaged copy must take priority, otherwise every real deployment
+    silently serves the fallback card.
+    """
+    from kubeflow_mcp.core.mcp_card import _server_json_candidates
+
+    candidates = _server_json_candidates()
+
+    assert candidates[0] == Path(kubeflow_mcp.__file__).resolve().parent / "server.json"
+    assert len(candidates) > 1, "a source checkout still needs the repository-root fallback"
+
+
+def test_server_json_is_force_included_in_the_wheel() -> None:
+    """Guards the packaging side of the lookup above.
+
+    The runtime preference for the packaged path is only useful if the build
+    actually puts server.json there, so assert the force-include is declared.
+    """
+    pyproject = Path(kubeflow_mcp.__file__).resolve().parent.parent / "pyproject.toml"
+    if not pyproject.exists():  # pragma: no cover - installed package, not a checkout
+        pytest.skip("pyproject.toml is not part of an installed package")
+
+    with open(pyproject, "rb") as handle:
+        config = tomllib.load(handle)
+
+    force_include = config["tool"]["hatch"]["build"]["targets"]["wheel"].get("force-include", {})
+
+    assert force_include.get("server.json") == "kubeflow_mcp/server.json"
+
+
+def test_server_card_uses_the_real_identity_when_server_json_is_present() -> None:
+    """In this checkout the file resolves, so the card is not the fallback."""
+    from kubeflow_mcp.core.mcp_card import _load_server_json
+
+    loaded = _load_server_json()
+
+    assert loaded.get("name") == "io.github.kubeflow/mcp-server"
+    assert loaded.get("version")
 
 
 def test_server_card_falls_back_when_server_json_unreadable(monkeypatch) -> None:

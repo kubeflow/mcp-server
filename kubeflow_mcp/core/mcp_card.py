@@ -97,28 +97,47 @@ _FALLBACK_REPOSITORY = {
 _INHERITED_FIELDS = ("name", "version", "description", "title", "websiteUrl", "repository", "icons")
 
 
-def _server_json_path() -> Path:
-    """Locate server.json at the repository root, if it is present."""
-    return Path(__file__).resolve().parents[2] / "server.json"
+def _server_json_candidates() -> tuple[Path, ...]:
+    """Paths where ``server.json`` may live, in priority order.
+
+    The packaged copy comes first: wheels and the container image ship
+    ``server.json`` inside the package (see ``force-include`` in
+    ``pyproject.toml``), and those are the only places a real deployment can
+    read it from. The repository root is the fallback, which is what an
+    editable install or a source checkout resolves to — force-include does not
+    materialize a file in the working tree.
+    """
+    package_root = Path(__file__).resolve().parent.parent
+    return (
+        package_root / "server.json",
+        package_root.parent / "server.json",
+    )
 
 
 @lru_cache(maxsize=1)
 def _load_server_json() -> dict[str, Any]:
-    """Read server.json once, tolerating its absence in installed packages."""
-    path = _server_json_path()
-    try:
-        with open(path, encoding="utf-8") as handle:
-            data = json.load(handle)
+    """Read server.json once, tolerating its absence."""
+    candidates = _server_json_candidates()
+    for path in candidates:
+        try:
+            with open(path, encoding="utf-8") as handle:
+                data = json.load(handle)
+        except FileNotFoundError:
+            continue
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("Could not read %s (%s), using fallback identity", path, exc)
+            return {}
+
         if not isinstance(data, dict):
-            logger.warning("server.json is not a JSON object, ignoring it")
+            logger.warning("%s is not a JSON object, ignoring it", path)
             return {}
         return data
-    except FileNotFoundError:
-        logger.debug("server.json not found at %s, using fallback identity", path)
-        return {}
-    except (OSError, json.JSONDecodeError) as exc:
-        logger.warning("Could not read server.json (%s), using fallback identity", exc)
-        return {}
+
+    logger.debug(
+        "server.json not found in any of %s, using fallback identity",
+        ", ".join(str(path) for path in candidates),
+    )
+    return {}
 
 
 def build_server_card(mcp_url: str | None = None) -> dict[str, Any]:
