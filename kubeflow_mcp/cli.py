@@ -98,7 +98,7 @@ def cli() -> None:
 @click.option(
     "--otel-endpoint",
     default=None,
-    help="OpenTelemetry OTLP HTTP endpoint for tracing. "
+    help="OpenTelemetry OTLP HTTP endpoint for traces and metrics. "
     "Falls back to OTEL_EXPORTER_OTLP_ENDPOINT env var, config file.",
 )
 def serve(
@@ -124,7 +124,7 @@ def serve(
     from kubeflow_mcp.core.logging import setup_logging
     from kubeflow_mcp.core.resilience import configure_circuit_breaker
     from kubeflow_mcp.core.server import configure_resilience, create_server
-    from kubeflow_mcp.core.telemetry import setup_tracing
+    from kubeflow_mcp.core.telemetry import setup_metrics, setup_tracing
 
     cfg = load_config()
 
@@ -142,6 +142,7 @@ def serve(
 
     logger = setup_logging(level=log_level, format=log_format)
     tracing_enabled = setup_tracing(endpoint=cfg.observability.otel_endpoint)
+    metrics_enabled = setup_metrics(endpoint=cfg.observability.otel_endpoint)
     logger.info(
         "Starting kubeflow-mcp",
         extra={
@@ -151,6 +152,7 @@ def serve(
             "mode": mode,
             "instruction_tier": instruction_tier,
             "tracing_enabled": tracing_enabled,
+            "metrics_enabled": metrics_enabled,
         },
     )
 
