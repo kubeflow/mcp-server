@@ -20,6 +20,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from kubeflow.trainer.constants import constants as trainer_constants
 from tests.common import TestCase
 
 from kubeflow_mcp.common.failures import FAILURE_PATTERNS, extract_failure_hint
@@ -172,22 +173,45 @@ def _make_pod(labels=None):
     return SimpleNamespace(metadata=SimpleNamespace(labels=labels))
 
 
+def _trainjob_pod(job: str, role: str, index: int | None = None, name: str | None = None):
+    """Pod labelled the way a Trainer v2 JobSet labels it.
+
+    All ``node`` pods belong to one ReplicatedJob, so ``jobset.sigs.k8s.io/job-index`` is
+    always 0; the node number is the Job completion index.
+    """
+    labels = {
+        trainer_constants.JOBSET_NAME_LABEL: job,
+        trainer_constants.JOBSET_RJOB_NAME_LABEL: role,
+        "jobset.sigs.k8s.io/job-index": "0",
+    }
+    if index is not None:
+        labels[trainer_constants.JOB_INDEX_LABEL] = str(index)
+    pod = _make_pod(labels)
+    pod.metadata.name = name or f"{job}-{role}-0-{index if index is not None else 0}"
+    return pod
+
+
 class TestIsPodForStep:
-    def test_matches_replicated_job_name(self):
-        pod = _make_pod({"jobset.sigs.k8s.io/replicatedjob-name": "node-0"})
-        assert _is_pod_for_step(pod, "node-0") is True
+    def test_matches_node_by_completion_index(self):
+        pods = [_trainjob_pod("job", "node", index=i) for i in range(3)]
+        assert [_is_pod_for_step(pod, "node-1") for pod in pods] == [False, True, False]
 
-    def test_matches_replicated_job_with_index(self):
-        pod = _make_pod(
-            {
-                "jobset.sigs.k8s.io/replicatedjob-name": "worker",
-                "jobset.sigs.k8s.io/job-index": "2",
-            }
-        )
-        assert _is_pod_for_step(pod, "worker-2") is True
+    def test_node_0_does_not_match_other_nodes(self):
+        pods = [_trainjob_pod("job", "node", index=i) for i in range(3)]
+        assert [_is_pod_for_step(pod, "node-0") for pod in pods] == [True, False, False]
 
-    def test_no_match(self):
-        pod = _make_pod({"jobset.sigs.k8s.io/replicatedjob-name": "node-1"})
+    def test_matches_launcher_by_completion_index(self):
+        pod = _trainjob_pod("job", "launcher", index=0)
+        assert _is_pod_for_step(pod, "launcher-0") is True
+        assert _is_pod_for_step(pod, "node-0") is False
+
+    def test_matches_initializer_by_role(self):
+        pod = _trainjob_pod("job", "dataset-initializer")
+        assert _is_pod_for_step(pod, "dataset-initializer") is True
+        assert _is_pod_for_step(pod, "model-initializer") is False
+
+    def test_node_without_completion_index(self):
+        pod = _make_pod({trainer_constants.JOBSET_RJOB_NAME_LABEL: "node"})
         assert _is_pod_for_step(pod, "node-0") is False
 
     def test_no_labels(self):
@@ -362,8 +386,7 @@ class TestGetTrainingLogs:
         self, mock_client_fn, _ns, _eff_ns, mock_v1_fn, _validate
     ):
         mock_client_fn.return_value = _make_mock_client(get_job_logs=[])
-        pod = _make_pod({"jobset.sigs.k8s.io/replicatedjob-name": "node-0"})
-        pod.metadata.name = "crash-job-node-0-0"
+        pod = _trainjob_pod("crash-job", "node", index=0, name="crash-job-node-0-0")
         mock_v1 = MagicMock()
         mock_v1.list_namespaced_pod.return_value = SimpleNamespace(items=[pod])
         mock_v1.read_namespaced_pod_log.return_value = "previous crash output"
@@ -371,9 +394,63 @@ class TestGetTrainingLogs:
         result = get_training_logs("crash-job", step="node-0")
         assert result["success"] is True
         assert "previous crash output" in result["data"]["logs"]
+        mock_v1.list_namespaced_pod.assert_called_once_with(
+            namespace="default",
+            label_selector=trainer_constants.POD_LABEL_SELECTOR.format(trainjob_name="crash-job"),
+        )
         mock_v1.read_namespaced_pod_log.assert_called_once_with(
             name="crash-job-node-0-0",
             namespace="default",
+            container="node",
+            previous=True,
+            tail_lines=MAX_LOG_LINES,
+        )
+
+    @patch(PATCH_VALIDATE_NAME, return_value=None)
+    @patch(PATCH_CORE_V1)
+    @patch(PATCH_EFF_NS, return_value="default")
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_fallback_reads_only_the_requested_node(
+        self, mock_client_fn, _ns, _eff_ns, mock_v1_fn, _validate
+    ):
+        mock_client_fn.return_value = _make_mock_client(get_job_logs=[])
+        pods = [_trainjob_pod("crash-job", "node", index=i) for i in range(3)]
+        mock_v1 = MagicMock()
+        mock_v1.list_namespaced_pod.return_value = SimpleNamespace(items=pods)
+        mock_v1.read_namespaced_pod_log.return_value = "node-1 crash output"
+        mock_v1_fn.return_value = mock_v1
+        result = get_training_logs("crash-job", step="node-1")
+        assert result["success"] is True
+        assert result["data"]["logs"] == "node-1 crash output"
+        mock_v1.read_namespaced_pod_log.assert_called_once_with(
+            name="crash-job-node-0-1",
+            namespace="default",
+            container="node",
+            previous=True,
+            tail_lines=MAX_LOG_LINES,
+        )
+
+    @patch(PATCH_VALIDATE_NAME, return_value=None)
+    @patch(PATCH_CORE_V1)
+    @patch(PATCH_EFF_NS, return_value="default")
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_fallback_reads_initializer_container(
+        self, mock_client_fn, _ns, _eff_ns, mock_v1_fn, _validate
+    ):
+        mock_client_fn.return_value = _make_mock_client(get_job_logs=[])
+        pod = _trainjob_pod("crash-job", "model-initializer", name="crash-job-model-init")
+        mock_v1 = MagicMock()
+        mock_v1.list_namespaced_pod.return_value = SimpleNamespace(items=[pod])
+        mock_v1.read_namespaced_pod_log.return_value = "download failed"
+        mock_v1_fn.return_value = mock_v1
+        result = get_training_logs("crash-job", step="model-initializer")
+        assert result["data"]["logs"] == "download failed"
+        mock_v1.read_namespaced_pod_log.assert_called_once_with(
+            name="crash-job-model-init",
+            namespace="default",
+            container="model-initializer",
             previous=True,
             tail_lines=MAX_LOG_LINES,
         )
@@ -387,8 +464,7 @@ class TestGetTrainingLogs:
         self, mock_client_fn, _ns, _eff_ns, mock_v1_fn, _validate
     ):
         mock_client_fn.return_value = _make_mock_client(get_job_logs=[])
-        pod = _make_pod({"jobset.sigs.k8s.io/replicatedjob-name": "node-0"})
-        pod.metadata.name = "crash-job-node-0-0"
+        pod = _trainjob_pod("crash-job", "node", index=0)
         mock_v1 = MagicMock()
         mock_v1.list_namespaced_pod.return_value = SimpleNamespace(items=[pod])
         mock_v1.read_namespaced_pod_log.side_effect = RuntimeError("container not found")
@@ -413,10 +489,8 @@ class TestGetTrainingLogs:
         self, mock_client_fn, _ns, _eff_ns, mock_v1_fn, _validate
     ):
         mock_client_fn.return_value = _make_mock_client(get_job_logs=[])
-        non_matching = _make_pod({"jobset.sigs.k8s.io/replicatedjob-name": "worker"})
-        non_matching.metadata.name = "job-worker-0"
-        matching = _make_pod({"jobset.sigs.k8s.io/replicatedjob-name": "node-0"})
-        matching.metadata.name = "job-node-0-0"
+        non_matching = _trainjob_pod("my-job", "dataset-initializer", name="job-dataset-init")
+        matching = _trainjob_pod("my-job", "node", index=0, name="job-node-0-0")
         mock_v1 = MagicMock()
         mock_v1.list_namespaced_pod.return_value = SimpleNamespace(items=[non_matching, matching])
         mock_v1.read_namespaced_pod_log.return_value = "recovered logs"
@@ -593,8 +667,7 @@ class TestGetTrainingLogsCursor:
         self, mock_client_fn, _ns, _eff_ns, mock_v1_fn, _validate
     ):
         mock_client_fn.return_value = _make_mock_client(get_job_logs=[])
-        pod = _make_pod({"jobset.sigs.k8s.io/replicatedjob-name": "node-0"})
-        pod.metadata.name = "crash-job-node-0-0"
+        pod = _trainjob_pod("crash-job", "node", index=0)
         mock_v1 = MagicMock()
         mock_v1.list_namespaced_pod.return_value = SimpleNamespace(items=[pod])
         mock_v1.read_namespaced_pod_log.return_value = "previous crash output"

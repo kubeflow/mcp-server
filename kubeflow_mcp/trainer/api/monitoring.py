@@ -15,8 +15,11 @@
 """Monitoring tools for training job logs and events."""
 
 import logging
+import re
 from collections import deque
 from typing import Any
+
+from kubeflow.trainer.constants import constants as trainer_constants
 
 from kubeflow_mcp.common.constants import ErrorCode
 from kubeflow_mcp.common.failures import extract_failure_hint
@@ -45,17 +48,17 @@ _VALID_TARGET_STATUSES = frozenset({"Complete", "Failed", "Running", "Created"})
 
 
 def _is_pod_for_step(pod: Any, step: str) -> bool:
-    """Return whether a JobSet pod corresponds to the requested TrainJob step."""
+    """Return whether a JobSet pod corresponds to the requested TrainJob step.
+
+    Mirrors how the SDK names steps: launcher and node pods are ``<role>-<completion
+    index>`` (all nodes share one ReplicatedJob), initializer pods are the role alone.
+    """
     labels = getattr(pod.metadata, "labels", None) or {}
-    replicated_job = labels.get("jobset.sigs.k8s.io/replicatedjob-name")
-    job_index = labels.get("jobset.sigs.k8s.io/job-index")
-    if replicated_job == step:
-        return True
-    return (
-        replicated_job is not None
-        and job_index is not None
-        and f"{replicated_job}-{job_index}" == step
-    )
+    role = labels.get(trainer_constants.JOBSET_RJOB_NAME_LABEL)
+    if role in (trainer_constants.LAUNCHER, trainer_constants.NODE):
+        index = labels.get(trainer_constants.JOB_INDEX_LABEL)
+        return index is not None and f"{role}-{index}" == step
+    return role == step
 
 
 def _collect_log_lines(
@@ -86,8 +89,10 @@ def _collect_log_lines(
         v1 = get_core_v1_api()
         pods = v1.list_namespaced_pod(
             namespace=eff_ns,
-            label_selector=f"training.kubeflow.org/trainjob-name={name}",
+            label_selector=trainer_constants.POD_LABEL_SELECTOR.format(trainjob_name=name),
         )
+        # Same container the SDK reads for the step: "node-1" -> "node".
+        container = re.sub(r"-\d+$", "", step)
         for pod in pods.items:
             if not _is_pod_for_step(pod, step):
                 continue
@@ -95,6 +100,7 @@ def _collect_log_lines(
                 raw = v1.read_namespaced_pod_log(
                     name=pod.metadata.name,
                     namespace=eff_ns,
+                    container=container,
                     previous=True,
                     tail_lines=MAX_LOG_LINES,
                 )
