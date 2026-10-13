@@ -40,7 +40,7 @@ from kubeflow_mcp.common.constants import (
     TOOL_PHASES,
     TOOL_TO_PHASE,
     ErrorCode,
-    is_infrastructure_error,
+    record_tool_result,
 )
 from kubeflow_mcp.core.resilience import get_breaker
 
@@ -196,7 +196,7 @@ def execute_tool(tool_name: str, arguments: dict[str, Any] | None = None) -> dic
     args = arguments or {}
 
     # Reject bad arguments before touching the breaker: they are a caller mistake,
-    # and returning after can_execute() would also leak a half-open probe slot.
+    # and returning after acquire() would also leak a half-open probe slot.
     try:
         inspect.signature(func).bind(**args)
     except TypeError as e:
@@ -207,7 +207,8 @@ def execute_tool(tool_name: str, arguments: dict[str, Any] | None = None) -> dic
         }
 
     breaker = get_breaker(tool_name)
-    if not breaker.can_execute():
+    generation = breaker.acquire()
+    if generation is None:
         return {
             "error": f"Circuit breaker open for '{tool_name}' — K8s API may be degraded. Retries automatically after recovery timeout.",
             "error_code": ErrorCode.CIRCUIT_OPEN,
@@ -217,16 +218,14 @@ def execute_tool(tool_name: str, arguments: dict[str, Any] | None = None) -> dic
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=Warning, module="urllib3")
             result = func(**args)
-        if isinstance(result, dict) and is_infrastructure_error(result):
-            breaker.record_failure()
-        else:
-            breaker.record_success()
-        if isinstance(result, dict):
-            return result
-        return {"result": result}
     except Exception as e:
-        breaker.record_failure()
+        breaker.record_failure(generation)
         return {"error": str(e), "error_code": ErrorCode.SDK_ERROR, "tool": tool_name}
+
+    record_tool_result(breaker, result, generation)
+    if isinstance(result, dict):
+        return result
+    return {"result": result}
 
 
 PROGRESSIVE_TOOLS: list[Callable] = [list_tools, describe_tools, execute_tool]
