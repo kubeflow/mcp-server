@@ -99,7 +99,11 @@ class TestTrainjobRuntimeToMcp:
 
 
 def test_get_training_job_returns_details(mock_trainer_client):
-    result = get_training_job(name=VALID_JOB_NAME)
+    with patch(
+        "kubeflow_mcp.trainer.api.discovery.get_trainjob_queue_status",
+        return_value=None,
+    ):
+        result = get_training_job(name=VALID_JOB_NAME)
     data = verify_tool_success(result)
     assert data["name"] == VALID_JOB_NAME
     assert data["status"] == "Running"
@@ -545,3 +549,123 @@ def test_get_training_job_namespace_not_allowed_short_circuits():
 
     assert result["success"] is False
     assert result["error_code"] == ErrorCode.PERMISSION_DENIED
+
+
+def test_get_training_job_surfaces_queue_status_inadmissible():
+    client = MagicMock()
+    client.get_job.return_value = _fake_job("job-a", status="Created")
+    queue_status = {
+        "queue_name": "bad-queue",
+        "state": "inadmissible",
+        "reason": "Inadmissible",
+        "message": "LocalQueue bad-queue doesn't exist",
+    }
+    with (
+        patch(
+            "kubeflow_mcp.trainer.api.discovery.get_trainer_client_for_namespace",
+            return_value=client,
+        ),
+        patch(
+            "kubeflow_mcp.trainer.api.discovery.get_trainjob_queue_status",
+            return_value=queue_status,
+        ),
+    ):
+        result = get_training_job("job-a")
+
+    assert result["success"] is True
+    assert result["data"]["queue_status"] == queue_status
+    assert "inadmissible in queue 'bad-queue'" in result["data"]["next_steps"][0]
+    assert "trainer://guides/queue-states" in result["data"]["next_steps"][0]
+
+
+def test_get_training_job_surfaces_queue_status_queued():
+    client = MagicMock()
+    client.get_job.return_value = _fake_job("job-a", status="Created")
+    queue_status = {
+        "queue_name": "gpu-queue",
+        "state": "queued",
+        "reason": "Pending",
+    }
+    with (
+        patch(
+            "kubeflow_mcp.trainer.api.discovery.get_trainer_client_for_namespace",
+            return_value=client,
+        ),
+        patch(
+            "kubeflow_mcp.trainer.api.discovery.get_trainjob_queue_status",
+            return_value=queue_status,
+        ),
+    ):
+        result = get_training_job("job-a")
+
+    assert result["success"] is True
+    assert result["data"]["queue_status"] == queue_status
+    assert "queued waiting for quota in 'gpu-queue'" in result["data"]["next_steps"][0]
+    assert "trainer://guides/queue-states" in result["data"]["next_steps"][0]
+
+
+def test_get_training_job_surfaces_queue_status_evicted():
+    client = MagicMock()
+    client.get_job.return_value = _fake_job("job-a", status="Created")
+    queue_status = {
+        "queue_name": "gpu-queue",
+        "state": "evicted",
+        "reason": "Preempted",
+        "message": "Preempted by priority job",
+    }
+    with (
+        patch(
+            "kubeflow_mcp.trainer.api.discovery.get_trainer_client_for_namespace",
+            return_value=client,
+        ),
+        patch(
+            "kubeflow_mcp.trainer.api.discovery.get_trainjob_queue_status",
+            return_value=queue_status,
+        ),
+    ):
+        result = get_training_job("job-a")
+
+    assert result["success"] is True
+    assert result["data"]["queue_status"] == queue_status
+    assert "evicted (Preempted)" in result["data"]["next_steps"][0]
+    assert "trainer://guides/queue-states" in result["data"]["next_steps"][0]
+
+
+def test_get_training_job_without_kueue_preserves_baseline():
+    client = MagicMock()
+    client.get_job.return_value = _fake_job("job-a", status="Created")
+    with (
+        patch(
+            "kubeflow_mcp.trainer.api.discovery.get_trainer_client_for_namespace",
+            return_value=client,
+        ),
+        patch(
+            "kubeflow_mcp.trainer.api.discovery.get_trainjob_queue_status",
+            return_value=None,
+        ),
+    ):
+        result = get_training_job("job-a")
+
+    assert result["success"] is True
+    assert "queue_status" not in result["data"]
+
+
+def test_get_training_job_terminal_status_skips_queue_status():
+    client = MagicMock()
+    client.get_job.return_value = _fake_job("job-a", status="Complete")
+    with (
+        patch(
+            "kubeflow_mcp.trainer.api.discovery.get_trainer_client_for_namespace",
+            return_value=client,
+        ),
+        patch(
+            "kubeflow_mcp.trainer.api.discovery.get_trainjob_queue_status",
+            return_value=None,
+        ) as mock_queue_status,
+    ):
+        result = get_training_job("job-a")
+
+    assert result["success"] is True
+    assert result["data"]["status"] == "Complete"
+    assert "queue_status" not in result["data"]
+    mock_queue_status.assert_not_called()

@@ -97,11 +97,14 @@ def get_trainer_effective_namespace(namespace: str | None = None) -> str:
     """
     if namespace:
         return namespace
-    client = get_trainer_client()
-    backend = client.backend
-    ns = getattr(backend, "namespace", None)
-    if ns is not None:
-        return str(ns)
+    try:
+        client = get_trainer_client()
+        backend = getattr(client, "backend", None)
+        ns = getattr(backend, "namespace", None)
+        if ns is not None:
+            return str(ns)
+    except Exception:
+        pass
     return "default"
 
 
@@ -203,3 +206,6 @@ def reset_clients() -> None:
     _get_api_client.cache_clear()
     with _ns_client_lock:
         _ns_client_cache.clear()
+    from kubeflow_mcp.trainer.api.kueue import reset_kueue_cache
+
+    reset_kueue_cache()

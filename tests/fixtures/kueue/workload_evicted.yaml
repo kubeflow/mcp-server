@@ -1,0 +1,33 @@
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: Workload
+metadata:
+  name: trainjob-llama-lora-c8e9b
+  namespace: default
+  labels:
+    kueue.x-k8s.io/job-uid: "7b4d1a58-3cf2-4c6e-8a21-9d1a3b5c7e90"
+    kueue.x-k8s.io/queue-name: "user-queue"
+spec:
+  active: true
+  queueName: user-queue
+status:
+  requeueState:
+    count: 1
+    requeueAt: "2026-10-03T01:05:00Z"
+  conditions:
+  - type: Evicted
+    status: "True"
+    reason: Preempted
+    message: "Preempted to accommodate higher priority workload"
+    lastTransitionTime: "2026-10-03T01:04:30Z"
+  - type: Preempted
+    status: "True"
+    reason: InClusterQueue
+    message: "Preempted due to prioritization in ClusterQueue cluster-gpu"
+    lastTransitionTime: "2026-10-03T01:04:30Z"
+  - type: QuotaReserved
+    status: "False"
+    reason: Pending
+    lastTransitionTime: "2026-10-03T01:04:31Z"
+  - type: Admitted
+    status: "False"
+    lastTransitionTime: "2026-10-03T01:04:31Z"
