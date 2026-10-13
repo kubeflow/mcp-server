@@ -1,0 +1,39 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: agentgateway-controller
+  namespace: agentgateway-system
+  labels:
+    app.kubernetes.io/part-of: kagent-agentgateway
+spec:
+  namespaceSelector:
+    matchNames:
+      - agentgateway-system
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agentgateway
+      app.kubernetes.io/instance: agentgateway
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: kagent-model-gateway
+  namespace: agentgateway-system
+  labels:
+    app.kubernetes.io/part-of: kagent-agentgateway
+spec:
+  selector:
+    matchLabels:
+      gateway.networking.k8s.io/gateway-name: kagent-model-gateway
+  podMetricsEndpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s
+      relabelings:
+        - sourceLabels:
+            - __meta_kubernetes_pod_label_gateway_networking_k8s_io_gateway_name
+          targetLabel: gateway_networking_k8s_io_gateway_name

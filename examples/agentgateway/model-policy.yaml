@@ -1,0 +1,23 @@
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayPolicy
+metadata:
+  name: kagent-model-guardrails
+  namespace: agentgateway-system
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: model-provider
+  traffic:
+    rateLimit:
+      local:
+        - requests: 120
+          unit: Minutes
+          burst: 20
+    retry:
+      attempts: 2
+      backoff: 250ms
+      codes: [500, 502, 503, 504]
+    timeouts:
+      request: 120s
+      responseIdle: 120s

@@ -127,6 +127,7 @@ spec:
       containers:
         - name: server
           image: ghcr.io/kubeflow/mcp-server:latest
+          imagePullPolicy: Always
           ports:
             - name: http
               containerPort: 8000

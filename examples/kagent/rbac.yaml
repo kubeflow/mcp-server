@@ -1,0 +1,71 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kubeflow-mcp-trainer
+rules:
+  - apiGroups: ["trainer.kubeflow.org"]
+    resources: ["trainjobs"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+  - apiGroups: ["trainer.kubeflow.org"]
+    resources: ["trainingruntimes"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kubeflow-mcp-trainer
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kubeflow-mcp-trainer
+subjects:
+  - kind: ServiceAccount
+    name: kubeflow-mcp
+    namespace: kagent
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kubeflow-mcp-runtime-read
+rules:
+  - apiGroups: ["trainer.kubeflow.org"]
+    resources: ["clustertrainingruntimes"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kubeflow-mcp-runtime-read
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kubeflow-mcp-runtime-read
+subjects:
+  - kind: ServiceAccount
+    name: kubeflow-mcp
+    namespace: kagent
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kubeflow-mcp-cluster-metadata-read
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "namespaces"]
+    verbs: ["get", "list"]
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kubeflow-mcp-cluster-metadata-read
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kubeflow-mcp-cluster-metadata-read
+subjects:
+  - kind: ServiceAccount
+    name: kubeflow-mcp
+    namespace: kagent

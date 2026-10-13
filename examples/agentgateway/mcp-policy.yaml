@@ -1,0 +1,19 @@
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayPolicy
+metadata:
+  name: kubeflow-mcp-guardrails
+  namespace: agentgateway-system
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: kubeflow-mcp
+  traffic:
+    rateLimit:
+      local:
+        - requests: 60
+          unit: Minutes
+          burst: 20
+    timeouts:
+      request: 180s
+      responseIdle: 180s
