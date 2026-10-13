@@ -70,6 +70,21 @@ def _suggest_hf_model_ids(model: str, limit: int = 3) -> list[str]:
         return []
 
 
+def _is_confirmed_missing(error: Exception) -> bool:
+    """Return True when a Hub error confirms the repo does not exist.
+
+    The Hub raises RepositoryNotFoundError for private or gated repos and missing
+    auth too (401, GatedRepoError), and a 401 is ambiguous: an anonymous request
+    gets it for a missing repo as well. Only a plain 404 is treated as a
+    nonexistent repo, so an access failure is never reported as bad input.
+    """
+    from huggingface_hub.errors import GatedRepoError, RepositoryNotFoundError
+
+    if not isinstance(error, RepositoryNotFoundError) or isinstance(error, GatedRepoError):
+        return False
+    return getattr(getattr(error, "response", None), "status_code", None) == 404
+
+
 def _get_model_info_from_hf(model: str) -> dict[str, Any] | None:
     """Fetch model info from HuggingFace Hub.
 
@@ -90,7 +105,7 @@ def _get_model_info_from_hf(model: str) -> dict[str, Any] | None:
             return result
 
         from huggingface_hub import model_info
-        from huggingface_hub.errors import GatedRepoError, RepositoryNotFoundError
+        from huggingface_hub.errors import RepositoryNotFoundError
 
         try:
             info = model_info(model, timeout=10)
@@ -100,13 +115,7 @@ def _get_model_info_from_hf(model: str) -> dict[str, Any] | None:
             # Other failures (auth, rate-limit, network, metadata) fall through
             # to the outer handler unchanged, with no extra Hub request.
             not_found: dict[str, Any] = {"error": str(e)}
-            # The Hub raises this error for private or gated repos and missing
-            # auth too (401, GatedRepoError), and a 401 is ambiguous: an anonymous
-            # request gets it for a missing repo as well. Only a plain 404 is
-            # treated as a nonexistent repo, so an access failure is never
-            # reported as bad input.
-            status_code = getattr(getattr(e, "response", None), "status_code", None)
-            if status_code == 404 and not isinstance(e, GatedRepoError):
+            if _is_confirmed_missing(e):
                 not_found["kind"] = "not_found"
             suggestions = _suggest_hf_model_ids(model)
             if suggestions:

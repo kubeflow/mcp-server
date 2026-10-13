@@ -329,6 +329,116 @@ def _should_apply_hf_dataset_workaround(dataset: str) -> bool:
     return bool(hf_repo and len(hf_repo.split("/")) == 2)
 
 
+_HF_REPO_PART_RE = re.compile(r"[a-zA-Z0-9._-]+")
+
+
+def _hf_repo_id(uri: str, *, dataset: bool) -> str | None:
+    """Return the repo ID of an ``hf://`` URI, or None if it is malformed.
+
+    Models and datasets differ because the Trainer initializers parse them
+    differently. The model initializer passes the whole path to
+    ``snapshot_download``, so an unscoped model such as ``hf://gpt2`` works. The
+    dataset initializer reads the second path segment, so a dataset needs
+    ``org/name`` and may add a subpath (``hf://org/ds/subpath``).
+    """
+    parts = uri.removeprefix("hf://").rstrip("/").split("/")
+    # A subpath is not checked against the repo pattern, so block path traversal here.
+    if "" in parts or any(part in (".", "..") for part in parts):
+        return None
+    if dataset:
+        repo_parts = parts[:2] if len(parts) >= 2 else []
+    else:
+        repo_parts = parts if len(parts) <= 2 else []
+    if not repo_parts or not all(_HF_REPO_PART_RE.fullmatch(p) for p in repo_parts):
+        return None
+    return "/".join(repo_parts)
+
+
+def _validate_hf_reference_formats(model: str, dataset: str) -> ToolError | None:
+    """Check that ``hf://`` model and dataset references are well formed.
+
+    Local check only, so it is safe in preview. Other schemes (e.g. ``s3://``)
+    are left alone.
+    """
+    for field, uri, is_dataset, example in (
+        ("model", model, False, "hf://[<org>/]<model>"),
+        ("dataset", dataset, True, "hf://<org>/<dataset>[/<path>]"),
+    ):
+        # Before the scheme check: " hf://org/model" does not start with "hf://", so it
+        # would otherwise skip validation and reach the initializer.
+        if any(ch.isspace() for ch in uri):
+            return ToolError(
+                error=f"Invalid Hugging Face {field} reference '{uri}' (must not contain whitespace)",
+                error_code=ErrorCode.VALIDATION_ERROR,
+            )
+        if uri.startswith("hf://") and _hf_repo_id(uri, dataset=is_dataset) is None:
+            return ToolError(
+                error=f"Invalid Hugging Face {field} reference '{uri}' (expected {example})",
+                error_code=ErrorCode.VALIDATION_ERROR,
+            )
+    return None
+
+
+def _check_hf_repos_exist(model: str, dataset: str) -> dict[str, Any] | None:
+    """On submission, reject ``hf://`` repos the Hub confirms missing (404).
+
+    Gated, private and unreachable repos do not block submission: without auth
+    the Hub cannot tell a missing repo from an inaccessible one, and a Hub outage
+    must not stop training. Those cases are logged and the job proceeds.
+
+    Without an ``HF_TOKEN`` on the MCP host, the Hub answers 401 even for a
+    missing repo, so in that setup this check never rejects anything.
+    """
+    from huggingface_hub import dataset_info, model_info
+
+    from kubeflow_mcp.trainer.api.planning import _get_model_info_from_hf
+
+    if model.startswith("hf://"):
+        repo_id = _hf_repo_id(model, dataset=False)
+        if "/" in repo_id:
+            info = _get_model_info_from_hf(repo_id) or {}
+            if info.get("kind") == "not_found":
+                return ToolError(
+                    error=f"Hugging Face model '{repo_id}' does not exist",
+                    error_code=ErrorCode.VALIDATION_ERROR,
+                    details={"suggestions": info["suggestions"]}
+                    if info.get("suggestions")
+                    else None,
+                ).model_dump()
+            if "error" in info:
+                logger.warning(
+                    "Could not verify model %s, submitting anyway: %s", repo_id, info["error"]
+                )
+        # _get_model_info_from_hf() only accepts org/name, so check an unscoped model directly.
+        elif _hub_confirms_missing(model_info, repo_id, "model"):
+            return ToolError(
+                error=f"Hugging Face model '{repo_id}' does not exist",
+                error_code=ErrorCode.VALIDATION_ERROR,
+            ).model_dump()
+
+    if dataset.startswith("hf://"):
+        repo_id = _hf_repo_id(dataset, dataset=True)
+        if _hub_confirms_missing(dataset_info, repo_id, "dataset"):
+            return ToolError(
+                error=f"Hugging Face dataset '{repo_id}' does not exist",
+                error_code=ErrorCode.VALIDATION_ERROR,
+            ).model_dump()
+    return None
+
+
+def _hub_confirms_missing(fetch: Callable[..., Any], repo_id: str, kind: str) -> bool:
+    """Return True only when the Hub confirms ``repo_id`` missing; log other failures."""
+    from kubeflow_mcp.trainer.api.planning import _is_confirmed_missing
+
+    try:
+        fetch(repo_id, timeout=10)
+    except Exception as e:
+        if _is_confirmed_missing(e):
+            return True
+        logger.warning("Could not verify %s %s, submitting anyway: %s", kind, repo_id, e)
+    return False
+
+
 def _sdk_error(e: Exception, hint: str | None = None) -> dict[str, Any]:
     """Convert an exception into a ToolError dict with optional K8s response detail."""
     details: dict[str, Any] | None = None
@@ -569,6 +679,8 @@ def _build_runtime_patch(
 
 
 def _validate_fine_tune_params(
+    model: str,
+    dataset: str,
     namespace: str | None,
     name: str | None,
     dtype: str | None,
@@ -596,6 +708,10 @@ def _validate_fine_tune_params(
         err = validate_k8s_name(name)
         if err:
             return err.model_dump()
+
+    hf_err = _validate_hf_reference_formats(model, dataset)
+    if hf_err:
+        return hf_err.model_dump()
 
     if dtype and dtype not in ("bf16", "fp32"):
         return ToolError(
@@ -632,7 +748,8 @@ def _validate_fine_tune_params(
     )
     if bounds_err:
         return bounds_err.model_dump()
-    return None
+    # The Hub call runs last, on submission only, after every local check passed.
+    return _check_hf_repos_exist(model, dataset) if confirmed else None
 
 
 def _check_gpu_available() -> dict[str, Any] | None:
@@ -832,8 +949,12 @@ def fine_tune(
 
     Args:
         model: Model URI. Use ``hf://`` prefix for HuggingFace (e.g.,
-            ``hf://google/gemma-2b``) or ``s3://`` prefix for S3.
-        dataset: Dataset URI. Same prefix rules as ``model``.
+            ``hf://google/gemma-2b`` or an unscoped ``hf://gpt2``) or ``s3://``
+            prefix for S3. On submission, a model the Hub confirms missing is
+            rejected; this check needs ``HF_TOKEN`` on the MCP host, since the Hub
+            answers 401 for a missing repo without a token.
+        dataset: Dataset URI. Same prefix rules as ``model``, but a HuggingFace
+            dataset needs ``org/name`` (e.g. ``hf://tatsu-lab/alpaca``).
         runtime: ClusterTrainingRuntime name. Must be a torchtune runtime.
             Run ``list_runtimes()`` to see what is installed in your cluster.
         name: Custom TrainJob name. Auto-generated if omitted.
@@ -905,6 +1026,8 @@ def fine_tune(
             return resources_err.model_dump()
 
         validation_err = _validate_fine_tune_params(
+            model=model,
+            dataset=dataset,
             namespace=namespace,
             name=name,
             dtype=dtype,
