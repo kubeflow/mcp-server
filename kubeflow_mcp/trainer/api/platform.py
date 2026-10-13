@@ -533,14 +533,13 @@ def delete_runtime(
         # An empty list only means "no dependents" if the listing worked, so every
         # response says whether it did.
         checked = check_error is None
-        unchecked_warning = (
-            "Could not check which TrainJobs use this runtime, so any that do "
-            "will fail if it is deleted. Confirm none remain before deleting."
-        )
 
         if not confirmed:
             if not checked:
-                warning = unchecked_warning
+                warning = (
+                    "Could not check which TrainJobs use this runtime, so any that do "
+                    "will fail if it is deleted. Confirm none remain before deleting."
+                )
             elif dependent_jobs:
                 warning = (
                     f"{len(dependent_jobs)} TrainJob(s) reference this runtime. "
@@ -577,7 +576,10 @@ def delete_runtime(
             "dependents_checked": checked,
         }
         if check_error is not None:
-            result["warning"] = unchecked_warning
+            result["warning"] = (
+                "Could not check which TrainJobs used this runtime, so any that "
+                "still reference it will now fail."
+            )
             result["dependency_check_error"] = check_error
         return ToolResponse(data=result).model_dump()
 

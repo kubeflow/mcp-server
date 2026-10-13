@@ -294,7 +294,8 @@ def test_delete_runtime_confirmed_after_failed_check_warns(mock_k8s_apis):
     assert data["deleted"] is True
     assert data["dependents_checked"] is False
     assert data["dependent_jobs_affected"] == 0
-    assert data["warning"].startswith("Could not check which TrainJobs use this runtime")
+    assert data["warning"].startswith("Could not check which TrainJobs used this runtime")
+    assert "before deleting" not in data["warning"]
     assert data["dependency_check_error"]["exception"] == "ApiException"
     api.delete_cluster_custom_object.assert_called_once()
 
