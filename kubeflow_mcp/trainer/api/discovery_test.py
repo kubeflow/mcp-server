@@ -545,3 +545,37 @@ def test_get_training_job_namespace_not_allowed_short_circuits():
 
     assert result["success"] is False
     assert result["error_code"] == ErrorCode.PERMISSION_DENIED
+
+
+class TestFetchPackagesPodLog:
+    """How the pip-list pod's log is read and interpreted."""
+
+    def _fetch(self, logs):
+        from kubeflow_mcp.trainer.api.discovery import _fetch_packages_via_pod
+
+        pod = MagicMock()
+        pod.status.phase = "Succeeded"
+        core = MagicMock()
+        core.read_namespaced_pod.return_value = pod
+        core.read_namespaced_pod_log.return_value = logs
+        self.core = core
+        mod = "kubeflow_mcp.trainer.api.discovery"
+        with (
+            patch(f"{mod}._get_runtime_image", return_value="img"),
+            patch(f"{mod}.get_trainer_effective_namespace", return_value="ns"),
+            patch(f"{mod}.check_namespace_allowed", return_value=None),
+            patch(f"{mod}.get_core_v1_api", return_value=core),
+        ):
+            return _fetch_packages_via_pod("rt")
+
+    def test_missing_pip_is_reported_instead_of_parsed(self):
+        """The pod command's own fallback text is not a package list."""
+        result = self._fetch("pip not found\n")
+        assert result == {"packages_error": "pip is not installed in the runtime image"}
+
+    def test_log_is_read_from_the_start_not_tailed(self):
+        """A tail drops the first packages of a large image, and the header with them."""
+        self._fetch("Package Version\nnumpy 2.0.0\n")
+        kwargs = self.core.read_namespaced_pod_log.call_args.kwargs
+        assert "tail_lines" not in kwargs
+        assert kwargs["limit_bytes"] >= 1024 * 1024

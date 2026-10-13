@@ -40,6 +40,11 @@ logger = logging.getLogger(__name__)
 
 _PACKAGES_POD_TIMEOUT = 60
 _PACKAGES_POLL_INTERVAL = 3
+# Upper bound on the pip-list log read. A package row is well under 100 bytes,
+# so this covers thousands of packages while keeping the read bounded.
+_PACKAGES_LOG_LIMIT_BYTES = 1024 * 1024
+# Printed by the pod command when the image has no pip.
+_PIP_NOT_FOUND = "pip not found"
 
 # Legacy filter/docs used "Succeeded" for finished TrainJobs; API uses "Complete".
 _JOB_STATUS_FILTER_ALIASES: dict[str, str] = {
@@ -359,7 +364,8 @@ def _fetch_packages_via_pod(runtime_name: str, runtime_obj: Any = None) -> dict[
                     "command": [
                         "sh",
                         "-c",
-                        "pip list --format=columns 2>/dev/null || pip list 2>/dev/null || echo 'pip not found'",
+                        "pip list --format=columns 2>/dev/null || pip list 2>/dev/null"
+                        f" || echo '{_PIP_NOT_FOUND}'",
                     ],
                     "resources": {
                         "requests": {"cpu": "100m", "memory": "128Mi"},
@@ -396,13 +402,20 @@ def _fetch_packages_via_pod(runtime_name: str, runtime_obj: Any = None) -> dict[
                 "packages_error": f"Pod '{pod_name}' did not complete within {_PACKAGES_POD_TIMEOUT}s (phase: {phase})"
             }
 
-        logs = core.read_namespaced_pod_log(name=pod_name, namespace=ns, tail_lines=500)
+        # The whole list is read. A tail would drop the first packages of a
+        # large image without any sign that the result was cut.
+        logs = core.read_namespaced_pod_log(
+            name=pod_name, namespace=ns, limit_bytes=_PACKAGES_LOG_LIMIT_BYTES
+        )
 
         if phase == "Failed":
             return {
                 "packages_error": "pip-list pod failed",
                 "logs": logs[-500:] if logs else "no logs",
             }
+
+        if logs.strip() == _PIP_NOT_FOUND:
+            return {"packages_error": "pip is not installed in the runtime image"}
 
         packages = []
         for line in logs.strip().splitlines():
