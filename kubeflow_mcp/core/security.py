@@ -64,6 +64,17 @@ def validate_runtime_name(name: str, field: str = "name") -> ToolError | None:
 
     Returns ToolError if invalid, None if valid.
     """
+    return validate_k8s_subdomain_name(name, field)
+
+
+def validate_k8s_subdomain_name(name: str, field: str = "name") -> ToolError | None:
+    """Validate a name that follows the RFC 1123 DNS-subdomain rules.
+
+    Used for Kubernetes objects such as runtimes and ServiceAccounts, whose names
+    may contain dots and be up to 253 characters long.
+
+    Returns ToolError if invalid, None if valid.
+    """
     if not name:
         return ToolError(
             error=f"{field} cannot be empty",
