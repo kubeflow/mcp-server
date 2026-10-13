@@ -26,6 +26,7 @@ from kubeflow_mcp.core.policy import (
     _load_policy_file,
     _matches_pattern,
     apply_policy_filters,
+    effective_persona_context,
     get_allowed_namespaces,
     get_allowed_tools,
     get_effective_persona,
@@ -38,7 +39,6 @@ from kubeflow_mcp.core.policy import (
 
 
 def test_default_persona_is_readonly():
-    set_effective_persona("readonly")
     assert get_effective_persona() == "readonly"
 
 
@@ -46,6 +46,28 @@ def test_set_and_get_persona():
     set_effective_persona("platform-admin")
     assert get_effective_persona() == "platform-admin"
     set_effective_persona("readonly")
+
+
+def test_effective_persona_context_restores_previous_value():
+    with effective_persona_context("ml-engineer"):
+        assert get_effective_persona() == "ml-engineer"
+    assert get_effective_persona() == "readonly"
+
+
+def test_nested_effective_persona_context_restores_enclosing_value():
+    with effective_persona_context("data-scientist"):
+        with effective_persona_context("platform-admin"):
+            assert get_effective_persona() == "platform-admin"
+        assert get_effective_persona() == "data-scientist"
+    assert get_effective_persona() == "readonly"
+
+
+def test_effective_persona_context_restores_after_exception():
+    with pytest.raises(RuntimeError, match="boom"):
+        with effective_persona_context("platform-admin"):
+            assert get_effective_persona() == "platform-admin"
+            raise RuntimeError("boom")
+    assert get_effective_persona() == "readonly"
 
 
 # ─── expand / matches helpers ────────────────────────────────────────────────

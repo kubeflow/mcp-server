@@ -24,6 +24,7 @@ import pytest
 
 from kubeflow_mcp.common.constants import ErrorCode
 from kubeflow_mcp.core import telemetry
+from kubeflow_mcp.core.policy import effective_persona_context, get_effective_persona
 from kubeflow_mcp.core.server import _audit_wrap
 
 
@@ -325,14 +326,13 @@ def test_audit_wrap_sets_span_attributes_on_success(monkeypatch: pytest.MonkeyPa
     breaker = _FakeBreaker()
     monkeypatch.setattr(server_mod, "_rate_limiter", None)
     monkeypatch.setattr(server_mod, "with_correlation_id", lambda: "cid-123")
-    monkeypatch.setattr(server_mod, "get_effective_persona", lambda: "ml-engineer")
     monkeypatch.setattr(server_mod, "get_tracer", lambda _name: tracer)
     monkeypatch.setattr(server_mod, "get_breaker", lambda _tool: breaker)
 
     def sample_tool(**_kwargs):
         return {"ok": True}
 
-    wrapped = _audit_wrap(sample_tool)
+    wrapped = _audit_wrap(sample_tool, "ml-engineer")
     wrapped()
 
     # OTel MCP semantic conventions
@@ -369,7 +369,6 @@ def test_audit_wrap_sets_mcp_context_attributes(monkeypatch: pytest.MonkeyPatch)
     breaker = _FakeBreaker()
     monkeypatch.setattr(server_mod, "_rate_limiter", None)
     monkeypatch.setattr(server_mod, "with_correlation_id", lambda: "cid-ctx")
-    monkeypatch.setattr(server_mod, "get_effective_persona", lambda: "readonly")
     monkeypatch.setattr(server_mod, "get_tracer", lambda _name: tracer)
     monkeypatch.setattr(server_mod, "get_breaker", lambda _tool: breaker)
 
@@ -381,7 +380,7 @@ def test_audit_wrap_sets_mcp_context_attributes(monkeypatch: pytest.MonkeyPatch)
         return {"ok": True}
 
     try:
-        wrapped = _audit_wrap(sample_tool)
+        wrapped = _audit_wrap(sample_tool, "readonly")
         wrapped()
 
         # The 2026-07-28 protocol is sessionless, so no session ID is recorded.
@@ -401,14 +400,13 @@ def test_audit_wrap_records_exception_on_failure(monkeypatch: pytest.MonkeyPatch
     breaker = _FakeBreaker()
     monkeypatch.setattr(server_mod, "_rate_limiter", None)
     monkeypatch.setattr(server_mod, "with_correlation_id", lambda: "cid-123")
-    monkeypatch.setattr(server_mod, "get_effective_persona", lambda: "readonly")
     monkeypatch.setattr(server_mod, "get_tracer", lambda _name: _FakeTracer(span))
     monkeypatch.setattr(server_mod, "get_breaker", lambda _tool: breaker)
 
     def failing_tool(**_kwargs):
         raise RuntimeError("boom")
 
-    wrapped = _audit_wrap(failing_tool)
+    wrapped = _audit_wrap(failing_tool, "readonly")
     with pytest.raises(RuntimeError, match="boom"):
         wrapped()
 
@@ -436,14 +434,13 @@ def test_audit_wrap_releases_probe_for_non_infrastructure_error(
     breaker = _FakeBreaker()
     monkeypatch.setattr(server_mod, "_rate_limiter", None)
     monkeypatch.setattr(server_mod, "with_correlation_id", lambda: "cid-789")
-    monkeypatch.setattr(server_mod, "get_effective_persona", lambda: "readonly")
     monkeypatch.setattr(server_mod, "get_tracer", lambda _name: _FakeTracer(_FakeSpan()))
     monkeypatch.setattr(server_mod, "get_breaker", lambda _tool: breaker)
 
     def rejecting_tool(**_kwargs):
         return {"success": False, "error": "bad name", "error_code": ErrorCode.VALIDATION_ERROR}
 
-    _audit_wrap(rejecting_tool)()
+    _audit_wrap(rejecting_tool, "readonly")()
 
     assert breaker.releases == 1
     assert breaker.successes == 0
@@ -458,14 +455,13 @@ def test_audit_wrap_records_failure_for_infrastructure_error(
     breaker = _FakeBreaker()
     monkeypatch.setattr(server_mod, "_rate_limiter", None)
     monkeypatch.setattr(server_mod, "with_correlation_id", lambda: "cid-789")
-    monkeypatch.setattr(server_mod, "get_effective_persona", lambda: "readonly")
     monkeypatch.setattr(server_mod, "get_tracer", lambda _name: _FakeTracer(_FakeSpan()))
     monkeypatch.setattr(server_mod, "get_breaker", lambda _tool: breaker)
 
     def failing_tool(**_kwargs):
         return {"success": False, "error": "api down", "error_code": ErrorCode.SDK_ERROR}
 
-    _audit_wrap(failing_tool)()
+    _audit_wrap(failing_tool, "readonly")()
 
     assert breaker.failures == 1
     assert breaker.successes == 0
@@ -482,7 +478,6 @@ def test_audit_wrap_not_found_during_half_open_does_not_wedge_breaker(
     breaker = CircuitBreaker(failure_threshold=1, recovery_timeout=0.0, half_open_max_calls=3)
     monkeypatch.setattr(server_mod, "_rate_limiter", None)
     monkeypatch.setattr(server_mod, "with_correlation_id", lambda: "cid-221")
-    monkeypatch.setattr(server_mod, "get_effective_persona", lambda: "readonly")
     monkeypatch.setattr(server_mod, "get_tracer", lambda _name: _FakeTracer(_FakeSpan()))
     monkeypatch.setattr(server_mod, "get_breaker", lambda _tool: breaker)
 
@@ -499,7 +494,7 @@ def test_audit_wrap_not_found_during_half_open_does_not_wedge_breaker(
     def tool(**_kwargs):
         return next(outcomes)
 
-    wrapped = _audit_wrap(tool)
+    wrapped = _audit_wrap(tool, "readonly")
     states = []
     for _ in range(5):
         wrapped()
@@ -523,17 +518,44 @@ def test_audit_wrap_circuit_breaker_open(monkeypatch: pytest.MonkeyPatch) -> Non
     breaker = _FakeBreaker(can_execute=False)
     monkeypatch.setattr(server_mod, "_rate_limiter", None)
     monkeypatch.setattr(server_mod, "with_correlation_id", lambda: "cid-456")
-    monkeypatch.setattr(server_mod, "get_effective_persona", lambda: "readonly")
     monkeypatch.setattr(server_mod, "get_tracer", lambda _name: tracer)
     monkeypatch.setattr(server_mod, "get_breaker", lambda _tool: breaker)
 
     def sample_tool(**_kwargs):
         return {"ok": True}
 
-    wrapped = _audit_wrap(sample_tool)
+    wrapped = _audit_wrap(sample_tool, "readonly")
     result = wrapped()
 
     assert span.attributes["tool.success"] is False
     assert "tool.duration_ms" in span.attributes
     assert "error" in result
     assert result["error_code"] == "CIRCUIT_OPEN"
+
+
+def test_audit_wrap_scopes_persona_per_wrapper(monkeypatch: pytest.MonkeyPatch) -> None:
+    import kubeflow_mcp.core.server as server_mod
+
+    monkeypatch.setattr(server_mod, "_rate_limiter", None)
+    monkeypatch.setattr(server_mod, "get_tracer", lambda _name: _FakeTracer(_FakeSpan()))
+    monkeypatch.setattr(server_mod, "get_breaker", lambda _tool: _FakeBreaker())
+    seen: list[str] = []
+
+    def observe_persona():
+        persona = get_effective_persona()
+        seen.append(persona)
+        return {"persona": persona}
+
+    readonly = _audit_wrap(observe_persona, "readonly")
+    admin = _audit_wrap(observe_persona, "platform-admin")
+
+    with effective_persona_context("ml-engineer"):
+        assert readonly()["persona"] == "readonly"
+        assert get_effective_persona() == "ml-engineer"
+        assert admin()["persona"] == "platform-admin"
+        assert get_effective_persona() == "ml-engineer"
+        assert readonly()["persona"] == "readonly"
+        assert get_effective_persona() == "ml-engineer"
+
+    assert seen == ["readonly", "platform-admin", "readonly"]
+    assert get_effective_persona() == "readonly"
