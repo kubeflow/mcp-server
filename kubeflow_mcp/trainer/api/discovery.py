@@ -129,7 +129,17 @@ def list_training_jobs(
         limit = min(limit, MAX_LIST_LIMIT)
         client = get_trainer_client_for_namespace(namespace)
         if runtime:
-            rt_obj = client.get_runtime(name=runtime)
+            try:
+                rt_obj = client.get_runtime(name=runtime)
+            except Exception as e:
+                if is_k8s_not_found(e):
+                    return ToolError(
+                        error=f"TrainingRuntime '{runtime}' not found",
+                        error_code=ErrorCode.RESOURCE_NOT_FOUND,
+                        hint="Use list_runtimes to find available runtimes",
+                        details=exception_details(e),
+                    ).model_dump()
+                raise
             jobs = client.list_jobs(runtime=rt_obj)
         else:
             jobs = client.list_jobs()
