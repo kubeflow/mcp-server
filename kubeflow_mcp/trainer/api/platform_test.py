@@ -447,8 +447,125 @@ def test_inspect_controller_auto_discovery_is_exempt_from_policy(
     assert verify_tool_success(result)["namespace"] == "kubeflow"
 
 
-# Remaining TODOs are outside this PR's runtime CRUD slice.
-# TODO(test): test inspect_crd — lists all Trainer CRDs
-# TODO(test): test inspect_crd(name) — returns CRD schema and conditions
-# TODO(test): test inspect_crd — invalid CRD name
-# TODO(test): test inspect_controller(view="logs") — returns controller logs
+def test_inspect_crd_lists_only_trainer_crds(mock_k8s_apis):
+    api = mock_k8s_apis["apiextensions"]
+
+    trainer_crd = MagicMock()
+    trainer_crd.metadata.name = "trainjobs.trainer.kubeflow.org"
+    trainer_crd.spec.group = "trainer.kubeflow.org"
+    trainer_crd.spec.scope = "Namespaced"
+
+    version = MagicMock()
+    version.name = "v1"
+    version.served = True
+    version.storage = True
+    trainer_crd.spec.versions = [version]
+
+    other_crd = MagicMock()
+    other_crd.spec.group = "example.com"
+
+    api.list_custom_resource_definition.return_value = MagicMock(items=[trainer_crd, other_crd])
+
+    result = inspect_crd()
+
+    data = verify_tool_success(result)
+    assert data["count"] == 1
+    assert data["crds"] == [
+        {
+            "name": "trainjobs.trainer.kubeflow.org",
+            "group": "trainer.kubeflow.org",
+            "versions": ["v1"],
+            "scope": "Namespaced",
+            "served_versions": ["v1"],
+        }
+    ]
+    api.list_custom_resource_definition.assert_called_once_with(
+        _request_timeout=mcp_utils.K8S_TIMEOUT
+    )
+
+
+def test_inspect_crd_returns_schema_and_conditions(mock_k8s_apis):
+    api = mock_k8s_apis["apiextensions"]
+
+    crd = MagicMock()
+    crd.metadata.name = "trainjobs.trainer.kubeflow.org"
+    crd.spec.group = "trainer.kubeflow.org"
+    crd.spec.scope = "Namespaced"
+
+    spec_schema = MagicMock()
+    spec_schema.properties = {
+        "numNodes": MagicMock(),
+        "template": MagicMock(),
+    }
+
+    openapi_schema = MagicMock()
+    openapi_schema.properties = {"spec": spec_schema}
+
+    version = MagicMock()
+    version.name = "v1"
+    version.served = True
+    version.storage = True
+    version.schema = MagicMock()
+    version.schema.open_apiv3_schema = openapi_schema
+    crd.spec.versions = [version]
+
+    condition = MagicMock()
+    condition.type = "Established"
+    condition.status = "True"
+    crd.status.conditions = [condition]
+
+    api.read_custom_resource_definition.return_value = crd
+
+    result = inspect_crd("trainjobs.trainer.kubeflow.org")
+
+    data = verify_tool_success(result)
+    assert data["name"] == "trainjobs.trainer.kubeflow.org"
+    assert data["group"] == "trainer.kubeflow.org"
+    assert data["scope"] == "Namespaced"
+    assert data["versions"] == [
+        {
+            "name": "v1",
+            "served": True,
+            "storage": True,
+            "spec_fields": ["numNodes", "template"],
+        }
+    ]
+    assert data["conditions"] == [{"type": "Established", "status": "True"}]
+
+    api.read_custom_resource_definition.assert_called_once_with(
+        name="trainjobs.trainer.kubeflow.org",
+        _request_timeout=mcp_utils.K8S_TIMEOUT,
+    )
+
+
+def test_inspect_crd_invalid_name_returns_kubernetes_error(mock_k8s_apis):
+    api = mock_k8s_apis["apiextensions"]
+    api.read_custom_resource_definition.side_effect = ApiException(status=400, reason="Bad Request")
+
+    result = inspect_crd("not a valid/name")
+
+    error = verify_tool_error(result, error_code=KUBERNETES_ERROR)
+    assert "Bad Request" in error["error"]
+
+
+def test_inspect_controller_logs_response(mock_k8s_apis, scan_default_namespaces):
+    core = mock_k8s_apis["core_v1"]
+    pod = _controller_pod("kubeflow-system")
+    core.list_namespaced_pod.return_value = MagicMock(items=[pod])
+    core.read_namespaced_pod_log.return_value = "controller started\nready"
+
+    result = inspect_controller(view="logs", tail_lines=25)
+
+    data = verify_tool_success(result)
+    assert data["pod"] == "trainer-controller-manager-0"
+    assert data["namespace"] == "kubeflow-system"
+    assert data["logs"] == "controller started\nready"
+    assert data["tail_lines"] == 25
+    assert data["phase"] == "Running"
+
+    core.read_namespaced_pod_log.assert_called_once_with(
+        name="trainer-controller-manager-0",
+        namespace="kubeflow-system",
+        tail_lines=25,
+        _request_timeout=mcp_utils.K8S_TIMEOUT,
+    )
