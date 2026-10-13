@@ -36,7 +36,7 @@ def cli() -> None:
     "--clients",
     "-c",
     default=None,
-    help="Comma-separated client modules (trainer, optimizer, hub). "
+    help="Comma-separated client modules (trainer, spark, optimizer, hub). "
     "Falls back to KUBEFLOW_MCP_CLIENTS env var, config file, then 'trainer'.",
 )
 @click.option(
