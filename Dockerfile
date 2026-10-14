@@ -23,6 +23,7 @@ RUN uv sync --frozen --no-dev --no-install-project
 
 COPY README.md ./
 COPY kubeflow_mcp ./kubeflow_mcp
+COPY skills ./skills
 RUN uv sync --frozen --no-dev --no-editable
 
 FROM python:3.12.13-slim AS runtime
