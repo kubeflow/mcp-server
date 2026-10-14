@@ -478,3 +478,122 @@ def test_serve_otel_endpoint_cli_overrides_config():
     fake_telemetry_mod.setup_tracing.assert_called_once_with(
         endpoint="http://new-endpoint:4318/v1/traces"
     )
+
+
+# --- status: import error handling ---
+
+
+def test_status_shows_not_installed_on_importerror():
+    """status command displays 'not installed' when a client module raises ImportError."""
+    with patch("importlib.import_module", side_effect=ImportError("missing module")):
+        runner = CliRunner()
+        result = runner.invoke(cli, ["status"])
+        assert result.exit_code == 0
+        assert "not installed" in result.output
+
+
+# --- serve: HTTP DNS rebinding protection middleware ---
+
+
+def test_serve_http_dns_rebinding_protection_enabled():
+    """HTTP transport includes DNSRebindingProtectionMiddleware when enabled."""
+    from kubeflow_mcp.core.config import SecurityConfig
+    from kubeflow_mcp.core.transport_security import DNSRebindingProtectionMiddleware
+
+    config = _make_default_config()
+    config.security = SecurityConfig(enable_dns_rebinding_protection=True)
+    mock_server, _, modules_patch = _make_serve_mocks(config=config)
+
+    with patch.dict(sys.modules, modules_patch):
+        runner = CliRunner()
+        runner.invoke(cli, ["serve", "--transport", "http"])
+
+    mock_server.run.assert_called_once()
+    _, kwargs = mock_server.run.call_args
+    middleware = kwargs.get("middleware")
+    assert middleware is not None
+    assert any(m.cls is DNSRebindingProtectionMiddleware for m in middleware)
+
+
+def test_serve_http_dns_rebinding_protection_disabled_logs_warning():
+    """HTTP transport logs warning and omits middleware when protection is disabled."""
+    from kubeflow_mcp.core.config import SecurityConfig
+
+    config = _make_default_config()
+    config.security = SecurityConfig(enable_dns_rebinding_protection=False)
+    mock_server, _, modules_patch = _make_serve_mocks(config=config)
+    logger = modules_patch["kubeflow_mcp.core.logging"].setup_logging.return_value
+
+    with patch.dict(sys.modules, modules_patch):
+        runner = CliRunner()
+        runner.invoke(cli, ["serve", "--transport", "http"])
+
+    mock_server.run.assert_called_once()
+    _, kwargs = mock_server.run.call_args
+    assert kwargs.get("middleware") is None
+    warnings = [c.args[0] for c in logger.warning.call_args_list]
+    assert any("DNS rebinding protection is disabled" in w for w in warnings)
+
+
+# --- agent command ---
+
+
+def test_agent_command_missing_dependencies():
+    """agent command exits with code 1 and helpful error when ollama is not installed."""
+    with patch.dict(sys.modules, {"kubeflow_mcp.agents.ollama": None}):
+        runner = CliRunner()
+        result = runner.invoke(cli, ["agent"])
+        assert result.exit_code == 1
+        assert "Error: Agent dependencies not installed." in result.output
+        assert "Install with: pip install ollama" in result.output
+
+
+def test_agent_command_runs_ollama_backend():
+    """agent command delegates to ollama_main with expected CLI arguments."""
+    mock_ollama_mod = MagicMock()
+    original_argv = list(sys.argv)
+    try:
+        with patch.dict(sys.modules, {"kubeflow_mcp.agents.ollama": mock_ollama_mod}):
+            runner = CliRunner()
+            result = runner.invoke(
+                cli,
+                ["agent", "--model", "custom-model:latest", "--mode", "progressive"],
+            )
+            assert result.exit_code == 0
+            mock_ollama_mod.main.assert_called_once()
+            assert sys.argv == [
+                "kubeflow-mcp-agent",
+                "--model",
+                "custom-model:latest",
+                "--mode",
+                "progressive",
+            ]
+    finally:
+        sys.argv = original_argv
+
+
+def test_agent_command_with_thinking_flag():
+    """agent command forwards --thinking flag to agent runner."""
+    mock_ollama_mod = MagicMock()
+    original_argv = list(sys.argv)
+    try:
+        with patch.dict(sys.modules, {"kubeflow_mcp.agents.ollama": mock_ollama_mod}):
+            runner = CliRunner()
+            result = runner.invoke(
+                cli,
+                ["agent", "--thinking"],
+            )
+            assert result.exit_code == 0
+            mock_ollama_mod.main.assert_called_once()
+            assert "--thinking" in sys.argv
+    finally:
+        sys.argv = original_argv
+
+
+def test_agent_command_unimplemented_backend():
+    """agent command raises SystemExit(1) on unsupported backend."""
+    from kubeflow_mcp.cli import agent
+
+    with pytest.raises(SystemExit) as exc_info:
+        agent.callback(backend="vllm", model="qwen", mode="full", thinking=False)
+    assert exc_info.value.code == 1
