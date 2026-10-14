@@ -26,6 +26,7 @@ from tests.common import FAILED, PREVIEW, VALIDATION_ERROR, TestCase, assert_tes
 
 from kubeflow_mcp.trainer.api.training import (
     _build_fine_tune_config,
+    _build_runtime_patch,
     _forwarded_train_args,
     _has_required_params,
     _has_train_call,
@@ -714,3 +715,64 @@ def test_inject_trainer_hf_home_exception_handling():
     assert k8s_utils.get_trainer_cr_from_builtin_trainer is original_func, (
         "Monkey-patch function identity was not restored after exception"
     )
+
+
+# ─── _build_runtime_patch ───────────────────────────────────────────────────
+
+_ENV = [{"name": "HF_HOME", "value": "/cache"}]
+_VOLUMES = [{"name": "data", "persistentVolumeClaim": {"claimName": "data-pvc"}}]
+_MOUNTS = [{"name": "data", "mountPath": "/data"}]
+
+
+def _pod_specs(options: list) -> dict:
+    """Map each replicated job name in the RuntimePatch to its pod spec patch."""
+    runtime_patch = options[0]
+    jobs = runtime_patch.training_runtime_spec.template.spec.replicated_jobs
+    return {job.name: job.template.spec.template.spec for job in jobs}
+
+
+class TestBuildRuntimePatch:
+    def test_no_options_returns_empty_list(self):
+        assert _build_runtime_patch() == []
+
+    def test_pod_fields_go_to_node_pod_spec(self):
+        options = _build_runtime_patch(
+            node_selector={"gpu": "a100"},
+            tolerations=[{"key": "gpu", "operator": "Exists"}],
+            service_account_name="trainer-sa",
+            env=_ENV,
+            volume_mounts=_MOUNTS,
+        )
+
+        specs = _pod_specs(options)
+        assert list(specs) == ["node"]
+        node = specs["node"]
+        assert node.node_selector == {"gpu": "a100"}
+        assert node.tolerations == [{"key": "gpu", "operator": "Exists"}]
+        assert node.service_account_name == "trainer-sa"
+        assert [(c.name, c.env, c.volume_mounts) for c in node.containers] == [
+            ("node", _ENV, _MOUNTS)
+        ]
+
+    def test_initializers_get_volumes_when_enabled(self):
+        options = _build_runtime_patch(
+            volumes=_VOLUMES, volume_mounts=_MOUNTS, has_initializers=True
+        )
+
+        specs = _pod_specs(options)
+        assert list(specs) == ["node", "dataset-initializer", "model-initializer"]
+        for name in ("dataset-initializer", "model-initializer"):
+            assert specs[name].volumes == _VOLUMES
+            assert [(c.name, c.volume_mounts) for c in specs[name].containers] == [(name, _MOUNTS)]
+
+    def test_initializers_not_patched_without_has_initializers(self):
+        options = _build_runtime_patch(volumes=_VOLUMES, volume_mounts=_MOUNTS)
+
+        assert list(_pod_specs(options)) == ["node"]
+
+    def test_labels_and_annotations_are_separate_options(self):
+        options = _build_runtime_patch(labels={"team": "ml"}, annotations={"owner": "alice"})
+
+        assert [type(o).__name__ for o in options] == ["Labels", "Annotations"]
+        assert options[0].labels == {"team": "ml"}
+        assert options[1].annotations == {"owner": "alice"}
