@@ -14,6 +14,7 @@
 
 """Unit tests for structured logging redaction."""
 
+import io
 import json
 import logging
 import sys
@@ -28,6 +29,7 @@ from kubeflow_mcp.core.logging import (
     _redact_text,
     get_log_buffer,
     request_context,
+    setup_logging,
 )
 
 _JWT = "eyJhbGciOiJIUzI1NiJ9.SECRETPAYLOAD.sig"
@@ -280,3 +282,53 @@ class TestLogPathsRedactConsistently:
         assert buffered == "calling API with Authorization: ***"
         assert buffered == structured
         assert buffered in ConsoleFormatter().format(record)
+
+
+class TestSetupLogging:
+    """Tests for setup_logging handler and level configuration."""
+
+    @pytest.fixture(autouse=True)
+    def _restore_logger(self):
+        root = logging.getLogger("kubeflow_mcp")
+        handlers, level = root.handlers[:], root.level
+        yield
+        root.handlers[:] = handlers
+        root.setLevel(level)
+
+    @staticmethod
+    def _stream_formatter(root: logging.Logger) -> logging.Formatter:
+        stream = [h for h in root.handlers if not isinstance(h, BufferingHandler)]
+        assert len(stream) == 1
+        return stream[0].formatter
+
+    @pytest.mark.parametrize(
+        ("fmt", "formatter_cls"),
+        [("json", StructuredFormatter), ("console", ConsoleFormatter)],
+    )
+    def test_uses_requested_format(self, fmt, formatter_cls):
+        root = setup_logging(format=fmt)
+        assert isinstance(self._stream_formatter(root), formatter_cls)
+
+    @pytest.mark.parametrize(
+        ("is_tty", "formatter_cls"),
+        [(True, ConsoleFormatter), (False, StructuredFormatter)],
+    )
+    def test_auto_detects_format_from_terminal(self, monkeypatch, is_tty, formatter_cls):
+        class _Stream(io.StringIO):
+            def isatty(self) -> bool:
+                return is_tty
+
+        monkeypatch.setattr(sys, "stderr", _Stream())
+        root = setup_logging()
+        assert isinstance(self._stream_formatter(root), formatter_cls)
+
+    def test_sets_log_level(self):
+        root = setup_logging(level="debug", format="json")
+        assert root.level == logging.DEBUG
+
+    def test_calling_twice_does_not_duplicate_handlers(self):
+        setup_logging(format="json")
+        root = setup_logging(format="json")
+
+        assert len(root.handlers) == 2
+        assert sum(isinstance(h, BufferingHandler) for h in root.handlers) == 1
