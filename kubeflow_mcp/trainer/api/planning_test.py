@@ -15,7 +15,7 @@
 """Tests for planning helpers: HuggingFace model ID validation and suggestions."""
 
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
@@ -27,6 +27,7 @@ from tests.common import TestCase
 from kubeflow_mcp.common.constants import KUBEFLOW_SDK_VERSION_MIN, KUBEFLOW_SDK_VERSION_SPEC
 from kubeflow_mcp.trainer.api.planning import (
     _check_sdk_version,
+    _detect_platform,
     _estimate_from_params,
     _get_model_info_from_hf,
     _parse_k8s_version,
@@ -261,6 +262,58 @@ def test_non_not_found_error_skips_suggestions():
 )
 def test_parse_k8s_version(test_case):
     assert _parse_k8s_version(**test_case.config) == test_case.expected_output
+
+
+def _core_api_with_node_labels(*labels: dict | None) -> MagicMock:
+    api = MagicMock()
+    api.list_node.return_value = SimpleNamespace(
+        items=[SimpleNamespace(metadata=SimpleNamespace(labels=lbl)) for lbl in labels]
+    )
+    return api
+
+
+@pytest.mark.parametrize(
+    ("label", "platform"),
+    [
+        ("node.openshift.io/os_id", "openshift"),
+        ("eks.amazonaws.com/nodegroup", "eks"),
+        ("cloud.google.com/gke-nodepool", "gke"),
+    ],
+)
+def test_detect_platform_from_node_labels(label, platform):
+    checks, recommendations = {}, []
+    api = _core_api_with_node_labels({label: "x"})
+
+    result = _detect_platform(checks, recommendations, lambda: api, timeout=5)
+
+    assert result == platform
+    assert checks["platform"] == {"status": "info", "detected": platform}
+    assert len(recommendations) == 1
+    assert "trainer://guides/platform-fixes" in recommendations[0]
+
+
+def test_detect_platform_defaults_to_kubernetes():
+    checks, recommendations = {}, []
+    api = _core_api_with_node_labels({"kubernetes.io/os": "linux"}, None)
+
+    result = _detect_platform(checks, recommendations, lambda: api, timeout=5)
+
+    assert result == "kubernetes"
+    assert checks["platform"] == {"status": "info", "detected": "kubernetes"}
+    assert recommendations == []
+
+
+def test_detect_platform_returns_unknown_when_api_fails():
+    checks, recommendations = {}, []
+    api = MagicMock()
+    api.list_node.side_effect = ConnectionError("Connection refused")
+
+    result = _detect_platform(checks, recommendations, lambda: api, timeout=5)
+
+    assert result == "unknown"
+    assert checks["platform"]["status"] == "warn"
+    assert "Connection refused" in checks["platform"]["error"]
+    assert recommendations == []
 
 
 def test_estimate_from_params_small_model():
