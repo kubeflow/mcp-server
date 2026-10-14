@@ -15,7 +15,7 @@
 """Tests for planning helpers: HuggingFace model ID validation and suggestions."""
 
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
@@ -26,6 +26,7 @@ from tests.common import TestCase
 
 from kubeflow_mcp.common.constants import KUBEFLOW_SDK_VERSION_MIN, KUBEFLOW_SDK_VERSION_SPEC
 from kubeflow_mcp.trainer.api.planning import (
+    _check_k8s_version,
     _check_sdk_version,
     _estimate_from_params,
     _get_model_info_from_hf,
@@ -261,6 +262,53 @@ def test_non_not_found_error_skips_suggestions():
 )
 def test_parse_k8s_version(test_case):
     assert _parse_k8s_version(**test_case.config) == test_case.expected_output
+
+
+def _version_api(git_version: str) -> MagicMock:
+    api = MagicMock()
+    api.get_code.return_value = SimpleNamespace(git_version=git_version)
+    return api
+
+
+def test_check_k8s_version_passes_for_supported_version():
+    checks, blockers = {}, []
+
+    _check_k8s_version(checks, blockers, lambda: _version_api("v1.29.3"), timeout=5)
+
+    assert checks["kubernetes_version"]["status"] == "pass"
+    assert checks["kubernetes_version"]["version"] == "v1.29.3"
+    assert blockers == []
+
+
+def test_check_k8s_version_blocks_version_below_minimum():
+    checks, blockers = {}, []
+
+    _check_k8s_version(checks, blockers, lambda: _version_api("v1.25.0"), timeout=5)
+
+    assert checks["kubernetes_version"]["status"] == "fail"
+    assert len(blockers) == 1
+    assert "v1.25.0 is below minimum v1.27" in blockers[0]
+
+
+def test_check_k8s_version_warns_when_version_cannot_be_parsed():
+    checks, blockers = {}, []
+
+    _check_k8s_version(checks, blockers, lambda: _version_api("garbage"), timeout=5)
+
+    assert checks["kubernetes_version"]["status"] == "warn"
+    assert blockers == []
+
+
+def test_check_k8s_version_blocks_when_api_is_unreachable():
+    checks, blockers = {}, []
+    api = MagicMock()
+    api.get_code.side_effect = ConnectionError("Connection refused")
+
+    _check_k8s_version(checks, blockers, lambda: api, timeout=5)
+
+    assert checks["kubernetes_version"]["status"] == "fail"
+    assert "Connection refused" in checks["kubernetes_version"]["error"]
+    assert blockers == ["Cannot reach Kubernetes API: Connection refused"]
 
 
 def test_estimate_from_params_small_model():
