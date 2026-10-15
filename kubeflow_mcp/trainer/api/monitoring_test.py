@@ -887,6 +887,13 @@ class TestWaitForTraining:
         assert result["success"] is False
         assert result["error_code"] == "SDK_ERROR"
 
+        mock_client_fn.return_value = _make_mock_client(
+            wait_for_job_status=RuntimeError("Cluster condition is Failed")
+        )
+        res_unrelated = wait_for_training("err-job")
+        assert res_unrelated["success"] is False
+        assert res_unrelated["error_code"] == "SDK_ERROR"
+
     @patch(PATCH_NS_CHECK, return_value=None)
     @patch(PATCH_CLIENT)
     def test_job_without_status_attribute(self, mock_client_fn, _ns):
@@ -921,6 +928,13 @@ class TestWaitForTraining:
         assert result["error_code"] == "RESOURCE_NOT_FOUND"
         assert "missing-job" in result["error"]
 
+        wrapped_404 = RuntimeError("wrapped error")
+        wrapped_404.__cause__ = ApiException(status=404, reason="Not Found")
+        mock_client_fn.return_value = _make_mock_client(wait_for_job_status=wrapped_404)
+        result_wrapped = wait_for_training("missing-job")
+        assert result_wrapped["success"] is False
+        assert result_wrapped["error_code"] == "RESOURCE_NOT_FOUND"
+
         wrapped = _audit_wrap(wait_for_training)
         breaker = get_breaker("wait_for_training")
 
@@ -942,4 +956,48 @@ class TestWaitForTraining:
         result = wait_for_training("bad..name")
         assert result["success"] is False
         assert result["error_code"] == "VALIDATION_ERROR"
+        mock_client_fn.assert_not_called()
+
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_failed_trainjob_does_not_trip_circuit_breaker(self, mock_client_fn, _ns):
+        mock_client_fn.return_value = _make_mock_client(
+            wait_for_job_status=RuntimeError("TrainJob failed-job is Failed")
+        )
+        result = wait_for_training("failed-job")
+        assert result["success"] is True
+        assert result["data"]["status"] == "Failed"
+        assert result["data"]["reached"] is False
+        assert "TrainJob failed-job is Failed" in result["data"]["message"]
+
+        wrapped = _audit_wrap(wait_for_training)
+        breaker = get_breaker("wait_for_training")
+
+        for _ in range(5):
+            res = wrapped(name="failed-job")
+            assert res["success"] is True
+            assert res["data"]["reached"] is False
+            assert res["data"]["status"] == "Failed"
+
+        assert breaker.state == CircuitState.CLOSED
+        assert breaker.failure_count == 0
+
+        job = SimpleNamespace(status="Complete")
+        mock_client_fn.return_value = _make_mock_client(wait_for_job_status=job)
+        valid_res = wrapped(name="valid-job")
+        assert valid_res["success"] is True
+
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_polling_interval_gte_timeout_rejected_before_sdk(self, mock_client_fn, _ns):
+        res = wait_for_training("my-job", timeout_seconds=5, polling_interval=10)
+        assert res["success"] is False
+        assert res["error_code"] == "VALIDATION_ERROR"
+        assert "polling_interval must be strictly less than timeout_seconds" in res["error"]
+        mock_client_fn.assert_not_called()
+
+        res_clamped = wait_for_training("my-job", timeout_seconds=5000, polling_interval=3800)
+        assert res_clamped["success"] is False
+        assert res_clamped["error_code"] == "VALIDATION_ERROR"
+        assert "polling_interval must be strictly less than timeout_seconds" in res_clamped["error"]
         mock_client_fn.assert_not_called()

@@ -477,6 +477,11 @@ def wait_for_training(
             ).model_dump()
         timeout_seconds = min(timeout_seconds, MAX_WAIT_TIMEOUT)
         polling_interval = max(polling_interval, MIN_POLLING_INTERVAL)
+        if polling_interval >= timeout_seconds:
+            return ToolError(
+                error=f"polling_interval must be strictly less than timeout_seconds, got polling_interval={polling_interval}, timeout_seconds={timeout_seconds}",
+                error_code=ErrorCode.VALIDATION_ERROR,
+            ).model_dump()
         client = get_trainer_client_for_namespace(namespace)
 
         job = client.wait_for_job_status(
@@ -507,6 +512,16 @@ def wait_for_training(
             }
         ).model_dump()
     except Exception as e:
+        if isinstance(e, RuntimeError) and str(e) == f"TrainJob {name} is Failed":
+            return ToolResponse(
+                data={
+                    "job": name,
+                    "status": "Failed",
+                    "reached": False,
+                    "message": str(e),
+                    "hint": "Use get_training_logs to check error output or get_training_events for scheduling issues",
+                }
+            ).model_dump()
         if is_k8s_not_found(e):
             return ToolError(
                 error=f"Training job '{name}' not found",
