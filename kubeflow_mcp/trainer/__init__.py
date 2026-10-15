@@ -20,6 +20,8 @@ Structure mirrors kubeflow/trainer/:
 └── constants/     # Constants
 """
 
+from typing import Any
+
 from kubeflow_mcp.common.constants import KUBEFLOW_SDK_VERSION_SPEC
 from kubeflow_mcp.trainer.api.discovery import (
     get_runtime,
@@ -319,6 +321,38 @@ CLIENT_RESOURCES: dict[str, tuple[str, str]] = {
     ),
 }
 
+# ─── A2A skills (owned by this client module) ──────────────────────────────
+# Advertised on the unauthenticated A2A Agent Card, so these name what this
+# client lets the server do, never which tools implement it or what arguments
+# they take. A client module that serves no tools exports nothing here, so the
+# card cannot advertise a capability the delegation endpoint will not serve.
+
+A2A_SKILLS: list[dict[str, Any]] = [
+    {
+        "id": "fine-tuning",
+        "name": "Model fine-tuning",
+        "description": (
+            "Fine-tune a foundation model on a dataset using Kubeflow Trainer, "
+            "including LoRA configuration and resource planning."
+        ),
+        "tags": ["training", "fine-tuning", "llm"],
+    },
+    {
+        "id": "distributed-training",
+        "name": "Distributed training",
+        "description": "Submit and manage multi-node distributed training jobs on Kubernetes.",
+        "tags": ["training", "distributed", "kubernetes"],
+    },
+    {
+        "id": "job-monitoring",
+        "name": "Training job monitoring",
+        "description": (
+            "Inspect status, logs, and events for training jobs, and diagnose failures."
+        ),
+        "tags": ["monitoring", "observability", "logs"],
+    },
+]
+
 # ─── Instruction sections (full tier; compact/minimal auto-derived) ────────
 # Phase-to-section mapping for auto-deriving which sections a persona needs.
 # TOOL_PHASES keys -> instruction section names.
@@ -410,6 +444,7 @@ __all__ = [
     "CLIENT_TOOL_DESCRIPTIONS",
     "CLIENT_TOOL_ANNOTATIONS",
     "CLIENT_RESOURCES",
+    "A2A_SKILLS",
     "INSTRUCTION_SECTIONS",
     "SECTION_ORDER",
     "PHASE_TO_SECTION",

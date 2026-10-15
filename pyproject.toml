@@ -68,6 +68,13 @@ path = "kubeflow_mcp/__init__.py"
 [tool.hatch.build.targets.wheel]
 packages = ["kubeflow_mcp"]
 
+# The MCP Server Card is built from server.json at runtime, so it has to be
+# readable from an installed package, not just a source checkout. Shipping it
+# inside the package keeps one source of truth: the registry reads the file at
+# the repository root, and the server reads this copy of it.
+[tool.hatch.build.targets.wheel.force-include]
+"server.json" = "kubeflow_mcp/server.json"
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["kubeflow_mcp", "tests"]
