@@ -413,6 +413,43 @@ def test_inspect_controller_events_response(mock_k8s_apis, scan_default_namespac
     )
 
 
+@pytest.mark.parametrize(
+    ("timestamp_field", "expected"),
+    [
+        ("event_time", "2024-02-03T04:05:06+00:00"),
+        ("metadata.creation_timestamp", "2024-03-04T05:06:07+00:00"),
+    ],
+)
+def test_inspect_controller_events_fall_back_when_first_timestamp_is_missing(
+    mock_k8s_apis, scan_default_namespaces, timestamp_field, expected
+):
+    core = mock_k8s_apis["core_v1"]
+    core.list_namespaced_pod.return_value = MagicMock(items=[_controller_pod("kubeflow-system")])
+
+    event = MagicMock()
+    event.type = "Warning"
+    event.reason = "Failed"
+    event.message = "Training job failed"
+    event.count = 1
+    event.first_timestamp = None
+    event.event_time = None
+    event.metadata.creation_timestamp = None
+    timestamp = datetime.fromisoformat(expected)
+
+    if timestamp_field == "event_time":
+        event.event_time = timestamp
+    else:
+        event.metadata.creation_timestamp = timestamp
+
+    core.list_namespaced_event.return_value = MagicMock(items=[event])
+
+    result = inspect_controller(view="events")
+
+    data = verify_tool_success(result)
+    assert data["events"][0]["first_seen"] == expected
+    assert data["count"] == 1
+
+
 def test_inspect_controller_rejects_namespace_outside_policy(mock_k8s_apis, tmp_policy_file):
     tmp_policy_file({"policy": {"namespaces": ["team-a"]}})
 

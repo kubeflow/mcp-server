@@ -360,7 +360,16 @@ def get_training_events(
 
         event_list = []
         for event in events[:limit]:
-            et = getattr(event, "event_time", None)
+            # Prefer the Kubernetes Event v1 timestamp, then fall back to
+            # legacy core/v1 Event fields for older client/API representations.
+            et = next(
+                (
+                    value
+                    for field in ("event_time", "last_timestamp", "first_timestamp")
+                    if (value := getattr(event, field, None)) is not None
+                ),
+                None,
+            )
             if et is not None and hasattr(et, "isoformat"):
                 event_time_str = et.isoformat()
             else:
