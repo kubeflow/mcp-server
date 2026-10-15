@@ -16,11 +16,21 @@
 
 Mirrors kubeflow SDK's client structure:
 - TrainerClient from kubeflow.trainer
+
+By default every client is built from the process kubeconfig (or in-cluster
+ServiceAccount) and cached for the life of the process. Inside a
+:func:`request_client_configuration` block, every helper here instead builds
+from the configuration supplied for that block and caches nothing beyond it, so
+a deployment can run each request as a different Kubernetes identity. See
+``RequestClientConfigurationMiddleware`` in :mod:`kubeflow_mcp.core.middleware`.
 """
 
+import contextlib
+import contextvars
 import logging
 import os
 import threading
+from collections.abc import Iterator
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any
 
@@ -33,6 +43,102 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 K8S_TIMEOUT = 5
+
+
+class _RequestClients:
+    """Clients built from one request's configuration, closed when the request ends.
+
+    Each ``ApiClient`` starts a thread pool on its first ``async_req`` call (the
+    Trainer SDK makes them) and registers it with ``atexit``, so a client that is
+    never closed is kept alive until the process exits. Closing them here keeps
+    per-request clients from accumulating.
+    """
+
+    def __init__(self, configuration: "k8s_client.Configuration") -> None:
+        self.configuration = configuration
+        self.trainer_clients: dict[str | None, TrainerClient] = {}
+        self._api_clients: list[Any] = []
+        self._lock = threading.Lock()
+
+    def api_client(self) -> "k8s_client.ApiClient":
+        from kubernetes import client
+
+        api = client.ApiClient(self.configuration)
+        self.track(api)
+        return api
+
+    def trainer_client(self, namespace: str | None) -> TrainerClient:
+        with self._lock:
+            if namespace in self.trainer_clients:
+                return self.trainer_clients[namespace]
+        from kubeflow.common.types import KubernetesBackendConfig
+
+        trainer = TrainerClient(
+            backend_config=KubernetesBackendConfig(
+                namespace=namespace, client_configuration=self.configuration
+            )
+        )
+        core_api = getattr(trainer.backend, "core_api", None)
+        if core_api is not None:
+            self.track(core_api.api_client)
+        with self._lock:
+            return self.trainer_clients.setdefault(namespace, trainer)
+
+    def track(self, api: Any) -> None:
+        with self._lock:
+            self._api_clients.append(api)
+
+    def close(self) -> None:
+        with self._lock:
+            api_clients, self._api_clients = self._api_clients, []
+            self.trainer_clients.clear()
+        for api in api_clients:
+            try:
+                api.close()
+            except Exception:
+                logger.debug("Failed to close a per-request ApiClient", exc_info=True)
+
+
+_request_clients: contextvars.ContextVar[_RequestClients | None] = contextvars.ContextVar(
+    "kubeflow_mcp_request_clients", default=None
+)
+
+
+@contextlib.contextmanager
+def request_client_configuration(
+    configuration: "k8s_client.Configuration",
+) -> Iterator[None]:
+    """Build every Kubernetes and Trainer client in this block from *configuration*.
+
+    Inside the block, the ``get_*_api`` helpers and the ``get_trainer_client*``
+    factories ignore the process kubeconfig and the process-wide caches. Clients
+    are built from *configuration* and shared only within the block (one
+    ``TrainerClient`` per namespace), then closed when it exits, so nothing
+    built for one identity is reused for another.
+
+    The configuration is used as given. The SDK is never asked to load a
+    kubeconfig or in-cluster config for it, because a ``TrainerClient`` given a
+    ``client_configuration`` skips that step.
+
+    Args:
+        configuration: Where the API server is and how to authenticate to it,
+            for example a bearer token in ``api_key["authorization"]``.
+    """
+    scope = _RequestClients(configuration)
+    token = _request_clients.set(scope)
+    try:
+        yield
+    finally:
+        _request_clients.reset(token)
+        scope.close()
+
+
+def _current_api_client() -> "k8s_client.ApiClient":
+    """The per-request ApiClient if a request configuration is set, else the shared one."""
+    scope = _request_clients.get()
+    if scope is not None:
+        return scope.api_client()
+    return _get_api_client()
 
 
 @lru_cache(maxsize=1)
@@ -63,31 +169,31 @@ def _get_api_client() -> "k8s_client.ApiClient":
 
 
 def get_core_v1_api() -> "k8s_client.CoreV1Api":
-    """Get CoreV1Api backed by the shared, timeout-configured ApiClient."""
+    """Get CoreV1Api backed by the shared ApiClient, or the request's if one is set."""
     from kubernetes import client
 
-    return client.CoreV1Api(_get_api_client())
+    return client.CoreV1Api(_current_api_client())
 
 
 def get_version_api() -> "k8s_client.VersionApi":
-    """Get VersionApi backed by the shared, timeout-configured ApiClient."""
+    """Get VersionApi backed by the shared ApiClient, or the request's if one is set."""
     from kubernetes import client
 
-    return client.VersionApi(_get_api_client())
+    return client.VersionApi(_current_api_client())
 
 
 def get_custom_objects_api() -> "k8s_client.CustomObjectsApi":
-    """Get CustomObjectsApi backed by the shared, timeout-configured ApiClient."""
+    """Get CustomObjectsApi backed by the shared ApiClient, or the request's if one is set."""
     from kubernetes import client
 
-    return client.CustomObjectsApi(_get_api_client())
+    return client.CustomObjectsApi(_current_api_client())
 
 
 def get_apiextensions_api() -> "k8s_client.ApiextensionsV1Api":
-    """Get ApiextensionsV1Api backed by the shared, timeout-configured ApiClient."""
+    """Get ApiextensionsV1Api backed by the shared ApiClient, or the request's if one is set."""
     from kubernetes import client
 
-    return client.ApiextensionsV1Api(_get_api_client())
+    return client.ApiextensionsV1Api(_current_api_client())
 
 
 def get_trainer_effective_namespace(namespace: str | None = None) -> str:
@@ -115,12 +221,20 @@ def get_trainer_custom_objects_api() -> "k8s_client.CustomObjectsApi":
     return get_custom_objects_api()
 
 
-@lru_cache(maxsize=1)
 def get_trainer_client() -> TrainerClient:
     """Get or create TrainerClient singleton.
 
-    Uses default KubernetesBackendConfig with current kubeconfig context.
+    Uses default KubernetesBackendConfig with current kubeconfig context, or
+    the request's configuration inside :func:`request_client_configuration`.
     """
+    scope = _request_clients.get()
+    if scope is not None:
+        return scope.trainer_client(None)
+    return _get_process_trainer_client()
+
+
+@lru_cache(maxsize=1)
+def _get_process_trainer_client() -> TrainerClient:
     return TrainerClient()
 
 
@@ -134,10 +248,15 @@ def get_trainer_client_for_namespace(namespace: str | None = None) -> Any:
 
     When *namespace* is ``None`` the shared singleton (default kubeconfig
     namespace) is returned.  When a namespace is explicitly provided a
-    cached ``TrainerClient`` scoped to that namespace is returned.
+    cached ``TrainerClient`` scoped to that namespace is returned. Inside
+    :func:`request_client_configuration` the client comes from the request
+    instead and the process-wide cache is neither read nor written.
     """
     if namespace is None:
         return get_trainer_client()
+    scope = _request_clients.get()
+    if scope is not None:
+        return scope.trainer_client(namespace)
     with _ns_client_lock:
         if namespace in _ns_client_cache:
             return _ns_client_cache[namespace]
@@ -199,7 +318,7 @@ def get_trainer_ownership(name: str, namespace: str) -> str | None:
 
 def reset_clients() -> None:
     """Reset all cached clients (for testing or kubeconfig rotation)."""
-    get_trainer_client.cache_clear()
+    _get_process_trainer_client.cache_clear()
     _get_api_client.cache_clear()
     with _ns_client_lock:
         _ns_client_cache.clear()
