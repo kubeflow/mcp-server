@@ -158,6 +158,8 @@ def setup_logging(
     """
     if format is None:
         format = "console" if sys.stderr.isatty() else "json"
+    elif format not in ("json", "console"):
+        raise ValueError(f"Unsupported log format {format!r}; expected 'json' or 'console'")
 
     formatter: logging.Formatter
     if format == "json":

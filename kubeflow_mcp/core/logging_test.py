@@ -28,6 +28,7 @@ from kubeflow_mcp.core.logging import (
     _redact_text,
     get_log_buffer,
     request_context,
+    setup_logging,
 )
 
 _JWT = "eyJhbGciOiJIUzI1NiJ9.SECRETPAYLOAD.sig"
@@ -280,3 +281,45 @@ class TestLogPathsRedactConsistently:
         assert buffered == "calling API with Authorization: ***"
         assert buffered == structured
         assert buffered in ConsoleFormatter().format(record)
+
+
+class TestSetupLogging:
+    """Tests for logging format selection and validation."""
+
+    @pytest.fixture(autouse=True)
+    def _restore_logger(self):
+        root = logging.getLogger("kubeflow_mcp")
+        handlers, level = root.handlers[:], root.level
+        yield
+        root.handlers[:] = handlers
+        root.setLevel(level)
+
+    @staticmethod
+    def _stream_formatter(root: logging.Logger) -> logging.Formatter:
+        stream = [h for h in root.handlers if not isinstance(h, BufferingHandler)]
+        assert len(stream) == 1
+        return stream[0].formatter
+
+    @pytest.mark.parametrize(
+        ("format_value", "formatter_type"),
+        [("json", StructuredFormatter), ("console", ConsoleFormatter)],
+    )
+    def test_uses_supported_format(self, format_value, formatter_type):
+        root = setup_logging(format=format_value)
+
+        assert isinstance(self._stream_formatter(root), formatter_type)
+
+    @pytest.mark.parametrize(
+        ("is_tty", "formatter_type"),
+        [(True, ConsoleFormatter), (False, StructuredFormatter)],
+    )
+    def test_auto_detects_format_when_omitted(self, monkeypatch, is_tty, formatter_type):
+        monkeypatch.setattr(sys.stderr, "isatty", lambda: is_tty)
+
+        root = setup_logging()
+
+        assert isinstance(self._stream_formatter(root), formatter_type)
+
+    def test_rejects_unsupported_format(self):
+        with pytest.raises(ValueError, match="invalid.*json.*console"):
+            setup_logging(format="invalid")
