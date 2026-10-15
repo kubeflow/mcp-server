@@ -100,56 +100,6 @@ _CARD_HEADERS = {
     "Access-Control-Allow-Headers": "Content-Type",
 }
 
-# High-level capabilities per client module. Deliberately coarse: this is
-# public, so it names what the server can do, never which tools implement it
-# or what arguments they take. A client module may override this by exporting
-# its own ``A2A_SKILLS``, the same way it exports INSTRUCTION_SECTIONS.
-_CLIENT_SKILLS: dict[str, list[dict[str, Any]]] = {
-    "trainer": [
-        {
-            "id": "fine-tuning",
-            "name": "Model fine-tuning",
-            "description": (
-                "Fine-tune a foundation model on a dataset using Kubeflow Trainer, "
-                "including LoRA configuration and resource planning."
-            ),
-            "tags": ["training", "fine-tuning", "llm"],
-        },
-        {
-            "id": "distributed-training",
-            "name": "Distributed training",
-            "description": (
-                "Submit and manage multi-node distributed training jobs on Kubernetes."
-            ),
-            "tags": ["training", "distributed", "kubernetes"],
-        },
-        {
-            "id": "job-monitoring",
-            "name": "Training job monitoring",
-            "description": (
-                "Inspect status, logs, and events for training jobs, and diagnose failures."
-            ),
-            "tags": ["monitoring", "observability", "logs"],
-        },
-    ],
-    "optimizer": [
-        {
-            "id": "hyperparameter-optimization",
-            "name": "Hyperparameter optimization",
-            "description": "Run and monitor hyperparameter search experiments.",
-            "tags": ["optimization", "hpo", "tuning"],
-        },
-    ],
-    "hub": [
-        {
-            "id": "model-registry",
-            "name": "Model registry",
-            "description": "Discover and inspect registered models and their versions.",
-            "tags": ["registry", "models", "metadata"],
-        },
-    ],
-}
-
 
 def _error(
     code: int,
@@ -188,14 +138,20 @@ def build_skills(
 ) -> list[dict[str, Any]]:
     """Build the card's skill list from the loaded client modules.
 
+    Each client module owns its own ``A2A_SKILLS``, the same way it owns
+    ``CLIENT_RESOURCES`` and ``CLIENT_TOOL_DESCRIPTIONS``. Core keeps no
+    defaults, so a client that serves no tools contributes no skills and the
+    public card cannot advertise a capability ``/a2a`` would refuse.
+
     Skills reflect what this deployment loaded, not what the caller's persona
     may reach — the card is public, so it stays persona-agnostic.
     """
     skills: list[dict[str, Any]] = []
     for client in loaded_clients:
         module = (loaded_modules or {}).get(client)
-        declared = getattr(module, "A2A_SKILLS", None) if module is not None else None
-        for skill in declared or _CLIENT_SKILLS.get(client, []):
+        if module is None:
+            continue
+        for skill in getattr(module, "A2A_SKILLS", ()) or ():
             skills.append(dict(skill))
     return skills
 

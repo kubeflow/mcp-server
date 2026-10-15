@@ -54,6 +54,15 @@ def identity_probe() -> dict[str, Any]:
     return {"audit_user": get_user_id()}
 
 
+def _load_modules(clients: list[str]) -> dict[str, Any]:
+    """Import the named client modules, the way create_server does."""
+    import importlib
+
+    from kubeflow_mcp.core.server import CLIENT_MODULES
+
+    return {name: importlib.import_module(CLIENT_MODULES[name]) for name in clients}
+
+
 def _a2a_client(
     *,
     tools: dict[str, Any] | None = None,
@@ -64,10 +73,12 @@ def _a2a_client(
 
     auth = APIKeyVerifier(expected_token="secret") if authenticated else None
     mcp = FastMCP("test-server", auth=auth)
+    loaded_clients = clients if clients is not None else ["trainer"]
     register_a2a_routes(
         mcp,
         tools=tools if tools is not None else {"fine_tune": fine_tune},
-        loaded_clients=clients if clients is not None else ["trainer"],
+        loaded_clients=loaded_clients,
+        loaded_modules=_load_modules(loaded_clients),
         auth_provider=auth,
     )
     return TestClient(mcp.http_app(transport="streamable-http"))
@@ -136,18 +147,57 @@ def test_agent_card_describes_capabilities_not_tool_surface() -> None:
 
 def test_agent_card_skills_do_not_vary_with_persona() -> None:
     """Persona shapes what /a2a will run, never what the public card advertises."""
-    restrictive = build_agent_card(url="http://x/a2a", loaded_clients=["trainer"])
-    permissive = build_agent_card(url="http://x/a2a", loaded_clients=["trainer"])
+    modules = _load_modules(["trainer"])
+    restrictive = build_agent_card(
+        url="http://x/a2a", loaded_clients=["trainer"], loaded_modules=modules
+    )
+    permissive = build_agent_card(
+        url="http://x/a2a", loaded_clients=["trainer"], loaded_modules=modules
+    )
 
     assert restrictive["skills"] == permissive["skills"]
 
 
 def test_agent_card_reflects_loaded_clients() -> None:
-    card = build_agent_card(url="http://x/a2a", loaded_clients=["trainer", "optimizer"])
+    card = build_agent_card(
+        url="http://x/a2a",
+        loaded_clients=["trainer"],
+        loaded_modules=_load_modules(["trainer"]),
+    )
     skill_ids = {skill["id"] for skill in card["skills"]}
 
     assert "fine-tuning" in skill_ids
-    assert "hyperparameter-optimization" in skill_ids
+    assert "job-monitoring" in skill_ids
+
+
+def test_agent_card_skills_come_from_the_client_module() -> None:
+    """Core holds no skill defaults; each client module owns its own."""
+    from kubeflow_mcp.core import a2a as a2a_module
+
+    assert not hasattr(a2a_module, "_CLIENT_SKILLS")
+
+    import kubeflow_mcp.trainer as trainer_module
+
+    card = build_agent_card(
+        url="http://x/a2a",
+        loaded_clients=["trainer"],
+        loaded_modules={"trainer": trainer_module},
+    )
+
+    assert card["skills"] == [dict(skill) for skill in trainer_module.A2A_SKILLS]
+
+
+def test_agent_card_advertises_nothing_for_a_client_that_serves_no_tools() -> None:
+    """optimizer and hub are stubs, so the card must not promise what /a2a refuses."""
+    card = build_agent_card(
+        url="http://x/a2a",
+        loaded_clients=["trainer", "optimizer", "hub"],
+        loaded_modules=_load_modules(["trainer", "optimizer", "hub"]),
+    )
+    skill_ids = {skill["id"] for skill in card["skills"]}
+
+    assert "fine-tuning" in skill_ids
+    assert "hyperparameter-optimization" not in skill_ids
     assert "model-registry" not in skill_ids
 
 
