@@ -188,7 +188,7 @@ Kubernetes API Server (RBAC enforced)
 
 ### What the MCP Server Does NOT Control
 
-- **Kubernetes RBAC** — all tool calls use the server process Kubeconfig / ServiceAccount; HTTP auth does not map callers to distinct Kubernetes identities (see Identity below)
+- **Kubernetes RBAC**: by default all tool calls use the server process Kubeconfig / ServiceAccount, and HTTP auth does not map callers to distinct Kubernetes identities. A deployment can opt in to per-caller clients (see Identity below)
 - **Network security** — TLS, ingress, and API gateway configuration are infrastructure concerns
 - **Secret management** — the server does not store credentials; it reads Kubeconfig from the environment
 
@@ -214,13 +214,21 @@ The tool accepts a Python script string, wraps it inside `def train():`, and cal
 
 #### 3. Identity — Per-User Mapping
 
-**Severity: Medium** | **Status: Open, tracked in [ROADMAP.md](ROADMAP.md) Step 3**
+**Severity: Medium** | **Status: Partially mitigated (opt-in per-request client hook); native per-caller RBAC tracked in [ROADMAP.md](ROADMAP.md#phase-4--enterprise--in-cluster-to-do) Phase 4**
 
-`core/auth.py` implements HTTP-layer authentication (API key via `--auth-token`, JWT/OIDC via `KUBEFLOW_MCP_JWKS_URI`). However, authenticated identities are not yet mapped to distinct Kubernetes identities. All tool calls run under whatever Kubeconfig the process was started with.
+`core/auth.py` implements HTTP-layer authentication (API key via `--auth-token`, JWT/OIDC via `KUBEFLOW_MCP_JWKS_URI`). By default, authenticated identities are not mapped to distinct Kubernetes identities: all tool calls run under whatever Kubeconfig the process was started with.
 
-**Impact:** In multi-user deployments, all users share the same Kubernetes identity. There is no per-user RBAC enforcement at the MCP layer (the auth layer verifies *who* is calling, but cannot scope *what* they can do beyond persona-level filtering).
+**Impact:** In multi-user deployments without the hook below, all users share the same Kubernetes identity. There is no per-user RBAC enforcement at the MCP layer (the auth layer verifies *who* is calling, but cannot scope *what* they can do beyond persona-level filtering).
 
-**Recommendation:** For single-user local development (stdio), this is acceptable — the user's own Kubeconfig is used. For multi-user HTTP deployments, configure `--auth-token` or JWT and enforce identity at the ingress/gateway layer until per-user Kubernetes impersonation is wired (Step 3).
+**Per-request client hook (opt-in):** `create_server(client_configuration_provider=...)` takes a callable (sync or async) that receives the caller's verified `AccessToken` and returns a `kubernetes.client.Configuration` for that caller, for example one carrying the caller's own bearer token for an API server that trusts the same OIDC issuer. `RequestClientConfigurationMiddleware` stores it in a `ContextVar` for the duration of the tool call, and every helper in `common/utils.py` (`get_core_v1_api`, `get_custom_objects_api`, `get_apiextensions_api`, `get_version_api`, `get_trainer_client`, `get_trainer_client_for_namespace`) builds from it, so the API server applies the caller's RBAC to reads and writes alike. Behaviour with the hook set:
+
+- **Fails closed.** If the provider returns `None` or raises, the call is refused with `PERMISSION_DENIED` and never falls back to the server's own credentials. Only the exception type is logged, since provider errors may echo the token.
+- **No sharing across callers.** Clients built for a request are used only within it (one `TrainerClient` per namespace per request) and closed when it ends; the process-wide `ApiClient`, `TrainerClient` singleton and per-namespace cache are neither read nor written.
+- **Scope.** The hook wraps MCP tool calls, which is where every Kubernetes call the server makes happens. The `/health` and `/ready` HTTP probes make no Kubernetes calls.
+
+Without a provider nothing changes, so stdio and single-tenant deployments are unaffected. Impersonation (`Impersonate-User` headers) cannot be expressed through a `Configuration` and is not covered by this hook.
+
+**Recommendation:** For single-user local development (stdio), the default is acceptable, because the user's own Kubeconfig is used. For multi-user HTTP deployments, configure JWT auth and either supply a `client_configuration_provider` or enforce identity at the ingress/gateway layer.
 
 ### Recommended Deployment Practices
 
