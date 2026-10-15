@@ -88,6 +88,13 @@ Kubeflow SDK derives its default namespace from the pod's ServiceAccount namespa
 Running it elsewhere makes every tool default to a namespace that has no TrainJobs
 in it.
 
+Trainer tools use an explicitly supplied `namespace` first. When it is omitted, they
+use the namespace from the Trainer SDK/backend configuration, which in-cluster is
+commonly derived from the pod's ServiceAccount namespace. If the backend provides no
+namespace, the current implementation falls back to `"default"`. Although
+`trainer.default_namespace` is accepted when loading configuration, it does not
+currently affect runtime namespace resolution.
+
 To use another namespace, replace `kubeflow-user-example-com` everywhere in
 `manifests.yaml` — including inside `KUBEFLOW_MCP_ALLOWED_HOSTS`, which spells out
 the Service DNS names, and the namespace suffix on both binding names. It leaves
