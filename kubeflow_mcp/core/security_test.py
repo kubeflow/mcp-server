@@ -26,6 +26,7 @@ from kubeflow_mcp.core.security import (
     _SENSITIVE_EXACT,
     _SENSITIVE_SUBSTRINGS,
     is_safe_python_code,
+    is_sensitive_key,
     mask_sensitive_data,
     truncate_log_output,
     validate_k8s_name,
@@ -411,6 +412,18 @@ def test_validate_training_bounds(test_case):
             expected_status=SUCCESS,
             config={"code": "getattr(().__class__.__base__, '__subcl' + 'asses__')()"},
         ),
+        TestCase(
+            name="getattr with dangerous dunder literal string is caught",
+            expected_status=FAILED,
+            config={"code": "getattr(obj, '__subclasses__')"},
+            expected_output="getattr",
+        ),
+        TestCase(
+            name="setattr with dangerous dunder literal string is caught",
+            expected_status=FAILED,
+            config={"code": "setattr(obj, '__builtins__', None)"},
+            expected_output="setattr",
+        ),
     ],
 )
 def test_is_safe_python_code(test_case):
@@ -554,6 +567,12 @@ def test_truncate_long_output():
 
 def test_truncate_exact_boundary():
     assert truncate_log_output("x" * 100, max_length=100) == "x" * 100
+
+
+def test_is_sensitive_key_safe_keys():
+    assert is_sensitive_key("keyword") is False
+    assert is_sensitive_key("public_key") is False
+    assert is_sensitive_key("secret") is True
 
 
 class TestValidateK8sNameTrailingNewline:

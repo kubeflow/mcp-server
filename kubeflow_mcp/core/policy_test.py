@@ -84,6 +84,11 @@ def test_non_category_returns_as_is():
             config={"tool": "fine_tune", "pattern": "risk:destructive"},
             expected_output=False,
         ),
+        TestCase(
+            name="unknown risk does not match",
+            config={"tool": "delete_training_job", "pattern": "risk:unknown"},
+            expected_output=False,
+        ),
     ],
 )
 def test_matches_pattern(test_case):
