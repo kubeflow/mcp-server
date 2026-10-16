@@ -414,7 +414,7 @@ def _fetch_packages_via_pod(runtime_name: str, runtime_obj: Any = None) -> dict[
                 "logs": logs[-500:] if logs else "no logs",
             }
 
-        if logs.strip() == _PIP_NOT_FOUND:
+        if _PIP_NOT_FOUND in logs:
             return {"packages_error": "pip is not installed in the runtime image"}
 
         packages = []

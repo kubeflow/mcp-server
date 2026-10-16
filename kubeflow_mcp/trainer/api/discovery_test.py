@@ -573,6 +573,11 @@ class TestFetchPackagesPodLog:
         result = self._fetch("pip not found\n")
         assert result == {"packages_error": "pip is not installed in the runtime image"}
 
+    def test_missing_pip_after_partial_output_is_reported(self):
+        """Both pip calls can fail after printing part of a list; the fallback still wins."""
+        result = self._fetch("Package Version\nnumpy 2.0.0\npip not found\n")
+        assert result == {"packages_error": "pip is not installed in the runtime image"}
+
     def test_log_is_read_from_the_start_not_tailed(self):
         """A tail drops the first packages of a large image, and the header with them."""
         self._fetch("Package Version\nnumpy 2.0.0\n")
