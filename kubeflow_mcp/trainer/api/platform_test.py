@@ -37,6 +37,7 @@ from kubeflow_mcp.common import utils as mcp_utils
 from kubeflow_mcp.conftest import create_mock_trainjob, verify_tool_error, verify_tool_success
 from kubeflow_mcp.core.policy import get_allowed_tools
 from kubeflow_mcp.trainer.api.platform import (
+    _get_controller_namespace,
     create_runtime,
     delete_runtime,
     inspect_controller,
@@ -447,8 +448,232 @@ def test_inspect_controller_auto_discovery_is_exempt_from_policy(
     assert verify_tool_success(result)["namespace"] == "kubeflow"
 
 
-# Remaining TODOs are outside this PR's runtime CRUD slice.
-# TODO(test): test inspect_crd — lists all Trainer CRDs
-# TODO(test): test inspect_crd(name) — returns CRD schema and conditions
-# TODO(test): test inspect_crd — invalid CRD name
-# TODO(test): test inspect_controller(view="logs") — returns controller logs
+# ─── _get_controller_namespace ───────────────────────────────────────────────
+
+
+def test_get_controller_namespace_from_env(monkeypatch):
+    monkeypatch.setenv("KUBEFLOW_MCP_CONTROLLER_NAMESPACE", "custom-controller-ns")
+    assert _get_controller_namespace() == "custom-controller-ns"
+
+
+def test_get_controller_namespace_from_config(monkeypatch):
+    monkeypatch.delenv("KUBEFLOW_MCP_CONTROLLER_NAMESPACE", raising=False)
+    mock_cfg = MagicMock()
+    mock_cfg.trainer.controller_namespace = "config-controller-ns"
+    monkeypatch.setattr("kubeflow_mcp.core.config.load_config", lambda: mock_cfg)
+    assert _get_controller_namespace() == "config-controller-ns"
+
+
+def test_get_controller_namespace_handles_config_exception(monkeypatch):
+    monkeypatch.delenv("KUBEFLOW_MCP_CONTROLLER_NAMESPACE", raising=False)
+
+    def raise_err():
+        raise RuntimeError("config broken")
+
+    monkeypatch.setattr("kubeflow_mcp.core.config.load_config", raise_err)
+    assert _get_controller_namespace() is None
+
+
+# ─── inspect_crd ─────────────────────────────────────────────────────────────
+
+
+def test_inspect_crd_lists_all_trainer_crds(mock_k8s_apis):
+    apiext = mock_k8s_apis["apiextensions"]
+    trainer_crd = MagicMock()
+    trainer_crd.metadata.name = "trainjobs.trainer.kubeflow.org"
+    trainer_crd.spec.group = "trainer.kubeflow.org"
+    trainer_crd.spec.scope = "Namespaced"
+    v1 = MagicMock(served=True)
+    v1.name = "v1alpha1"
+    v1.served = True
+    trainer_crd.spec.versions = [v1]
+
+    other_crd = MagicMock()
+    other_crd.metadata.name = "virtualservices.networking.istio.io"
+    other_crd.spec.group = "networking.istio.io"
+
+    apiext.list_custom_resource_definition.return_value = MagicMock(items=[trainer_crd, other_crd])
+
+    result = inspect_crd()
+
+    data = verify_tool_success(result)
+    assert data["count"] == 1
+    assert data["crds"][0]["name"] == "trainjobs.trainer.kubeflow.org"
+    assert data["crds"][0]["group"] == "trainer.kubeflow.org"
+    assert data["crds"][0]["versions"] == ["v1alpha1"]
+    assert data["crds"][0]["served_versions"] == ["v1alpha1"]
+    assert data["crds"][0]["scope"] == "Namespaced"
+
+
+def test_inspect_crd_returns_schema_and_conditions(mock_k8s_apis):
+    apiext = mock_k8s_apis["apiextensions"]
+    crd = MagicMock()
+    crd.metadata.name = "trainjobs.trainer.kubeflow.org"
+    crd.spec.group = "trainer.kubeflow.org"
+    crd.spec.scope = "Namespaced"
+
+    v1 = MagicMock()
+    v1.name = "v1alpha1"
+    v1.served = True
+    v1.storage = True
+    spec_prop = MagicMock()
+    spec_prop.properties = {"trainer": MagicMock(), "datasetConfig": MagicMock()}
+    v1.schema.open_apiv3_schema.properties = {"spec": spec_prop}
+    crd.spec.versions = [v1]
+
+    cond = MagicMock()
+    cond.type = "Established"
+    cond.status = "True"
+    crd.status.conditions = [cond]
+
+    apiext.read_custom_resource_definition.return_value = crd
+
+    result = inspect_crd(name="trainjobs.trainer.kubeflow.org")
+
+    data = verify_tool_success(result)
+    assert data["name"] == "trainjobs.trainer.kubeflow.org"
+    assert data["group"] == "trainer.kubeflow.org"
+    assert data["scope"] == "Namespaced"
+    assert len(data["versions"]) == 1
+    assert data["versions"][0]["name"] == "v1alpha1"
+    assert data["versions"][0]["served"] is True
+    assert data["versions"][0]["storage"] is True
+    assert set(data["versions"][0]["spec_fields"]) == {"trainer", "datasetConfig"}
+    assert data["conditions"] == [{"type": "Established", "status": "True"}]
+
+
+def test_inspect_crd_generic_exception(mock_k8s_apis):
+    apiext = mock_k8s_apis["apiextensions"]
+    apiext.read_custom_resource_definition.side_effect = RuntimeError("API server down")
+
+    result = inspect_crd(name="trainjobs.trainer.kubeflow.org")
+
+    verify_tool_error(result, error_code=KUBERNETES_ERROR)
+
+
+# ─── inspect_controller validation and edge cases ────────────────────────────
+
+
+def test_inspect_controller_invalid_view():
+    result = inspect_controller(view="metrics")
+    error = verify_tool_error(result, error_code=VALIDATION_ERROR)
+    assert "Invalid view 'metrics'" in error["error"]
+
+
+def test_inspect_controller_invalid_tail_lines():
+    result = inspect_controller(tail_lines=0)
+    error = verify_tool_error(result, error_code=VALIDATION_ERROR)
+    assert "tail_lines must be >= 1" in error["error"]
+
+
+def test_inspect_controller_view_logs_success(mock_k8s_apis, scan_default_namespaces):
+    core = mock_k8s_apis["core_v1"]
+    core.list_namespaced_pod.return_value = MagicMock(items=[_controller_pod("kubeflow")])
+    core.read_namespaced_pod_log.return_value = "line 1\nline 2"
+
+    result = inspect_controller(view="logs", tail_lines=50)
+
+    data = verify_tool_success(result)
+    assert data["pod"] == "trainer-controller-manager-0"
+    assert data["namespace"] == "kubeflow"
+    assert data["logs"] == "line 1\nline 2"
+    assert data["tail_lines"] == 50
+    assert data["phase"] == "Running"
+
+
+def test_inspect_controller_generic_read_log_exception(mock_k8s_apis, scan_default_namespaces):
+    core = mock_k8s_apis["core_v1"]
+    core.list_namespaced_pod.return_value = MagicMock(items=[_controller_pod("kubeflow")])
+    core.read_namespaced_pod_log.side_effect = RuntimeError("Socket read timeout")
+
+    result = inspect_controller(view="logs")
+
+    verify_tool_error(result, error_code=KUBERNETES_ERROR)
+
+
+# ─── patch_runtime edge cases ───────────────────────────────────────────────
+
+
+def test_patch_runtime_missing_patch():
+    result = patch_runtime(name="torch-distributed", patch=None)
+    error = verify_tool_error(result, error_code=VALIDATION_ERROR)
+    assert "patch parameter is required" in error["error"]
+
+
+def test_patch_runtime_generic_exception(mock_k8s_apis):
+    custom = mock_k8s_apis["custom"]
+    custom.patch_cluster_custom_object.side_effect = ApiException(
+        status=500, reason="Internal Error"
+    )
+
+    result = patch_runtime(
+        name="torch-distributed",
+        patch={"spec": {"template": {}}},
+        confirmed=True,
+    )
+
+    verify_tool_error(result, error_code=KUBERNETES_ERROR)
+
+
+# ─── create_runtime edge cases ──────────────────────────────────────────────
+
+
+def test_create_runtime_missing_spec():
+    result = create_runtime(name="new-runtime", spec=None)
+    error = verify_tool_error(result, error_code=VALIDATION_ERROR)
+    assert "spec parameter is required" in error["error"]
+
+
+def test_create_runtime_generic_exception(mock_k8s_apis):
+    custom = mock_k8s_apis["custom"]
+    custom.create_cluster_custom_object.side_effect = ApiException(
+        status=503, reason="Service Unavailable"
+    )
+
+    result = create_runtime(
+        name="new-runtime",
+        spec={"template": {}},
+        confirmed=True,
+    )
+
+    verify_tool_error(result, error_code=KUBERNETES_ERROR)
+
+
+# ─── delete_runtime edge cases ──────────────────────────────────────────────
+
+
+def test_delete_runtime_not_found(mock_k8s_apis):
+    custom = mock_k8s_apis["custom"]
+    custom.list_cluster_custom_object.return_value = {"items": []}
+    custom.delete_cluster_custom_object.side_effect = ApiException(status=404, reason="Not Found")
+
+    result = delete_runtime(name="nonexistent-runtime", confirmed=True)
+
+    error = verify_tool_error(result, error_code=RESOURCE_NOT_FOUND)
+    assert "not found" in error["error"]
+
+
+def test_delete_runtime_generic_exception(mock_k8s_apis):
+    custom = mock_k8s_apis["custom"]
+    custom.list_cluster_custom_object.return_value = {"items": []}
+    custom.delete_cluster_custom_object.side_effect = ApiException(
+        status=500, reason="Internal Error"
+    )
+
+    result = delete_runtime(name="torch-distributed", confirmed=True)
+
+    verify_tool_error(result, error_code=KUBERNETES_ERROR)
+
+
+def test_delete_runtime_preview_handles_dependent_jobs_listing_exception(mock_k8s_apis):
+    custom = mock_k8s_apis["custom"]
+    custom.list_cluster_custom_object.side_effect = RuntimeError("RBAC list denied")
+
+    result = delete_runtime(name="torch-distributed", confirmed=False)
+
+    data = verify_tool_success(result)
+    assert data["action"] == "preview"
+    assert data["runtime"] == "torch-distributed"
+    assert data["dependent_jobs"] == []
+    assert data["dependent_count"] == 0
+    assert "No dependent TrainJobs found." in data["warning"]
