@@ -144,6 +144,67 @@ def test_serve_passes_clients_and_persona():
     mock_server.run.assert_called_once()
 
 
+def test_serve_rejects_unknown_persona_from_env_or_config():
+    """A persona from the env var or config file gets the same usage error as --persona."""
+    _, mock_create_server, modules_patch = _make_serve_mocks(
+        config=_make_default_config(persona="bogus")
+    )
+
+    with patch.dict(sys.modules, modules_patch):
+        result = CliRunner().invoke(cli, ["serve"])
+
+    assert result.exit_code == 2
+    assert "Unknown persona: bogus" in result.output
+    assert "Traceback" not in result.output
+    mock_create_server.assert_not_called()
+
+
+def test_serve_rejects_unknown_persona_from_real_environment(monkeypatch):
+    """KUBEFLOW_MCP_PERSONA goes through the real load_config(), with no config or policy file."""
+    from kubeflow_mcp.core.policy import reload_policy
+
+    monkeypatch.setattr("kubeflow_mcp.core.config._find_config_file", lambda: None)
+    monkeypatch.setattr("kubeflow_mcp.core.policy._get_policy_paths", lambda: [])
+    reload_policy()
+    try:
+        result = CliRunner().invoke(cli, ["serve"], env={"KUBEFLOW_MCP_PERSONA": "bogus"})
+    finally:
+        reload_policy()
+
+    assert result.exit_code == 2
+    assert "Unknown persona: bogus" in result.output
+    assert "Traceback" not in result.output
+
+
+@pytest.mark.parametrize(
+    ("args", "config_persona"),
+    [
+        (["serve", "--persona", "my-custom-role"], "readonly"),
+        (["serve"], "my-custom-role"),
+    ],
+    ids=["flag", "env-or-config"],
+)
+def test_serve_accepts_custom_persona(tmp_policy_file, args, config_persona):
+    """A custom persona from the policy file works from the flag and from env/config."""
+    from kubeflow_mcp.core.policy import reload_policy
+
+    tmp_policy_file(
+        {"personas": {"my-custom-role": {"inherit": "readonly", "tools": ["fine_tune"]}}}
+    )
+    _, mock_create_server, modules_patch = _make_serve_mocks(
+        config=_make_default_config(persona=config_persona)
+    )
+
+    try:
+        with patch.dict(sys.modules, modules_patch):
+            result = CliRunner().invoke(cli, args)
+    finally:
+        reload_policy()
+
+    assert result.exit_code == 0, result.output
+    assert mock_create_server.call_args.kwargs["persona"] == "my-custom-role"
+
+
 def test_serve_filters_empty_cli_client_entries():
     mock_server, mock_create_server, modules_patch = _make_serve_mocks()
 

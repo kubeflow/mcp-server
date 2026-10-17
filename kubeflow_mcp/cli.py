@@ -43,8 +43,8 @@ def cli() -> None:
     "--persona",
     "-p",
     default=None,
-    type=click.Choice(["readonly", "data-scientist", "ml-engineer", "platform-admin"]),
-    help="Persona for tool filtering. "
+    help="Persona for tool filtering: readonly, data-scientist, ml-engineer, platform-admin, "
+    "or a custom persona from the policy file. "
     "Falls back to KUBEFLOW_MCP_PERSONA env var, config file, then 'readonly'.",
 )
 @click.option(
@@ -122,6 +122,7 @@ def serve(
     from kubeflow_mcp.core.auth import build_auth_provider
     from kubeflow_mcp.core.config import load_config
     from kubeflow_mcp.core.logging import setup_logging
+    from kubeflow_mcp.core.policy import get_allowed_tools
     from kubeflow_mcp.core.resilience import configure_circuit_breaker
     from kubeflow_mcp.core.server import configure_resilience, create_server
     from kubeflow_mcp.core.telemetry import setup_tracing
@@ -130,6 +131,12 @@ def serve(
 
     clients = clients or ",".join(cfg.server.clients)
     persona = persona or cfg.server.persona
+    # Checked here, whatever the source, so a typo from the env var or config file gets
+    # the same usage error as --persona, and custom policy-file personas work from all three.
+    try:
+        get_allowed_tools(persona)
+    except ValueError as e:
+        raise click.BadParameter(str(e), param_hint="persona") from e
     transport = transport or cfg.server.transport
     instruction_tier = instruction_tier or cfg.server.instruction_tier
     log_level = log_level or cfg.logging.level

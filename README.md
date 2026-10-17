@@ -118,7 +118,7 @@ dependencies.
 | `KUBEFLOW_MCP_JWT_ISSUER` | _(none)_ | Expected JWT issuer |
 | `KUBEFLOW_MCP_JWT_AUDIENCE` | _(none)_ | Expected JWT audience |
 | `KUBEFLOW_MCP_CLIENTS` | `trainer` | Comma-separated client modules to load |
-| `KUBEFLOW_MCP_PERSONA` | `readonly` | Tool persona (`readonly`, `data-scientist`, `ml-engineer`, `platform-admin`) |
+| `KUBEFLOW_MCP_PERSONA` | `readonly` | Tool persona (`readonly`, `data-scientist`, `ml-engineer`, `platform-admin`, or a custom persona from the policy file) |
 | `KUBEFLOW_MCP_INSTRUCTION_TIER` | `full` | Instruction verbosity (`full`, `compact`, `minimal`) |
 | `KUBEFLOW_MCP_ALLOWED_HOSTS` | _(loopback)_ | Comma-separated `Host` header allowlist for DNS rebinding protection; `:*` port wildcard supported (e.g. `mcp.example.com,mcp.example.com:*`) |
 | `KUBEFLOW_MCP_ALLOWED_ORIGINS` | _(loopback)_ | Comma-separated `Origin` header allowlist; `:*` port wildcard supported (e.g. `https://mcp.example.com`) |
@@ -255,6 +255,8 @@ kubeflow-mcp serve \
 | `data-scientist` | Submitting fine-tuning and custom training, waiting for jobs, deleting MCP-created jobs |
 | `ml-engineer` | Container training, suspending/resuming jobs, inspecting CRDs and the controller |
 | `platform-admin` | All tools, including creating, patching and deleting runtimes |
+
+A custom persona defined under `personas:` in `~/.kf-mcp-policy.yaml` can be used the same way, from `--persona`, `KUBEFLOW_MCP_PERSONA` or the config file. An unknown persona from any of them stops `serve` with an error.
 
 <details>
 <summary> HTTP Authentication</summary>
