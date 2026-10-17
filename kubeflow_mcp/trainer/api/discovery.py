@@ -402,8 +402,7 @@ def _fetch_packages_via_pod(runtime_name: str, runtime_obj: Any = None) -> dict[
                 "packages_error": f"Pod '{pod_name}' did not complete within {_PACKAGES_POD_TIMEOUT}s (phase: {phase})"
             }
 
-        # The whole list is read. A tail would drop the first packages of a
-        # large image without any sign that the result was cut.
+        # Read full log to avoid dropping header/first packages with tail_lines
         logs = core.read_namespaced_pod_log(
             name=pod_name, namespace=ns, limit_bytes=_PACKAGES_LOG_LIMIT_BYTES
         )
@@ -414,7 +413,7 @@ def _fetch_packages_via_pod(runtime_name: str, runtime_obj: Any = None) -> dict[
                 "logs": logs[-500:] if logs else "no logs",
             }
 
-        if _PIP_NOT_FOUND in logs:
+        if logs.rstrip().endswith(_PIP_NOT_FOUND):
             return {"packages_error": "pip is not installed in the runtime image"}
 
         packages = []
