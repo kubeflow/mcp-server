@@ -478,3 +478,35 @@ def test_serve_otel_endpoint_cli_overrides_config():
     fake_telemetry_mod.setup_tracing.assert_called_once_with(
         endpoint="http://new-endpoint:4318/v1/traces"
     )
+
+
+def test_serve_reports_config_value_errors_cleanly():
+    _, mock_create_server, modules_patch = _make_serve_mocks()
+    mock_load_config = modules_patch["kubeflow_mcp.core.config"].load_config
+    mock_load_config.side_effect = ValueError("at least one client must be specified")
+
+    with patch.dict(sys.modules, modules_patch):
+        runner = CliRunner()
+        result = runner.invoke(cli, ["serve"])
+
+    assert result.exit_code == 1
+    assert "at least one client must be specified" in result.output
+    assert "Traceback" not in result.output
+    mock_create_server.assert_not_called()
+
+
+def test_serve_reports_invalid_clients_environment_cleanly(monkeypatch):
+    monkeypatch.setattr(
+        "kubeflow_mcp.core.config._find_config_file",
+        lambda: None,
+    )
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["serve"],
+        env={"KUBEFLOW_MCP_CLIENTS": ","},
+    )
+
+    assert result.exit_code == 1
+    assert "at least one client must be specified" in result.output
+    assert "Traceback" not in result.output
