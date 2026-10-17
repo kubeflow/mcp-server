@@ -17,6 +17,7 @@
 | A custom persona that inherits from an unrestricted parent (`tools: "*"`, such as `platform-admin`) now gets all tools. In 0.1.x a bug limited it to its own tool list. | #274 | Review custom personas in your policy file. Some get more access after the upgrade. |
 | `./.kubeflow-mcp.yaml` in the working directory now takes priority over the file in your home directory. | #151 | If you have both, the local file now applies. |
 | `cb_failure_threshold` must be greater than 0 and `cb_recovery_timeout` can't be negative. Other values now stop the server at startup. | #351 | Check the `resilience` section of your config and `KUBEFLOW_MCP_CB_*` env vars. |
+| `rate_limit` and `rate_capacity` must be greater than 0. Other values now stop the server at startup. | #332 | Check the `resilience` section of your config. |
 
 ## 2. Changed responses
 
