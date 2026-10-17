@@ -493,3 +493,20 @@ def test_serve_reports_config_value_errors_cleanly():
     assert "at least one client must be specified" in result.output
     assert "Traceback" not in result.output
     mock_create_server.assert_not_called()
+
+
+def test_serve_reports_invalid_clients_environment_cleanly(monkeypatch):
+    monkeypatch.setattr(
+        "kubeflow_mcp.core.config._find_config_file",
+        lambda: None,
+    )
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["serve"],
+        env={"KUBEFLOW_MCP_CLIENTS": ","},
+    )
+
+    assert result.exit_code == 1
+    assert "at least one client must be specified" in result.output
+    assert "Traceback" not in result.output
