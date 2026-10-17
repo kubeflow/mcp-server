@@ -264,6 +264,176 @@ def test_policy_file_without_pyyaml_fails_closed(tmp_policy_file):
             _load_policy_file()
 
 
+# ─── Policy file shape ───────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def write_policy_yaml(tmp_policy_file):
+    """Write raw YAML so tests use the exact text an admin would type."""
+
+    def _write(text: str):
+        policy_path = tmp_policy_file({})
+        policy_path.write_text(text)
+        return policy_path
+
+    return _write
+
+
+@pytest.mark.parametrize(
+    "yaml_text, message",
+    [
+        pytest.param(
+            "policy:\n  deny: risk:destructive\n",
+            r"'policy\.deny' must be a list of strings, got the single string "
+            r"'risk:destructive'\. Write it as a YAML list item: '- risk:destructive'",
+            id="deny-single-string-denied-nothing",
+        ),
+        pytest.param(
+            "policy:\n  allow: list_*\n",
+            r"'policy\.allow' must be a list of strings, got the single string",
+            id="allow-single-string-allowed-everything",
+        ),
+        pytest.param(
+            "policy:\n  namespaces: ml-team-dev\n",
+            r"'policy\.namespaces' must be a list of strings, got the single string",
+            id="namespaces-single-string-split-into-characters",
+        ),
+        pytest.param(
+            "policy:\n  deny:\n    - delete_*\n    - 42\n",
+            r"'policy\.deny\[\]' must be a string, got int 42",
+            id="deny-non-string-item",
+        ),
+        pytest.param(
+            "policy:\n  deny:\n    risk: destructive\n",
+            r"'policy\.deny' must be a list of strings, got dict",
+            id="deny-mapping",
+        ),
+        pytest.param(
+            'policy:\n  read_only: "false"\n',
+            r"'policy\.read_only' must be true or false, got str 'false'",
+            id="read-only-quoted-string-read-as-true",
+        ),
+        pytest.param(
+            "policy:\n  - read_only\n",
+            r"'policy' must be a mapping, got list",
+            id="policy-section-list",
+        ),
+        pytest.param(
+            "personas: auditor\n",
+            r"'personas' must be a mapping, got str",
+            id="personas-section-string",
+        ),
+        pytest.param(
+            "personas:\n  auditor: readonly\n",
+            r"'personas\.auditor' must be a mapping, got str",
+            id="persona-body-string",
+        ),
+        pytest.param(
+            "personas:\n  auditor:\n    tools: fine_tune\n",
+            r"'personas\.auditor\.tools' must be a list of strings, got the single string",
+            id="persona-tools-single-string",
+        ),
+        pytest.param(
+            "personas:\n  auditor:\n    inherit: [readonly]\n",
+            r"'personas\.auditor\.inherit' must be a persona name, got list",
+            id="persona-inherit-list-crashed-cycle-check",
+        ),
+        pytest.param(
+            "personas:\n  auditor:\n    inherit:\n",
+            r"'personas\.auditor\.inherit' must be a persona name, got NoneType",
+            id="persona-inherit-empty",
+        ),
+        pytest.param(
+            "- deny\n",
+            r"the top level must be a mapping, got list",
+            id="top-level-list",
+        ),
+        pytest.param(
+            "read_only\n",
+            r"the top level must be a mapping, got str",
+            id="top-level-string",
+        ),
+    ],
+)
+def test_wrong_policy_shape_fails_closed(write_policy_yaml, yaml_text, message):
+    """A file that parses but has the wrong shape must not be applied (issue #405)."""
+    policy_path = write_policy_yaml(yaml_text)
+
+    with pytest.raises(RuntimeError, match=message) as exc_info:
+        _load_policy_file()
+    assert str(policy_path) in str(exc_info.value)
+
+
+@pytest.mark.parametrize("reader", [is_read_only, get_allowed_namespaces, apply_policy_filters])
+def test_wrong_policy_shape_blocks_every_reader(write_policy_yaml, reader):
+    """No policy reader may fall back to an unrestricted value for a bad file."""
+    write_policy_yaml("policy:\n  deny: risk:destructive\n")
+    args = ({"delete_training_job"},) if reader is apply_policy_filters else ()
+
+    with pytest.raises(RuntimeError, match="Invalid policy file"):
+        reader(*args)
+
+
+def test_well_formed_policy_file_is_unchanged(write_policy_yaml):
+    write_policy_yaml(
+        "policy:\n"
+        "  allow: [category:discovery, fine_tune]\n"
+        "  deny: [risk:destructive]\n"
+        "  namespaces: [ml-team-dev]\n"
+        "  read_only: false\n"
+        "personas:\n"
+        "  auditor:\n"
+        "    inherit: readonly\n"
+        "    tools: [fine_tune]\n"
+        "  admin-like:\n"
+        "    tools: '*'\n"
+    )
+
+    assert _load_policy_file() == {
+        "policy": {
+            "allow": ["category:discovery", "fine_tune"],
+            "deny": ["risk:destructive"],
+            "namespaces": ["ml-team-dev"],
+            "read_only": False,
+        },
+        "personas": {
+            "auditor": {"inherit": "readonly", "tools": ["fine_tune"]},
+            "admin-like": {"tools": "*"},
+        },
+    }
+    assert get_allowed_namespaces() == ["ml-team-dev"]
+    assert apply_policy_filters({"delete_training_job", "fine_tune"}) == {"fine_tune"}
+
+
+@pytest.mark.parametrize(
+    "yaml_text",
+    [
+        pytest.param("", id="empty-file"),
+        pytest.param("policy:\n", id="empty-policy"),
+        pytest.param("policy:\n  deny:\n", id="empty-deny"),
+        pytest.param("policy:\n  allow:\n", id="empty-allow"),
+        pytest.param("policy:\n  namespaces:\n  read_only:\n", id="empty-namespaces-read-only"),
+        pytest.param("personas:\n", id="empty-personas"),
+    ],
+)
+def test_empty_sections_mean_no_restriction(write_policy_yaml, yaml_text):
+    """An empty section used to crash startup; it now means the same as leaving it out."""
+    write_policy_yaml(yaml_text)
+    tools = {"delete_training_job", "fine_tune"}
+
+    assert is_read_only() is False
+    assert get_allowed_namespaces() is None
+    assert apply_policy_filters(tools) == tools
+    assert get_allowed_tools("readonly") is not None
+
+
+def test_empty_persona_body_has_no_tools(write_policy_yaml):
+    """A persona with nothing under it used to crash when selected."""
+    write_policy_yaml("personas:\n  auditor:\n")
+
+    assert get_allowed_tools("auditor") == set()
+
+
 # ─── Persona inheritance & gating ───────────────────────────────────────────
 
 

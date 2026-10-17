@@ -176,7 +176,7 @@ Kubernetes API Server (RBAC enforced)
 ### What the MCP Server Controls
 
 - **Persona-based tool filtering** — restricts which tools are visible to the AI agent (default: `--persona readonly`, which hides all write tools)
-- **Policy file** — `~/.kf-mcp-policy.yaml` can further restrict tools and namespaces. A policy file that exists but cannot be loaded (for example a YAML syntax error) stops the server instead of being ignored, so a typo never silently removes restrictions
+- **Policy file** — `~/.kf-mcp-policy.yaml` can further restrict tools and namespaces. A policy file that exists but cannot be loaded (for example a YAML syntax error) stops the server instead of being ignored, so a typo never silently removes restrictions. The same applies to a file that parses but has the wrong shape, such as `deny: risk:destructive` written as a single string instead of a list. An empty section (`policy:`, `deny:`, `personas:`) means the same as leaving it out
 - **Two-phase confirmation** — write tools require `confirmed=True` (preview first, submit after)
 - **Input validation** — K8s name format, CPU/memory format, resource limits, training parameter bounds (batch_size, epochs, nodes, GPU count, LoRA rank, script size, package count)
 - **Namespace restrictions** — policy enforcement on both lifecycle and training tools (training tools use per-call `TrainerClient` with `KubernetesBackendConfig(namespace=...)`)
