@@ -264,6 +264,153 @@ def test_policy_file_without_pyyaml_fails_closed(tmp_policy_file):
             _load_policy_file()
 
 
+# ─── Policy file shape validation ────────────────────────────────────────────
+
+
+def test_valid_policy_file_with_personas_is_loaded(tmp_policy_file):
+    policy = {
+        "policy": {
+            "allow": ["category:discovery", "fine_tune"],
+            "deny": ["risk:destructive"],
+            "read_only": False,
+        },
+        "personas": {
+            "auditor": {"inherit": "readonly", "tools": ["list_training_jobs"]},
+            "unrestricted": {"tools": "*"},
+        },
+    }
+    tmp_policy_file(policy)
+    assert _load_policy_file() == policy
+
+
+@pytest.mark.parametrize(
+    ("policy", "message"),
+    [
+        pytest.param(
+            {"policy": {"deny": "risk:destructive"}},
+            "'policy.deny' must be a list of strings",
+            id="single-string-deny-fails-open",
+        ),
+        pytest.param(
+            {"policy": {"allow": "list_*"}},
+            "'policy.allow' must be a list of strings",
+            id="single-string-allow-matches-everything",
+        ),
+        pytest.param(
+            {"policy": {"namespaces": "ml-team-dev"}},
+            "'policy.namespaces' must be a list of strings",
+            id="single-string-namespaces-split-into-characters",
+        ),
+        pytest.param(
+            {"policy": {"allow": ["fine_tune", 3]}},
+            "'policy.allow' must be a list of strings",
+            id="non-string-allow-entry",
+        ),
+        pytest.param(
+            {"policy": {"read_only": "false"}},
+            "'policy.read_only' must be a boolean",
+            id="read-only-string-is-not-true",
+        ),
+        pytest.param(
+            {"policy": ["deny"]},
+            "'policy' must be a mapping",
+            id="policy-section-is-a-list",
+        ),
+        pytest.param(
+            {"personas": ["readonly"]},
+            "'personas' must be a mapping",
+            id="personas-section-is-a-list",
+        ),
+        pytest.param(
+            {"personas": {"my-role": "readonly"}},
+            "'personas.my-role' must be a mapping",
+            id="persona-body-is-a-string",
+        ),
+        pytest.param(
+            {"personas": {"my-role": {"tools": "fine_tune"}}},
+            "'personas.my-role.tools' must be a list of strings",
+            id="persona-tools-single-string",
+        ),
+        pytest.param(
+            {"personas": {"my-role": {"tools": ["fine_tune", 3]}}},
+            "'personas.my-role.tools' must be a list of strings",
+            id="persona-tools-non-string-entry",
+        ),
+    ],
+)
+def test_invalid_policy_shapes_fail_closed(policy, message, tmp_policy_file):
+    """Wrong YAML shapes must be rejected instead of applied character by character."""
+    tmp_policy_file(policy)
+    with pytest.raises(RuntimeError, match=message):
+        _load_policy_file()
+
+
+def test_top_level_list_is_rejected(tmp_policy_file):
+    """A policy file that is a list at the top level must be rejected."""
+    policy_path = tmp_policy_file({})
+    policy_path.write_text("- deny\n")
+    with pytest.raises(RuntimeError, match="top level must be a mapping"):
+        _load_policy_file()
+
+
+def test_top_level_scalar_is_rejected(tmp_policy_file):
+    policy_path = tmp_policy_file({})
+    policy_path.write_text("just-a-string\n")
+    with pytest.raises(RuntimeError, match="top level must be a mapping"):
+        _load_policy_file()
+
+
+def test_empty_sections_are_treated_as_empty(tmp_policy_file):
+    """Empty policy:, deny: and personas: sections must not crash startup."""
+    policy_path = tmp_policy_file({})
+    policy_path.write_text("policy:\n  deny:\npersonas:\n")
+
+    assert _load_policy_file() == {"policy": {"deny": []}, "personas": {}}
+    assert is_read_only() is False
+    assert get_allowed_namespaces() is None
+    assert apply_policy_filters({"fine_tune", "delete_training_job"}) == {
+        "fine_tune",
+        "delete_training_job",
+    }
+
+
+def test_empty_allow_namespaces_and_read_only_are_unchanged(tmp_policy_file):
+    policy_path = tmp_policy_file({})
+    policy_path.write_text("policy:\n  allow:\n  namespaces:\n  read_only:\n")
+
+    loaded = _load_policy_file()
+    assert loaded["policy"]["allow"] == []
+    assert loaded["policy"]["namespaces"] is None
+    assert loaded["policy"]["read_only"] is None
+    assert is_read_only() is False
+    assert get_allowed_namespaces() is None
+
+
+def test_empty_file_means_no_policy(tmp_policy_file):
+    """A policy file with no content behaves like a missing file."""
+    policy_path = tmp_policy_file({})
+    policy_path.write_text("")
+    assert _load_policy_file() == {}
+
+
+def test_null_policy_section_is_treated_as_empty(tmp_policy_file):
+    policy_path = tmp_policy_file({})
+    policy_path.write_text("policy:\n")
+
+    assert _load_policy_file() == {"policy": {}}
+    assert is_read_only() is False
+    assert get_allowed_namespaces() is None
+
+
+def test_persona_without_body_is_treated_as_empty(tmp_policy_file):
+    """A persona with no body must start with no tools instead of crashing."""
+    policy_path = tmp_policy_file({})
+    policy_path.write_text("personas:\n  empty-role:\n")
+
+    assert _load_policy_file() == {"personas": {"empty-role": {}}}
+    assert get_allowed_tools("empty-role") == set()
+
+
 # ─── Persona inheritance & gating ───────────────────────────────────────────
 
 

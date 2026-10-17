@@ -138,9 +138,10 @@ def _find_policy_file() -> Path | None:
 def _load_policy_file() -> dict[str, Any]:
     """Load policy from YAML file.
 
-    A missing file means no policy. A file that exists but cannot be loaded raises
-    instead of returning ``{}``: an empty policy is "no restrictions", so ignoring
-    the file would silently drop ``read_only``, ``namespaces`` and ``deny`` (fail open).
+    A missing file means no policy. A file that exists but cannot be loaded, or whose
+    values have the wrong shape, raises instead of returning ``{}``: an empty policy is
+    "no restrictions", so ignoring the file would silently drop ``read_only``,
+    ``namespaces`` and ``deny`` (fail open).
     """
     path = _find_policy_file()
     if not path:
@@ -151,12 +152,85 @@ def _load_policy_file() -> dict[str, Any]:
 
         with open(path) as f:
             data = yaml.safe_load(f)
-            logger.debug(f"Loaded policy from {path}")
-            return data if data else {}
     except ImportError as e:
         raise RuntimeError(f"Cannot enforce policy file {path}: PyYAML is not installed") from e
     except Exception as e:
         raise RuntimeError(f"Failed to load policy file {path}: {e}") from e
+
+    logger.debug(f"Loaded policy from {path}")
+    return _validate_policy_shape(data, path)
+
+
+def _require_string_list(value: Any, key: str, path: Path, *, allow_star: bool = False) -> None:
+    """Reject a list-valued option that is not a list of strings."""
+    if allow_star and value == "*":
+        return
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        expected = 'a list of strings or "*"' if allow_star else "a list of strings"
+        raise RuntimeError(f"Invalid policy file {path}: '{key}' must be {expected}")
+
+
+def _validate_policy_section(policy: dict[str, Any], path: Path) -> None:
+    """Validate the ``policy`` mapping; empty ``allow``/``deny`` become empty lists."""
+    for key in ("allow", "deny"):
+        if key not in policy:
+            continue
+        if policy[key] is None:
+            policy[key] = []
+        else:
+            _require_string_list(policy[key], f"policy.{key}", path)
+    if policy.get("namespaces") is not None:
+        _require_string_list(policy["namespaces"], "policy.namespaces", path)
+    read_only = policy.get("read_only")
+    if read_only is not None and not isinstance(read_only, bool):
+        raise RuntimeError(f"Invalid policy file {path}: 'policy.read_only' must be a boolean")
+
+
+def _validate_personas(personas: dict[str, Any], path: Path) -> None:
+    """Validate each custom persona; an empty body means a persona with no tools."""
+    for name, body in personas.items():
+        if body is None:
+            personas[name] = {}
+            continue
+        if not isinstance(body, dict):
+            raise RuntimeError(f"Invalid policy file {path}: 'personas.{name}' must be a mapping")
+        tools = body.get("tools")
+        if tools is not None:
+            _require_string_list(tools, f"personas.{name}.tools", path, allow_star=True)
+
+
+def _validate_policy_shape(data: Any, path: Path) -> dict[str, Any]:
+    """Validate the parsed policy file, treating ``None`` sections as empty.
+
+    ``yaml.safe_load`` accepts any YAML document, but values of the wrong type are
+    misread instead of rejected: a lone string is applied one character at a time
+    and ``read_only: "false"`` reads as True. Raise at load time, the way an
+    unparseable file does, naming the file and the offending key (fail closed).
+    """
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise RuntimeError(f"Invalid policy file {path}: the top level must be a mapping")
+
+    policy = data.get("policy")
+    if policy is None:
+        if "policy" in data:
+            data["policy"] = {}
+    elif not isinstance(policy, dict):
+        raise RuntimeError(f"Invalid policy file {path}: 'policy' must be a mapping")
+    else:
+        _validate_policy_section(policy, path)
+
+    personas = data.get("personas")
+    if personas is None:
+        if "personas" in data:
+            data["personas"] = {}
+    elif not isinstance(personas, dict):
+        raise RuntimeError(f"Invalid policy file {path}: 'personas' must be a mapping")
+    else:
+        _validate_personas(personas, path)
+
+    return data
 
 
 @functools.lru_cache(maxsize=1)
