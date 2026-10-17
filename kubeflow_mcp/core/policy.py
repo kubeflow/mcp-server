@@ -50,6 +50,7 @@ Custom policies can be defined in ~/.kf-mcp-policy.yaml:
 import fnmatch
 import functools
 import logging
+import reprlib
 import threading
 from pathlib import Path
 from typing import Any
@@ -138,9 +139,10 @@ def _find_policy_file() -> Path | None:
 def _load_policy_file() -> dict[str, Any]:
     """Load policy from YAML file.
 
-    A missing file means no policy. A file that exists but cannot be loaded raises
-    instead of returning ``{}``: an empty policy is "no restrictions", so ignoring
-    the file would silently drop ``read_only``, ``namespaces`` and ``deny`` (fail open).
+    A missing file means no policy. A file that exists but cannot be loaded, or that
+    loads with values of the wrong shape, raises instead of returning ``{}``: an empty
+    policy is "no restrictions", so ignoring the file would silently drop ``read_only``,
+    ``namespaces`` and ``deny`` (fail open).
     """
     path = _find_policy_file()
     if not path:
@@ -151,12 +153,109 @@ def _load_policy_file() -> dict[str, Any]:
 
         with open(path) as f:
             data = yaml.safe_load(f)
-            logger.debug(f"Loaded policy from {path}")
-            return data if data else {}
     except ImportError as e:
         raise RuntimeError(f"Cannot enforce policy file {path}: PyYAML is not installed") from e
     except Exception as e:
         raise RuntimeError(f"Failed to load policy file {path}: {e}") from e
+
+    logger.debug(f"Loaded policy from {path}")
+    return _validate_policy_shape(data, path)
+
+
+def _shape_error(path: Path, key: str, expected: str, value: Any) -> RuntimeError:
+    """Build the error for a policy value of the wrong type."""
+    return RuntimeError(
+        f"Invalid policy file {path}: '{key}' must be {expected}, "
+        f"got {type(value).__name__} {reprlib.repr(value)}"
+    )
+
+
+def _mapping_or_empty(value: Any, key: str, path: Path) -> dict[str, Any]:
+    """Return a mapping section; an empty YAML section (``None``) means an empty mapping."""
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise _shape_error(path, key, "a mapping", value)
+    return value
+
+
+def _check_string_list(value: Any, key: str, path: Path) -> None:
+    """Require a list of strings.
+
+    A lone string is the dangerous case: the readers iterate it one character at a
+    time, so ``deny: risk:destructive`` would deny nothing.
+    """
+    if isinstance(value, str):
+        raise RuntimeError(
+            f"Invalid policy file {path}: '{key}' must be a list of strings, got the single "
+            f"string {value!r}. Write it as a YAML list item: '- {value}'"
+        )
+    if not isinstance(value, list):
+        raise _shape_error(path, key, "a list of strings", value)
+    for item in value:
+        if not isinstance(item, str):
+            raise _shape_error(path, f"{key}[]", "a string", item)
+
+
+def _validate_policy_section(policy: dict[str, Any], path: Path) -> None:
+    """Check the ``policy:`` mapping in place."""
+    for key in ("allow", "deny"):
+        if key in policy:
+            if policy[key] is None:
+                policy[key] = []
+            else:
+                _check_string_list(policy[key], f"policy.{key}", path)
+
+    # An empty ``namespaces:`` keeps meaning "no namespace restriction".
+    if policy.get("namespaces") is not None:
+        _check_string_list(policy["namespaces"], "policy.namespaces", path)
+
+    read_only = policy.get("read_only")
+    if read_only is not None and not isinstance(read_only, bool):
+        # bool("false") is True, so a quoted value would silently flip the setting.
+        raise _shape_error(path, "policy.read_only", "true or false", read_only)
+
+
+def _validate_personas_section(personas: dict[str, Any], path: Path) -> None:
+    """Check each custom persona in place."""
+    for name, body in personas.items():
+        key = f"personas.{name}"
+        body = _mapping_or_empty(body, key, path)
+        personas[name] = body
+
+        if "inherit" in body and not isinstance(body["inherit"], str):
+            raise _shape_error(path, f"{key}.inherit", "a persona name", body["inherit"])
+
+        tools = body.get("tools")
+        if tools is not None and tools != "*":
+            _check_string_list(tools, f"{key}.tools", path)
+
+
+def _validate_policy_shape(data: Any, path: Path) -> dict[str, Any]:
+    """Check that a parsed policy file has the shape the readers below rely on.
+
+    ``yaml.safe_load`` accepts any document, and a value of the wrong type is misread
+    rather than rejected. Raise at load time instead, naming the file and the key, the
+    same way an unparseable file fails closed. Empty sections are normalized so the
+    readers never see ``None`` where they expect a mapping or a list.
+    """
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise RuntimeError(
+            f"Invalid policy file {path}: the top level must be a mapping, "
+            f"got {type(data).__name__} {reprlib.repr(data)}"
+        )
+
+    if "policy" in data:
+        data["policy"] = _mapping_or_empty(data["policy"], "policy", path)
+        _validate_policy_section(data["policy"], path)
+
+    if "personas" in data:
+        data["personas"] = _mapping_or_empty(data["personas"], "personas", path)
+        _validate_personas_section(data["personas"], path)
+
+    return data
 
 
 @functools.lru_cache(maxsize=1)
