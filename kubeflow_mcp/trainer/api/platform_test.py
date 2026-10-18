@@ -171,7 +171,7 @@ def test_runtime_tools_accept_dotted_runtime_names(good_name, mock_k8s_apis):
 # ─── Runtime CRUD ───────────────────────────────────────────────────────────
 
 
-def test_patch_runtime_confirmed_applies_strategic_patch(mock_k8s_apis):
+def test_patch_runtime_confirmed_applies_merge_patch(mock_k8s_apis):
     api = mock_k8s_apis["custom"]
     api.patch_cluster_custom_object.return_value = {
         "metadata": {"resourceVersion": "123"},
@@ -192,6 +192,89 @@ def test_patch_runtime_confirmed_applies_strategic_patch(mock_k8s_apis):
         body=patch_body,
         _request_timeout=mcp_utils.K8S_TIMEOUT,
     )
+
+
+def _runtime_with_jobs() -> dict:
+    node = {"name": "node", "image": "old", "command": ["tune", "run"], "args": ["a"]}
+    init = {"name": "dataset-initializer", "image": "init"}
+    return {
+        "spec": {
+            "template": {
+                "spec": {
+                    "replicatedJobs": [
+                        {"name": "dataset-initializer", "containers": [init]},
+                        {"name": "node", "containers": [node]},
+                    ]
+                }
+            }
+        }
+    }
+
+
+def _patch_jobs(jobs: list[dict]) -> dict:
+    return {"spec": {"template": {"spec": {"replicatedJobs": jobs}}}}
+
+
+def _sent_jobs(api) -> list[dict]:
+    body = api.patch_cluster_custom_object.call_args.kwargs["body"]
+    return body["spec"]["template"]["spec"]["replicatedJobs"]
+
+
+def test_patch_runtime_keeps_unmentioned_entries_of_named_lists(mock_k8s_apis):
+    api = mock_k8s_apis["custom"]
+    api.get_cluster_custom_object.return_value = _runtime_with_jobs()
+    api.patch_cluster_custom_object.return_value = {"metadata": {}}
+    patch_body = _patch_jobs([{"name": "node", "containers": [{"name": "node", "image": "new"}]}])
+
+    verify_tool_success(patch_runtime("torchtune-llama", patch=patch_body, confirmed=True))
+
+    jobs = _sent_jobs(api)
+    assert [j["name"] for j in jobs] == ["dataset-initializer", "node"]
+    assert jobs[1]["containers"] == [
+        {"name": "node", "image": "new", "command": ["tune", "run"], "args": ["a"]}
+    ]
+
+
+def test_patch_runtime_appends_new_entry_and_honours_null(mock_k8s_apis):
+    api = mock_k8s_apis["custom"]
+    api.get_cluster_custom_object.return_value = _runtime_with_jobs()
+    api.patch_cluster_custom_object.return_value = {"metadata": {}}
+    patch_body = _patch_jobs(
+        [
+            {"name": "node", "containers": [{"name": "node", "args": None}]},
+            {"name": "extra", "containers": []},
+        ]
+    )
+
+    verify_tool_success(patch_runtime("torchtune-llama", patch=patch_body, confirmed=True))
+
+    jobs = _sent_jobs(api)
+    assert [j["name"] for j in jobs] == ["dataset-initializer", "node", "extra"]
+    assert "args" not in jobs[1]["containers"][0]
+    assert jobs[1]["containers"][0]["command"] == ["tune", "run"]
+
+
+def test_patch_runtime_still_replaces_unnamed_and_empty_lists(mock_k8s_apis):
+    api = mock_k8s_apis["custom"]
+    api.get_cluster_custom_object.return_value = _runtime_with_jobs()
+    api.patch_cluster_custom_object.return_value = {"metadata": {}}
+    patch_body = {"spec": {"template": {"spec": {"replicatedJobs": [], "tags": ["a", "b"]}}}}
+
+    verify_tool_success(patch_runtime("torchtune-llama", patch=patch_body, confirmed=True))
+
+    assert api.patch_cluster_custom_object.call_args.kwargs["body"] == patch_body
+
+
+def test_patch_runtime_missing_runtime_is_not_patched(mock_k8s_apis):
+    api = mock_k8s_apis["custom"]
+    api.get_cluster_custom_object.side_effect = ApiException(status=404, reason="Not Found")
+
+    result = patch_runtime(
+        "missing-runtime", patch={"spec": {"labels": {"a": "b"}}}, confirmed=True
+    )
+
+    verify_tool_error(result, error_code=RESOURCE_NOT_FOUND)
+    api.patch_cluster_custom_object.assert_not_called()
 
 
 def test_patch_runtime_invalid_runtime_name_returns_not_found(mock_k8s_apis):

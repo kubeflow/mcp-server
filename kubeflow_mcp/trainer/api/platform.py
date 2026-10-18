@@ -305,20 +305,64 @@ def inspect_controller(
         ).model_dump()
 
 
+def _is_named_list(value: Any) -> bool:
+    return (
+        isinstance(value, list)
+        and bool(value)
+        and all(isinstance(i, dict) and "name" in i for i in value)
+    )
+
+
+def _merge(current: Any, patch: Any) -> Any:
+    """Overlay ``patch`` on ``current``, merging name-keyed lists entry by entry."""
+    if isinstance(patch, dict) and isinstance(current, dict):
+        merged = dict(current)
+        for key, value in patch.items():
+            if value is None:
+                merged.pop(key, None)
+            else:
+                merged[key] = _merge(current.get(key), value)
+        return merged
+    if _is_named_list(patch) and _is_named_list(current):
+        patch_by_name = {item["name"]: item for item in patch}
+        merged_list = [_merge(c, patch_by_name.pop(c["name"], {})) for c in current]
+        return merged_list + list(patch_by_name.values())
+    return patch
+
+
+def _expand_named_lists(current: Any, patch: Any) -> Any:
+    """Keep the shape of ``patch`` but carry the sibling entries of its name-keyed lists.
+
+    The API server applies a ClusterTrainingRuntime patch as a JSON merge patch
+    (RFC 7386), which replaces a list wholesale. Sending a patch that names one
+    replicated job or container as-is would delete every other entry.
+    """
+    if isinstance(patch, dict):
+        cur = current if isinstance(current, dict) else {}
+        return {k: _expand_named_lists(cur.get(k), v) for k, v in patch.items()}
+    if _is_named_list(patch) and _is_named_list(current):
+        return _merge(current, patch)
+    return patch
+
+
 def patch_runtime(
     name: str,
     patch: dict[str, Any] | None = None,
     confirmed: bool = False,
 ) -> dict[str, Any]:
-    """Strategic merge patch on a ClusterTrainingRuntime.
+    """JSON merge patch on a ClusterTrainingRuntime.
 
     Use to update images, add volumes, change defaults without full replacement.
-    Top-level keys are restricted to ``spec`` and ``metadata``; deep structure
-    is validated by the K8s API. Intended for platform-admin persona only.
+    Lists whose entries all carry a ``name`` (``replicatedJobs``, ``containers``,
+    ``env``, ``volumes``, ``volumeMounts``) are merged by name: entries the patch
+    does not mention are kept, so removing one entry is not possible here. Other
+    lists are replaced. Top-level keys are restricted to ``spec`` and ``metadata``;
+    deep structure is validated by the K8s API. Intended for platform-admin
+    persona only.
 
     Args:
         name: ClusterTrainingRuntime name.
-        patch: Strategic merge patch dict. Allowed top-level keys: spec, metadata.
+        patch: Merge patch dict. Allowed top-level keys: spec, metadata.
         confirmed: Must be True to apply. False returns a preview.
 
     Returns:
@@ -354,12 +398,19 @@ def patch_runtime(
 
     try:
         api = mcp_utils.get_custom_objects_api()
+        current = api.get_cluster_custom_object(
+            group=trainer_constants.GROUP,
+            version=trainer_constants.VERSION,
+            plural="clustertrainingruntimes",
+            name=name,
+            _request_timeout=mcp_utils.K8S_TIMEOUT,
+        )
         result = api.patch_cluster_custom_object(
             group=trainer_constants.GROUP,
             version=trainer_constants.VERSION,
             plural="clustertrainingruntimes",
             name=name,
-            body=patch,
+            body=_expand_named_lists(current, patch),
             _request_timeout=mcp_utils.K8S_TIMEOUT,
         )
 
