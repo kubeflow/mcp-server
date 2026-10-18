@@ -7,9 +7,14 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Optional image version/tag to publish (e.g. 0.1.0). Defaults to a commit SHA tag.'
+        description: 'Optional image version/tag (e.g. 0.1.0). Defaults to a commit SHA tag.'
         required: false
         type: string
+      publish:
+        description: 'Publish the image to GHCR. Defaults to false.'
+        required: false
+        default: false
+        type: boolean
       ref:
         description: 'Branch or tag to build from.'
         required: true
@@ -44,6 +49,7 @@ jobs:
         id: ver
         env:
           REQUESTED_VERSION: ${{ inputs.version }}
+          REQUESTED_PUBLISH: ${{ inputs.publish }}
         run: |
           set -euo pipefail
           V="$REQUESTED_VERSION"
@@ -68,8 +74,9 @@ jobs:
           echo "major_minor=$MAJOR_MINOR" >> "$GITHUB_OUTPUT"
           echo "major=$MAJOR" >> "$GITHUB_OUTPUT"
           echo "version=$V" >> "$GITHUB_OUTPUT"
-          # Push only when we have a concrete version to publish and it's not a PR.
-          if [[ "${{ github.event_name }}" != "pull_request" && -n "$V" ]]; then
+          # Release calls publish; manual runs publish only when explicitly requested.
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_call" ]] \
+            || [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" && "$REQUESTED_PUBLISH" == "true" ]]; then
             echo "push=true" >> "$GITHUB_OUTPUT"
           else
             echo "push=false" >> "$GITHUB_OUTPUT"

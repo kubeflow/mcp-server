@@ -20,4 +20,3 @@ spec:
       codes: [500, 502, 503, 504]
     timeouts:
       request: 120s
-      responseIdle: 120s

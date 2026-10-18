@@ -57,7 +57,7 @@ Reference environment used for these tested examples:
 | Component | Version or requirement |
 |---|---|
 | Kubernetes | `v1.32.10` |
-| Kubeflow MCP Server | `latest` image tag |
+| Kubeflow MCP Server | `0.1.1` (Kubernetes profile); `latest` (KAgent profiles) |
 | Kubeflow Trainer | `2.3.0` and Trainer CRDs |
 | KAgent | `v1.0.0-alpha4` with `RemoteMCPServer` |
 | Agentgateway | `v1.5.0` with Gateway API |

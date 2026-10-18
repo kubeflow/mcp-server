@@ -16,4 +16,3 @@ spec:
           burst: 20
     timeouts:
       request: 180s
-      responseIdle: 180s

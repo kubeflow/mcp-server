@@ -126,7 +126,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: server
-          image: ghcr.io/kubeflow/mcp-server:latest
+          image: ghcr.io/kubeflow/mcp-server:0.1.1
           imagePullPolicy: Always
           ports:
             - name: http

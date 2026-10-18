@@ -17,15 +17,15 @@ The following panels show the signals to verify after traffic flows through the
 Gateway. Metric names, labels, and dashboard sections depend on the Agentgateway
 version and monitoring stack used by the cluster.
 
-![Agentgateway overview](assets/agentgateway-overview.png)
+![Agentgateway overview](../grafana/assets/agentgateway-overview.png)
 
 *Gateway resource usage and request volume.*
 
-![Agentgateway MCP calls and latency](assets/mcp-tool-calls-and-latency.png)
+![Agentgateway MCP calls and latency](../grafana/assets/mcp-tool-calls-and-latency.png)
 
 *MCP protocol calls, tool calls, and route latency.*
 
-![Agentgateway request status](assets/agentgateway-requests-status.png)
+![Agentgateway request status](../grafana/assets/agentgateway-requests-status.png)
 
 *Requests grouped by response status and reason.*
 
