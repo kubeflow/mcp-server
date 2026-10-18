@@ -128,6 +128,54 @@ def test_matches_pattern(test_case):
             },
             expected_output={"fine_tune"},
         ),
+        TestCase(
+            name="allow with category:planning keeps only planning tools",
+            config={
+                "tools": {
+                    "pre_flight",
+                    "check_compatibility",
+                    "get_cluster_resources",
+                    "estimate_resources",
+                    "fine_tune",
+                    "delete_training_job",
+                },
+                "policy": {"allow": ["category:planning"]},
+            },
+            expected_output={
+                "pre_flight",
+                "check_compatibility",
+                "get_cluster_resources",
+                "estimate_resources",
+            },
+        ),
+        TestCase(
+            name="combined allow and deny applies deny after allow",
+            config={
+                "tools": {
+                    "fine_tune",
+                    "run_custom_training",
+                    "run_container_training",
+                    "delete_training_job",
+                    "list_training_jobs",
+                },
+                "policy": {"allow": ["category:training"], "deny": ["fine_tune"]},
+            },
+            expected_output={"run_custom_training", "run_container_training"},
+        ),
+        TestCase(
+            name="deny with category:training removes all training tools",
+            config={
+                "tools": {
+                    "fine_tune",
+                    "run_custom_training",
+                    "run_container_training",
+                    "get_training_logs",
+                    "delete_training_job",
+                },
+                "policy": {"deny": ["category:training"]},
+            },
+            expected_output={"get_training_logs", "delete_training_job"},
+        ),
     ],
 )
 def test_apply_policy_filters(test_case):
@@ -137,11 +185,6 @@ def test_apply_policy_filters(test_case):
     else:
         assert "fine_tune" in result
         assert "delete_training_job" not in result
-
-
-# TODO(test): test allow with category:planning
-# TODO(test): test combined allow + deny
-# TODO(test): test deny with category:training
 
 
 # ─── Namespace policy ────────────────────────────────────────────────────────

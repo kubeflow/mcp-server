@@ -195,7 +195,9 @@ def serve(
                 "KUBEFLOW_MCP_DNS_REBINDING_PROTECTION=true to re-enable it."
             )
 
-    client_list = [c.strip() for c in clients.split(",")]
+    client_list = [c.strip() for c in clients.split(",") if c.strip()]
+    if not client_list:
+        raise click.ClickException("at least one client must be specified")
     server = create_server(
         clients=client_list,
         persona=persona,

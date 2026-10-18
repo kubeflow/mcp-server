@@ -102,7 +102,11 @@ def validate_namespace(namespace: str) -> ToolError | None:
 
 
 def check_namespace_allowed(namespace: str | None) -> ToolError | None:
-    """Check if namespace is allowed by policy.
+    """Check that a namespace is well formed and allowed by policy.
+
+    A caller-supplied namespace is format-checked first. Without an allowlist
+    the policy check accepts any string, so a malformed value would otherwise
+    reach the Kubernetes API and come back as a misleading "not found".
 
     When *namespace* is ``None`` the effective default namespace from the
     TrainerClient backend is resolved and checked against the allowlist so
@@ -112,8 +116,13 @@ def check_namespace_allowed(namespace: str | None) -> ToolError | None:
         namespace: Namespace to check. ``None`` resolves to the effective default.
 
     Returns:
-        ToolError if namespace is restricted, None if allowed
+        ToolError if namespace is malformed or restricted, None if allowed
     """
+    if namespace is not None:
+        format_err = validate_namespace(namespace)
+        if format_err is not None:
+            return format_err
+
     # Import here to avoid circular import
     from kubeflow_mcp.core.policy import get_allowed_namespaces
 

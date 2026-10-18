@@ -144,6 +144,31 @@ def test_serve_passes_clients_and_persona():
     mock_server.run.assert_called_once()
 
 
+def test_serve_filters_empty_cli_client_entries():
+    mock_server, mock_create_server, modules_patch = _make_serve_mocks()
+
+    with patch.dict(sys.modules, modules_patch):
+        runner = CliRunner()
+        runner.invoke(cli, ["serve", "--clients", "trainer, ,optimizer,,"])
+
+    mock_create_server.assert_called_once()
+    _, kwargs = mock_create_server.call_args
+    assert kwargs["clients"] == ["trainer", "optimizer"]
+
+
+def test_serve_rejects_all_empty_cli_client_entries():
+    mock_server, mock_create_server, modules_patch = _make_serve_mocks()
+
+    with patch.dict(sys.modules, modules_patch):
+        runner = CliRunner()
+        result = runner.invoke(cli, ["serve", "--clients", ","])
+
+    assert result.exit_code != 0
+    assert "at least one client must be specified" in result.output
+    mock_create_server.assert_not_called()
+    mock_server.run.assert_not_called()
+
+
 def test_serve_http_transport_uses_streamable_http():
     mock_server, _, modules_patch = _make_serve_mocks()
 
