@@ -47,7 +47,7 @@ make install-dev
 Before starting the Kubeflow MCP Server, make sure the following requirements
 are available:
 
-- Python 3.10, 3.11, or 3.12
+- Python 3.10, 3.11, or 3.12 (Python 3.13 is not yet supported)
 - A running Kubernetes cluster
 - `kubectl` installed and available in `PATH`
 - A kubeconfig configured for the target cluster

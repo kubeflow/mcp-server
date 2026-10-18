@@ -10,7 +10,7 @@ for the security model and RBAC YAML see [ARCHITECTURE.md](../ARCHITECTURE.md).
 
 | Requirement | Notes |
 |-------------|-------|
-| **Python** 3.10 – 3.12 | Check the [compatibility matrix](../README.md#requirements) for exact SDK versions |
+| **Python** 3.10 – 3.12 | Python 3.13 is not yet supported; check the [compatibility matrix](../README.md#requirements) for exact SDK versions |
 | **Kubernetes** ≥ 1.27 | `kubectl` configured and pointing at your cluster (`kubectl cluster-info`) |
 | **Kubeflow Trainer** | Version depends on the MCP server release, see the [compatibility matrix](../README.md#requirements). CRD must be installed; verify with `kubectl get crd trainjobs.trainer.kubeflow.org` |
 | **MCP client** | Cursor, Claude Code, VS Code, or any client that speaks MCP |
@@ -316,7 +316,7 @@ make inspector
 | Symptom | Cause | Fix |
 |---------|-------|-----|
 | `ModuleNotFoundError: kubeflow_mcp` | Package not installed | `pip install kubeflow-mcp` |
-| Unsupported Python version error | Wrong Python version | Use Python 3.10 – 3.12 |
+| Unsupported Python version error | Wrong Python version | Use Python 3.10 – 3.12; Python 3.13 is not yet supported |
 | Server exits immediately on stdio | The MCP client is not reading from the process stdin | Start with `--transport http` first to isolate config errors |
 | `Failed to load policy file <path>:` or `Cannot enforce policy file <path>: PyYAML is not installed` | Syntax error in `~/.kf-mcp-policy.yaml` or missing PyYAML | Fix YAML syntax; a bad policy file is fatal by design |
 | `PyYAML not installed, skipping config file` | Optional YAML dep missing | `pip install pyyaml` |
