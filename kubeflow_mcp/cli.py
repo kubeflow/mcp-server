@@ -17,6 +17,7 @@
 import warnings
 
 import click
+from pydantic import ValidationError
 
 from kubeflow_mcp import __version__
 
@@ -127,7 +128,10 @@ def serve(
     from kubeflow_mcp.core.server import configure_resilience, create_server
     from kubeflow_mcp.core.telemetry import setup_tracing
 
-    cfg = load_config()
+    try:
+        cfg = load_config()
+    except ValidationError as exc:
+        raise click.ClickException(f"Invalid configuration: {exc}") from None
 
     clients = clients or ",".join(cfg.server.clients)
     persona = persona or cfg.server.persona
