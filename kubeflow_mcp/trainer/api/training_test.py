@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import json
 import threading
 from unittest.mock import MagicMock, patch
 
@@ -25,6 +26,7 @@ import pytest
 from kubernetes.client.exceptions import ApiException
 from tests.common import FAILED, PREVIEW, VALIDATION_ERROR, TestCase, assert_test_case
 
+from kubeflow_mcp.common.constants import ErrorCode
 from kubeflow_mcp.trainer.api.training import (
     _build_fine_tune_config,
     _build_runtime_patch,
@@ -99,6 +101,51 @@ class TestFineTuneConfirmed:
         assert result["data"]["job_name"] == "train-gemma-abc"
         assert result["data"]["status"] == "Created"
         mock_client.train.assert_called_once()
+
+    @patch(PATCH_GPU_CHECK, return_value=None)
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_existing_job_name_returns_conflict(self, mock_client_fn, _ns, _gpu):
+        from kubernetes.client.exceptions import ApiException
+
+        # The SDK wraps the Kubernetes 409 in a RuntimeError.
+        api_error = ApiException(status=409, reason="Conflict")
+        api_error.body = json.dumps({"kind": "Status", "reason": "AlreadyExists", "code": 409})
+        wrapped = RuntimeError("Failed to create TrainJob: default/my-job")
+        wrapped.__cause__ = api_error
+        mock_client = MagicMock()
+        mock_client.train.side_effect = wrapped
+        mock_client_fn.return_value = mock_client
+
+        result = fine_tune(
+            model="hf://org/model",
+            dataset="hf://org/ds",
+            runtime="torchtune-llama",
+            name="my-job",
+            confirmed=True,
+        )
+
+        assert result["success"] is False
+        assert result["error_code"] == ErrorCode.CONFLICT
+        assert result["details"]["reason"] == "AlreadyExists"
+        assert "delete_training_job" in result["hint"]
+
+    @patch(PATCH_GPU_CHECK, return_value=None)
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_non_conflict_sdk_failure_stays_sdk_error(self, mock_client_fn, _ns, _gpu):
+        mock_client = MagicMock()
+        mock_client.train.side_effect = RuntimeError("Failed to create TrainJob")
+        mock_client_fn.return_value = mock_client
+
+        result = fine_tune(
+            model="hf://org/model",
+            dataset="hf://org/ds",
+            runtime="torchtune-llama",
+            confirmed=True,
+        )
+
+        assert result["error_code"] == ErrorCode.SDK_ERROR
 
     @patch(PATCH_GPU_CHECK, return_value=None)
     @patch(PATCH_NS_CHECK, return_value=None)

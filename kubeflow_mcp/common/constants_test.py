@@ -65,6 +65,10 @@ class TestIsInfrastructureError:
         result = {"error": "rate limited", "error_code": ErrorCode.RATE_LIMITED}
         assert is_infrastructure_error(result) is False
 
+    def test_conflict_is_not_infrastructure(self):
+        result = {"error": "already exists", "error_code": ErrorCode.CONFLICT}
+        assert is_infrastructure_error(result) is False
+
 
 class TestToolPhases:
     def test_contains_all_expected_phases(self):
