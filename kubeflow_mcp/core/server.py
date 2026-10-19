@@ -163,11 +163,14 @@ def _audit_wrap(tool_func):
         persona = get_effective_persona()
         start = time.monotonic()
 
+        # FastMCP already opens the SERVER span "tools/call <tool>" and parents it on
+        # the traceparent from the request _meta. This span is an INTERNAL child for
+        # the tool execution itself, so a call no longer shows two identical spans.
         span_kwargs: dict[str, Any] = {}
         if SpanKind is not None:
-            span_kwargs["kind"] = SpanKind.SERVER
+            span_kwargs["kind"] = SpanKind.INTERNAL
 
-        with tracer.start_as_current_span(f"tools/call {tool_name}", **span_kwargs) as span:
+        with tracer.start_as_current_span(f"execute_tool {tool_name}", **span_kwargs) as span:
             # OTel MCP semantic conventions (Development status)
             # https://opentelemetry.io/docs/specs/semconv/gen-ai/mcp/
             span.set_attribute("mcp.method.name", "tools/call")

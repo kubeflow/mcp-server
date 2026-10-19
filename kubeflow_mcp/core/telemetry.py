@@ -38,6 +38,13 @@ try:
 except ImportError:
     _OTEL_AVAILABLE = False
 
+# The OTel API (no SDK) is enough to read the active span. FastMCP depends on it and
+# sets the span from the traceparent in the request _meta.
+try:
+    from opentelemetry import trace as _otel_api_trace
+except ImportError:  # pragma: no cover - fastmcp always installs opentelemetry-api
+    _otel_api_trace = None  # type: ignore[assignment]
+
 
 class _NoopSpan:
     def set_attribute(self, key: str, value: Any) -> None:
@@ -139,3 +146,20 @@ def get_tracer(name: str = "kubeflow_mcp") -> Any:
     if not _OTEL_AVAILABLE:
         return _NOOP_TRACER
     return _otel_trace.get_tracer(name)
+
+
+def current_trace_ids() -> dict[str, str]:
+    """Return the active span's ``trace_id`` and ``span_id`` as hex, or an empty dict.
+
+    Used to stamp log records so they can be joined to traces. Missing or malformed
+    incoming trace context leaves no valid span, so nothing is added.
+    """
+    if _otel_api_trace is None:
+        return {}
+    span_context = _otel_api_trace.get_current_span().get_span_context()
+    if not span_context.is_valid:
+        return {}
+    return {
+        "trace_id": format(span_context.trace_id, "032x"),
+        "span_id": format(span_context.span_id, "016x"),
+    }

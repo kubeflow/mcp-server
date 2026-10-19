@@ -296,8 +296,14 @@ export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
 kubeflow-mcp serve
 ```
 
-Each tool invocation emits a span with attributes:
+Each tool invocation emits an `execute_tool <tool>` span with attributes:
 `tool.name`, `tool.args_preview`, `tool.success`, `tool.duration_ms`, `kubeflow.persona`, and `correlation_id`.
+It is a child of the `tools/call <tool>` span that FastMCP creates, which continues the
+caller's trace when the request `_meta` carries a W3C `traceparent`.
+
+JSON logs and `get_server_logs` entries include `trace_id` and `span_id` while a span is
+active, so logs can be joined to traces. A missing or malformed `traceparent` just starts
+a new trace.
 
 ## Development
 
