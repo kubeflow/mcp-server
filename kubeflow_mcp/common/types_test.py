@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from unittest.mock import patch
 
@@ -25,6 +26,7 @@ from kubeflow_mcp.common.types import (
     ToolResponse,
     exception_details,
     is_k8s_not_found,
+    k8s_conflict_reason,
 )
 
 
@@ -68,6 +70,47 @@ class TestIsK8sNotFound:
         exc = RuntimeError("wrapper")
         exc.__context__ = context
         assert is_k8s_not_found(exc) is True
+
+
+def _api_409(reason: str | None = None):
+    from kubernetes.client.exceptions import ApiException
+
+    exc = ApiException(status=409, reason="Conflict")
+    if reason is not None:
+        exc.body = json.dumps({"kind": "Status", "reason": reason, "code": 409})
+    return exc
+
+
+class TestK8sConflictReason:
+    def test_already_exists(self):
+        assert k8s_conflict_reason(_api_409("AlreadyExists")) == "AlreadyExists"
+
+    def test_resource_version_conflict(self):
+        assert k8s_conflict_reason(_api_409("Conflict")) == "Conflict"
+
+    def test_409_without_status_body_is_conflict(self):
+        assert k8s_conflict_reason(_api_409()) == "Conflict"
+
+    def test_409_with_non_json_body_is_conflict(self):
+        exc = _api_409()
+        exc.body = "not json"
+        assert k8s_conflict_reason(exc) == "Conflict"
+
+    def test_409_wrapped_by_sdk(self):
+        try:
+            try:
+                raise _api_409("AlreadyExists")
+            except Exception as e:
+                raise RuntimeError("Failed to create TrainJob") from e
+        except RuntimeError as wrapped:
+            assert k8s_conflict_reason(wrapped) == "AlreadyExists"
+
+    def test_other_errors_are_not_conflicts(self):
+        from kubernetes.client.exceptions import ApiException
+
+        assert k8s_conflict_reason(ApiException(status=404)) is None
+        assert k8s_conflict_reason(ApiException(status=500)) is None
+        assert k8s_conflict_reason(RuntimeError("409 conflict")) is None
 
 
 class TestExceptionDetails:
