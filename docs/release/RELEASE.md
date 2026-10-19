@@ -68,14 +68,28 @@ Also confirm that the package, container image, and GitHub Release have the expe
 
 ## Re-run or recover a release
 
-If a release workflow fails or requires manual recovery, maintainers can trigger it manually via GitHub Actions:
+If a release workflow fails or requires manual recovery:
+
+### Failures before publication (build, test, or tag creation)
+
+If the workflow fails before publishing to PyPI:
 
 1. Navigate to **Actions** → **Release** workflow.
 2. Click **Run workflow**.
 3. Select `main` (for minor releases) or the target `release-X.Y` branch (for patch releases).
 4. Click **Run workflow** to start the release.
 
-Requirements for manual dispatch:
+Alternatively, you can use **Re-run all jobs** on the failed run.
+
+### Failures after partial publication (e.g. PyPI succeeded, but Docker or GitHub Release failed)
+
+If PyPI publication has already succeeded, do **not** dispatch a fresh workflow run, because PyPI rejects re-uploading an existing distribution version:
+
+1. Open the failed release workflow run in **Actions**.
+2. Click **Re-run failed jobs** (instead of re-running all jobs or triggering a new workflow dispatch).
+3. This retries only the incomplete jobs (such as Docker publish or GitHub Release) without attempting to re-upload to PyPI.
+
+### Requirements for manual dispatch
 
 - Manual dispatch must be started from `main` or the relevant `release-X.Y` branch. The workflow explicitly rejects runs dispatched from any other branch.
 - The selected branch must already contain a valid release version (`X.Y.Z` or `X.Y.ZrcN`) in `kubeflow_mcp/__init__.py`.
