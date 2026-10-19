@@ -50,7 +50,8 @@ Stub: `MODULE_INFO` + `TOOLS = []`. Implemented: all exports above + tests.
 | `ToolError` | Failure (`error_code`, optional `hint`) |
 
 **Confirm gate:** Mutators accept `confirmed: bool = False` — preview first, execute at
-`confirmed=True`. `delete_*`: `[DESTRUCTIVE]` in description, `destructiveHint: True`,
+`confirmed=True`. Full authorization and safety model:
+[design/mutation-safety.md](design/mutation-safety.md). `delete_*`: `[DESTRUCTIVE]` in description, `destructiveHint: True`,
 entry in `DESTRUCTIVE_TOOLS`. Legacy exceptions: trainer runtime
 previews use `ToolResponse` not `PreviewResponse` — do not extend.
 
