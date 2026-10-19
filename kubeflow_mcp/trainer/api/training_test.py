@@ -359,6 +359,24 @@ def test_training_tools_reject_invalid_service_account_before_any_call(tool, con
 
 
 @pytest.mark.parametrize(("tool", "config"), _TRAINING_TOOLS)
+def test_training_tools_reject_invalid_service_account_without_resolving_namespace(tool, config):
+    """An invalid ServiceAccount name must be rejected before resolving default namespace."""
+    with (
+        patch("kubeflow_mcp.core.policy.get_allowed_namespaces", return_value=["team-a"]),
+        patch("kubeflow_mcp.common.utils.get_trainer_effective_namespace") as mock_resolve_ns,
+        patch(PATCH_CLIENT) as mock_client,
+        patch(PATCH_GPU_CHECK) as gpu_check,
+    ):
+        result = tool(**config, namespace=None, service_account_name="INVALID_NAME", confirmed=True)
+
+    assert result["success"] is False
+    assert result["error_code"] == VALIDATION_ERROR
+    mock_resolve_ns.assert_not_called()
+    mock_client.assert_not_called()
+    gpu_check.assert_not_called()
+
+
+@pytest.mark.parametrize(("tool", "config"), _TRAINING_TOOLS)
 def test_training_tools_accept_dotted_service_account(tool, config):
     with patch(PATCH_NS_CHECK, return_value=None), patch(PATCH_GPU_CHECK, return_value=None):
         result = tool(**config, service_account_name="trainer.sa-1")

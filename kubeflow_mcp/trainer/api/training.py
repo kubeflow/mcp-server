@@ -1182,6 +1182,12 @@ def run_custom_training(
                 error_code=ErrorCode.SDK_ERROR,
             ).model_dump()
 
+        input_err = _validate_resources_per_node(
+            resources_per_node
+        ) or _validate_service_account_name(service_account_name)
+        if input_err:
+            return input_err.model_dump()
+
         ns_err = check_namespace_allowed(namespace)
         if ns_err:
             return ns_err.model_dump()
@@ -1199,12 +1205,6 @@ def run_custom_training(
             err = validate_k8s_name(name)
             if err:
                 return err.model_dump()
-
-        input_err = _validate_resources_per_node(
-            resources_per_node
-        ) or _validate_service_account_name(service_account_name)
-        if input_err:
-            return input_err.model_dump()
 
         effective_resources = resources_per_node or (
             {"gpu": gpu_per_node} if gpu_per_node > 0 else None
@@ -1391,6 +1391,12 @@ def run_container_training(
                 error_code=ErrorCode.SDK_ERROR,
             ).model_dump()
 
+        input_err = _validate_resources_per_node(
+            resources_per_node
+        ) or _validate_service_account_name(service_account_name)
+        if input_err:
+            return input_err.model_dump()
+
         ns_err = check_namespace_allowed(namespace)
         if ns_err:
             return ns_err.model_dump()
@@ -1406,12 +1412,6 @@ def run_container_training(
             err = validate_k8s_name(name)
             if err:
                 return err.model_dump()
-
-        input_err = _validate_resources_per_node(
-            resources_per_node
-        ) or _validate_service_account_name(service_account_name)
-        if input_err:
-            return input_err.model_dump()
 
         effective_resources = resources_per_node or (
             {"gpu": gpu_per_node} if gpu_per_node > 0 else None
