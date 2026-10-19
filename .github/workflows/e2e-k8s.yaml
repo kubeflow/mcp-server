@@ -1,5 +1,10 @@
 name: E2E Test - Kubernetes
 
+# Two jobs share the same Kind + Trainer setup:
+#   - e2e: runs the server from the source checkout over stdio (faster)
+#   - e2e-image: builds the runtime image for this commit (never pushed), loads it
+#     into Kind, deploys it from examples/kubernetes and runs the same tests over HTTP
+#
 # E2E provisions a large runner + Kind cluster, gated by path filters:
 #   - PRs: only when E2E-relevant paths change
 #   - push to main: always, for post-merge validation
@@ -13,7 +18,11 @@ on:
       - "kubeflow_mcp/**"
       - "tests/e2e/**"
       - "pyproject.toml"
+      - "uv.lock"
       - "Makefile"
+      - "Dockerfile"
+      - ".dockerignore"
+      - "examples/kubernetes/**"
       - ".github/workflows/e2e-k8s.yaml"
   workflow_dispatch:
 
@@ -77,3 +86,97 @@ jobs:
           KUBEFLOW_MCP_E2E: "true"
         run: |
           uv run pytest tests/e2e/test_kubernetes_e2e.py -v
+
+  e2e-image:
+    name: E2E Test (Runtime Image) (${{ matrix.kubernetes-version }}, ${{ matrix.trainer-ref }})
+    runs-on: cncf-ubuntu-16-64-x86
+    timeout-minutes: 60
+
+    strategy:
+      fail-fast: false
+      matrix:
+        kubernetes-version: ["1.32.3"]
+        trainer-ref: ["v2.3.0"]
+
+    env:
+      IMAGE: kubeflow-mcp:${{ github.sha }}
+      MCP_NAMESPACE: kubeflow-user-example-com
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Checkout Kubeflow Trainer repository
+        uses: actions/checkout@v7
+        with:
+          repository: kubeflow/trainer
+          ref: ${{ matrix.trainer-ref }}
+          path: trainer
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      # Only the test client runs from source; the server runs from the image.
+      - name: Synchronize dependencies
+        run: uv sync --all-extras --group dev
+
+      - name: Build runtime image (single platform, not pushed)
+        run: docker build --build-arg VERSION=${{ github.sha }} -t "$IMAGE" .
+
+      - name: Setup cluster
+        run: |
+          cd ./trainer
+          make test-e2e-setup-cluster             K8S_VERSION=${{ matrix.kubernetes-version }}
+          kubectl get clustertrainingruntimes
+
+      - name: Load image into Kind
+        run: ./trainer/bin/kind load docker-image "$IMAGE" --name kind
+
+      - name: Deploy runtime image
+        run: |
+          token="$(openssl rand -hex 32)"
+          echo "::add-mask::${token}"
+          echo "E2E_TOKEN=${token}" >> "$GITHUB_ENV"
+
+          kubectl create namespace "$MCP_NAMESPACE"
+          kubectl -n "$MCP_NAMESPACE" create secret generic kubeflow-mcp-auth             --from-literal=token="${token}"
+
+          # Swap in the image under test and the persona the tests expect.
+          manifest="$(sed             -e "s|image: ghcr.io/kubeflow/mcp-server:latest|image: ${IMAGE}|"             -e "s|value: data-scientist|value: platform-admin|"             examples/kubernetes/manifests.yaml)"
+          grep -q "image: ${IMAGE}" <<< "$manifest"
+          grep -q "value: platform-admin" <<< "$manifest"
+          kubectl apply -f - <<< "$manifest"
+          kubectl apply -f tests/e2e/runtime-image-rbac.yaml
+
+          kubectl -n "$MCP_NAMESPACE" rollout status deployment/kubeflow-mcp --timeout=5m
+
+      - name: Run E2E Tests against the runtime image
+        env:
+          KUBEFLOW_MCP_E2E: "true"
+          KUBEFLOW_MCP_E2E_URL: http://localhost:8000/mcp
+        run: |
+          kubectl -n "$MCP_NAMESPACE" port-forward svc/kubeflow-mcp 8000:8000 &
+          pf_pid=$!
+          trap 'kill "$pf_pid"' EXIT
+          for _ in $(seq 1 30); do
+            curl -sf http://localhost:8000/health >/dev/null && break
+            sleep 1
+          done
+          KUBEFLOW_MCP_E2E_TOKEN="$E2E_TOKEN" uv run pytest tests/e2e/test_kubernetes_e2e.py -v
+
+      - name: Dump server state on failure
+        if: failure()
+        run: |
+          kubectl -n "$MCP_NAMESPACE" get pods -o wide || true
+          kubectl -n "$MCP_NAMESPACE" describe deployment/kubeflow-mcp || true
+          kubectl -n "$MCP_NAMESPACE" logs deployment/kubeflow-mcp --tail=300 || true

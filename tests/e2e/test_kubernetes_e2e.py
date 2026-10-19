@@ -19,13 +19,15 @@ import json
 import logging
 import os
 import uuid
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 
 import pytest
 from kubernetes.client import V1Namespace, V1ObjectMeta
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+from mcp.client.streamable_http import create_mcp_http_client, streamable_http_client
 
 from kubeflow_mcp.common.utils import get_core_v1_api
 
@@ -51,21 +53,44 @@ NON_EXISTENT_RUNTIME = "non-existent-runtime-999"
 NON_EXISTENT_NAMESPACE = "non-existent-ns-999"
 
 
-@pytest.fixture
-async def mcp_session() -> AsyncGenerator[ClientSession, None]:
-    """Fixture to start the MCP server and yield an initialized ClientSession."""
+@asynccontextmanager
+async def _server_streams() -> AsyncIterator[tuple[Any, Any]]:
+    """Open MCP streams to the server under test.
+
+    By default the server is started from the source checkout over stdio. When
+    ``KUBEFLOW_MCP_E2E_URL`` is set, connect over Streamable HTTP to a server that is
+    already running, such as the runtime image deployed in the cluster, sending
+    ``KUBEFLOW_MCP_E2E_TOKEN`` as a bearer token when it is set.
+    """
+    url = os.getenv("KUBEFLOW_MCP_E2E_URL")
+    if url:
+        token = os.getenv("KUBEFLOW_MCP_E2E_TOKEN")
+        headers = {"Authorization": f"Bearer {token}"} if token else None
+        async with (
+            create_mcp_http_client(headers=headers) as http_client,
+            streamable_http_client(url, http_client=http_client) as streams,
+        ):
+            yield streams
+        return
+
     server_params = StdioServerParameters(
         command="uv",
         args=["run", "kubeflow-mcp", "serve", "--persona", "platform-admin", "--no-banner"],
         env=os.environ.copy(),
     )
+    async with stdio_client(server_params) as streams:
+        yield streams
 
+
+@pytest.fixture
+async def mcp_session() -> AsyncGenerator[ClientSession, None]:
+    """Fixture to connect to the MCP server and yield an initialized ClientSession."""
     session_future: asyncio.Future[ClientSession] = asyncio.Future()
     stop_event = asyncio.Event()
 
     async def run_server() -> None:
         try:
-            async with stdio_client(server_params) as (read, write):
+            async with _server_streams() as (read, write):
                 async with ClientSession(read, write) as session:
                     await session.initialize()
                     session_future.set_result(session)
