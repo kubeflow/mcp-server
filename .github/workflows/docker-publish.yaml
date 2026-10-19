@@ -87,6 +87,30 @@ jobs:
             type=raw,value=${{ steps.ver.outputs.major }},enable=${{ steps.ver.outputs.stable == 'true' }}
             type=raw,value=latest,enable=${{ steps.ver.outputs.stable == 'true' }}
 
+      # Scan before anything is pushed, so a vulnerable image never reaches GHCR.
+      # A multi-platform build cannot be loaded into the local Docker daemon, so a
+      # linux/amd64 copy is built (from the same cache) just for the scan.
+      - name: Build image for scanning (linux/amd64)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: kubeflow-mcp:scan
+          build-args: VERSION=${{ inputs.version }}
+          cache-from: type=gha
+
+      # Blocks a release on fixable CRITICAL CVEs; on pull requests it only reports.
+      - name: Scan image for critical CVEs (Trivy)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: kubeflow-mcp:scan
+          format: table
+          exit-code: ${{ steps.ver.outputs.push == 'true' && '1' || '0' }}
+          severity: CRITICAL
+          ignore-unfixed: true
+
       - name: Build and push
         id: build
         uses: docker/build-push-action@v7
@@ -99,13 +123,23 @@ jobs:
           build-args: VERSION=${{ inputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          # SBOM and SLSA provenance are stored in GHCR next to the image.
+          sbom: ${{ steps.ver.outputs.push == 'true' }}
+          provenance: ${{ steps.ver.outputs.push == 'true' && 'mode=max' || 'false' }}
 
-      - name: Scan image for critical CVEs (Trivy)
+      - name: Attest build provenance
         if: steps.ver.outputs.push == 'true'
-        uses: aquasecurity/trivy-action@master
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
-          format: table
-          exit-code: 1
-          severity: CRITICAL
-          ignore-unfixed: true
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - name: Verify provenance attestation
+        if: steps.ver.outputs.push == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh attestation verify \
+            "oci://${REGISTRY}/${IMAGE_NAME}@${{ steps.build.outputs.digest }}" \
+            --repo "${{ github.repository }}"

@@ -93,3 +93,27 @@ If PyPI publication has already succeeded, do **not** dispatch a fresh workflow 
 
 - Manual dispatch must be started from `main` or the relevant `release-X.Y` branch. The workflow explicitly rejects runs dispatched from any other branch.
 - The selected branch must already contain a valid release version (`X.Y.Z` or `X.Y.ZrcN`) in `kubeflow_mcp/__init__.py`.
+
+## Supply-chain checks
+
+The release workflow runs these checks. None of them need extra secrets.
+
+| Check | Where | Blocks the release? |
+|---|---|---|
+| OSV-Scanner on `uv.lock` | `release.yaml`, build job | No. Findings go to the job summary as a warning. |
+| Trivy image scan (fixable `CRITICAL` CVEs) | `docker-publish.yaml`, before the push | Yes. On pull requests it only reports. |
+| SBOM and SLSA provenance (BuildKit) | Stored in GHCR with the image | No |
+| GitHub artifact attestation for the image | `actions/attest-build-provenance`, verified with `gh attestation verify` in the same job | Yes, if verification fails |
+| PyPI attestations | Uploaded by `pypa/gh-action-pypi-publish` with trusted publishing | No |
+
+The nightly `osv-scanner.yaml` workflow still opens fix PRs for vulnerable dependencies.
+
+Verify a published image:
+
+```bash
+gh attestation verify oci://ghcr.io/kubeflow/mcp-server:X.Y.Z --repo kubeflow/mcp-server
+docker buildx imagetools inspect ghcr.io/kubeflow/mcp-server:X.Y.Z --format '{{ json .SBOM }}'
+```
+
+If Trivy blocks a release on a CVE with no usable fix, add its ID to a `.trivyignore`
+file with a short reason and a link to the advisory, and mention it in the release PR.
