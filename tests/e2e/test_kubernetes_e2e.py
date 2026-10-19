@@ -586,6 +586,20 @@ async def test_e2e_monitoring(mcp_session: ClientSession) -> None:
         )
         assert create_resp.get("success") is True
 
+        # 0. get_training_job reports per-step status. Pods may not exist yet on a
+        # slow runner, so only the shape is checked here.
+        job_resp = await _call_tool(
+            mcp_session,
+            "get_training_job",
+            {"name": job_name, "namespace": namespace},
+        )
+        assert job_resp.get("success") is True
+        job_data = job_resp.get("data", {})
+        assert isinstance(job_data.get("steps"), list)
+        summary = job_data.get("step_summary", {})
+        assert summary.get("total", -1) >= len(job_data["steps"])
+        assert sum(summary.get("by_status", {}).values()) == summary.get("total")
+
         # 1. get_training_events on live job
         events_resp = await _call_tool(
             mcp_session,
