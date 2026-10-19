@@ -59,6 +59,12 @@ Choose the transport that fits your setup:
 
 ### Cursor
 
+Install [`uv`](https://docs.astral.sh/uv/) and ensure it is available on your system `PATH`:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
 Add to `.cursor/mcp.json` (or use the repo-root [`.mcp.json`](../.mcp.json) for local dev):
 
 ```json
