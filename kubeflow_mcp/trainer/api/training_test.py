@@ -736,10 +736,22 @@ class TestBuildRuntimePatch:
         assert _build_runtime_patch() == []
 
     def test_pod_fields_go_to_node_pod_spec(self):
+        affinity = {
+            "nodeAffinity": {
+                "requiredDuringSchedulingIgnoredDuringExecution": {
+                    "nodeSelectorTerms": [
+                        {"matchExpressions": [{"key": "zone", "operator": "In", "values": ["a"]}]}
+                    ]
+                }
+            }
+        }
+        pull_secrets = [{"name": "registry-creds"}]
         options = _build_runtime_patch(
             node_selector={"gpu": "a100"},
             tolerations=[{"key": "gpu", "operator": "Exists"}],
+            affinity=affinity,
             service_account_name="trainer-sa",
+            image_pull_secrets=pull_secrets,
             env=_ENV,
             volume_mounts=_MOUNTS,
         )
@@ -749,7 +761,9 @@ class TestBuildRuntimePatch:
         node = specs["node"]
         assert node.node_selector == {"gpu": "a100"}
         assert node.tolerations == [{"key": "gpu", "operator": "Exists"}]
+        assert node.affinity == affinity
         assert node.service_account_name == "trainer-sa"
+        assert node.image_pull_secrets == pull_secrets
         assert [(c.name, c.env, c.volume_mounts) for c in node.containers] == [
             ("node", _ENV, _MOUNTS)
         ]
