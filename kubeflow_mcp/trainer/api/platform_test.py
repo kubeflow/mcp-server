@@ -235,6 +235,25 @@ def test_patch_runtime_keeps_unmentioned_entries_of_named_lists(mock_k8s_apis):
     ]
 
 
+def test_patch_runtime_applies_requested_order_when_all_entries_listed(mock_k8s_apis):
+    api = mock_k8s_apis["custom"]
+    api.get_cluster_custom_object.return_value = _runtime_with_jobs()
+    api.patch_cluster_custom_object.return_value = {"metadata": {}}
+    patch_body = _patch_jobs([{"name": "node"}, {"name": "dataset-initializer"}])
+
+    verify_tool_success(patch_runtime("torchtune-llama", patch=patch_body, confirmed=True))
+
+    jobs = _sent_jobs(api)
+    assert [j["name"] for j in jobs] == ["node", "dataset-initializer"]
+    assert jobs[0]["containers"][0]["command"] == ["tune", "run"]
+
+
+def test_patch_runtime_preview_states_merge_semantics():
+    result = patch_runtime("torchtune-llama", patch={"spec": {"x": 1}})
+    assert "cannot remove" in result["data"]["merge_semantics"]
+    assert "clears all entries" in result["data"]["merge_semantics"]
+
+
 def test_patch_runtime_appends_new_entry_and_honours_null(mock_k8s_apis):
     api = mock_k8s_apis["custom"]
     api.get_cluster_custom_object.return_value = _runtime_with_jobs()

@@ -310,6 +310,14 @@ _MERGED_LIST_KEYS = frozenset(
 )
 
 
+_MERGE_SEMANTICS = (
+    "Name-keyed lists (replicatedJobs, containers, initContainers, env, volumes, "
+    "volumeMounts) merge by name: unmentioned entries are kept and a partial list cannot "
+    "remove one. Listing every current entry applies the supplied order. An empty list [] "
+    "replaces the list and clears all entries. Other lists are replaced; null deletes a key."
+)
+
+
 def _is_named_list(value: Any) -> bool:
     return (
         isinstance(value, list)
@@ -330,6 +338,10 @@ def _merge(current: Any, patch: Any, key: str | None = None) -> Any:
         return merged
     if key in _MERGED_LIST_KEYS and _is_named_list(patch) and _is_named_list(current):
         patch_by_name = {item["name"]: item for item in patch}
+        current_by_name = {c["name"]: c for c in current}
+        if current_by_name.keys() <= patch_by_name.keys():
+            # Every current entry is listed: honour the supplied order (initContainers run in sequence).
+            return [_merge(current_by_name.get(p["name"], {}), p) for p in patch]
         merged_list = [_merge(c, patch_by_name.pop(c["name"], {})) for c in current]
         return merged_list + list(patch_by_name.values())
     return patch
@@ -360,7 +372,9 @@ def patch_runtime(
     Use to update images, add volumes, change defaults without full replacement.
     Lists under these keys whose entries all carry a ``name`` (``replicatedJobs``,
     ``containers``, ``initContainers``, ``env``, ``volumes``, ``volumeMounts``) are
-    merged by name: entries the patch does not mention are kept, so removing one entry is not possible here. An empty
+    merged by name: entries the patch does not mention are kept, so removing one entry
+    is not possible here. If the patch lists every current entry, its order is applied
+    (reordering); otherwise current order is kept and new entries are appended. An empty
     list (``[]``) is not merged: it replaces the list and clears every entry. Other
     lists are replaced. The patch is rejected with a conflict if the runtime changes
     between the read and the write; re-run it to retry. Top-level keys are restricted to ``spec`` and ``metadata``;
@@ -400,6 +414,7 @@ def patch_runtime(
                 "runtime": name,
                 "patch": patch,
                 "message": "Set confirmed=True to apply this patch.",
+                "merge_semantics": _MERGE_SEMANTICS,
             }
         ).model_dump()
 

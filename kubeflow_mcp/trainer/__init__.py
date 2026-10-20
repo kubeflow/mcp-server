@@ -126,7 +126,12 @@ CLIENT_TOOL_DESCRIPTIONS: dict[str, str] = {
     "update_training_job": "Suspend or resume a training job. Pass action='suspend' or 'resume'. Set confirmed=True to execute.",
     "inspect_crd": "List Trainer CRDs or get details for a specific one. Pass name= for details.",
     "inspect_controller": "Inspect controller pod. Pass view='logs' or 'events'. Auto-discovers namespace.",
-    "patch_runtime": "Merge patch on a ClusterTrainingRuntime; name-keyed lists merge by name. Set confirmed=True to apply.",
+    "patch_runtime": (
+        "Merge patch on a ClusterTrainingRuntime. Name-keyed lists (replicatedJobs, containers, "
+        "initContainers, env, volumes, volumeMounts) merge by name: unmentioned entries are kept, "
+        "a partial list cannot remove one, listing all entries applies their order, and [] clears the list. "
+        "Set confirmed=True to apply."
+    ),
     "create_runtime": "Create a new ClusterTrainingRuntime. Set confirmed=True to create.",
     "delete_runtime": "[DESTRUCTIVE] Delete a ClusterTrainingRuntime. Lists dependent jobs first. Set confirmed=True.",
 }
