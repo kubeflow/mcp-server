@@ -176,7 +176,7 @@ Kubernetes API Server (RBAC enforced)
 ### What the MCP Server Controls
 
 - **Persona-based tool filtering** — restricts which tools are visible to the AI agent (default: `--persona readonly`, which hides all write tools)
-- **Policy file** — `~/.kf-mcp-policy.yaml` can further restrict tools and namespaces. A policy file that exists but cannot be loaded (for example a YAML syntax error) stops the server instead of being ignored, so a typo never silently removes restrictions
+- **Policy file** — `~/.kf-mcp-policy.yaml` can further restrict tools and namespaces. A policy file that exists but cannot be loaded (for example a YAML syntax error) stops the server instead of being ignored, so a typo never silently removes restrictions. The same applies to a file that parses but has the wrong shape, such as `deny: risk:destructive` written as a single string instead of a list. An empty section (`policy:`, `deny:`, `personas:`) means the same as leaving it out
 - **Two-phase confirmation** — write tools require `confirmed=True` (preview first, submit after)
 - **Input validation** — K8s name format, CPU/memory format, resource limits, training parameter bounds (batch_size, epochs, nodes, GPU count, LoRA rank, script size, package count)
 - **Namespace restrictions** — policy enforcement on both lifecycle and training tools (training tools use per-call `TrainerClient` with `KubernetesBackendConfig(namespace=...)`)
@@ -366,6 +366,7 @@ For production deployments:
 - [ ] Use stdio transport for local dev; place HTTP behind an authenticated reverse proxy for additional defense-in-depth
 - [ ] Bind the MCP server ServiceAccount to the minimum ClusterRole above
 - [ ] Do not grant `run_custom_training` access to untrusted users
+- [ ] Restrict which ServiceAccounts training jobs may use with an admission policy (Kubernetes RBAC alone does not limit `serviceAccountName`). Training tools only check the `service_account_name` syntax. The policy must match **TrainJobs** and deny with **403**: a ValidatingAdmissionPolicy needs `reason: Forbidden` (it returns 422 by default), and a webhook must set status code 403 (it returns 400 if unset). Only a 403 is returned as `PERMISSION_DENIED`; other denials come back as `SDK_ERROR`. A Pod-level policy is not enough, since it only rejects the Pod later in the Job controller (a `FailedCreate` event), after the tool has already reported success
 - [ ] Keep log level at INFO or above in production (DEBUG exposes stack traces in error responses)
 - [ ] Ensure every new tool has a `CLIENT_TOOL_ANNOTATIONS` entry — `read_only` mode is fail-closed: tools without an explicit `readOnlyHint: True` annotation are treated as write tools and excluded
 - [ ] Review audit logs (`tool_call` events with `"audit": true`) for unexpected tool usage

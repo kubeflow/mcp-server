@@ -64,6 +64,17 @@ def validate_runtime_name(name: str, field: str = "name") -> ToolError | None:
 
     Returns ToolError if invalid, None if valid.
     """
+    return validate_k8s_subdomain_name(name, field)
+
+
+def validate_k8s_subdomain_name(name: str, field: str = "name") -> ToolError | None:
+    """Validate a name that follows the RFC 1123 DNS-subdomain rules.
+
+    Used for Kubernetes objects such as runtimes and ServiceAccounts, whose names
+    may contain dots and be up to 253 characters long.
+
+    Returns ToolError if invalid, None if valid.
+    """
     if not name:
         return ToolError(
             error=f"{field} cannot be empty",
@@ -96,13 +107,82 @@ def validate_runtime_name(name: str, field: str = "name") -> ToolError | None:
     return None
 
 
+# Every character a valid image reference can contain, digests included.
+_IMAGE_REFERENCE_CHARS = re.compile(r"[A-Za-z0-9._:/@+=-]+")
+_IMAGE_DIGEST = re.compile(r"[a-z0-9]+(?:[+._-][a-z0-9]+)*:[A-Za-z0-9=_-]+")
+
+
+def validate_image_reference(image: str | None, field: str = "image") -> ToolError | None:
+    """Reject empty, whitespace-only and clearly malformed container image references.
+
+    This deliberately does not enforce the full OCI grammar, which is easy to get
+    wrong (e.g. uppercase is legal in a registry host but not in a repository path).
+    It only catches references Kubernetes could never pull, and keeps valid forms
+    such as ``localhost:5000/a/b:tag`` and ``img:tag@sha256:...`` working.
+    ``None`` is valid: the tool then uses the runtime's default image.
+
+    Returns ToolError if invalid, None if valid.
+    """
+    if image is None:
+        return None
+
+    def _invalid(reason: str) -> ToolError:
+        return ToolError(
+            error=f"{field} {reason}",
+            error_code=ErrorCode.VALIDATION_ERROR,
+            details={"value": image},
+        )
+
+    if not isinstance(image, str) or not image.strip():
+        return _invalid("cannot be empty")
+    if any(ch.isspace() for ch in image):
+        return _invalid("must not contain whitespace")
+    if not _IMAGE_REFERENCE_CHARS.fullmatch(image):
+        return _invalid("contains characters not allowed in an image reference")
+
+    name, has_digest, digest = image.partition("@")
+    if has_digest:
+        if not _IMAGE_DIGEST.fullmatch(digest):
+            return _invalid("has an invalid digest (expected e.g. 'img@sha256:<hex>')")
+        algo, _, h = digest.partition(":")
+        if algo == "sha256" and not re.fullmatch(r"[a-fA-F0-9]{64}", h):
+            return _invalid("has an invalid SHA-256 digest (expected 64 hex characters)")
+
+    if not name:
+        return _invalid("is missing the image name before '@'")
+    if name[:1] in "-./:" or name[-1:] in "/:":
+        return _invalid("must not start with a separator or end with '/' or ':'")
+    if "//" in name or name.split("/")[-1].count(":") > 1:
+        return _invalid("has an empty path component or tag")
+
+    # Docker/OCI requires the repository path to be lowercase, while registry hosts
+    # (domain or port) may contain uppercase. Tags can also contain uppercase.
+    if "/" in name:
+        first_part, rest = name.split("/", 1)
+        if "." in first_part or ":" in first_part or first_part == "localhost":
+            repo_path = rest.split(":", 1)[0]
+        else:
+            repo_path = name.split(":", 1)[0]
+    else:
+        repo_path = name.split(":", 1)[0]
+
+    if any(ch.isupper() for ch in repo_path):
+        return _invalid("repository path must be lowercase")
+
+    return None
+
+
 def validate_namespace(namespace: str) -> ToolError | None:
     """Validate namespace name format."""
     return validate_k8s_name(namespace, "namespace")
 
 
 def check_namespace_allowed(namespace: str | None) -> ToolError | None:
-    """Check if namespace is allowed by policy.
+    """Check that a namespace is well formed and allowed by policy.
+
+    A caller-supplied namespace is format-checked first. Without an allowlist
+    the policy check accepts any string, so a malformed value would otherwise
+    reach the Kubernetes API and come back as a misleading "not found".
 
     When *namespace* is ``None`` the effective default namespace from the
     TrainerClient backend is resolved and checked against the allowlist so
@@ -112,8 +192,13 @@ def check_namespace_allowed(namespace: str | None) -> ToolError | None:
         namespace: Namespace to check. ``None`` resolves to the effective default.
 
     Returns:
-        ToolError if namespace is restricted, None if allowed
+        ToolError if namespace is malformed or restricted, None if allowed
     """
+    if namespace is not None:
+        format_err = validate_namespace(namespace)
+        if format_err is not None:
+            return format_err
+
     # Import here to avoid circular import
     from kubeflow_mcp.core.policy import get_allowed_namespaces
 
@@ -182,8 +267,17 @@ class _ScriptSafetyVisitor(ast.NodeVisitor):
         self.warnings: list[str] = []
 
     def visit_Call(self, node: ast.Call) -> None:  # noqa: N802
-        if isinstance(node.func, ast.Name) and node.func.id in _DANGEROUS_CALLS:
-            self.warnings.append(f"Dangerous call: {node.func.id}() at line {node.lineno}")
+        if isinstance(node.func, ast.Name):
+            if node.func.id in _DANGEROUS_CALLS:
+                self.warnings.append(f"Dangerous call: {node.func.id}() at line {node.lineno}")
+            elif node.func.id in {"getattr", "setattr", "delattr"}:
+                if len(node.args) >= 2:
+                    attr_arg = node.args[1]
+                    if isinstance(attr_arg, ast.Constant) and isinstance(attr_arg.value, str):
+                        if attr_arg.value in _DANGEROUS_DUNDER:
+                            self.warnings.append(
+                                f"Dangerous call: {node.func.id}() at line {node.lineno}"
+                            )
         elif isinstance(node.func, ast.Attribute):
             if isinstance(node.func.value, ast.Name):
                 module = node.func.value.id
@@ -212,6 +306,11 @@ class _ScriptSafetyVisitor(ast.NodeVisitor):
             self.warnings.append(f"Dangerous attribute access: {node.attr} at line {node.lineno}")
         self.generic_visit(node)
 
+    def visit_Name(self, node: ast.Name) -> None:  # noqa: N802
+        if node.id in _DANGEROUS_DUNDER:
+            self.warnings.append(f"Dangerous name access: {node.id} at line {node.lineno}")
+        self.generic_visit(node)
+
 
 def is_safe_python_code(code: str) -> tuple[bool, str]:
     """AST-based scan for dangerous patterns in training scripts.
@@ -225,7 +324,8 @@ def is_safe_python_code(code: str) -> tuple[bool, str]:
 
     **Flagged patterns** (via AST, not substring matching):
 
-    - Calls: ``eval``, ``exec``, ``compile``, ``__import__``
+    - Calls: ``eval``, ``exec``, ``compile``, ``__import__``; ``getattr``/``setattr``/``delattr``
+      only when the attribute name is a literal dangerous dunder (e.g. ``"__globals__"``)
     - Module calls: ``os.system``, ``os.popen``, ``subprocess.*``, ``shutil.rmtree``
     - Imports: ``ctypes``, ``socket``
     - Dunder access: ``__builtins__``, ``__subclasses__``, ``__globals__``, ``__code__``

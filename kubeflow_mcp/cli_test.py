@@ -144,6 +144,123 @@ def test_serve_passes_clients_and_persona():
     mock_server.run.assert_called_once()
 
 
+def test_serve_rejects_unknown_persona_from_env_or_config():
+    """A persona from the env var or config file gets the same usage error as --persona."""
+    _, mock_create_server, modules_patch = _make_serve_mocks(
+        config=_make_default_config(persona="bogus")
+    )
+
+    with patch.dict(sys.modules, modules_patch):
+        result = CliRunner().invoke(cli, ["serve"])
+
+    assert result.exit_code == 2
+    assert "Unknown persona: bogus" in result.output
+    assert "Traceback" not in result.output
+    mock_create_server.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("policy_text", "message"),
+    [
+        ('policy:\n  read_only: true\n  deny: ["delete_*"\n', "Failed to load policy file"),
+        ("policy:\n  deny: risk:destructive\n", "'policy.deny' must be a list of strings"),
+        ("policy:\n  read_only: 'false'\n", "'policy.read_only' must be true or false"),
+    ],
+    ids=["unparseable", "single-string", "wrong-type"],
+)
+def test_serve_reports_policy_file_errors_without_traceback(
+    tmp_path, monkeypatch, policy_text, message
+):
+    """A policy file that cannot be used still stops the server, with its message only."""
+    from kubeflow_mcp.core.policy import reload_policy
+
+    policy_path = tmp_path / ".kf-mcp-policy.yaml"
+    policy_path.write_text(policy_text)
+    monkeypatch.setattr("kubeflow_mcp.core.config._find_config_file", lambda: None)
+    monkeypatch.setattr("kubeflow_mcp.core.policy._get_policy_paths", lambda: [policy_path])
+    reload_policy()
+    try:
+        result = CliRunner().invoke(cli, ["serve"])
+    finally:
+        reload_policy()
+
+    assert result.exit_code == 1
+    assert message in result.output
+    assert "Traceback" not in result.output
+    assert not isinstance(result.exception, RuntimeError)
+
+
+def test_serve_rejects_unknown_persona_from_real_environment(monkeypatch):
+    """KUBEFLOW_MCP_PERSONA goes through the real load_config(), with no config or policy file."""
+    from kubeflow_mcp.core.policy import reload_policy
+
+    monkeypatch.setattr("kubeflow_mcp.core.config._find_config_file", lambda: None)
+    monkeypatch.setattr("kubeflow_mcp.core.policy._get_policy_paths", lambda: [])
+    reload_policy()
+    try:
+        result = CliRunner().invoke(cli, ["serve"], env={"KUBEFLOW_MCP_PERSONA": "bogus"})
+    finally:
+        reload_policy()
+
+    assert result.exit_code == 2
+    assert "Unknown persona: bogus" in result.output
+    assert "Traceback" not in result.output
+
+
+@pytest.mark.parametrize(
+    ("args", "config_persona"),
+    [
+        (["serve", "--persona", "my-custom-role"], "readonly"),
+        (["serve"], "my-custom-role"),
+    ],
+    ids=["flag", "env-or-config"],
+)
+def test_serve_accepts_custom_persona(tmp_policy_file, args, config_persona):
+    """A custom persona from the policy file works from the flag and from env/config."""
+    from kubeflow_mcp.core.policy import reload_policy
+
+    tmp_policy_file(
+        {"personas": {"my-custom-role": {"inherit": "readonly", "tools": ["fine_tune"]}}}
+    )
+    _, mock_create_server, modules_patch = _make_serve_mocks(
+        config=_make_default_config(persona=config_persona)
+    )
+
+    try:
+        with patch.dict(sys.modules, modules_patch):
+            result = CliRunner().invoke(cli, args)
+    finally:
+        reload_policy()
+
+    assert result.exit_code == 0, result.output
+    assert mock_create_server.call_args.kwargs["persona"] == "my-custom-role"
+
+
+def test_serve_filters_empty_cli_client_entries():
+    mock_server, mock_create_server, modules_patch = _make_serve_mocks()
+
+    with patch.dict(sys.modules, modules_patch):
+        runner = CliRunner()
+        runner.invoke(cli, ["serve", "--clients", "trainer, ,optimizer,,"])
+
+    mock_create_server.assert_called_once()
+    _, kwargs = mock_create_server.call_args
+    assert kwargs["clients"] == ["trainer", "optimizer"]
+
+
+def test_serve_rejects_all_empty_cli_client_entries():
+    mock_server, mock_create_server, modules_patch = _make_serve_mocks()
+
+    with patch.dict(sys.modules, modules_patch):
+        runner = CliRunner()
+        result = runner.invoke(cli, ["serve", "--clients", ","])
+
+    assert result.exit_code != 0
+    assert "at least one client must be specified" in result.output
+    mock_create_server.assert_not_called()
+    mock_server.run.assert_not_called()
+
+
 def test_serve_http_transport_uses_streamable_http():
     mock_server, _, modules_patch = _make_serve_mocks()
 
@@ -453,3 +570,35 @@ def test_serve_otel_endpoint_cli_overrides_config():
     fake_telemetry_mod.setup_tracing.assert_called_once_with(
         endpoint="http://new-endpoint:4318/v1/traces"
     )
+
+
+def test_serve_reports_config_value_errors_cleanly():
+    _, mock_create_server, modules_patch = _make_serve_mocks()
+    mock_load_config = modules_patch["kubeflow_mcp.core.config"].load_config
+    mock_load_config.side_effect = ValueError("at least one client must be specified")
+
+    with patch.dict(sys.modules, modules_patch):
+        runner = CliRunner()
+        result = runner.invoke(cli, ["serve"])
+
+    assert result.exit_code == 1
+    assert "at least one client must be specified" in result.output
+    assert "Traceback" not in result.output
+    mock_create_server.assert_not_called()
+
+
+def test_serve_reports_invalid_clients_environment_cleanly(monkeypatch):
+    monkeypatch.setattr(
+        "kubeflow_mcp.core.config._find_config_file",
+        lambda: None,
+    )
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["serve"],
+        env={"KUBEFLOW_MCP_CLIENTS": ","},
+    )
+
+    assert result.exit_code == 1
+    assert "at least one client must be specified" in result.output
+    assert "Traceback" not in result.output

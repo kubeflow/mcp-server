@@ -357,6 +357,40 @@ class TestGetTrainjobQueueStatus:
         assert res is not None
         assert len(res["message"]) == MAX_QUEUE_MESSAGE_LENGTH
 
+    @patch("kubeflow_mcp.trainer.api.kueue.get_custom_objects_api")
+    @patch("kubernetes.client.ApisApi")
+    def test_workload_list_404_invalidates_cached_version(self, mock_apis_cls, mock_custom_api_fn):
+        def _group(version):
+            gv = V1GroupVersionForDiscovery(
+                group_version=f"kueue.x-k8s.io/{version}", version=version
+            )
+            return V1APIGroupList(
+                groups=[V1APIGroup(name="kueue.x-k8s.io", versions=[gv], preferred_version=gv)]
+            )
+
+        mock_apis = MagicMock()
+        mock_apis.get_api_versions.side_effect = [_group("v1beta1"), _group("v1beta2")]
+        mock_apis_cls.return_value = mock_apis
+
+        mock_api = MagicMock()
+        mock_api.get_namespaced_custom_object.return_value = {
+            "metadata": {"name": "llama-lora", "uid": "123"}
+        }
+        mock_api.list_namespaced_custom_object.side_effect = [
+            ApiException(status=404),
+            {"items": []},
+        ]
+        mock_custom_api_fn.return_value = mock_api
+
+        assert get_trainjob_queue_status("llama-lora", "default", job_status="Created") is None
+        get_trainjob_queue_status("llama-lora", "default", job_status="Created")
+
+        assert mock_apis.get_api_versions.call_count == 2
+        versions = [
+            c.kwargs["version"] for c in mock_api.list_namespaced_custom_object.call_args_list
+        ]
+        assert versions == ["v1beta1", "v1beta2"]
+
     @patch(
         "kubeflow_mcp.trainer.api.kueue.discover_kueue_version",
         return_value="v1beta1",

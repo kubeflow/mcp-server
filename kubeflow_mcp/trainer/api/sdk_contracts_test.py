@@ -18,6 +18,7 @@ from typing import get_type_hints
 
 import pytest
 from kubeflow.trainer import TrainerClient
+from kubeflow.trainer.constants import constants as trainer_constants
 from kubeflow.trainer.types import types as sdk_types
 
 
@@ -1116,8 +1117,9 @@ class TestMCPToolSignatures:
         mock_pod = MagicMock()
         mock_pod.metadata.name = "crashed-node-0"
         mock_pod.metadata.labels = {
-            "jobset.sigs.k8s.io/replicatedjob-name": "node",
-            "jobset.sigs.k8s.io/job-index": "0",
+            trainer_constants.JOBSET_NAME_LABEL: "crashed-job",
+            trainer_constants.JOBSET_RJOB_NAME_LABEL: trainer_constants.NODE,
+            trainer_constants.JOB_INDEX_LABEL: "0",
         }
 
         mock_v1 = MagicMock()
@@ -1144,8 +1146,17 @@ class TestMCPToolSignatures:
         )
         assert "CUDA out of memory" in resp["data"]["logs"]
         assert resp["data"]["failure_hint"]["category"] == "OOM"
+        # Pods are found with the same selector the SDK uses to build TrainJob steps.
+        mock_v1.list_namespaced_pod.assert_called_once_with(
+            namespace="test-ns",
+            label_selector=trainer_constants.POD_LABEL_SELECTOR.format(trainjob_name="crashed-job"),
+        )
         mock_v1.read_namespaced_pod_log.assert_called_once_with(
-            name="crashed-node-0", namespace="test-ns", previous=True, tail_lines=1000
+            name="crashed-node-0",
+            namespace="test-ns",
+            container=trainer_constants.NODE,
+            previous=True,
+            tail_lines=1000,
         )
 
     def test_get_training_logs_fallback_scopes_to_requested_step(self):
@@ -1159,15 +1170,18 @@ class TestMCPToolSignatures:
 
         node_0 = MagicMock()
         node_0.metadata.name = "crashed-node-0"
+        # All nodes share one ReplicatedJob: the node number is the completion index.
         node_0.metadata.labels = {
-            "jobset.sigs.k8s.io/replicatedjob-name": "node",
+            trainer_constants.JOBSET_RJOB_NAME_LABEL: trainer_constants.NODE,
             "jobset.sigs.k8s.io/job-index": "0",
+            trainer_constants.JOB_INDEX_LABEL: "0",
         }
         node_1 = MagicMock()
         node_1.metadata.name = "crashed-node-1"
         node_1.metadata.labels = {
-            "jobset.sigs.k8s.io/replicatedjob-name": "node",
-            "jobset.sigs.k8s.io/job-index": "1",
+            trainer_constants.JOBSET_RJOB_NAME_LABEL: trainer_constants.NODE,
+            "jobset.sigs.k8s.io/job-index": "0",
+            trainer_constants.JOB_INDEX_LABEL: "1",
         }
 
         mock_v1 = MagicMock()
@@ -1190,7 +1204,15 @@ class TestMCPToolSignatures:
 
         assert resp["data"]["logs"] == "node-0 crash"
         mock_v1.read_namespaced_pod_log.assert_has_calls(
-            [call(name="crashed-node-0", namespace="test-ns", previous=True, tail_lines=1000)]
+            [
+                call(
+                    name="crashed-node-0",
+                    namespace="test-ns",
+                    container=trainer_constants.NODE,
+                    previous=True,
+                    tail_lines=1000,
+                )
+            ]
         )
         assert mock_v1.read_namespaced_pod_log.call_count == 1
 

@@ -15,8 +15,11 @@
 """Monitoring tools for training job logs and events."""
 
 import logging
+import re
 from collections import deque
 from typing import Any
+
+from kubeflow.trainer.constants import constants as trainer_constants
 
 from kubeflow_mcp.common.constants import ErrorCode
 from kubeflow_mcp.common.failures import extract_failure_hint
@@ -46,17 +49,17 @@ _VALID_TARGET_STATUSES = frozenset({"Complete", "Failed", "Running", "Created"})
 
 
 def _is_pod_for_step(pod: Any, step: str) -> bool:
-    """Return whether a JobSet pod corresponds to the requested TrainJob step."""
+    """Return whether a JobSet pod corresponds to the requested TrainJob step.
+
+    Mirrors how the SDK names steps: launcher and node pods are ``<role>-<completion
+    index>`` (all nodes share one ReplicatedJob), initializer pods are the role alone.
+    """
     labels = getattr(pod.metadata, "labels", None) or {}
-    replicated_job = labels.get("jobset.sigs.k8s.io/replicatedjob-name")
-    job_index = labels.get("jobset.sigs.k8s.io/job-index")
-    if replicated_job == step:
-        return True
-    return (
-        replicated_job is not None
-        and job_index is not None
-        and f"{replicated_job}-{job_index}" == step
-    )
+    role = labels.get(trainer_constants.JOBSET_RJOB_NAME_LABEL)
+    if role in (trainer_constants.LAUNCHER, trainer_constants.NODE):
+        index = labels.get(trainer_constants.JOB_INDEX_LABEL)
+        return index is not None and f"{role}-{index}" == step
+    return role == step
 
 
 def _collect_log_lines(
@@ -87,8 +90,10 @@ def _collect_log_lines(
         v1 = get_core_v1_api()
         pods = v1.list_namespaced_pod(
             namespace=eff_ns,
-            label_selector=f"training.kubeflow.org/trainjob-name={name}",
+            label_selector=trainer_constants.POD_LABEL_SELECTOR.format(trainjob_name=name),
         )
+        # Same container the SDK reads for the step: "node-1" -> "node".
+        container = re.sub(r"-\d+$", "", step)
         for pod in pods.items:
             if not _is_pod_for_step(pod, step):
                 continue
@@ -96,6 +101,7 @@ def _collect_log_lines(
                 raw = v1.read_namespaced_pod_log(
                     name=pod.metadata.name,
                     namespace=eff_ns,
+                    container=container,
                     previous=True,
                     tail_lines=MAX_LOG_LINES,
                 )
@@ -422,6 +428,35 @@ def _format_queue_timeout_hint(queue_status: dict[str, Any]) -> str | None:
     return None
 
 
+def _timeout_response(
+    client: Any, name: str, namespace: str | None, timeout_seconds: int
+) -> dict[str, Any]:
+    """Build the wait timeout response, enriched with Kueue queue status when available."""
+    queue_status = None
+    try:
+        effective_ns = (
+            namespace
+            or getattr(getattr(client, "backend", None), "namespace", None)
+            or get_trainer_effective_namespace(namespace)
+        )
+        queue_status = get_trainjob_queue_status(name=name, namespace=str(effective_ns))
+    except Exception as e:
+        logger.debug("Failed to resolve Kueue status for %s on timeout: %s", name, e)
+    data: dict[str, Any] = {
+        "job": name,
+        "status": "Unknown",
+        "reached": False,
+        "message": f"Timeout after {timeout_seconds}s",
+        "hint": "Use get_training_events to check for scheduling issues",
+    }
+    if queue_status is not None:
+        data["queue_status"] = queue_status
+        hint = _format_queue_timeout_hint(queue_status)
+        if hint:
+            data["hint"] = hint
+    return ToolResponse(data=data).model_dump()
+
+
 def wait_for_training(
     name: str,
     target_statuses: list[str] | str = "Complete",
@@ -499,6 +534,11 @@ def wait_for_training(
             ).model_dump()
         timeout_seconds = min(timeout_seconds, MAX_WAIT_TIMEOUT)
         polling_interval = max(polling_interval, MIN_POLLING_INTERVAL)
+        if polling_interval >= timeout_seconds:
+            return ToolError(
+                error=f"polling_interval must be strictly less than timeout_seconds, got polling_interval={polling_interval}, timeout_seconds={timeout_seconds}",
+                error_code=ErrorCode.VALIDATION_ERROR,
+            ).model_dump()
         client = get_trainer_client_for_namespace(namespace)
 
         job = client.wait_for_job_status(
@@ -519,30 +559,18 @@ def wait_for_training(
         ).model_dump()
 
     except TimeoutError:
-        queue_status = None
-        try:
-            effective_ns = (
-                namespace
-                or getattr(getattr(client, "backend", None), "namespace", None)
-                or get_trainer_effective_namespace(namespace)
-            )
-            queue_status = get_trainjob_queue_status(name=name, namespace=str(effective_ns))
-        except Exception as e:
-            logger.debug("Failed to resolve Kueue status for %s on timeout: %s", name, e)
-        data: dict[str, Any] = {
-            "job": name,
-            "status": "Unknown",
-            "reached": False,
-            "message": f"Timeout after {timeout_seconds}s",
-            "hint": "Use get_training_events to check for scheduling issues",
-        }
-        if queue_status is not None:
-            data["queue_status"] = queue_status
-            hint = _format_queue_timeout_hint(queue_status)
-            if hint:
-                data["hint"] = hint
-        return ToolResponse(data=data).model_dump()
+        return _timeout_response(client, name, namespace, timeout_seconds)
     except Exception as e:
+        if isinstance(e, RuntimeError) and str(e) == f"TrainJob {name} is Failed":
+            return ToolResponse(
+                data={
+                    "job": name,
+                    "status": "Failed",
+                    "reached": False,
+                    "message": str(e),
+                    "hint": "Use get_training_logs to check error output or get_training_events for scheduling issues",
+                }
+            ).model_dump()
         if is_k8s_not_found(e):
             return ToolError(
                 error=f"Training job '{name}' not found",

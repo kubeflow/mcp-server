@@ -26,6 +26,8 @@ The Kubeflow MCP Server exposes Kubeflow Training operations as [Model Context P
 
 ## Get Started
 
+> New here? See the **[Quickstart & Troubleshooting guide](docs/quickstart.md)** for a step-by-step path from installation to a working MCP client.
+
 ### Install from PyPI
 
 ```bash
@@ -118,7 +120,7 @@ dependencies.
 | `KUBEFLOW_MCP_JWT_ISSUER` | _(none)_ | Expected JWT issuer |
 | `KUBEFLOW_MCP_JWT_AUDIENCE` | _(none)_ | Expected JWT audience |
 | `KUBEFLOW_MCP_CLIENTS` | `trainer` | Comma-separated client modules to load |
-| `KUBEFLOW_MCP_PERSONA` | `readonly` | Tool persona (`readonly`, `data-scientist`, `ml-engineer`, `platform-admin`) |
+| `KUBEFLOW_MCP_PERSONA` | `readonly` | Tool persona (`readonly`, `data-scientist`, `ml-engineer`, `platform-admin`, or a custom persona from the policy file) |
 | `KUBEFLOW_MCP_INSTRUCTION_TIER` | `full` | Instruction verbosity (`full`, `compact`, `minimal`) |
 | `KUBEFLOW_MCP_ALLOWED_HOSTS` | _(loopback)_ | Comma-separated `Host` header allowlist for DNS rebinding protection; `:*` port wildcard supported (e.g. `mcp.example.com,mcp.example.com:*`) |
 | `KUBEFLOW_MCP_ALLOWED_ORIGINS` | _(loopback)_ | Comma-separated `Origin` header allowlist; `:*` port wildcard supported (e.g. `https://mcp.example.com`) |
@@ -256,6 +258,8 @@ kubeflow-mcp serve \
 | `ml-engineer` | Container training, suspending/resuming jobs, inspecting CRDs and the controller |
 | `platform-admin` | All tools, including creating, patching and deleting runtimes |
 
+A custom persona defined under `personas:` in `~/.kf-mcp-policy.yaml` can be used the same way, from `--persona`, `KUBEFLOW_MCP_PERSONA` or the config file. An unknown persona from any of them stops `serve` with an error.
+
 <details>
 <summary> HTTP Authentication</summary>
 
@@ -294,8 +298,14 @@ export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
 kubeflow-mcp serve
 ```
 
-Each tool invocation emits a span with attributes:
+Each tool invocation emits an `execute_tool <tool>` span with attributes:
 `tool.name`, `tool.args_preview`, `tool.success`, `tool.duration_ms`, `kubeflow.persona`, and `correlation_id`.
+It is a child of the `tools/call <tool>` span that FastMCP creates, which continues the
+caller's trace when the request `_meta` carries a W3C `traceparent`.
+
+JSON logs and `get_server_logs` entries include `trace_id` and `span_id` while a span is
+active, so logs can be joined to traces. A missing or malformed `traceparent` just starts
+a new trace.
 
 ## Development
 
@@ -316,6 +326,7 @@ make inspector TRANSPORT=sse      # Inspector + SSE (deprecated; start server se
 
 ## Documentation
 
+- **[Quickstart & Troubleshooting](docs/quickstart.md)**: Install, connect a client, verify connectivity, and diagnose common failures
 - **[CONTRIBUTING](CONTRIBUTING.md)**: Development workflow and PR guidelines
 - **[ROADMAP](ROADMAP.md)**: Project roadmap
 - **[SECURITY](SECURITY.md)**: Vulnerability reporting; see [ARCHITECTURE.md#security-model](ARCHITECTURE.md#security-model) for threat model, RBAC, and hardening

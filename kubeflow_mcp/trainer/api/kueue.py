@@ -168,6 +168,10 @@ def get_trainjob_queue_status(
                 _request_timeout=K8S_TIMEOUT,
             )
         except Exception as e:
+            if getattr(e, "status", None) in (404, "404"):
+                # Served version vanished (e.g. Kueue upgrade): force rediscovery.
+                with _cache_lock:
+                    _discovery_cache.clear()
             if getattr(e, "status", None) in (403, "403"):
                 global _warned_workload_rbac
                 should_warn = False

@@ -58,6 +58,26 @@ def clock(monkeypatch: pytest.MonkeyPatch) -> Callable[[float], None]:
 
 
 class TestCircuitBreaker:
+    @pytest.mark.parametrize(
+        ("kwargs", "message"),
+        [
+            ({"failure_threshold": 0}, "failure_threshold"),
+            ({"failure_threshold": -1}, "failure_threshold"),
+            ({"recovery_timeout": -0.1}, "recovery_timeout"),
+            ({"half_open_max_calls": 0}, "half_open_max_calls"),
+            ({"half_open_max_calls": -1}, "half_open_max_calls"),
+        ],
+    )
+    def test_rejects_invalid_configuration(self, kwargs, message):
+        with pytest.raises(ValueError, match=message):
+            CircuitBreaker(**kwargs)
+
+    def test_zero_recovery_timeout_is_allowed(self):
+        cb = CircuitBreaker(failure_threshold=1, recovery_timeout=0.0)
+        cb.record_failure()
+        assert cb.acquire() is not None
+        assert cb.state == CircuitState.HALF_OPEN
+
     def test_starts_closed(self):
         cb = CircuitBreaker()
         assert cb.state == CircuitState.CLOSED
@@ -191,6 +211,21 @@ class TestCircuitBreaker:
 
 
 class TestGetBreaker:
+    @pytest.mark.parametrize(
+        ("failure_threshold", "recovery_timeout", "message"),
+        [
+            (0, 30.0, "failure_threshold"),
+            (-1, 30.0, "failure_threshold"),
+            (5, -0.1, "recovery_timeout"),
+        ],
+    )
+    def test_configure_rejects_invalid_values(self, failure_threshold, recovery_timeout, message):
+        with pytest.raises(ValueError, match=message):
+            configure_circuit_breaker(
+                failure_threshold=failure_threshold,
+                recovery_timeout=recovery_timeout,
+            )
+
     def test_returns_same_instance(self):
         a = get_breaker("tool_a")
         b = get_breaker("tool_a")
@@ -265,10 +300,27 @@ class TestRateLimiter:
         rl = RateLimiter(rate=100.0, capacity=10.0)
         assert rl.acquire() is True
 
+    @pytest.mark.parametrize(
+        ("rate", "capacity"),
+        [(0.0, 1.0), (-1.0, 1.0), (1.0, 0.0), (1.0, -1.0)],
+    )
+    def test_rejects_non_positive_configuration(self, rate, capacity):
+        with pytest.raises(ValueError):
+            RateLimiter(rate=rate, capacity=capacity)
+
     def test_acquire_fails_when_exhausted(self):
-        rl = RateLimiter(rate=0.0, capacity=1.0)
+        rl = RateLimiter(rate=1.0, capacity=1.0)
         rl.acquire()
         assert rl.acquire() is False
+
+    @pytest.mark.parametrize("tokens", [0.0, -1.0])
+    def test_acquire_rejects_non_positive_tokens(self, tokens):
+        rl = RateLimiter(rate=10.0, capacity=5.0)
+
+        with pytest.raises(ValueError, match="tokens must be greater than zero"):
+            rl.acquire(tokens)
+
+        assert rl.acquire(5.0) is True
 
     def test_tokens_refill_over_time(self, clock):
         rl = RateLimiter(rate=1000.0, capacity=5.0)

@@ -20,6 +20,8 @@ import os
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from kubeflow_mcp.common.utils import (
     MCP_MANAGED_LABEL,
     MCP_MANAGED_VALUE,
@@ -146,6 +148,7 @@ class TestGetApiClientConfigLoading:
 
     def test_empty_kubeconfig_uses_default_location(self, monkeypatch, tmp_path):
         monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))  # expanduser on Windows
         (tmp_path / ".kube").mkdir()
         (tmp_path / ".kube" / "config").touch()
         mock_kube, mock_incluster = self._load(monkeypatch, "")
@@ -228,8 +231,9 @@ class TestGetTrainerEffectiveNamespace:
         assert get_trainer_effective_namespace(None) == "default"
 
     @patch(PATCH_TRAINER_CLIENT, side_effect=RuntimeError("no kubeconfig"))
-    def test_falls_back_to_default_on_error(self, mock_trainer):
-        assert get_trainer_effective_namespace(None) == "default"
+    def test_propagates_lookup_error(self, mock_trainer):
+        with pytest.raises(RuntimeError):
+            get_trainer_effective_namespace(None)
 
 
 class TestGetTrainerClientForNamespace:

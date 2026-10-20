@@ -1,0 +1,43 @@
+# Extra RBAC for the runtime image E2E job only. Do not use outside CI.
+#
+# examples/kubernetes/manifests.yaml grants TrainJob access in one namespace.
+# The E2E tests create TrainJobs in "default" and in temporary namespaces, and
+# inspect_controller reads the Trainer controller pod in kubeflow-system, so CI
+# binds the same rules cluster-wide to the example's ServiceAccount.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kubeflow-mcp-e2e
+rules:
+  - apiGroups: ["trainer.kubeflow.org"]
+    resources: ["trainjobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["trainer.kubeflow.org"]
+    resources: ["trainingruntimes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["jobset.x-k8s.io"]
+    resources: ["jobsets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "events", "persistentvolumeclaims"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kubeflow-mcp-e2e
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kubeflow-mcp-e2e
+subjects:
+  - kind: ServiceAccount
+    name: kubeflow-mcp
+    namespace: kubeflow-user-example-com

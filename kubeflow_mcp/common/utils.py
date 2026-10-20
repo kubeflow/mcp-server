@@ -97,14 +97,11 @@ def get_trainer_effective_namespace(namespace: str | None = None) -> str:
     """
     if namespace:
         return namespace
-    try:
-        client = get_trainer_client()
-        backend = getattr(client, "backend", None)
-        ns = getattr(backend, "namespace", None)
-        if ns is not None:
-            return str(ns)
-    except Exception:
-        pass
+    client = get_trainer_client()
+    backend = client.backend
+    ns = getattr(backend, "namespace", None)
+    if ns is not None:
+        return str(ns)
     return "default"
 
 

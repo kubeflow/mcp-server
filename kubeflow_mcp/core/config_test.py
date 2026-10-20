@@ -20,9 +20,11 @@ from unittest.mock import patch
 
 import pytest
 import yaml
+from pydantic import ValidationError
 from tests.common import TestCase
 
 from kubeflow_mcp.core.config import (
+    ResilienceConfig,
     ServerConfig,
     _find_config_file,
     load_config,
@@ -49,6 +51,33 @@ def test_load_config_defaults_when_no_file():
         cfg = load_config()
     assert cfg.server.persona == "readonly"
     assert cfg.resilience.rate_limit == 10.0
+
+
+@pytest.mark.parametrize(
+    ("rate_limit", "rate_capacity"),
+    [(0.0, 20.0), (-1.0, 20.0), (10.0, 0.0), (10.0, -1.0)],
+)
+def test_resilience_config_rejects_non_positive_values(rate_limit, rate_capacity):
+    with pytest.raises(ValidationError):
+        ResilienceConfig(rate_limit=rate_limit, rate_capacity=rate_capacity)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("cb_failure_threshold", 0),
+        ("cb_failure_threshold", -1),
+        ("cb_recovery_timeout", -0.1),
+    ],
+)
+def test_resilience_config_rejects_invalid_circuit_breaker_values(field, value):
+    with pytest.raises(ValidationError):
+        ResilienceConfig(**{field: value})
+
+
+def test_resilience_config_allows_zero_recovery_timeout():
+    cfg = ResilienceConfig(cb_recovery_timeout=0.0)
+    assert cfg.cb_recovery_timeout == 0.0
 
 
 @pytest.mark.parametrize(
@@ -84,6 +113,23 @@ def test_load_config_env_overrides(test_case):
         cfg = load_config()
     section, field = test_case.expected_output["field"].split(".")
     assert getattr(getattr(cfg, section), field) == test_case.expected_output["value"]
+
+
+def test_load_config_filters_empty_client_entries(monkeypatch):
+    monkeypatch.setenv("KUBEFLOW_MCP_CLIENTS", "trainer, ,optimizer,,")
+    with patch("kubeflow_mcp.core.config._find_config_file", return_value=None):
+        cfg = load_config()
+
+    assert cfg.server.clients == ["trainer", "optimizer"]
+
+
+def test_load_config_rejects_all_empty_client_entries(monkeypatch):
+    monkeypatch.setenv("KUBEFLOW_MCP_CLIENTS", ",")
+    with (
+        patch("kubeflow_mcp.core.config._find_config_file", return_value=None),
+        pytest.raises(ValueError, match="at least one client must be specified"),
+    ):
+        load_config()
 
 
 def test_load_config_from_file(tmp_path):

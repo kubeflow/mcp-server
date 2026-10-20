@@ -17,6 +17,7 @@
 import logging
 import time
 import uuid
+from collections import Counter
 from typing import Any
 
 from kubeflow.trainer.constants import constants as trainer_constants
@@ -66,6 +67,42 @@ def _trainjob_runtime_to_mcp(runtime: object | None) -> dict[str, str] | None:
     if isinstance(name, str) and name:
         return {"name": name}
     return None
+
+
+# Upper bound on steps returned by get_training_job, so a large multi-node job
+# cannot blow up the response. The step summary still counts every step.
+MAX_JOB_STEPS = 32
+
+
+def _trainjob_steps_to_mcp(job: object) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Return a bounded list of a TrainJob's steps and a status summary.
+
+    Steps are the job's pods (initializers and ``node-N``), as reported by the SDK.
+    Failed steps come first, then the rest by name, so the cap never hides a failure.
+    A step whose pod has no phase yet is reported as ``Unknown``.
+    """
+    raw_steps = getattr(job, "steps", None)
+    steps = sorted(
+        raw_steps if isinstance(raw_steps, list) else [],
+        key=lambda s: (getattr(s, "status", None) != "Failed", s.name),
+    )
+    statuses = [getattr(s, "status", None) or "Unknown" for s in steps]
+    step_list = [
+        {
+            "name": step.name,
+            "status": status,
+            "pod": getattr(step, "pod_name", None),
+            "device": getattr(step, "device", None),
+            "device_count": getattr(step, "device_count", None),
+        }
+        for step, status in zip(steps, statuses, strict=True)
+    ][:MAX_JOB_STEPS]
+    summary = {
+        "total": len(steps),
+        "by_status": dict(sorted(Counter(statuses).items())),
+        "truncated": len(steps) > MAX_JOB_STEPS,
+    }
+    return step_list, summary
 
 
 MAX_LIST_LIMIT = 500
@@ -166,6 +203,19 @@ def list_training_jobs(
         ).model_dump()
 
 
+def _queue_hint(queue_status: dict[str, Any]) -> str | None:
+    """Next-step hint for a Kueue state that blocks the job, else None."""
+    q_name = queue_status.get("queue_name")
+    state = queue_status.get("state")
+    if state == "inadmissible":
+        return f"Job is inadmissible in queue '{q_name}'. Check queue configuration (see trainer://guides/queue-states)"
+    if state == "queued":
+        return f"Job is queued waiting for quota in '{q_name}'. Read trainer://guides/queue-states"
+    if state == "evicted":
+        return f"Job was evicted ({queue_status.get('reason')}) from queue '{q_name}'. Read trainer://guides/queue-states"
+    return None
+
+
 def get_training_job(name: str, namespace: str | None = None) -> dict[str, Any]:
     """Get details of a specific training job.
 
@@ -174,7 +224,10 @@ def get_training_job(name: str, namespace: str | None = None) -> dict[str, Any]:
         namespace: K8s namespace. Uses default from kubeconfig when omitted.
 
     Returns:
-        dict: Response containing ``name``, ``status``, ``runtime``.
+        dict: Response containing ``name``, ``status``, ``runtime``, ``num_nodes``,
+        ``steps`` (each step's ``name``, pod ``status``, ``pod``, ``device`` and
+        ``device_count``; failed steps first, at most ``MAX_JOB_STEPS``) and
+        ``step_summary`` (step counts by status).
 
     Raises:
         ToolError: If job not found (``RESOURCE_NOT_FOUND``).
@@ -193,6 +246,7 @@ def get_training_job(name: str, namespace: str | None = None) -> dict[str, Any]:
 
         jr = job.runtime if hasattr(job, "runtime") else None
         status = job.status if hasattr(job, "status") else "Unknown"
+        steps, step_summary = _trainjob_steps_to_mcp(job)
 
         next_steps: list[str] = []
         if status == "Failed":
@@ -208,11 +262,29 @@ def get_training_job(name: str, namespace: str | None = None) -> dict[str, Any]:
                 f"get_training_events(name='{name}') — check if scheduling or suspended",
             ]
 
+        # Point at the step that needs attention, which the job status alone hides.
+        failed = [s["name"] for s in steps if s["status"] == "Failed"]
+        if failed:
+            next_steps.insert(
+                0, f"get_training_logs(name='{name}', step='{failed[0]}') — failed step"
+            )
+        elif "Pending" in step_summary["by_status"] and not any(
+            hint.startswith("get_training_events") for hint in next_steps
+        ):
+            next_steps.append(
+                f"get_training_events(name='{name}') — pods pending, check scheduling"
+            )
+
         data: dict[str, Any] = {
             "name": job.name,
             "status": status,
             "runtime": _trainjob_runtime_to_mcp(jr),
+            "steps": steps,
+            "step_summary": step_summary,
         }
+        num_nodes = getattr(job, "num_nodes", None)
+        if isinstance(num_nodes, int):
+            data["num_nodes"] = num_nodes
 
         queue_status = None
         if status not in ("Complete", "Failed"):
@@ -224,24 +296,9 @@ def get_training_job(name: str, namespace: str | None = None) -> dict[str, Any]:
             )
         if queue_status is not None:
             data["queue_status"] = queue_status
-            state = queue_status.get("state")
-            q_name = queue_status.get("queue_name")
-            q_reason = queue_status.get("reason")
-            if state == "inadmissible":
-                next_steps.insert(
-                    0,
-                    f"Job is inadmissible in queue '{q_name}'. Check queue configuration (see trainer://guides/queue-states)",
-                )
-            elif state == "queued":
-                next_steps.insert(
-                    0,
-                    f"Job is queued waiting for quota in '{q_name}'. Read trainer://guides/queue-states",
-                )
-            elif state == "evicted":
-                next_steps.insert(
-                    0,
-                    f"Job was evicted ({q_reason}) from queue '{q_name}'. Read trainer://guides/queue-states",
-                )
+            hint = _queue_hint(queue_status)
+            if hint:
+                next_steps.insert(0, hint)
 
         if next_steps:
             data["next_steps"] = next_steps

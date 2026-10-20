@@ -16,14 +16,21 @@
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import pytest
 from tests.common import FAILED, SUCCESS, TestCase, assert_test_case
 
 from kubeflow_mcp.core.security import (
+    _SAFE_KEYS,
+    _SENSITIVE_EXACT,
+    _SENSITIVE_SUBSTRINGS,
     is_safe_python_code,
     mask_sensitive_data,
     truncate_log_output,
+    validate_image_reference,
     validate_k8s_name,
+    validate_k8s_subdomain_name,
     validate_namespace,
     validate_resource_limits,
     validate_runtime_name,
@@ -66,9 +73,21 @@ from kubeflow_mcp.core.security import (
             expected_status=FAILED,
             config={"name": "../../etc"},
         ),
-        # TODO(test): test single character name "a"
-        # TODO(test): test max length name (63 chars)
-        # TODO(test): test ends with hyphen rejected
+        TestCase(
+            name="single character name",
+            expected_status=SUCCESS,
+            config={"name": "a"},
+        ),
+        TestCase(
+            name="max length name",
+            expected_status=SUCCESS,
+            config={"name": "a" * 63},
+        ),
+        TestCase(
+            name="ends with hyphen rejected",
+            expected_status=FAILED,
+            config={"name": "test-name-"},
+        ),
     ],
 )
 def test_validate_k8s_name(test_case):
@@ -86,10 +105,63 @@ def test_validate_namespace_delegates():
     assert err is not None
 
 
-# TODO(test): test check_namespace_allowed with policy allowing namespace
-# TODO(test): test check_namespace_allowed with policy denying namespace
-# TODO(test): test check_namespace_allowed with None resolving to default
-# TODO(test): test check_namespace_allowed fail-closed when resolution errors
+@patch("kubeflow_mcp.core.policy.get_allowed_namespaces", return_value={"default", "kube-system"})
+def test_check_namespace_allowed_with_policy_allowing(mock_get_allowed):
+    from kubeflow_mcp.core.security import check_namespace_allowed
+
+    assert check_namespace_allowed("default") is None
+
+
+@patch("kubeflow_mcp.core.policy.get_allowed_namespaces", return_value={"default"})
+def test_check_namespace_allowed_with_policy_denying(mock_get_allowed):
+    from kubeflow_mcp.core.security import check_namespace_allowed
+
+    err = check_namespace_allowed("kube-system")
+    assert err is not None
+    assert "not allowed by policy" in err.error
+
+
+@pytest.mark.parametrize("namespace", ["Bad_NS!", "has space", "UPPER", "", "a" * 64])
+@patch("kubeflow_mcp.core.policy.get_allowed_namespaces", return_value=None)
+def test_check_namespace_allowed_rejects_malformed_namespace_without_policy(
+    mock_get_allowed, namespace
+):
+    """With no allowlist the policy check passes anything, so the format check must not."""
+    from kubeflow_mcp.core.security import check_namespace_allowed
+
+    err = check_namespace_allowed(namespace)
+    assert err is not None
+    assert err.error_code == "VALIDATION_ERROR"
+    assert "namespace" in err.error
+
+
+@patch("kubeflow_mcp.core.policy.get_allowed_namespaces", return_value=None)
+def test_check_namespace_allowed_accepts_valid_namespace_without_policy(mock_get_allowed):
+    from kubeflow_mcp.core.security import check_namespace_allowed
+
+    assert check_namespace_allowed("team-a") is None
+    assert check_namespace_allowed(None) is None
+
+
+@patch("kubeflow_mcp.common.utils.get_trainer_effective_namespace", return_value="kubeflow")
+@patch("kubeflow_mcp.core.policy.get_allowed_namespaces", return_value={"kubeflow"})
+def test_check_namespace_allowed_with_none_resolving_to_default(mock_get_allowed, mock_get_eff):
+    from kubeflow_mcp.core.security import check_namespace_allowed
+
+    assert check_namespace_allowed(None) is None
+
+
+@patch(
+    "kubeflow_mcp.common.utils.get_trainer_effective_namespace",
+    side_effect=Exception("Failed to load kubeconfig"),
+)
+@patch("kubeflow_mcp.core.policy.get_allowed_namespaces", return_value={"kubeflow"})
+def test_check_namespace_allowed_fail_closed_on_resolution_error(mock_get_allowed, mock_get_eff):
+    from kubeflow_mcp.core.security import check_namespace_allowed
+
+    err = check_namespace_allowed(None)
+    assert err is not None
+    assert "Cannot resolve effective namespace" in err.error
 
 
 # ─── Resource limits validation ─────────────────────────────────────────────
@@ -185,10 +257,46 @@ def test_validate_resource_limits(test_case):
             expected_status=FAILED,
             config={"script": "x" * 1_000_001},
         ),
-        # TODO(test): test exact boundary values (batch_size=1, batch_size=1024)
-        # TODO(test): test lora_rank boundary (1 and 256)
-        # TODO(test): test num_nodes boundary (1 and 100)
-        # TODO(test): test gpu_per_node boundary (0 and 16)
+        TestCase(
+            name="batch_size exact lower boundary",
+            expected_status=SUCCESS,
+            config={"batch_size": 1},
+        ),
+        TestCase(
+            name="batch_size exact upper boundary",
+            expected_status=SUCCESS,
+            config={"batch_size": 1024},
+        ),
+        TestCase(
+            name="lora_rank lower boundary",
+            expected_status=SUCCESS,
+            config={"lora_rank": 1},
+        ),
+        TestCase(
+            name="lora_rank upper boundary",
+            expected_status=SUCCESS,
+            config={"lora_rank": 256},
+        ),
+        TestCase(
+            name="num_nodes lower boundary",
+            expected_status=SUCCESS,
+            config={"num_nodes": 1},
+        ),
+        TestCase(
+            name="num_nodes upper boundary",
+            expected_status=SUCCESS,
+            config={"num_nodes": 100},
+        ),
+        TestCase(
+            name="gpu_per_node lower boundary",
+            expected_status=SUCCESS,
+            config={"gpu_per_node": 0},
+        ),
+        TestCase(
+            name="gpu_per_node upper boundary",
+            expected_status=SUCCESS,
+            config={"gpu_per_node": 16},
+        ),
     ],
 )
 def test_validate_training_bounds(test_case):
@@ -258,13 +366,53 @@ def test_validate_training_bounds(test_case):
             config={"code": "def (invalid"},
             expected_output="Syntax error",
         ),
-        # TODO(test): test __import__ direct call
-        # TODO(test): test compile() call
-        # TODO(test): test shutil.rmtree detection
-        # TODO(test): test socket import detection
-        # TODO(test): test from ctypes import detection (ImportFrom)
-        # TODO(test): test __subclasses__ dunder access
-        # TODO(test): bypass via getattr is NOT caught (document limitation)
+        TestCase(
+            name="detects __import__ direct call",
+            expected_status=FAILED,
+            config={"code": "__import__('os')"},
+            expected_output="__import__",
+        ),
+        TestCase(
+            name="detects compile() call",
+            expected_status=FAILED,
+            config={"code": "compile('print(\"Hello\")', '', 'exec')"},
+            expected_output="compile",
+        ),
+        TestCase(
+            name="detects shutil.rmtree",
+            expected_status=FAILED,
+            config={"code": "import shutil\nshutil.rmtree('/')"},
+            expected_output="shutil.rmtree",
+        ),
+        TestCase(
+            name="detects socket import",
+            expected_status=FAILED,
+            config={"code": "import socket"},
+            expected_output="socket",
+        ),
+        TestCase(
+            name="detects from ctypes import",
+            expected_status=FAILED,
+            config={"code": "from ctypes import cdll"},
+            expected_output="ctypes",
+        ),
+        TestCase(
+            name="detects __subclasses__ dunder access",
+            expected_status=FAILED,
+            config={"code": "object.__subclasses__()"},
+            expected_output="__subclasses__",
+        ),
+        TestCase(
+            name="__builtins__ name access is caught",
+            expected_status=FAILED,
+            config={"code": "getattr(__builtins__, 'ev' + 'al')('1+1')"},
+            expected_output="__builtins__",
+        ),
+        TestCase(
+            name="known limitation: getattr with a computed dunder name is not caught",
+            expected_status=SUCCESS,
+            config={"code": "getattr(().__class__.__base__, '__subcl' + 'asses__')()"},
+        ),
     ],
 )
 def test_is_safe_python_code(test_case):
@@ -316,15 +464,27 @@ def test_is_safe_python_code(test_case):
             name="masks _key suffix",
             config={"data": {"api_key": "key123"}, "key": "api_key", "expected": "***"},
         ),
-        # TODO(test): test all _SENSITIVE_EXACT keys are masked
-        # TODO(test): test all _SENSITIVE_SUBSTRINGS are masked
-        # TODO(test): test all _SAFE_KEYS are preserved
-        # TODO(test): test BufferingHandler redaction patterns
     ],
 )
 def test_mask_sensitive_data(test_case):
     result = mask_sensitive_data(test_case.config["data"])
     assert result[test_case.config["key"]] == test_case.config["expected"]
+
+
+@pytest.mark.parametrize("key", sorted(_SENSITIVE_EXACT))
+def test_mask_all_sensitive_exact_keys(key):
+    assert mask_sensitive_data({key: "x"})[key] == "***"
+
+
+@pytest.mark.parametrize("substring", sorted(_SENSITIVE_SUBSTRINGS))
+def test_mask_all_sensitive_substrings(substring):
+    key = f"my_{substring}_field"
+    assert mask_sensitive_data({key: "x"})[key] == "***"
+
+
+@pytest.mark.parametrize("key", sorted(_SAFE_KEYS))
+def test_preserve_all_safe_keys(key):
+    assert mask_sensitive_data({key: "x"})[key] == "x"
 
 
 def test_mask_sensitive_data_recurses_into_nested_dicts():
@@ -394,7 +554,8 @@ def test_truncate_long_output():
     assert "truncated" in result
 
 
-# TODO(test): test exact boundary (max_length characters)
+def test_truncate_exact_boundary():
+    assert truncate_log_output("x" * 100, max_length=100) == "x" * 100
 
 
 class TestValidateK8sNameTrailingNewline:
@@ -475,3 +636,112 @@ class TestValidateRuntimeName:
     def test_accepts_label_at_63_chars(self):
         assert validate_runtime_name("a" * 63) is None
         assert validate_runtime_name(".".join(["a" * 63] * 3)) is None
+
+
+class TestValidateK8sSubdomainName:
+    """Shared DNS-subdomain check, used for runtime and ServiceAccount names."""
+
+    @pytest.mark.parametrize("name", ["default", "trainer.sa-1", "a" * 63, "a.b." + "c" * 63])
+    def test_accepts_valid_names(self, name):
+        assert validate_k8s_subdomain_name(name, "service_account_name") is None
+
+    @pytest.mark.parametrize(
+        "name",
+        ["", "INVALID_NAME", "bad service account", "sa/name", "a" * 254, "a" * 64 + ".b"],
+    )
+    def test_rejects_invalid_names(self, name):
+        err = validate_k8s_subdomain_name(name, "service_account_name")
+        assert err is not None
+        assert err.error_code == "VALIDATION_ERROR"
+        assert "service_account_name" in err.error
+
+
+_SHA256 = "sha256:" + "a" * 64
+
+
+class TestValidateImageReference:
+    """Only clearly malformed references are rejected, so real images keep working."""
+
+    @pytest.mark.parametrize(
+        "image",
+        [
+            "nginx",
+            "ghcr.io/kubeflow/mcp-server:latest",
+            "localhost:5000/img:tag",
+            "registry.example.com:5000/a/b/c:tag",
+            f"img@{_SHA256}",
+            f"img:tag@{_SHA256}",
+            "a/b_c.d-e:tag",
+            "MyRegistry.io/app:1",
+            "pytorch/pytorch:2.0",
+        ],
+    )
+    def test_accepts_valid_references(self, image):
+        assert validate_image_reference(image) is None
+
+    def test_none_is_valid(self):
+        assert validate_image_reference(None) is None
+
+    @pytest.mark.parametrize(
+        "image",
+        [
+            "",
+            "   ",
+            "not a valid image!!",
+            "img!!",
+            "img:",
+            "img::double",
+            "-leading/x",
+            "/img",
+            "a//b",
+            "img/",
+            "img@",
+            "img@sha256",
+            f"@{_SHA256}",
+            ":tag",
+        ],
+    )
+    def test_rejects_malformed_references(self, image):
+        err = validate_image_reference(image)
+        assert err is not None
+        assert err.error_code == "VALIDATION_ERROR"
+
+    @pytest.mark.parametrize(
+        "image",
+        [
+            "img@sha256:x",
+            "img@sha256:" + "a" * 63,
+            "img@sha256:" + "a" * 65,
+            "img@sha256:" + "g" * 64,
+        ],
+    )
+    def test_rejects_malformed_sha256_digest(self, image):
+        err = validate_image_reference(image)
+        assert err is not None
+        assert err.error_code == "VALIDATION_ERROR"
+        assert "SHA-256 digest" in err.error
+
+    @pytest.mark.parametrize(
+        "image",
+        [
+            "UPPER/image:tag",
+            "Ubuntu:latest",
+            "myregistry.com:5000/MyOrg/app:tag",
+        ],
+    )
+    def test_rejects_uppercase_repository_path(self, image):
+        err = validate_image_reference(image)
+        assert err is not None
+        assert err.error_code == "VALIDATION_ERROR"
+        assert "repository path must be lowercase" in err.error
+
+
+@patch("kubeflow_mcp.common.utils.get_trainer_client", side_effect=RuntimeError("no kubeconfig"))
+@patch("kubeflow_mcp.core.policy.get_allowed_namespaces", return_value=["team-a"])
+def test_check_namespace_allowed_fails_closed_on_lookup_error(_allowed, _client):
+    from kubeflow_mcp.common.constants import ErrorCode
+    from kubeflow_mcp.core.security import check_namespace_allowed
+
+    err = check_namespace_allowed(None)
+    assert err is not None
+    assert err.error_code == ErrorCode.PERMISSION_DENIED

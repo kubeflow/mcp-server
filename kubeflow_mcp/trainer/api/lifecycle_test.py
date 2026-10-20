@@ -14,8 +14,8 @@
 
 """Tests for trainer/api/lifecycle.py — delete, suspend, resume.
 
-Covers input validation and the MCP ownership gate. The remaining K8s API
-interaction tests are marked as TODOs.
+Covers input validation, confirmation previews, the MCP ownership gate,
+and mocked SDK/K8s API success and error paths.
 """
 
 from __future__ import annotations
@@ -39,6 +39,7 @@ from tests.common import (
 from kubeflow_mcp.common import utils as mcp_utils
 from kubeflow_mcp.common.constants import ErrorCode
 from kubeflow_mcp.common.types import ToolError
+from kubeflow_mcp.conftest import verify_tool_error, verify_tool_success
 from kubeflow_mcp.trainer.api.lifecycle import delete_training_job, update_training_job
 
 _UTILS = "kubeflow_mcp.common.utils"
@@ -155,6 +156,15 @@ class TestDeleteTrainingJob:
         assert result["success"] is False
         assert result["error_code"] == PERMISSION_DENIED
 
+    def test_generic_error_returns_sdk_error(self, mock_trainer_client: MagicMock) -> None:
+        mock_trainer_client.delete_job.side_effect = RuntimeError("cluster unreachable")
+        with patch(f"{_LIFECYCLE}.get_effective_persona", return_value="platform-admin"):
+            result = delete_training_job(name="test-job", namespace="default", confirmed=True)
+
+        verify_tool_error(result, error_code=SDK_ERROR)
+        assert "cluster unreachable" in result["error"]
+        mock_trainer_client.delete_job.assert_called_once_with(name="test-job")
+
 
 # ─── MCP ownership enforcement ─────────────────────────────────────────────
 
@@ -205,11 +215,19 @@ def test_non_admin_blocked_from_mutating_external_job(tool, call):
     api.patch_namespaced_custom_object.assert_not_called()
 
 
-def test_non_admin_allowed_for_mcp_created_job():
-    with cluster(ownership=mcp_utils.OWNERSHIP_MANAGED) as (_, client, _lookup):
-        result = delete_training_job("ours", confirmed=True)
+@pytest.mark.parametrize(
+    ("tool", "call"),
+    [
+        ("delete", lambda: delete_training_job("ours", confirmed=True)),
+        ("update", lambda: update_training_job("ours", "suspend", confirmed=True)),
+    ],
+)
+def test_non_admin_allowed_for_mcp_created_job(tool, call):
+    with cluster(ownership=mcp_utils.OWNERSHIP_MANAGED) as (api, client, _lookup):
+        result = call()
     assert result["success"] is True
-    client.delete_job.assert_called_once()
+    assert client.delete_job.call_count == (1 if tool == "delete" else 0)
+    assert api.patch_namespaced_custom_object.call_count == (1 if tool == "update" else 0)
 
 
 def test_admin_bypasses_ownership_check_entirely():
@@ -259,11 +277,37 @@ def test_missing_job_end_to_end_from_a_real_404(tool, call):
     client.delete_job.assert_not_called()
 
 
-def test_ownership_lookup_failure_does_not_mutate():
-    with cluster(ownership=None) as (_, client, _lookup):
-        result = delete_training_job("unknown", confirmed=True)
+@pytest.mark.parametrize(
+    ("tool", "call"),
+    [
+        ("delete", lambda: delete_training_job("unknown", confirmed=True)),
+        ("update", lambda: update_training_job("unknown", "suspend", confirmed=True)),
+    ],
+)
+def test_ownership_lookup_failure_does_not_mutate(tool, call):
+    with cluster(ownership=None) as (api, client, _lookup):
+        result = call()
     assert result["error_code"] == SDK_ERROR
     client.delete_job.assert_not_called()
+    api.patch_namespaced_custom_object.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("tool", "call"),
+    [
+        ("delete", lambda: delete_training_job("ours", confirmed=False)),
+        ("update", lambda: update_training_job("ours", "suspend", confirmed=False)),
+    ],
+)
+def test_non_admin_preview_checks_ownership_without_mutating(tool, call):
+    """The preview runs after the ownership gate and never touches the job."""
+    with cluster(ownership=mcp_utils.OWNERSHIP_MANAGED) as (api, client, lookup):
+        result = call()
+    assert result["status"] == "preview"
+    assert result["config"]["job"] == "ours"
+    lookup.assert_called_once_with("ours", "default")
+    client.delete_job.assert_not_called()
+    api.patch_namespaced_custom_object.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -294,6 +338,68 @@ def test_update_training_job_validation(test_case):
 
 
 class TestUpdateTrainingJob:
+    def test_ownership_api_error_for_non_admin(self, mock_k8s_apis: dict[str, MagicMock]) -> None:
+        with (
+            patch(f"{_LIFECYCLE}.get_effective_persona", return_value="ml-engineer"),
+            patch(f"{_UTILS}.get_trainer_ownership", return_value=None) as lookup,
+        ):
+            result = update_training_job(
+                name="test-job", action="suspend", namespace="default", confirmed=True
+            )
+
+        verify_tool_error(result, error_code=SDK_ERROR)
+        assert "Cannot verify ownership" in result["error"]
+        lookup.assert_called_once_with("test-job", "default")
+        mock_k8s_apis["custom"].patch_namespaced_custom_object.assert_not_called()
+
+    def test_managed_job_can_be_updated_by_non_admin(
+        self, mock_k8s_apis: dict[str, MagicMock]
+    ) -> None:
+        with (
+            patch(f"{_LIFECYCLE}.get_effective_persona", return_value="data-scientist"),
+            patch(
+                f"{_UTILS}.get_trainer_ownership", return_value=mcp_utils.OWNERSHIP_MANAGED
+            ) as lookup,
+        ):
+            result = update_training_job(
+                name="test-job", action="suspend", namespace="default", confirmed=True
+            )
+
+        data = verify_tool_success(result)
+        assert data["job"] == "test-job"
+        assert data["namespace"] == "default"
+        assert data["action"] == "suspend"
+        lookup.assert_called_once_with("test-job", "default")
+        mock_k8s_apis["custom"].patch_namespaced_custom_object.assert_called_once_with(
+            group=trainer_constants.GROUP,
+            version=trainer_constants.VERSION,
+            namespace="default",
+            plural=trainer_constants.TRAINJOB_PLURAL,
+            name="test-job",
+            body={"spec": {"suspend": True}},
+            _request_timeout=mcp_utils.K8S_TIMEOUT,
+        )
+
+    def test_generic_error_returns_sdk_error(self, mock_k8s_apis: dict[str, MagicMock]) -> None:
+        api = mock_k8s_apis["custom"]
+        api.patch_namespaced_custom_object.side_effect = RuntimeError("api server down")
+        with patch(f"{_LIFECYCLE}.get_effective_persona", return_value="platform-admin"):
+            result = update_training_job(
+                name="test-job", action="resume", namespace="default", confirmed=True
+            )
+
+        verify_tool_error(result, error_code=SDK_ERROR)
+        assert "api server down" in result["error"]
+        api.patch_namespaced_custom_object.assert_called_once_with(
+            group=trainer_constants.GROUP,
+            version=trainer_constants.VERSION,
+            namespace="default",
+            plural=trainer_constants.TRAINJOB_PLURAL,
+            name="test-job",
+            body={"spec": {"suspend": False}},
+            _request_timeout=mcp_utils.K8S_TIMEOUT,
+        )
+
     @patch(
         "kubeflow_mcp.trainer.api.lifecycle.get_effective_persona", return_value="platform-admin"
     )

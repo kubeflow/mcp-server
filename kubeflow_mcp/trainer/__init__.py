@@ -97,7 +97,7 @@ CLIENT_TOOL_DESCRIPTIONS: dict[str, str] = {
     "get_cluster_resources": "Check cluster GPU/CPU availability. Use pre_flight() instead for full check.",
     "estimate_resources": "Estimate GPU memory needed for a HuggingFace model. Use pre_flight(model=...) instead.",
     "list_training_jobs": "List training jobs. Filter by runtime, status, or namespace.",
-    "get_training_job": "Get details of a specific training job. Supports optional namespace.",
+    "get_training_job": "Get details of a specific training job, including the status of each step (pod). Supports optional namespace.",
     "list_runtimes": "List available ClusterTrainingRuntimes.",
     "get_runtime": "Get runtime config. Pass include_packages=True to fetch pip list (slow: creates a Pod).",
     "fine_tune": (
