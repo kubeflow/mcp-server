@@ -133,6 +133,29 @@ class TestFineTuneConfirmed:
     @patch(PATCH_GPU_CHECK, return_value=None)
     @patch(PATCH_NS_CHECK, return_value=None)
     @patch(PATCH_CLIENT)
+    def test_409_without_reason_on_create_gets_the_name_hint(self, mock_client_fn, _ns, _gpu):
+        from kubernetes.client.exceptions import ApiException
+
+        wrapped = RuntimeError("Failed to create TrainJob: default/my-job")
+        wrapped.__cause__ = ApiException(status=409, reason="Conflict")  # no Status body
+        mock_client = MagicMock()
+        mock_client.train.side_effect = wrapped
+        mock_client_fn.return_value = mock_client
+
+        result = fine_tune(
+            model="hf://org/model",
+            dataset="hf://org/ds",
+            runtime="torchtune-llama",
+            name="my-job",
+            confirmed=True,
+        )
+
+        assert result["error_code"] == ErrorCode.CONFLICT
+        assert "already exists" in result["hint"]
+
+    @patch(PATCH_GPU_CHECK, return_value=None)
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
     def test_non_conflict_sdk_failure_stays_sdk_error(self, mock_client_fn, _ns, _gpu):
         mock_client = MagicMock()
         mock_client.train.side_effect = RuntimeError("Failed to create TrainJob")

@@ -360,8 +360,9 @@ def _sdk_error(e: Exception, hint: str | None = None) -> dict[str, Any]:
                 "this namespace and use the requested service_account_name."
             ),
         ).model_dump()
-    # A 409 on submit means a TrainJob with this name already exists. Report it as a
-    # conflict the caller can fix, not as a transient SDK failure.
+    # Only the create paths (fine_tune, run_custom_training, run_container_training)
+    # reach this, so a 409 means a TrainJob with this name already exists, whatever
+    # reason the API body gives. Report it as a conflict the caller can fix.
     conflict = k8s_conflict_reason(e)
     if conflict:
         return ToolError(
@@ -371,8 +372,6 @@ def _sdk_error(e: Exception, hint: str | None = None) -> dict[str, Any]:
             hint=(
                 "A TrainJob with this name already exists in the namespace. Pick another "
                 "name, or delete the existing job with delete_training_job."
-                if conflict == "AlreadyExists"
-                else "The TrainJob changed while it was being updated. Read it again and retry."
             ),
         ).model_dump()
     return ToolError(
