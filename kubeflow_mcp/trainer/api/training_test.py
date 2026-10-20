@@ -436,6 +436,28 @@ def test_training_tools_reject_invalid_image_before_sdk_call(tool, config, bad_i
     mock_client.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    ("tool", "config"),
+    [
+        (run_custom_training, {"script": "print('hello')", "runtime": "torch-distributed"}),
+        (run_container_training, {}),
+    ],
+)
+def test_training_tools_reject_invalid_image_without_resolving_namespace(tool, config):
+    """A malformed image must be rejected before resolving the default namespace."""
+    with (
+        patch("kubeflow_mcp.core.policy.get_allowed_namespaces", return_value=["team-a"]),
+        patch("kubeflow_mcp.common.utils.get_trainer_effective_namespace") as mock_resolve_ns,
+        patch(PATCH_CLIENT) as mock_client,
+    ):
+        result = tool(**config, namespace=None, image="img::double", confirmed=True)
+
+    assert result["success"] is False
+    assert result["error_code"] == VALIDATION_ERROR
+    mock_resolve_ns.assert_not_called()
+    mock_client.assert_not_called()
+
+
 def test_run_container_training_rejects_empty_image():
     """The image is required here, so "" is an error, unlike run_custom_training."""
     with patch(PATCH_CLIENT) as mock_client:

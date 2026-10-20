@@ -42,6 +42,7 @@ from kubeflow_mcp.core.security import (
     check_namespace_allowed,
     is_safe_python_code,
     mask_sensitive_data,
+    validate_image_reference,
     validate_k8s_name,
     validate_k8s_subdomain_name,
     validate_training_bounds,
@@ -1151,7 +1152,7 @@ def run_custom_training(
             function signature must accept matching parameter names.
         packages: Pip packages to install (e.g., ``["torch", "transformers"]``).
         image: Custom base container image for the training pod. Uses runtime
-            default if omitted.
+            default if omitted or empty.
         pip_index_urls: Custom PyPI mirror URLs (e.g., internal Nexus/Artifactory).
         resources_per_node: Full resource dict for the training pod (e.g.,
             ``{"cpu": "8", "memory": "32Gi", "gpu": 2}``). When provided,
@@ -1188,18 +1189,20 @@ def run_custom_training(
         if input_err:
             return input_err.model_dump()
 
-        ns_err = check_namespace_allowed(namespace)
-        if ns_err:
-            return ns_err.model_dump()
-
+        # Input checks run before the namespace check: with an allowlist and no
+        # namespace, that check resolves the default through the Trainer SDK.
         bounds_err = validate_training_bounds(
             num_nodes=num_nodes,
             gpu_per_node=gpu_per_node,
             script=script,
             packages=packages,
-        )
+        ) or validate_image_reference(image or None)  # "" means unset: the SDK skips it too
         if bounds_err:
             return bounds_err.model_dump()
+
+        ns_err = check_namespace_allowed(namespace)
+        if ns_err:
+            return ns_err.model_dump()
 
         if name:
             err = validate_k8s_name(name)
@@ -1397,16 +1400,18 @@ def run_container_training(
         if input_err:
             return input_err.model_dump()
 
-        ns_err = check_namespace_allowed(namespace)
-        if ns_err:
-            return ns_err.model_dump()
-
+        # Input checks run before the namespace check: with an allowlist and no
+        # namespace, that check resolves the default through the Trainer SDK.
         bounds_err = validate_training_bounds(
             num_nodes=num_nodes,
             gpu_per_node=gpu_per_node,
-        )
+        ) or validate_image_reference(image)
         if bounds_err:
             return bounds_err.model_dump()
+
+        ns_err = check_namespace_allowed(namespace)
+        if ns_err:
+            return ns_err.model_dump()
 
         if name:
             err = validate_k8s_name(name)
