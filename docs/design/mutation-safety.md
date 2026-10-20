@@ -23,8 +23,10 @@ See also: [CONVENTIONS.md](../CONVENTIONS.md) for module layout and naming,
 
 ## Order of checks
 
-A mutating call goes through these layers. Each one fails closed: if it cannot decide,
-it refuses.
+A mutating call goes through these layers. The authorization checks (exposure, namespace
+policy and ownership) fail closed: if they cannot decide, the call is refused. Some
+informational checks are best effort and do not block; see
+[Best-effort checks](#best-effort-checks).
 
 1. **Exposure.** The tool is only registered if the persona allows it
    (`get_allowed_tools`), the policy file's `allow`/`deny` keep it
@@ -46,6 +48,16 @@ it refuses.
 6. **Execution and audit.** Every call is wrapped by `_audit_wrap`: rate limit, circuit
    breaker, an audit log entry with masked parameters, and a trace span. Kubernetes errors
    are returned as `ToolError` with a stable `error_code`, never as a traceback.
+
+### Best-effort checks
+
+These add information to a preview but do not stop a call when they fail:
+
+- **`delete_runtime` dependency check.** The preview lists TrainJobs that reference the
+  runtime. If listing TrainJobs fails, the list is treated as empty, so the preview says
+  no jobs depend on it and a `confirmed=True` delete still goes ahead. #340 makes the
+  preview report that the check failed instead of showing an empty list; whether the
+  confirmed delete should then be refused is still open.
 
 The Kubernetes API is the final authority. RBAC or an admission policy can still deny a
 call that passed all of the above, and that denial should be reported as
@@ -74,7 +86,8 @@ call that passed all of the above, and that denial should be reported as
    `delete_training_job(..., confirmed=True)` first in 5 of 5 runs, and the server
    executed it as designed. Options: a short-lived token returned by the preview that the
    confirmed call must send back, or native MCP elicitation (ROADMAP Phase 4). A token
-   changes tool schemas, so it needs maintainer agreement first.
+   changes tool schemas, so it needs maintainer agreement first. Tracked in #433, which
+   needs a decision and an owner before this gap counts as resolved for v0.2.
 2. **`patch_runtime` is not marked destructive.** A bad patch can break every job that
    uses the runtime, and without a `metadata.resourceVersion` it silently overwrites
    concurrent changes. #422 adds conflict detection; the annotation question remains.
@@ -86,7 +99,10 @@ call that passed all of the above, and that denial should be reported as
    run through `execute_tool` is logged with `tool: "execute_tool"`; the real tool name
    is only inside `parameters`. Logging the inner tool name would make audits easier to
    search.
-5. **Persona state is process-global.** `get_effective_persona()` reads a global set at
+5. **A failed dependency check does not block `delete_runtime`.** See
+   [Best-effort checks](#best-effort-checks). #340 fixes what the preview reports; the
+   confirmed delete still proceeds.
+6. **Persona state is process-global.** `get_effective_persona()` reads a global set at
    startup, which matters for the ownership check when several servers share a process.
    #348 scopes it per server.
 
