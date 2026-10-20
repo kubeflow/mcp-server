@@ -74,13 +74,17 @@ MAX_JOB_STEPS = 32
 
 
 def _trainjob_steps_to_mcp(job: object) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Return a bounded, name-sorted list of a TrainJob's steps and a status summary.
+    """Return a bounded list of a TrainJob's steps and a status summary.
 
     Steps are the job's pods (initializers and ``node-N``), as reported by the SDK.
+    Failed steps come first, then the rest by name, so the cap never hides a failure.
     A step whose pod has no phase yet is reported as ``Unknown``.
     """
     raw_steps = getattr(job, "steps", None)
-    steps = sorted(raw_steps if isinstance(raw_steps, list) else [], key=lambda s: s.name)
+    steps = sorted(
+        raw_steps if isinstance(raw_steps, list) else [],
+        key=lambda s: (getattr(s, "status", None) != "Failed", s.name),
+    )
     statuses = [getattr(s, "status", None) or "Unknown" for s in steps]
     step_list = [
         {
@@ -208,8 +212,8 @@ def get_training_job(name: str, namespace: str | None = None) -> dict[str, Any]:
     Returns:
         dict: Response containing ``name``, ``status``, ``runtime``, ``num_nodes``,
         ``steps`` (each step's ``name``, pod ``status``, ``pod``, ``device`` and
-        ``device_count``, at most ``MAX_JOB_STEPS``) and ``step_summary`` (step
-        counts by status).
+        ``device_count``; failed steps first, at most ``MAX_JOB_STEPS``) and
+        ``step_summary`` (step counts by status).
 
     Raises:
         ToolError: If job not found (``RESOURCE_NOT_FOUND``).

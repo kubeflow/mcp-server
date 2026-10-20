@@ -641,3 +641,21 @@ def test_get_training_job_bounds_the_step_list():
     assert data["step_summary"]["total"] == MAX_JOB_STEPS + 8
     assert data["step_summary"]["truncated"] is True
     assert data["step_summary"]["by_status"] == {"Running": MAX_JOB_STEPS + 8}
+
+
+def test_get_training_job_keeps_failed_step_beyond_the_cap():
+    from kubeflow_mcp.trainer.api.discovery import MAX_JOB_STEPS
+
+    count = MAX_JOB_STEPS + 8
+    steps = [_step(f"node-{i:02d}", "Running") for i in range(count - 1)]
+    steps.append(_step(f"node-{count - 1:02d}", "Failed"))
+
+    data = verify_tool_success(_get_job(_job_with_steps(steps, num_nodes=count)))
+
+    failed_name = f"node-{count - 1:02d}"
+    assert data["steps"][0]["name"] == failed_name
+    assert len(data["steps"]) == MAX_JOB_STEPS
+    assert data["step_summary"]["by_status"]["Failed"] == 1
+    assert data["next_steps"][0] == (
+        f"get_training_logs(name='job-a', step='{failed_name}') — failed step"
+    )
