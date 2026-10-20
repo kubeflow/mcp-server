@@ -46,54 +46,16 @@ from kubeflow_mcp.core.resilience import get_breaker
 
 logger = logging.getLogger(__name__)
 
-# Populated by init_dynamic_tools() after server knows which tools are loaded.
-TOOL_REGISTRY: dict[str, dict[str, Any]] = {}
-TOOL_HIERARCHY: dict[str, list[str]] = {}
-
-
-def init_dynamic_tools(
-    tool_funcs: list[Callable],
-    descriptions: dict[str, str],
-) -> None:
-    """Initialize the dynamic tool registry from loaded tool functions.
-
-    Must be called before any meta-tool is invoked. Typically called by
-    create_server() after collecting tools from client modules.
-    """
-    _embedding_cache.reset()
-    TOOL_REGISTRY.clear()
-    TOOL_HIERARCHY.clear()
-
-    for phase in TOOL_PHASES:
-        TOOL_HIERARCHY[phase] = []
-
-    for func in tool_funcs:
-        name = func.__name__
-        doc = func.__doc__ or ""
-        category = TOOL_TO_PHASE.get(name, "other")
-        short_desc = descriptions.get(name, doc.split("\n")[0] if doc else name)
-
-        TOOL_REGISTRY[name] = {
-            "name": name,
-            "category": category,
-            "description": short_desc,
-            "full_doc": doc,
-            "func": func,
-        }
-        TOOL_HIERARCHY.setdefault(category, []).append(name)
-
-    logger.info(
-        f"Dynamic tool registry initialized: {len(TOOL_REGISTRY)} tools, "
-        f"{len(TOOL_HIERARCHY)} categories"
-    )
-
-
 # =============================================================================
 # Progressive mode: list_tools → describe_tools → execute_tool
 # =============================================================================
 
 
-def list_tools(prefix: str = "") -> dict[str, Any]:
+def _list_tools(
+    tool_registry: dict[str, dict[str, Any]],
+    tool_hierarchy: dict[str, list[str]],
+    prefix: str = "",
+) -> dict[str, Any]:
     """List available tools by category or prefix.
 
     Start with no prefix to see categories, then drill down.
@@ -109,22 +71,22 @@ def list_tools(prefix: str = "") -> dict[str, Any]:
     """
     if not prefix:
         return {
-            "categories": list(TOOL_HIERARCHY.keys()),
-            "category_tools": {cat: len(tools) for cat, tools in TOOL_HIERARCHY.items()},
+            "categories": list(tool_hierarchy.keys()),
+            "category_tools": {cat: len(tools) for cat, tools in tool_hierarchy.items()},
             "hint": "Use list_tools('category_name') to see tools in a category",
         }
 
-    if prefix in TOOL_HIERARCHY:
-        tools = TOOL_HIERARCHY[prefix]
+    if prefix in tool_hierarchy:
+        tools = tool_hierarchy[prefix]
         return {
             "category": prefix,
-            "tools": [{"name": t, "description": TOOL_REGISTRY[t]["description"]} for t in tools],
+            "tools": [{"name": t, "description": tool_registry[t]["description"]} for t in tools],
             "hint": "Use describe_tools(['tool_name']) to get full schema",
         }
 
     matching = [
         {"name": name, "description": info["description"]}
-        for name, info in TOOL_REGISTRY.items()
+        for name, info in tool_registry.items()
         if name.startswith(prefix) or prefix in name
     ]
     return {
@@ -134,7 +96,9 @@ def list_tools(prefix: str = "") -> dict[str, Any]:
     }
 
 
-def describe_tools(tool_names: list[str]) -> dict[str, Any]:
+def _describe_tools(
+    tool_registry: dict[str, dict[str, Any]], tool_names: list[str]
+) -> dict[str, Any]:
     """Get detailed schema for specific tools.
 
     Call after list_tools() to get parameter information before executing.
@@ -150,11 +114,11 @@ def describe_tools(tool_names: list[str]) -> dict[str, Any]:
 
     results: list[dict[str, Any]] = []
     for name in tool_names:
-        if name not in TOOL_REGISTRY:
+        if name not in tool_registry:
             results.append({"name": name, "error": "Tool not found"})
             continue
 
-        tool = TOOL_REGISTRY[name]
+        tool = tool_registry[name]
         sig = inspect.signature(tool["func"])
         params: dict[str, Any] = {}
         for param_name, param in sig.parameters.items():
@@ -177,7 +141,11 @@ def describe_tools(tool_names: list[str]) -> dict[str, Any]:
     return {"tools": results}
 
 
-def execute_tool(tool_name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
+def _execute_tool(
+    tool_registry: dict[str, dict[str, Any]],
+    tool_name: str,
+    arguments: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Execute a discovered tool by name.
 
     Call after list_tools() and describe_tools() to run the actual tool.
@@ -189,10 +157,10 @@ def execute_tool(tool_name: str, arguments: dict[str, Any] | None = None) -> dic
     Returns:
         Tool execution result.
     """
-    if tool_name not in TOOL_REGISTRY:
-        return {"error": f"Tool '{tool_name}' not found", "available": list(TOOL_REGISTRY.keys())}
+    if tool_name not in tool_registry:
+        return {"error": f"Tool '{tool_name}' not found", "available": list(tool_registry.keys())}
 
-    func = TOOL_REGISTRY[tool_name]["func"]
+    func = tool_registry[tool_name]["func"]
     args = arguments or {}
 
     # Reject bad arguments before touching the breaker: they are a caller mistake,
@@ -229,9 +197,6 @@ def execute_tool(tool_name: str, arguments: dict[str, Any] | None = None) -> dic
         return {"error": str(e), "error_code": ErrorCode.SDK_ERROR, "tool": tool_name}
 
 
-PROGRESSIVE_TOOLS: list[Callable] = [list_tools, describe_tools, execute_tool]
-
-
 # =============================================================================
 # Semantic mode: find_tools → execute_tool
 # =============================================================================
@@ -240,7 +205,11 @@ PROGRESSIVE_TOOLS: list[Callable] = [list_tools, describe_tools, execute_tool]
 class _EmbeddingCache:
     """Lazy-loaded embedding cache for semantic search."""
 
-    def __init__(self):
+    _shared_model = None
+    _shared_model_lock = threading.Lock()
+
+    def __init__(self, tool_registry: dict[str, dict[str, Any]]):
+        self._tool_registry = tool_registry
         self._embeddings: dict[str, list[float]] | None = None
         self._model = None
         self._unavailable = False
@@ -280,15 +249,18 @@ class _EmbeddingCache:
             return self._mark_unavailable()
 
         try:
-            self._model = SentenceTransformer("all-MiniLM-L6-v2")
+            with _EmbeddingCache._shared_model_lock:
+                if _EmbeddingCache._shared_model is None:
+                    _EmbeddingCache._shared_model = SentenceTransformer("all-MiniLM-L6-v2")
+            self._model = _EmbeddingCache._shared_model
             descriptions = [
                 f"{info['description']}. Category: {info['category']}. {info['full_doc'][:200]}"
-                for info in TOOL_REGISTRY.values()
+                for info in self._tool_registry.values()
             ]
             embeddings = self._model.encode(descriptions)
             self._embeddings = {
                 name: emb.tolist()
-                for name, emb in zip(TOOL_REGISTRY.keys(), embeddings, strict=True)
+                for name, emb in zip(self._tool_registry.keys(), embeddings, strict=True)
             }
             return self._embeddings, self._model
         except Exception as e:
@@ -300,8 +272,8 @@ class _EmbeddingCache:
     def _mark_unavailable(self) -> tuple[None, None]:
         """Remember the failure so every call doesn't repeat work that just failed.
 
-        Cleared by reset(), which init_dynamic_tools() calls, so a rebuilt registry
-        tries the model again once the underlying problem is fixed.
+        Cleared by reset(), so this registry can retry once the underlying problem
+        is fixed.
         """
         self._unavailable = True
         self._model = None
@@ -314,14 +286,16 @@ class _EmbeddingCache:
             self._unavailable = False
 
 
-_embedding_cache = _EmbeddingCache()
-
-
 MAX_QUERY_LENGTH = 500
 MAX_TOP_K = 20
 
 
-def find_tools(query: str, top_k: int = 5) -> dict[str, Any]:
+def _find_tools(
+    tool_registry: dict[str, dict[str, Any]],
+    embedding_cache: _EmbeddingCache,
+    query: str,
+    top_k: int = 5,
+) -> dict[str, Any]:
     """Find relevant tools using semantic or keyword search.
 
     Describe what you want to accomplish in natural language.
@@ -361,18 +335,18 @@ def find_tools(query: str, top_k: int = 5) -> dict[str, Any]:
     if query_lower in _list_all or "all tool" in query_lower or "available tool" in query_lower:
         return {
             "query": query,
-            "total": len(TOOL_REGISTRY),
+            "total": len(tool_registry),
             "tools": [
                 {"name": name, "description": info["description"], "category": info["category"]}
-                for name, info in TOOL_REGISTRY.items()
+                for name, info in tool_registry.items()
             ],
             "hint": "Use execute_tool(tool_name, {args}) to run a tool",
         }
 
-    embeddings, model = _embedding_cache.get()
+    embeddings, model = embedding_cache.get()
 
     if embeddings is None:
-        return _keyword_search(query, top_k)
+        return _keyword_search(tool_registry, query, top_k)
 
     try:
         import numpy as np
@@ -389,15 +363,15 @@ def find_tools(query: str, top_k: int = 5) -> dict[str, Any]:
         sorted_tools = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:top_k]
     except Exception:
         logger.debug("Embedding search failed, falling back to keyword search")
-        return _keyword_search(query, top_k)
+        return _keyword_search(tool_registry, query, top_k)
 
     return {
         "query": query,
         "tools": [
             {
                 "name": name,
-                "description": TOOL_REGISTRY[name]["description"],
-                "category": TOOL_REGISTRY[name]["category"],
+                "description": tool_registry[name]["description"],
+                "category": tool_registry[name]["category"],
                 "relevance": f"{score:.2f}",
             }
             for name, score in sorted_tools
@@ -406,13 +380,15 @@ def find_tools(query: str, top_k: int = 5) -> dict[str, Any]:
     }
 
 
-def _keyword_search(query: str, top_k: int = 5) -> dict[str, Any]:
+def _keyword_search(
+    tool_registry: dict[str, dict[str, Any]], query: str, top_k: int = 5
+) -> dict[str, Any]:
     """Fallback keyword search when embeddings unavailable."""
     query_lower = query.lower()
     keywords = query_lower.split()
 
     scores = {}
-    for name, info in TOOL_REGISTRY.items():
+    for name, info in tool_registry.items():
         text = f"{name} {info['description']} {info['category']}".lower()
         score = sum(1 for kw in keywords if kw in text)
         if score > 0:
@@ -425,8 +401,8 @@ def _keyword_search(query: str, top_k: int = 5) -> dict[str, Any]:
         "tools": [
             {
                 "name": name,
-                "description": TOOL_REGISTRY[name]["description"],
-                "category": TOOL_REGISTRY[name]["category"],
+                "description": tool_registry[name]["description"],
+                "category": tool_registry[name]["category"],
             }
             for name, _ in sorted_tools
         ],
@@ -434,6 +410,150 @@ def _keyword_search(query: str, top_k: int = 5) -> dict[str, Any]:
     }
 
 
+class DynamicToolRegistry:
+    """Own the tools and discovery state exposed by one dynamic toolset."""
+
+    def __init__(self, tool_funcs: list[Callable], descriptions: dict[str, str]):
+        self.tool_registry: dict[str, dict[str, Any]] = {}
+        self.tool_hierarchy: dict[str, list[str]] = {}
+        self._embedding_cache = _EmbeddingCache(self.tool_registry)
+        self.initialize(tool_funcs, descriptions)
+
+    def initialize(self, tool_funcs: list[Callable], descriptions: dict[str, str]) -> None:
+        """Replace this registry's contents and reset its semantic cache."""
+        self._embedding_cache.reset()
+        self.tool_registry.clear()
+        self.tool_hierarchy.clear()
+        for phase in TOOL_PHASES:
+            self.tool_hierarchy[phase] = []
+
+        for func in tool_funcs:
+            name = func.__name__
+            doc = func.__doc__ or ""
+            category = TOOL_TO_PHASE.get(name, "other")
+            short_desc = descriptions.get(name, doc.split("\n")[0] if doc else name)
+
+            self.tool_registry[name] = {
+                "name": name,
+                "category": category,
+                "description": short_desc,
+                "full_doc": doc,
+                "func": func,
+            }
+            self.tool_hierarchy.setdefault(category, []).append(name)
+
+        logger.info(
+            "Dynamic tool registry initialized: %s tools, %s categories",
+            len(self.tool_registry),
+            len(self.tool_hierarchy),
+        )
+
+    def list_tools(self, prefix: str = "") -> dict[str, Any]:
+        """List this registry's available tools by category or prefix.
+
+        Start with no prefix to see categories, then drill down.
+
+        Args:
+            prefix: Filter. Examples:
+                - "" → list all categories with tool counts
+                - "planning" → list planning tools
+                - "training" → list training tools
+
+        Returns:
+            Categories and matching tools in this registry.
+        """
+        return _list_tools(self.tool_registry, self.tool_hierarchy, prefix)
+
+    def describe_tools(self, tool_names: list[str]) -> dict[str, Any]:
+        """Get detailed schema for specific tools in this registry.
+
+        Call after list_tools() to get parameter information before executing.
+
+        Args:
+            tool_names: List of tool names to describe (max 5 at a time).
+
+        Returns:
+            Tool schemas with parameter types and defaults.
+        """
+        return _describe_tools(self.tool_registry, tool_names)
+
+    def execute_tool(
+        self, tool_name: str, arguments: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """Execute a discovered tool from this registry by name.
+
+        Call after list_tools() and describe_tools() to run the actual tool.
+
+        Args:
+            tool_name: Name of the tool to execute.
+            arguments: Tool arguments as key-value pairs.
+
+        Returns:
+            Tool execution result.
+        """
+        return _execute_tool(self.tool_registry, tool_name, arguments)
+
+    def find_tools(self, query: str, top_k: int = 5) -> dict[str, Any]:
+        """Find relevant tools in this registry using semantic or keyword search.
+
+        Describe what you want to accomplish in natural language.
+
+        Args:
+            query: Natural language description. Examples:
+                - "all" → list every available tool in this registry
+                - "check GPU availability in the cluster"
+                - "fine-tune a language model"
+                - "view logs from a training job"
+                - "delete a failed job"
+            top_k: Number of results (default 5, ignored when query="all").
+
+        Returns:
+            Matching tools ranked by relevance within this registry.
+        """
+        return _find_tools(self.tool_registry, self._embedding_cache, query, top_k)
+
+    def _keyword_search(self, query: str, top_k: int = 5) -> dict[str, Any]:
+        """Search this registry using the semantic fallback."""
+        return _keyword_search(self.tool_registry, query, top_k)
+
+
+# Compatibility entry points retain a default registry for existing module-level APIs.
+# New server instances use DynamicToolRegistry directly.
+_default_registry = DynamicToolRegistry([], {})
+TOOL_REGISTRY = _default_registry.tool_registry
+TOOL_HIERARCHY = _default_registry.tool_hierarchy
+_embedding_cache = _default_registry._embedding_cache
+
+
+def init_dynamic_tools(tool_funcs: list[Callable], descriptions: dict[str, str]) -> None:
+    """Initialize the default registry for existing module-level callers.
+
+    New callers that need isolation should construct a DynamicToolRegistry.
+    """
+    _default_registry.initialize(tool_funcs, descriptions)
+
+
+def list_tools(prefix: str = "") -> dict[str, Any]:
+    """Compatibility wrapper for the default registry's list operation."""
+    return _default_registry.list_tools(prefix)
+
+
+def describe_tools(tool_names: list[str]) -> dict[str, Any]:
+    """Compatibility wrapper for the default registry's describe operation."""
+    return _default_registry.describe_tools(tool_names)
+
+
+def execute_tool(tool_name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Compatibility wrapper for the default registry's execute operation."""
+    return _default_registry.execute_tool(tool_name, arguments)
+
+
+def find_tools(query: str, top_k: int = 5) -> dict[str, Any]:
+    """Compatibility wrapper for the default registry's semantic search."""
+    return _default_registry.find_tools(query, top_k)
+
+
+PROGRESSIVE_TOOLS: list[Callable] = [list_tools, describe_tools, execute_tool]
 SEMANTIC_TOOLS: list[Callable] = [find_tools, execute_tool]
 
 
