@@ -305,6 +305,11 @@ def inspect_controller(
         ).model_dump()
 
 
+_MERGED_LIST_KEYS = frozenset(
+    {"replicatedJobs", "containers", "initContainers", "env", "volumes", "volumeMounts"}
+)
+
+
 def _is_named_list(value: Any) -> bool:
     return (
         isinstance(value, list)
@@ -313,24 +318,24 @@ def _is_named_list(value: Any) -> bool:
     )
 
 
-def _merge(current: Any, patch: Any) -> Any:
+def _merge(current: Any, patch: Any, key: str | None = None) -> Any:
     """Overlay ``patch`` on ``current``, merging name-keyed lists entry by entry."""
     if isinstance(patch, dict) and isinstance(current, dict):
         merged = dict(current)
-        for key, value in patch.items():
+        for k, value in patch.items():
             if value is None:
-                merged.pop(key, None)
+                merged.pop(k, None)
             else:
-                merged[key] = _merge(current.get(key), value)
+                merged[k] = _merge(current.get(k), value, k)
         return merged
-    if _is_named_list(patch) and _is_named_list(current):
+    if key in _MERGED_LIST_KEYS and _is_named_list(patch) and _is_named_list(current):
         patch_by_name = {item["name"]: item for item in patch}
         merged_list = [_merge(c, patch_by_name.pop(c["name"], {})) for c in current]
         return merged_list + list(patch_by_name.values())
     return patch
 
 
-def _expand_named_lists(current: Any, patch: Any) -> Any:
+def _expand_named_lists(current: Any, patch: Any, key: str | None = None) -> Any:
     """Keep the shape of ``patch`` but carry the sibling entries of its name-keyed lists.
 
     The API server applies a ClusterTrainingRuntime patch as a JSON merge patch
@@ -339,9 +344,9 @@ def _expand_named_lists(current: Any, patch: Any) -> Any:
     """
     if isinstance(patch, dict):
         cur = current if isinstance(current, dict) else {}
-        return {k: _expand_named_lists(cur.get(k), v) for k, v in patch.items()}
-    if _is_named_list(patch) and _is_named_list(current):
-        return _merge(current, patch)
+        return {k: _expand_named_lists(cur.get(k), v, k) for k, v in patch.items()}
+    if key in _MERGED_LIST_KEYS and _is_named_list(patch) and _is_named_list(current):
+        return _merge(current, patch, key)
     return patch
 
 
@@ -353,9 +358,9 @@ def patch_runtime(
     """JSON merge patch on a ClusterTrainingRuntime.
 
     Use to update images, add volumes, change defaults without full replacement.
-    Lists whose entries all carry a ``name`` (``replicatedJobs``, ``containers``,
-    ``env``, ``volumes``, ``volumeMounts``) are merged by name: entries the patch
-    does not mention are kept, so removing one entry is not possible here. An empty
+    Lists under these keys whose entries all carry a ``name`` (``replicatedJobs``,
+    ``containers``, ``initContainers``, ``env``, ``volumes``, ``volumeMounts``) are
+    merged by name: entries the patch does not mention are kept, so removing one entry is not possible here. An empty
     list (``[]``) is not merged: it replaces the list and clears every entry. Other
     lists are replaced. The patch is rejected with a conflict if the runtime changes
     between the read and the write; re-run it to retry. Top-level keys are restricted to ``spec`` and ``metadata``;

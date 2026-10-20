@@ -265,6 +265,19 @@ def test_patch_runtime_still_replaces_unnamed_and_empty_lists(mock_k8s_apis):
     assert api.patch_cluster_custom_object.call_args.kwargs["body"] == patch_body
 
 
+def test_patch_runtime_replaces_named_lists_under_unsupported_keys(mock_k8s_apis):
+    api = mock_k8s_apis["custom"]
+    current = _runtime_with_jobs()
+    current["spec"]["other"] = [{"name": "a"}, {"name": "b"}]
+    api.get_cluster_custom_object.return_value = current
+    api.patch_cluster_custom_object.return_value = {"metadata": {}}
+    patch_body = {"spec": {"other": [{"name": "a", "x": 1}]}}
+
+    verify_tool_success(patch_runtime("torchtune-llama", patch=patch_body, confirmed=True))
+
+    assert api.patch_cluster_custom_object.call_args.kwargs["body"] == patch_body
+
+
 def test_patch_runtime_pins_resource_version_and_reports_conflict(mock_k8s_apis):
     api = mock_k8s_apis["custom"]
     current = _runtime_with_jobs()
