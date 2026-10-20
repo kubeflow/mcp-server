@@ -173,12 +173,15 @@ def test_runtime_tools_accept_dotted_runtime_names(good_name, mock_k8s_apis):
 # ─── Runtime CRUD ───────────────────────────────────────────────────────────
 
 
-def test_patch_runtime_confirmed_applies_strategic_patch(mock_k8s_apis):
+def test_patch_runtime_confirmed_applies_merge_patch(mock_k8s_apis):
     api = mock_k8s_apis["custom"]
     api.patch_cluster_custom_object.return_value = {
         "metadata": {"resourceVersion": "123"},
     }
-    patch_body = {"spec": {"template": {"spec": {"numNodes": 2}}}}
+    patch_body = {
+        "metadata": {"resourceVersion": "122"},
+        "spec": {"template": {"spec": {"numNodes": 2}}},
+    }
 
     result = patch_runtime("torchtune-llama", patch=patch_body, confirmed=True)
 
@@ -202,7 +205,7 @@ def test_patch_runtime_invalid_runtime_name_returns_not_found(mock_k8s_apis):
 
     result = patch_runtime(
         "missing-runtime",
-        patch={"spec": {"labels": {"env": "test"}}},
+        patch={"metadata": {"resourceVersion": "1"}, "spec": {"labels": {"env": "test"}}},
         confirmed=True,
     )
 
@@ -326,9 +329,40 @@ def test_patch_runtime_non_conflict_failure_stays_kubernetes_error(mock_k8s_apis
     api = mock_k8s_apis["custom"]
     api.patch_cluster_custom_object.side_effect = ApiException(status=500, reason="Boom")
 
-    result = patch_runtime("torchtune-llama", patch={"spec": {"template": {}}}, confirmed=True)
+    result = patch_runtime(
+        "torchtune-llama",
+        patch={"metadata": {"resourceVersion": "41"}, "spec": {"template": {}}},
+        confirmed=True,
+    )
 
     verify_tool_error(result, error_code=KUBERNETES_ERROR)
+
+
+@pytest.mark.parametrize(
+    "patch_body",
+    [
+        {"spec": {"template": {}}},
+        {"metadata": {"labels": {"team": "ml"}}, "spec": {"template": {}}},
+        {"metadata": {"resourceVersion": ""}, "spec": {"template": {}}},
+    ],
+    ids=["no-metadata", "metadata-without-version", "empty-version"],
+)
+def test_patch_runtime_confirmed_without_resource_version_is_refused(mock_k8s_apis, patch_body):
+    """Without a version the patch would overwrite whatever changed since the preview."""
+    api = mock_k8s_apis["custom"]
+    api.get_cluster_custom_object.return_value = {"metadata": {"resourceVersion": "41"}}
+
+    preview = verify_tool_success(patch_runtime("torchtune-llama", patch=patch_body))
+    assert preview["resource_version"] == "41"
+
+    # Someone else changes the runtime before the caller confirms.
+    api.get_cluster_custom_object.return_value = {"metadata": {"resourceVersion": "42"}}
+    result = patch_runtime("torchtune-llama", patch=patch_body, confirmed=True)
+
+    error = verify_tool_error(result, error_code=VALIDATION_ERROR)
+    assert "metadata.resourceVersion" in error["error"]
+    assert "resource_version" in error["hint"]
+    api.patch_cluster_custom_object.assert_not_called()
 
 
 def test_delete_runtime_preview_lists_dependent_trainjobs(mock_k8s_apis):

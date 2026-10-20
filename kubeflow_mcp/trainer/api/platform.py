@@ -334,19 +334,20 @@ def patch_runtime(
     patch: dict[str, Any] | None = None,
     confirmed: bool = False,
 ) -> dict[str, Any]:
-    """Strategic merge patch on a ClusterTrainingRuntime.
+    """JSON merge patch on a ClusterTrainingRuntime.
 
     Use to update images, add volumes, change defaults without full replacement.
     Top-level keys are restricted to ``spec`` and ``metadata``; deep structure
     is validated by the K8s API. Intended for platform-admin persona only.
 
-    The preview returns the runtime's current ``resource_version``. Put it in the
-    patch as ``metadata.resourceVersion`` to make the patch fail with ``CONFLICT``
-    instead of overwriting a change made by someone else in the meantime.
+    The preview returns the runtime's current ``resource_version``. A confirmed
+    patch must carry it as ``metadata.resourceVersion``: if the runtime changed
+    since the preview, the patch fails with ``CONFLICT`` instead of silently
+    overwriting someone else's change.
 
     Args:
         name: ClusterTrainingRuntime name.
-        patch: Strategic merge patch dict. Allowed top-level keys: spec, metadata.
+        patch: JSON merge patch dict. Allowed top-level keys: spec, metadata.
         confirmed: Must be True to apply. False returns a preview.
 
     Returns:
@@ -370,6 +371,16 @@ def patch_runtime(
             error_code=ErrorCode.VALIDATION_ERROR,
         ).model_dump()
 
+    if confirmed and not (patch.get("metadata") or {}).get("resourceVersion"):
+        return ToolError(
+            error="A confirmed patch must include metadata.resourceVersion",
+            error_code=ErrorCode.VALIDATION_ERROR,
+            hint=(
+                "Call patch_runtime with confirmed=False to get the current resource_version, "
+                "then add it to the patch as metadata.resourceVersion."
+            ),
+        ).model_dump()
+
     if not confirmed:
         preview: dict[str, Any] = {
             "action": "preview",
@@ -381,8 +392,8 @@ def patch_runtime(
         if resource_version:
             preview["resource_version"] = resource_version
             preview["hint"] = (
-                "To avoid overwriting a concurrent change, add "
-                f'"metadata": {{"resourceVersion": "{resource_version}"}} to the patch.'
+                f'Add "metadata": {{"resourceVersion": "{resource_version}"}} to the patch '
+                "before confirming, so a concurrent change returns CONFLICT."
             )
         return ToolResponse(data=preview).model_dump()
 
