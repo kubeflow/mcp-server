@@ -265,6 +265,23 @@ def test_patch_runtime_still_replaces_unnamed_and_empty_lists(mock_k8s_apis):
     assert api.patch_cluster_custom_object.call_args.kwargs["body"] == patch_body
 
 
+def test_patch_runtime_pins_resource_version_and_reports_conflict(mock_k8s_apis):
+    api = mock_k8s_apis["custom"]
+    current = _runtime_with_jobs()
+    current["metadata"] = {"resourceVersion": "7"}
+    api.get_cluster_custom_object.return_value = current
+    api.patch_cluster_custom_object.side_effect = ApiException(status=409, reason="Conflict")
+
+    result = patch_runtime(
+        "torchtune-llama", patch={"metadata": {"labels": {"a": "b"}}}, confirmed=True
+    )
+
+    body = api.patch_cluster_custom_object.call_args.kwargs["body"]
+    assert body["metadata"] == {"labels": {"a": "b"}, "resourceVersion": "7"}
+    error = verify_tool_error(result, error_code=KUBERNETES_ERROR)
+    assert "changed while patching" in error["error"]
+
+
 def test_patch_runtime_missing_runtime_is_not_patched(mock_k8s_apis):
     api = mock_k8s_apis["custom"]
     api.get_cluster_custom_object.side_effect = ApiException(status=404, reason="Not Found")

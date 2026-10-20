@@ -355,8 +355,10 @@ def patch_runtime(
     Use to update images, add volumes, change defaults without full replacement.
     Lists whose entries all carry a ``name`` (``replicatedJobs``, ``containers``,
     ``env``, ``volumes``, ``volumeMounts``) are merged by name: entries the patch
-    does not mention are kept, so removing one entry is not possible here. Other
-    lists are replaced. Top-level keys are restricted to ``spec`` and ``metadata``;
+    does not mention are kept, so removing one entry is not possible here. An empty
+    list (``[]``) is not merged: it replaces the list and clears every entry. Other
+    lists are replaced. The patch is rejected with a conflict if the runtime changes
+    between the read and the write; re-run it to retry. Top-level keys are restricted to ``spec`` and ``metadata``;
     deep structure is validated by the K8s API. Intended for platform-admin
     persona only.
 
@@ -405,12 +407,17 @@ def patch_runtime(
             name=name,
             _request_timeout=mcp_utils.K8S_TIMEOUT,
         )
+        body = _expand_named_lists(current, patch)
+        resource_version = current.get("metadata", {}).get("resourceVersion")
+        if resource_version:
+            # Makes the API server answer 409 if the runtime changed since the read above.
+            body.setdefault("metadata", {})["resourceVersion"] = resource_version
         result = api.patch_cluster_custom_object(
             group=trainer_constants.GROUP,
             version=trainer_constants.VERSION,
             plural="clustertrainingruntimes",
             name=name,
-            body=_expand_named_lists(current, patch),
+            body=body,
             _request_timeout=mcp_utils.K8S_TIMEOUT,
         )
 
@@ -429,6 +436,16 @@ def patch_runtime(
             return ToolError(
                 error=f"ClusterTrainingRuntime '{name}' not found",
                 error_code=ErrorCode.RESOURCE_NOT_FOUND,
+            ).model_dump()
+        if getattr(e, "status", None) == 409:
+            return ToolError(
+                error=f"ClusterTrainingRuntime '{name}' changed while patching",
+                error_code=ErrorCode.KUBERNETES_ERROR,
+                details={
+                    **exception_details(e),
+                    "hint": "Another update landed after the runtime was read; "
+                    "re-run patch_runtime to merge against the latest version",
+                },
             ).model_dump()
         return ToolError(
             error=str(e),
