@@ -88,24 +88,41 @@ jobs:
             type=raw,value=latest,enable=${{ steps.ver.outputs.stable == 'true' }}
 
       # Scan before anything is pushed, so a vulnerable image never reaches GHCR.
-      # A multi-platform build cannot be loaded into the local Docker daemon, so a
-      # linux/amd64 copy is built (from the same cache) just for the scan.
+      # A multi-platform build cannot be loaded into the local Docker daemon, so
+      # each published platform is built (from the same cache) into a tarball and
+      # scanned on its own. Blocks a release on fixable CRITICAL CVEs in either
+      # platform; on pull requests it only reports.
       - name: Build image for scanning (linux/amd64)
         uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64
-          load: true
-          push: false
-          tags: kubeflow-mcp:scan
+          outputs: type=docker,dest=${{ runner.temp }}/scan-amd64.tar
           build-args: VERSION=${{ inputs.version }}
           cache-from: type=gha
 
-      # Blocks a release on fixable CRITICAL CVEs; on pull requests it only reports.
-      - name: Scan image for critical CVEs (Trivy)
+      - name: Scan linux/amd64 image for critical CVEs (Trivy)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          image-ref: kubeflow-mcp:scan
+          input: ${{ runner.temp }}/scan-amd64.tar
+          format: table
+          exit-code: ${{ steps.ver.outputs.push == 'true' && '1' || '0' }}
+          severity: CRITICAL
+          ignore-unfixed: true
+
+      - name: Build image for scanning (linux/arm64)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/arm64
+          outputs: type=docker,dest=${{ runner.temp }}/scan-arm64.tar
+          build-args: VERSION=${{ inputs.version }}
+          cache-from: type=gha
+
+      - name: Scan linux/arm64 image for critical CVEs (Trivy)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          input: ${{ runner.temp }}/scan-arm64.tar
           format: table
           exit-code: ${{ steps.ver.outputs.push == 'true' && '1' || '0' }}
           severity: CRITICAL

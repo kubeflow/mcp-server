@@ -101,7 +101,7 @@ The release workflow runs these checks. None of them need extra secrets.
 | Check | Where | Blocks the release? |
 |---|---|---|
 | OSV-Scanner on `uv.lock` | `release.yaml`, build job | No. Findings go to the job summary as a warning. |
-| Trivy image scan (fixable `CRITICAL` CVEs) | `docker-publish.yaml`, before the push | Yes. On pull requests it only reports. |
+| Trivy image scan (fixable `CRITICAL` CVEs), `linux/amd64` and `linux/arm64` | `docker-publish.yaml`, before the push | Yes. On pull requests it only reports. |
 | SBOM and SLSA provenance (BuildKit) | Stored in GHCR with the image | No |
 | GitHub artifact attestation for the image | `actions/attest-build-provenance`, verified with `gh attestation verify` in the same job | Yes, if verification fails |
 | PyPI attestations | Uploaded by `pypa/gh-action-pypi-publish` with trusted publishing | No |
