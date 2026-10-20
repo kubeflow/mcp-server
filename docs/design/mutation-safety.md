@@ -23,10 +23,14 @@ See also: [CONVENTIONS.md](../CONVENTIONS.md) for module layout and naming,
 
 ## Order of checks
 
-A mutating call goes through these layers. The authorization checks (exposure, namespace
-policy and ownership) fail closed: if they cannot decide, the call is refused. Some
-informational checks are best effort and do not block; see
-[Best-effort checks](#best-effort-checks).
+This is the intended order for a mutating call. Not every tool follows it yet:
+`fine_tune()` checks namespace policy before validating its other inputs, and the
+training tools still run some input checks after the namespace check (#319 moves the
+image check earlier). See the known gaps below.
+
+The authorization checks (exposure, namespace policy and ownership) fail closed: if they
+cannot decide, the call is refused. Some informational checks are best effort and do not
+block; see [Best-effort checks](#best-effort-checks).
 
 1. **Exposure.** The tool is only registered if the persona allows it
    (`get_allowed_tools`), the policy file's `allow`/`deny` keep it
@@ -44,7 +48,9 @@ informational checks are best effort and do not block; see
    one is `VALIDATION_ERROR`. If ownership cannot be read, the call is refused.
 5. **Confirm gate.** With `confirmed=False` (the default) the tool returns a preview and
    changes nothing. Only `confirmed=True` executes. Steps 1 to 4 run before the preview,
-   so a preview never promises an action that would then be refused.
+   so a preview means those checks passed when it was generated. The confirmed call can
+   still be refused later, for example by RBAC or an admission policy (see below), or
+   because the resource changed in between.
 6. **Execution and audit.** Every call is wrapped by `_audit_wrap`: rate limit, circuit
    breaker, an audit log entry with masked parameters, and a trace span. Kubernetes errors
    are returned as `ToolError` with a stable `error_code`, never as a traceback.
@@ -102,7 +108,13 @@ call that passed all of the above, and that denial should be reported as
 5. **A failed dependency check does not block `delete_runtime`.** See
    [Best-effort checks](#best-effort-checks). #340 fixes what the preview reports; the
    confirmed delete still proceeds.
-6. **Persona state is process-global.** `get_effective_persona()` reads a global set at
+6. **Not every tool validates input before the namespace check.** `fine_tune()` calls
+   `check_namespace_allowed()` before validating its name, dtype, model and dataset
+   references and bounds. With an allowlist and no namespace, that check resolves the
+   default through the Trainer SDK, so malformed input can trigger an SDK call before it
+   is rejected. #318 and #319 fix this order for `run_custom_training` and
+   `run_container_training`.
+7. **Persona state is process-global.** `get_effective_persona()` reads a global set at
    startup, which matters for the ownership check when several servers share a process.
    #348 scopes it per server.
 
