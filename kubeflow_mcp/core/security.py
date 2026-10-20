@@ -107,6 +107,71 @@ def validate_k8s_subdomain_name(name: str, field: str = "name") -> ToolError | N
     return None
 
 
+# Every character a valid image reference can contain, digests included.
+_IMAGE_REFERENCE_CHARS = re.compile(r"[A-Za-z0-9._:/@+=-]+")
+_IMAGE_DIGEST = re.compile(r"[a-z0-9]+(?:[+._-][a-z0-9]+)*:[A-Za-z0-9=_-]+")
+
+
+def validate_image_reference(image: str | None, field: str = "image") -> ToolError | None:
+    """Reject empty, whitespace-only and clearly malformed container image references.
+
+    This deliberately does not enforce the full OCI grammar, which is easy to get
+    wrong (e.g. uppercase is legal in a registry host but not in a repository path).
+    It only catches references Kubernetes could never pull, and keeps valid forms
+    such as ``localhost:5000/a/b:tag`` and ``img:tag@sha256:...`` working.
+    ``None`` is valid: the tool then uses the runtime's default image.
+
+    Returns ToolError if invalid, None if valid.
+    """
+    if image is None:
+        return None
+
+    def _invalid(reason: str) -> ToolError:
+        return ToolError(
+            error=f"{field} {reason}",
+            error_code=ErrorCode.VALIDATION_ERROR,
+            details={"value": image},
+        )
+
+    if not isinstance(image, str) or not image.strip():
+        return _invalid("cannot be empty")
+    if any(ch.isspace() for ch in image):
+        return _invalid("must not contain whitespace")
+    if not _IMAGE_REFERENCE_CHARS.fullmatch(image):
+        return _invalid("contains characters not allowed in an image reference")
+
+    name, has_digest, digest = image.partition("@")
+    if has_digest:
+        if not _IMAGE_DIGEST.fullmatch(digest):
+            return _invalid("has an invalid digest (expected e.g. 'img@sha256:<hex>')")
+        algo, _, h = digest.partition(":")
+        if algo == "sha256" and not re.fullmatch(r"[a-fA-F0-9]{64}", h):
+            return _invalid("has an invalid SHA-256 digest (expected 64 hex characters)")
+
+    if not name:
+        return _invalid("is missing the image name before '@'")
+    if name[:1] in "-./:" or name[-1:] in "/:":
+        return _invalid("must not start with a separator or end with '/' or ':'")
+    if "//" in name or name.split("/")[-1].count(":") > 1:
+        return _invalid("has an empty path component or tag")
+
+    # Docker/OCI requires the repository path to be lowercase, while registry hosts
+    # (domain or port) may contain uppercase. Tags can also contain uppercase.
+    if "/" in name:
+        first_part, rest = name.split("/", 1)
+        if "." in first_part or ":" in first_part or first_part == "localhost":
+            repo_path = rest.split(":", 1)[0]
+        else:
+            repo_path = name.split(":", 1)[0]
+    else:
+        repo_path = name.split(":", 1)[0]
+
+    if any(ch.isupper() for ch in repo_path):
+        return _invalid("repository path must be lowercase")
+
+    return None
+
+
 def validate_namespace(namespace: str) -> ToolError | None:
     """Validate namespace name format."""
     return validate_k8s_name(namespace, "namespace")
