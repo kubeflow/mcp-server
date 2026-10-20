@@ -268,7 +268,7 @@ def test_execute_tool_stale_probe_does_not_advance_new_half_open_window():
 
     def stale_test_tool(name: str) -> dict:
         breaker.state = CircuitState.OPEN
-        breaker.last_failure_time = 0.0
+        breaker.last_failure_time = float("-inf")
         breaker.acquire()
         return {"success": True, "data": {"name": name}}
 
