@@ -15,6 +15,7 @@
 """Health check tools for server monitoring."""
 
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -121,6 +122,237 @@ def get_server_logs(
             error=str(e),
             error_code=ErrorCode.SDK_ERROR,
         ).model_dump()
+
+
+@dataclass
+class ReadinessDiagnostic:
+    """A single readiness check result."""
+
+    check: str
+    status: str  # "pass", "fail", "warn"
+    message: str
+    category: str = ""
+    resource: str = ""
+    verb: str = ""
+    namespace: str = ""
+
+    def to_dict(self) -> dict[str, str]:
+        """Convert diagnostic result to a JSON-serializable dictionary."""
+        d: dict[str, str] = {
+            "check": self.check,
+            "status": self.status,
+            "message": self.message,
+        }
+        if self.category:
+            d["category"] = self.category
+        if self.resource:
+            d["resource"] = self.resource
+        if self.verb:
+            d["verb"] = self.verb
+        if self.namespace:
+            d["namespace"] = self.namespace
+        return d
+
+
+def _check_rbac_permission(
+    auth_api: Any,
+    resource: str,
+    verb: str,
+    group: str,
+    namespace: str,
+    timeout: int,
+) -> ReadinessDiagnostic:
+    """Check a single RBAC permission via SelfSubjectAccessReview."""
+    from kubernetes.client import (
+        V1ResourceAttributes,
+        V1SelfSubjectAccessReview,
+        V1SelfSubjectAccessReviewSpec,
+    )
+
+    check_name = f"rbac:{verb}:{resource}"
+    if namespace:
+        check_name += f":{namespace}"
+
+    try:
+        review = V1SelfSubjectAccessReview(
+            spec=V1SelfSubjectAccessReviewSpec(
+                resource_attributes=V1ResourceAttributes(
+                    namespace=namespace or "",
+                    verb=verb,
+                    group=group,
+                    resource=resource,
+                )
+            )
+        )
+        result = auth_api.create_self_subject_access_review(
+            body=review,
+            _request_timeout=timeout,
+        )
+        status_obj = getattr(result, "status", None)
+        if getattr(status_obj, "allowed", False):
+            scope_desc = f" in namespace '{namespace}'" if namespace else " (cluster-scoped)"
+            return ReadinessDiagnostic(
+                check=check_name,
+                status="pass",
+                message=f"Permission granted: {verb} {resource}{scope_desc}",
+                resource=resource,
+                verb=verb,
+                namespace=namespace,
+            )
+        reason = getattr(status_obj, "reason", None) or "denied by RBAC policy"
+        scope_desc = f" in namespace '{namespace}'" if namespace else " (cluster-scoped)"
+        return ReadinessDiagnostic(
+            check=check_name,
+            status="fail",
+            message=f"Permission denied: {verb} {resource}{scope_desc} — {reason}",
+            category="permission_denied",
+            resource=resource,
+            verb=verb,
+            namespace=namespace,
+        )
+    except Exception as e:
+        logger.warning("RBAC check failed for %s %s: %s", verb, resource, e)
+        return ReadinessDiagnostic(
+            check=check_name,
+            status="warn",
+            message=f"Could not verify permission: {verb} {resource}",
+            category="unknown",
+            resource=resource,
+            verb=verb,
+            namespace=namespace,
+        )
+
+
+def run_readiness_diagnostics() -> tuple[bool, list[ReadinessDiagnostic]]:
+    """Run startup readiness diagnostics.
+
+    Evaluates:
+      1. Kubernetes API reachability (list namespaces)
+      2. Kubeflow Trainer CRD presence and supported version
+      3. Essential RBAC permissions (trainjobs list/create, runtimes list)
+
+    Returns:
+        tuple[bool, list[ReadinessDiagnostic]]: (all_passed, diagnostics_list)
+    """
+    from kubeflow_mcp.common.constants import (
+        MIN_TRAINER_CRD_VERSION,
+        TRAINER_CRD_GROUP,
+        TRAINER_CRD_NAME,
+    )
+    from kubeflow_mcp.common.utils import (
+        K8S_TIMEOUT,
+        get_apiextensions_api,
+        get_authorization_v1_api,
+        get_core_v1_api,
+    )
+
+    diagnostics: list[ReadinessDiagnostic] = []
+
+    # 1. Kubernetes API reachability
+    try:
+        v1 = get_core_v1_api()
+        v1.list_namespace(limit=1, _request_timeout=K8S_TIMEOUT)
+        diagnostics.append(
+            ReadinessDiagnostic(
+                check="k8s_api",
+                status="pass",
+                message="Kubernetes API reachable",
+                resource="namespaces",
+                verb="list",
+            )
+        )
+    except Exception as e:
+        logger.warning("Readiness: K8s API unreachable: %s", e)
+        diagnostics.append(
+            ReadinessDiagnostic(
+                check="k8s_api",
+                status="fail",
+                message="Kubernetes API unreachable",
+                category="api_unreachable",
+                resource="namespaces",
+                verb="list",
+            )
+        )
+        # Short-circuit: do not attempt downstream CRD or RBAC checks if API is down
+        return False, diagnostics
+
+    # 2. Trainer CRD existence and supported version
+    try:
+        api_ext = get_apiextensions_api()
+        crd = api_ext.read_custom_resource_definition(
+            TRAINER_CRD_NAME,
+            _request_timeout=K8S_TIMEOUT,
+        )
+        versions = getattr(getattr(crd, "spec", None), "versions", []) or []
+        served = [v.name for v in versions if getattr(v, "served", False)]
+        if MIN_TRAINER_CRD_VERSION in served:
+            diagnostics.append(
+                ReadinessDiagnostic(
+                    check="trainer_crd",
+                    status="pass",
+                    message=f"CRD {TRAINER_CRD_NAME} serves {MIN_TRAINER_CRD_VERSION}",
+                    resource=TRAINER_CRD_NAME,
+                )
+            )
+        else:
+            diagnostics.append(
+                ReadinessDiagnostic(
+                    check="trainer_crd",
+                    status="fail",
+                    message=(
+                        f"CRD {TRAINER_CRD_NAME} does not serve {MIN_TRAINER_CRD_VERSION}"
+                        f" (served: {', '.join(served) if served else 'none'})"
+                    ),
+                    category="crd_version_unsupported",
+                    resource=TRAINER_CRD_NAME,
+                )
+            )
+    except Exception as e:
+        logger.warning("Readiness: Trainer CRD check failed: %s", e)
+        diagnostics.append(
+            ReadinessDiagnostic(
+                check="trainer_crd",
+                status="fail",
+                message=f"CRD {TRAINER_CRD_NAME} not found or not accessible",
+                category="crd_missing",
+                resource=TRAINER_CRD_NAME,
+            )
+        )
+
+    # 3. RBAC permission checks
+    try:
+        auth_api = get_authorization_v1_api()
+    except Exception as e:
+        logger.warning("Readiness: cannot create AuthorizationV1Api: %s", e)
+        diagnostics.append(
+            ReadinessDiagnostic(
+                check="rbac",
+                status="warn",
+                message="Could not initialize authorization API for RBAC checks",
+                category="unknown",
+            )
+        )
+        all_passed = all(d.status != "fail" for d in diagnostics)
+        return all_passed, diagnostics
+
+    # Resolve effective namespace
+    try:
+        from kubeflow_mcp.common.utils import get_trainer_effective_namespace
+
+        namespace = get_trainer_effective_namespace()
+    except Exception:
+        namespace = "default"
+
+    rbac_checks = [
+        ("trainjobs", "list", TRAINER_CRD_GROUP, namespace),
+        ("trainjobs", "create", TRAINER_CRD_GROUP, namespace),
+        ("clustertrainingruntimes", "list", TRAINER_CRD_GROUP, ""),
+    ]
+    for resource, verb, group, ns in rbac_checks:
+        diagnostics.append(_check_rbac_permission(auth_api, resource, verb, group, ns, K8S_TIMEOUT))
+
+    all_passed = all(d.status != "fail" for d in diagnostics)
+    return all_passed, diagnostics
 
 
 HEALTH_TOOLS = [health_check, get_server_logs]

@@ -44,6 +44,7 @@ from kubeflow_mcp.core.health import (
     HEALTH_TOOL_ANNOTATIONS,
     HEALTH_TOOL_DESCRIPTIONS,
     HEALTH_TOOLS,
+    run_readiness_diagnostics,
 )
 from kubeflow_mcp.core.http_edge import register_probe_routes
 from kubeflow_mcp.core.logging import with_correlation_id
@@ -540,6 +541,18 @@ def create_server(  # noqa: C901
 
     # Register MCP resources from client modules (all resources, always)
     resources_ready = register_resources(mcp, loaded_modules)
-    register_probe_routes(mcp, is_ready=clients_ready and resources_ready)
+
+    diagnostics_ok = True
+    diagnostics = None
+    if clients_ready and resources_ready:
+        diagnostics_ok, diagnostics = run_readiness_diagnostics()
+
+    server_ready = clients_ready and resources_ready and diagnostics_ok
+    failed_diagnostics = [d for d in diagnostics if d.status != "pass"] if diagnostics else None
+    register_probe_routes(
+        mcp,
+        is_ready=server_ready,
+        diagnostics=failed_diagnostics if not server_ready else None,
+    )
 
     return mcp

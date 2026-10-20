@@ -15,7 +15,8 @@
 """Tests for planning helpers: HuggingFace model ID validation and suggestions."""
 
 from types import SimpleNamespace
-from unittest.mock import patch
+from typing import Any
+from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
@@ -26,12 +27,15 @@ from tests.common import TestCase
 
 from kubeflow_mcp.common.constants import KUBEFLOW_SDK_VERSION_MIN, KUBEFLOW_SDK_VERSION_SPEC
 from kubeflow_mcp.trainer.api.planning import (
+    _check_rbac_permissions,
     _check_sdk_version,
     _estimate_from_params,
     _get_model_info_from_hf,
     _parse_k8s_version,
     _suggest_hf_model_ids,
+    check_compatibility,
     estimate_resources,
+    pre_flight,
 )
 
 
@@ -354,3 +358,177 @@ def test_estimate_resources_returns_sdk_error_for_api_failure():
 
     assert result["success"] is False
     assert result["error_code"] == "SDK_ERROR"
+
+
+# ─── RBAC Permissions and check_compatibility Tests ────────────────────────
+
+
+def test_check_rbac_permissions_pass():
+    checks: dict[str, Any] = {}
+    blockers: list[str] = []
+    mock_auth_api = MagicMock()
+    mock_review_resp = MagicMock()
+    mock_review_resp.status.allowed = True
+    mock_auth_api.create_self_subject_access_review.return_value = mock_review_resp
+
+    _check_rbac_permissions(
+        checks,
+        blockers,
+        get_authorization_v1_api=lambda: mock_auth_api,
+        namespace="kubeflow-test",
+        timeout=5,
+    )
+
+    assert "rbac" in checks
+    assert checks["rbac"]["list_trainjobs"]["status"] == "pass"
+    assert checks["rbac"]["list_trainjobs"]["namespace"] == "kubeflow-test"
+    assert checks["rbac"]["create_trainjobs"]["status"] == "pass"
+    assert checks["rbac"]["list_clustertrainingruntimes"]["status"] == "pass"
+    assert checks["rbac"]["list_clustertrainingruntimes"]["namespace"] == ""
+    assert blockers == []
+
+
+def test_check_rbac_permissions_denied():
+    checks: dict[str, Any] = {}
+    blockers: list[str] = []
+    mock_auth_api = MagicMock()
+    mock_review_resp = MagicMock()
+    mock_review_resp.status.allowed = False
+    mock_review_resp.status.reason = "User cannot list trainjobs"
+    mock_auth_api.create_self_subject_access_review.return_value = mock_review_resp
+
+    _check_rbac_permissions(
+        checks,
+        blockers,
+        get_authorization_v1_api=lambda: mock_auth_api,
+        namespace="kubeflow-test",
+        timeout=5,
+    )
+
+    assert "rbac" in checks
+    assert checks["rbac"]["list_trainjobs"]["status"] == "fail"
+    assert checks["rbac"]["list_trainjobs"]["reason"] == "User cannot list trainjobs"
+    assert len(blockers) == 3
+    assert (
+        "Missing permission: list trainer.kubeflow.org/trainjobs in namespace 'kubeflow-test'"
+        in blockers
+    )
+    assert (
+        "Missing permission: create trainer.kubeflow.org/trainjobs in namespace 'kubeflow-test'"
+        in blockers
+    )
+    assert (
+        "Missing permission: list trainer.kubeflow.org/clustertrainingruntimes (cluster-scoped)"
+        in blockers
+    )
+
+
+def test_check_rbac_permissions_error_warns():
+    checks: dict[str, Any] = {}
+    blockers: list[str] = []
+    mock_auth_api = MagicMock()
+    mock_auth_api.create_self_subject_access_review.side_effect = RuntimeError("SSAR forbidden")
+
+    _check_rbac_permissions(
+        checks,
+        blockers,
+        get_authorization_v1_api=lambda: mock_auth_api,
+        namespace="kubeflow-test",
+        timeout=5,
+    )
+
+    assert "rbac" in checks
+    assert checks["rbac"]["list_trainjobs"]["status"] == "warn"
+    assert "SSAR forbidden" in checks["rbac"]["list_trainjobs"]["error"]
+    assert blockers == []
+
+
+def test_check_rbac_permissions_factory_failure_warns():
+    checks: dict[str, Any] = {}
+    blockers: list[str] = []
+
+    def _failing_factory():
+        raise RuntimeError("Cannot construct AuthorizationV1Api")
+
+    _check_rbac_permissions(
+        checks,
+        blockers,
+        get_authorization_v1_api=_failing_factory,
+        namespace="kubeflow-test",
+        timeout=5,
+    )
+
+    assert "rbac" in checks
+    assert checks["rbac"]["authorization_api"]["status"] == "warn"
+    assert "Cannot construct AuthorizationV1Api" in checks["rbac"]["authorization_api"]["error"]
+    assert blockers == []
+
+
+def test_check_compatibility_with_rbac_denial():
+    mock_auth_api = MagicMock()
+    mock_denied = MagicMock()
+    mock_denied.status.allowed = False
+    mock_denied.status.reason = "denied"
+    mock_auth_api.create_self_subject_access_review.return_value = mock_denied
+
+    with (
+        patch("kubeflow_mcp.trainer.api.planning._check_k8s_version"),
+        patch("kubeflow_mcp.trainer.api.planning._check_trainer_crd", return_value=True),
+        patch("kubeflow_mcp.trainer.api.planning._check_sdk_version"),
+        patch("kubeflow_mcp.trainer.api.planning._detect_platform", return_value="kubernetes"),
+        patch("kubeflow_mcp.common.utils.get_authorization_v1_api", return_value=mock_auth_api),
+        patch("kubeflow_mcp.common.utils.get_trainer_effective_namespace", return_value="test-ns"),
+    ):
+        result = check_compatibility()
+
+    assert result["success"] is True
+    data = result["data"]
+    assert data["compatible"] is False
+    assert any("Missing permission" in b for b in data["blockers"])
+    assert data["checks"]["rbac"]["list_trainjobs"]["status"] == "fail"
+
+
+def test_check_compatibility_with_rbac_success():
+    mock_auth_api = MagicMock()
+    mock_allowed = MagicMock()
+    mock_allowed.status.allowed = True
+    mock_auth_api.create_self_subject_access_review.return_value = mock_allowed
+
+    with (
+        patch("kubeflow_mcp.trainer.api.planning._check_k8s_version"),
+        patch("kubeflow_mcp.trainer.api.planning._check_trainer_crd", return_value=True),
+        patch("kubeflow_mcp.trainer.api.planning._check_sdk_version"),
+        patch("kubeflow_mcp.trainer.api.planning._detect_platform", return_value="kubernetes"),
+        patch("kubeflow_mcp.common.utils.get_authorization_v1_api", return_value=mock_auth_api),
+        patch("kubeflow_mcp.common.utils.get_trainer_effective_namespace", return_value="test-ns"),
+    ):
+        result = check_compatibility()
+
+    assert result["success"] is True
+    data = result["data"]
+    assert data["compatible"] is True
+    assert data["blockers"] == []
+    assert data["checks"]["rbac"]["list_trainjobs"]["status"] == "pass"
+
+
+def test_pre_flight_with_rbac_blockers():
+    mock_auth_api = MagicMock()
+    mock_denied = MagicMock()
+    mock_denied.status.allowed = False
+    mock_denied.status.reason = "denied by RBAC policy"
+    mock_auth_api.create_self_subject_access_review.return_value = mock_denied
+
+    with (
+        patch("kubeflow_mcp.trainer.api.planning._check_k8s_version"),
+        patch("kubeflow_mcp.trainer.api.planning._check_trainer_crd", return_value=True),
+        patch("kubeflow_mcp.trainer.api.planning._check_sdk_version"),
+        patch("kubeflow_mcp.trainer.api.planning._detect_platform", return_value="kubernetes"),
+        patch("kubeflow_mcp.common.utils.get_authorization_v1_api", return_value=mock_auth_api),
+        patch("kubeflow_mcp.common.utils.get_trainer_effective_namespace", return_value="test-ns"),
+    ):
+        result = pre_flight()
+
+    assert result["success"] is True
+    data = result["data"]
+    assert data["compatibility"]["compatible"] is False
+    assert any("Blocker: Missing permission" in step for step in data["next_steps"])

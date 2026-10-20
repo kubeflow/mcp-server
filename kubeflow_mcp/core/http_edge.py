@@ -14,12 +14,24 @@
 
 """HTTP liveness and readiness probes for network transports."""
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
 from fastmcp import FastMCP
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
+if TYPE_CHECKING:
+    from kubeflow_mcp.core.health import ReadinessDiagnostic
 
-def register_probe_routes(mcp: FastMCP, *, is_ready: bool = True) -> None:
+
+def register_probe_routes(
+    mcp: FastMCP,
+    *,
+    is_ready: bool = True,
+    diagnostics: list[ReadinessDiagnostic] | None = None,
+) -> None:
     """Register unauthenticated probes on the FastMCP HTTP application."""
 
     @mcp.custom_route("/health", methods=["GET"], include_in_schema=False)
@@ -29,5 +41,10 @@ def register_probe_routes(mcp: FastMCP, *, is_ready: bool = True) -> None:
     @mcp.custom_route("/ready", methods=["GET"], include_in_schema=False)
     async def ready(_request: Request) -> Response:
         if not is_ready:
-            return JSONResponse({"status": "not_ready"}, status_code=503)
+            body: dict[str, Any] = {"status": "not_ready"}
+            if diagnostics:
+                body["diagnostics"] = [
+                    d.to_dict() if hasattr(d, "to_dict") else d for d in diagnostics
+                ]
+            return JSONResponse(body, status_code=503)
         return JSONResponse({"status": "ready"})

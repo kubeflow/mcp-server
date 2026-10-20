@@ -358,6 +358,77 @@ def _detect_platform(
         return "unknown"
 
 
+def _check_rbac_permissions(
+    checks: dict[str, dict[str, Any]],
+    blockers: list[str],
+    get_authorization_v1_api: Any,
+    namespace: str,
+    timeout: int,
+) -> None:
+    """Check RBAC permissions for core operations via SelfSubjectAccessReview."""
+    from kubernetes.client import (
+        V1ResourceAttributes,
+        V1SelfSubjectAccessReview,
+        V1SelfSubjectAccessReviewSpec,
+    )
+
+    from kubeflow_mcp.common.constants import TRAINER_CRD_GROUP
+
+    required = [
+        ("trainjobs", "list", TRAINER_CRD_GROUP, namespace),
+        ("trainjobs", "create", TRAINER_CRD_GROUP, namespace),
+        ("clustertrainingruntimes", "list", TRAINER_CRD_GROUP, ""),
+    ]
+    rbac_results: dict[str, dict[str, Any]] = {}
+    try:
+        auth_api = get_authorization_v1_api()
+        for resource, verb, group, ns in required:
+            key = f"{verb}_{resource}"
+            try:
+                review = V1SelfSubjectAccessReview(
+                    spec=V1SelfSubjectAccessReviewSpec(
+                        resource_attributes=V1ResourceAttributes(
+                            namespace=ns or "",
+                            verb=verb,
+                            group=group,
+                            resource=resource,
+                        )
+                    )
+                )
+                result = auth_api.create_self_subject_access_review(
+                    body=review,
+                    _request_timeout=timeout,
+                )
+                allowed = getattr(getattr(result, "status", None), "allowed", False)
+                if allowed:
+                    rbac_results[key] = {
+                        "status": "pass",
+                        "resource": resource,
+                        "verb": verb,
+                        "namespace": ns,
+                    }
+                else:
+                    reason = (
+                        getattr(getattr(result, "status", None), "reason", None)
+                        or "denied by RBAC policy"
+                    )
+                    rbac_results[key] = {
+                        "status": "fail",
+                        "resource": resource,
+                        "verb": verb,
+                        "namespace": ns,
+                        "reason": reason,
+                    }
+                    scope = f"in namespace '{ns}'" if ns else "(cluster-scoped)"
+                    blockers.append(f"Missing permission: {verb} {group}/{resource} {scope}")
+            except Exception as e:
+                rbac_results[key] = {"status": "warn", "error": str(e)}
+    except Exception as e:
+        rbac_results["authorization_api"] = {"status": "warn", "error": str(e)}
+
+    checks["rbac"] = rbac_results
+
+
 def check_compatibility() -> dict[str, Any]:
     """Pre-flight check: verify K8s version, Trainer CRD, installed packages, and platform.
 
@@ -371,6 +442,7 @@ def check_compatibility() -> dict[str, Any]:
         3. **CRD API version** — ``{crd_version}`` must be served
         4. **Kubeflow SDK** — ``{sdk_version}`` required
         5. **Platform detection** — identifies platform from node labels
+        6. **RBAC permissions** — verifies ServiceAccount can list/create TrainJobs and list runtimes
 
     Returns:
         dict: Response containing:
@@ -392,8 +464,10 @@ def check_compatibility() -> dict[str, Any]:
     try:
         from kubeflow_mcp.common.utils import (
             K8S_TIMEOUT,
+            get_authorization_v1_api,
             get_core_v1_api,
             get_custom_objects_api,
+            get_trainer_effective_namespace,
             get_version_api,
         )
 
@@ -405,6 +479,11 @@ def check_compatibility() -> dict[str, Any]:
         crd_installed = _check_trainer_crd(checks, blockers, get_custom_objects_api, K8S_TIMEOUT)
         _check_sdk_version(checks, blockers)
         platform = _detect_platform(checks, recommendations, get_core_v1_api, K8S_TIMEOUT)
+
+        effective_ns = get_trainer_effective_namespace()
+        _check_rbac_permissions(
+            checks, blockers, get_authorization_v1_api, effective_ns, K8S_TIMEOUT
+        )
 
         if not blockers and crd_installed:
             recommendations.append("Environment compatible — proceed with get_cluster_resources()")

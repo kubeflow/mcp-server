@@ -12,9 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from unittest.mock import patch
+
 from fastmcp import FastMCP
 from starlette.testclient import TestClient
 
+from kubeflow_mcp.core.health import ReadinessDiagnostic
 from kubeflow_mcp.core.http_edge import register_probe_routes
 from kubeflow_mcp.core.server import create_server
 
@@ -50,6 +53,96 @@ def test_ready_probe_rejects_incomplete_startup() -> None:
 
     assert response.status_code == 503
     assert response.json() == {"status": "not_ready"}
+
+
+def test_ready_probe_includes_diagnostics_on_failure() -> None:
+    diagnostics = [
+        ReadinessDiagnostic(
+            check="trainer_crd",
+            status="fail",
+            message="CRD trainjobs.trainer.kubeflow.org not found",
+            category="crd_missing",
+            resource="trainjobs.trainer.kubeflow.org",
+        ),
+        ReadinessDiagnostic(
+            check="rbac:list:trainjobs:default",
+            status="fail",
+            message="Permission denied: list trainjobs",
+            category="permission_denied",
+            resource="trainjobs",
+            verb="list",
+            namespace="default",
+        ),
+    ]
+    mcp = FastMCP("test-server")
+    register_probe_routes(mcp, is_ready=False, diagnostics=diagnostics)
+    with TestClient(mcp.http_app(transport="streamable-http")) as client:
+        response = client.get("/ready")
+
+    assert response.status_code == 503
+    data = response.json()
+    assert data["status"] == "not_ready"
+    assert len(data["diagnostics"]) == 2
+    assert data["diagnostics"][0]["category"] == "crd_missing"
+    assert data["diagnostics"][0]["resource"] == "trainjobs.trainer.kubeflow.org"
+    assert data["diagnostics"][1]["category"] == "permission_denied"
+    assert data["diagnostics"][1]["verb"] == "list"
+
+
+def test_ready_probe_backward_compatible_without_diagnostics() -> None:
+    mcp = FastMCP("test-server")
+    register_probe_routes(mcp, is_ready=False)
+    with TestClient(mcp.http_app(transport="streamable-http")) as client:
+        response = client.get("/ready")
+
+    assert response.status_code == 503
+    assert response.json() == {"status": "not_ready"}
+
+
+def test_create_server_readiness_healthy_when_k8s_ok() -> None:
+    with patch(
+        "kubeflow_mcp.core.server.run_readiness_diagnostics",
+        return_value=(
+            True,
+            [
+                ReadinessDiagnostic(
+                    check="k8s_api",
+                    status="pass",
+                    message="Kubernetes API reachable",
+                )
+            ],
+        ),
+    ):
+        mcp = create_server()
+        with TestClient(mcp.http_app(transport="streamable-http")) as client:
+            response = client.get("/ready")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ready"}
+
+
+def test_create_server_readiness_fails_with_diagnostics_when_k8s_fails() -> None:
+    failed_diag = ReadinessDiagnostic(
+        check="trainer_crd",
+        status="fail",
+        message="CRD trainjobs.trainer.kubeflow.org not found",
+        category="crd_missing",
+        resource="trainjobs.trainer.kubeflow.org",
+    )
+    with patch(
+        "kubeflow_mcp.core.server.run_readiness_diagnostics",
+        return_value=(False, [failed_diag]),
+    ):
+        mcp = create_server()
+        with TestClient(mcp.http_app(transport="streamable-http")) as client:
+            response = client.get("/ready")
+
+    assert response.status_code == 503
+    data = response.json()
+    assert data["status"] == "not_ready"
+    assert len(data["diagnostics"]) == 1
+    assert data["diagnostics"][0]["category"] == "crd_missing"
+    assert data["diagnostics"][0]["check"] == "trainer_crd"
 
 
 def test_ready_probe_rejects_unknown_configured_client() -> None:

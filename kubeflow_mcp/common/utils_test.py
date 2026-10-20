@@ -27,6 +27,7 @@ from kubeflow_mcp.common.utils import (
     OWNERSHIP_MISSING,
     OWNERSHIP_UNMANAGED,
     _get_api_client,
+    get_authorization_v1_api,
     get_core_v1_api,
     get_custom_objects_api,
     get_trainer_client_for_namespace,
@@ -209,6 +210,23 @@ class TestGetCustomObjectsApi:
         shared_client = MagicMock()
         mock_api_client.return_value = shared_client
         get_custom_objects_api()
+        mock_api_client.assert_called_once()
+
+
+class TestGetAuthorizationV1Api:
+    @patch(PATCH_GET_API_CLIENT)
+    def test_returns_authorization_v1_api_instance(self, mock_api_client):
+        mock_api_client.return_value = MagicMock()
+        result = get_authorization_v1_api()
+        from kubernetes.client import AuthorizationV1Api
+
+        assert isinstance(result, AuthorizationV1Api)
+
+    @patch(PATCH_GET_API_CLIENT)
+    def test_uses_shared_api_client(self, mock_api_client):
+        shared_client = MagicMock()
+        mock_api_client.return_value = shared_client
+        get_authorization_v1_api()
         mock_api_client.assert_called_once()
 
 

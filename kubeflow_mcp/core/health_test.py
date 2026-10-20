@@ -28,8 +28,10 @@ from kubeflow_mcp.core.health import (
     HEALTH_TOOL_ANNOTATIONS,
     HEALTH_TOOL_DESCRIPTIONS,
     HEALTH_TOOLS,
+    ReadinessDiagnostic,
     get_server_logs,
     health_check,
+    run_readiness_diagnostics,
 )
 from kubeflow_mcp.core.policy import get_effective_persona, set_effective_persona
 from kubeflow_mcp.core.server import create_server
@@ -235,3 +237,247 @@ class TestHealthMetadata:
 
         finally:
             set_effective_persona(previous_persona)
+
+
+class TestReadinessDiagnostics:
+    """Tests for ReadinessDiagnostic and run_readiness_diagnostics."""
+
+    def test_readiness_diagnostic_to_dict(self) -> None:
+        diag = ReadinessDiagnostic(
+            check="rbac:list:trainjobs:default",
+            status="fail",
+            message="Permission denied",
+            category="permission_denied",
+            resource="trainjobs",
+            verb="list",
+            namespace="default",
+        )
+        data = diag.to_dict()
+        assert data == {
+            "check": "rbac:list:trainjobs:default",
+            "status": "fail",
+            "message": "Permission denied",
+            "category": "permission_denied",
+            "resource": "trainjobs",
+            "verb": "list",
+            "namespace": "default",
+        }
+
+    def test_readiness_diagnostic_to_dict_minimal(self) -> None:
+        diag = ReadinessDiagnostic(
+            check="k8s_api",
+            status="pass",
+            message="Kubernetes API reachable",
+        )
+        data = diag.to_dict()
+        assert data == {
+            "check": "k8s_api",
+            "status": "pass",
+            "message": "Kubernetes API reachable",
+        }
+
+    @patch("kubeflow_mcp.common.utils.get_trainer_effective_namespace", return_value="kubeflow")
+    @patch("kubeflow_mcp.common.utils.get_authorization_v1_api")
+    @patch("kubeflow_mcp.common.utils.get_apiextensions_api")
+    @patch("kubeflow_mcp.common.utils.get_core_v1_api")
+    def test_all_pass_when_healthy(
+        self,
+        mock_core: MagicMock,
+        mock_apiext: MagicMock,
+        mock_auth: MagicMock,
+        mock_ns: MagicMock,
+    ) -> None:
+        # 1. API reachable
+        mock_v1 = MagicMock()
+        mock_core.return_value = mock_v1
+
+        # 2. CRD exists serving v1alpha1
+        mock_crd = MagicMock()
+        version_mock = MagicMock()
+        version_mock.name = "v1alpha1"
+        version_mock.served = True
+        mock_crd.spec.versions = [version_mock]
+        mock_apiext.return_value.read_custom_resource_definition.return_value = mock_crd
+
+        # 3. RBAC checks allowed
+        mock_ssar = MagicMock()
+        mock_ssar.status.allowed = True
+        mock_auth.return_value.create_self_subject_access_review.return_value = mock_ssar
+
+        ok, diagnostics = run_readiness_diagnostics()
+
+        assert ok is True
+        assert len(diagnostics) == 5  # 1 api + 1 crd + 3 rbac
+        assert all(d.status == "pass" for d in diagnostics)
+        assert diagnostics[0].check == "k8s_api"
+        assert diagnostics[1].check == "trainer_crd"
+        assert diagnostics[2].check == "rbac:list:trainjobs:kubeflow"
+        assert diagnostics[3].check == "rbac:create:trainjobs:kubeflow"
+        assert diagnostics[4].check == "rbac:list:clustertrainingruntimes"
+
+    @patch("kubeflow_mcp.common.utils.get_authorization_v1_api")
+    @patch("kubeflow_mcp.common.utils.get_apiextensions_api")
+    @patch("kubeflow_mcp.common.utils.get_core_v1_api")
+    def test_api_unreachable_short_circuits(
+        self,
+        mock_core: MagicMock,
+        mock_apiext: MagicMock,
+        mock_auth: MagicMock,
+    ) -> None:
+        mock_core.return_value.list_namespace.side_effect = ConnectionError("Connection refused")
+
+        ok, diagnostics = run_readiness_diagnostics()
+
+        assert ok is False
+        assert len(diagnostics) == 1
+        assert diagnostics[0].check == "k8s_api"
+        assert diagnostics[0].status == "fail"
+        assert diagnostics[0].category == "api_unreachable"
+        # Verify CRD and Auth APIs were not touched
+        mock_apiext.assert_not_called()
+        mock_auth.assert_not_called()
+
+    @patch("kubeflow_mcp.common.utils.get_trainer_effective_namespace", return_value="default")
+    @patch("kubeflow_mcp.common.utils.get_authorization_v1_api")
+    @patch("kubeflow_mcp.common.utils.get_apiextensions_api")
+    @patch("kubeflow_mcp.common.utils.get_core_v1_api")
+    def test_crd_missing(
+        self,
+        mock_core: MagicMock,
+        mock_apiext: MagicMock,
+        mock_auth: MagicMock,
+        mock_ns: MagicMock,
+    ) -> None:
+        mock_apiext.return_value.read_custom_resource_definition.side_effect = Exception(
+            "404 Not Found"
+        )
+        mock_auth.return_value.create_self_subject_access_review.return_value = MagicMock(
+            status=MagicMock(allowed=True)
+        )
+
+        ok, diagnostics = run_readiness_diagnostics()
+
+        assert ok is False
+        crd_diag = next(d for d in diagnostics if d.check == "trainer_crd")
+        assert crd_diag.status == "fail"
+        assert crd_diag.category == "crd_missing"
+
+    @patch("kubeflow_mcp.common.utils.get_trainer_effective_namespace", return_value="default")
+    @patch("kubeflow_mcp.common.utils.get_authorization_v1_api")
+    @patch("kubeflow_mcp.common.utils.get_apiextensions_api")
+    @patch("kubeflow_mcp.common.utils.get_core_v1_api")
+    def test_crd_version_unsupported(
+        self,
+        mock_core: MagicMock,
+        mock_apiext: MagicMock,
+        mock_auth: MagicMock,
+        mock_ns: MagicMock,
+    ) -> None:
+        mock_crd = MagicMock()
+        v_mock = MagicMock()
+        v_mock.name = "v1beta1"
+        v_mock.served = True
+        mock_crd.spec.versions = [v_mock]
+        mock_apiext.return_value.read_custom_resource_definition.return_value = mock_crd
+        mock_auth.return_value.create_self_subject_access_review.return_value = MagicMock(
+            status=MagicMock(allowed=True)
+        )
+
+        ok, diagnostics = run_readiness_diagnostics()
+
+        assert ok is False
+        crd_diag = next(d for d in diagnostics if d.check == "trainer_crd")
+        assert crd_diag.status == "fail"
+        assert crd_diag.category == "crd_version_unsupported"
+
+    @patch("kubeflow_mcp.common.utils.get_trainer_effective_namespace", return_value="default")
+    @patch("kubeflow_mcp.common.utils.get_authorization_v1_api")
+    @patch("kubeflow_mcp.common.utils.get_apiextensions_api")
+    @patch("kubeflow_mcp.common.utils.get_core_v1_api")
+    def test_rbac_denied(
+        self,
+        mock_core: MagicMock,
+        mock_apiext: MagicMock,
+        mock_auth: MagicMock,
+        mock_ns: MagicMock,
+    ) -> None:
+        mock_crd = MagicMock()
+        v_mock = MagicMock()
+        v_mock.name = "v1alpha1"
+        v_mock.served = True
+        mock_crd.spec.versions = [v_mock]
+        mock_apiext.return_value.read_custom_resource_definition.return_value = mock_crd
+
+        mock_ssar = MagicMock()
+        mock_ssar.status.allowed = False
+        mock_ssar.status.reason = "User cannot create trainjobs"
+        mock_auth.return_value.create_self_subject_access_review.return_value = mock_ssar
+
+        ok, diagnostics = run_readiness_diagnostics()
+
+        assert ok is False
+        rbac_denied = [d for d in diagnostics if d.category == "permission_denied"]
+        assert len(rbac_denied) == 3
+        assert rbac_denied[0].status == "fail"
+        assert "Permission denied: list trainjobs" in rbac_denied[0].message
+        assert rbac_denied[0].resource == "trainjobs"
+        assert rbac_denied[0].verb == "list"
+        assert rbac_denied[0].namespace == "default"
+
+    @patch("kubeflow_mcp.common.utils.get_trainer_effective_namespace", return_value="default")
+    @patch("kubeflow_mcp.common.utils.get_authorization_v1_api")
+    @patch("kubeflow_mcp.common.utils.get_apiextensions_api")
+    @patch("kubeflow_mcp.common.utils.get_core_v1_api")
+    def test_rbac_api_init_fails_warns_without_blocking(
+        self,
+        mock_core: MagicMock,
+        mock_apiext: MagicMock,
+        mock_auth: MagicMock,
+        mock_ns: MagicMock,
+    ) -> None:
+        mock_crd = MagicMock()
+        v_mock = MagicMock()
+        v_mock.name = "v1alpha1"
+        v_mock.served = True
+        mock_crd.spec.versions = [v_mock]
+        mock_apiext.return_value.read_custom_resource_definition.return_value = mock_crd
+
+        mock_auth.side_effect = Exception("Authorization API init failure")
+
+        ok, diagnostics = run_readiness_diagnostics()
+
+        # Fail-safe: warning on SSAR initialization does not mark server not-ready
+        assert ok is True
+        rbac_warn = next(d for d in diagnostics if d.check == "rbac")
+        assert rbac_warn.status == "warn"
+        assert rbac_warn.category == "unknown"
+
+    @patch("kubeflow_mcp.common.utils.get_trainer_effective_namespace", return_value="default")
+    @patch("kubeflow_mcp.common.utils.get_authorization_v1_api")
+    @patch("kubeflow_mcp.common.utils.get_apiextensions_api")
+    @patch("kubeflow_mcp.common.utils.get_core_v1_api")
+    def test_rbac_check_exception_warns_without_blocking(
+        self,
+        mock_core: MagicMock,
+        mock_apiext: MagicMock,
+        mock_auth: MagicMock,
+        mock_ns: MagicMock,
+    ) -> None:
+        mock_crd = MagicMock()
+        v_mock = MagicMock()
+        v_mock.name = "v1alpha1"
+        v_mock.served = True
+        mock_crd.spec.versions = [v_mock]
+        mock_apiext.return_value.read_custom_resource_definition.return_value = mock_crd
+
+        mock_auth.return_value.create_self_subject_access_review.side_effect = Exception(
+            "ServiceAccount cannot create selfsubjectaccessreviews"
+        )
+
+        ok, diagnostics = run_readiness_diagnostics()
+
+        # Fail-safe: warning does not mark server not-ready
+        assert ok is True
+        rbac_warns = [d for d in diagnostics if d.status == "warn"]
+        assert len(rbac_warns) == 3
+        assert all(d.category == "unknown" for d in rbac_warns)
