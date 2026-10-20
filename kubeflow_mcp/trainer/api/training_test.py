@@ -348,6 +348,38 @@ def test_fine_tune_validates_resources_before_gpu_preflight():
 # ─── fine_tune Hugging Face model/dataset checks ────────────────────────────
 
 
+@pytest.mark.parametrize(
+    ("model", "dataset"),
+    [
+        ("hf://org/ model", "hf://org/ds"),
+        ("hf://org/model", "hf://only-one-segment"),
+        ("hf://org/../model", "hf://org/ds"),
+    ],
+)
+@pytest.mark.parametrize("confirmed", [False, True])
+def test_fine_tune_rejects_bad_hf_reference_without_resolving_namespace(model, dataset, confirmed):
+    """Malformed hf:// input must be rejected before the namespace is resolved."""
+    with (
+        patch("kubeflow_mcp.core.policy.get_allowed_namespaces", return_value=["team-a"]),
+        patch("kubeflow_mcp.common.utils.get_trainer_effective_namespace") as mock_resolve_ns,
+        patch(PATCH_CLIENT) as mock_client,
+        patch(PATCH_GPU_CHECK) as gpu_check,
+    ):
+        result = fine_tune(
+            model=model,
+            dataset=dataset,
+            runtime="torchtune-llama",
+            namespace=None,
+            confirmed=confirmed,
+        )
+
+    assert result["success"] is False
+    assert result["error_code"] == VALIDATION_ERROR
+    mock_resolve_ns.assert_not_called()
+    mock_client.assert_not_called()
+    gpu_check.assert_not_called()
+
+
 def _hub_error(error_cls: type[Exception], status_code: int) -> Exception:
     request = httpx.Request("GET", "https://huggingface.co/api/models/x")
     return error_cls("Hub error", response=httpx.Response(status_code, request=request))

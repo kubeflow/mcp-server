@@ -731,10 +731,8 @@ def _validate_fine_tune_params(
             error="Required training libraries not available", error_code=ErrorCode.SDK_ERROR
         ).model_dump()
 
-    ns_err = check_namespace_allowed(namespace)
-    if ns_err:
-        return ns_err.model_dump()
-
+    # Local checks first. With an allowlist and no namespace, the namespace check
+    # resolves the default through the Trainer SDK, so it must not run on bad input.
     if name:
         err = validate_k8s_name(name)
         if err:
@@ -764,11 +762,6 @@ def _validate_fine_tune_params(
             error_code=ErrorCode.VALIDATION_ERROR,
         ).model_dump()
 
-    if not confirmed:
-        gpu_err = _check_gpu_available()
-        if gpu_err:
-            return gpu_err
-
     bounds_err = validate_training_bounds(
         batch_size=batch_size,
         epochs=epochs,
@@ -779,6 +772,16 @@ def _validate_fine_tune_params(
     )
     if bounds_err:
         return bounds_err.model_dump()
+
+    ns_err = check_namespace_allowed(namespace)
+    if ns_err:
+        return ns_err.model_dump()
+
+    if not confirmed:
+        gpu_err = _check_gpu_available()
+        if gpu_err:
+            return gpu_err
+
     # The Hub call runs last, on submission only, after every local check passed.
     return _check_hf_repos_exist(model, dataset) if confirmed else None
 
