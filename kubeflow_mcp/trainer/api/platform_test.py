@@ -280,24 +280,29 @@ def test_delete_runtime_preview_reports_failed_dependency_check(mock_k8s_apis):
     assert data["dependents_checked"] is False
     assert data["dependent_count"] == 0
     assert data["warning"].startswith("Could not check which TrainJobs use this runtime")
+    assert data["message"].startswith("A confirmed delete is refused")
     assert data["dependency_check_error"]["exception"] == "ApiException"
     api.delete_cluster_custom_object.assert_not_called()
 
 
-def test_delete_runtime_confirmed_after_failed_check_warns(mock_k8s_apis):
+@pytest.mark.parametrize(
+    ("list_error", "error_code"),
+    [
+        (ApiException(status=403, reason="Forbidden"), PERMISSION_DENIED),
+        (ApiException(status=500, reason="Internal Server Error"), KUBERNETES_ERROR),
+    ],
+)
+def test_delete_runtime_confirmed_refuses_when_check_fails(mock_k8s_apis, list_error, error_code):
     api = mock_k8s_apis["custom"]
-    api.list_cluster_custom_object.side_effect = ApiException(status=403, reason="Forbidden")
+    api.list_cluster_custom_object.side_effect = list_error
 
     result = delete_runtime("torchtune-llama", confirmed=True)
 
-    data = verify_tool_success(result)
-    assert data["deleted"] is True
-    assert data["dependents_checked"] is False
-    assert data["dependent_jobs_affected"] == 0
-    assert data["warning"].startswith("Could not check which TrainJobs used this runtime")
-    assert "before deleting" not in data["warning"]
-    assert data["dependency_check_error"]["exception"] == "ApiException"
-    api.delete_cluster_custom_object.assert_called_once()
+    verify_tool_error(result, error_code=error_code)
+    assert result["error"].startswith("Did not delete ClusterTrainingRuntime 'torchtune-llama'")
+    assert result["details"]["exception"] == "ApiException"
+    assert ("hint" in result["details"]) is (error_code == PERMISSION_DENIED)
+    api.delete_cluster_custom_object.assert_not_called()
 
 
 @pytest.mark.parametrize(

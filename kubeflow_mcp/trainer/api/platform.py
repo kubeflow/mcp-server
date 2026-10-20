@@ -497,10 +497,11 @@ def delete_runtime(
         confirmed: Must be True to delete. False returns a preview with dependents.
 
     Returns:
-        dict: Preview with dependent jobs, or deletion result. Both carry
+        dict: Preview with dependent jobs, or deletion result. The preview carries
         ``dependents_checked``; when it is False the TrainJob listing failed, so an
         empty ``dependent_jobs`` and a zero count do not mean nothing depends on
-        the runtime.
+        the runtime. A confirmed delete returns an error instead of deleting when
+        the listing fails.
     """
     name_err = validate_runtime_name(name)
     if name_err is not None:
@@ -510,7 +511,7 @@ def delete_runtime(
         api = mcp_utils.get_custom_objects_api()
 
         dependent_jobs = []
-        check_error: dict[str, Any] | None = None
+        check_exc: Exception | None = None
         try:
             jobs = api.list_cluster_custom_object(
                 group=trainer_constants.GROUP,
@@ -527,19 +528,21 @@ def delete_runtime(
                         }
                     )
         except Exception as e:
-            check_error = exception_details(e)
+            check_exc = e
             logger.warning("Could not list TrainJobs that use runtime %s: %s", name, e)
 
-        # An empty list only means "no dependents" if the listing worked, so every
-        # response says whether it did.
-        checked = check_error is None
+        # An empty list only means "no dependents" if the listing worked, so the
+        # preview says whether it did.
+        checked = check_exc is None
 
         if not confirmed:
+            message = "Set confirmed=True to delete this runtime."
             if not checked:
                 warning = (
                     "Could not check which TrainJobs use this runtime, so any that do "
-                    "will fail if it is deleted. Confirm none remain before deleting."
+                    "would fail if it were deleted."
                 )
+                message = "A confirmed delete is refused until the TrainJob listing works."
             elif dependent_jobs:
                 warning = (
                     f"{len(dependent_jobs)} TrainJob(s) reference this runtime. "
@@ -554,11 +557,34 @@ def delete_runtime(
                 "dependent_count": len(dependent_jobs),
                 "dependents_checked": checked,
                 "warning": warning,
-                "message": "Set confirmed=True to delete this runtime.",
+                "message": message,
             }
-            if check_error is not None:
-                data["dependency_check_error"] = check_error
+            if check_exc is not None:
+                data["dependency_check_error"] = exception_details(check_exc)
             return ToolResponse(data=data).model_dump()
+
+        # A confirmed call may be rechecking after a clean preview, so a failed
+        # check has to stop the delete rather than be reported after it.
+        if check_exc is not None:
+            error = (
+                f"Did not delete ClusterTrainingRuntime '{name}': "
+                "could not check which TrainJobs use it"
+            )
+            if getattr(check_exc, "status", None) == 403:
+                return ToolError(
+                    error=error,
+                    error_code=ErrorCode.PERMISSION_DENIED,
+                    details={
+                        **exception_details(check_exc),
+                        "hint": "Grant the server's service account list access to "
+                        "TrainJobs in all namespaces, then retry",
+                    },
+                ).model_dump()
+            return ToolError(
+                error=error,
+                error_code=ErrorCode.KUBERNETES_ERROR,
+                details=exception_details(check_exc),
+            ).model_dump()
 
         api.delete_cluster_custom_object(
             group=trainer_constants.GROUP,
@@ -573,14 +599,7 @@ def delete_runtime(
             "deleted": True,
             "message": f"ClusterTrainingRuntime '{name}' deleted successfully",
             "dependent_jobs_affected": len(dependent_jobs),
-            "dependents_checked": checked,
         }
-        if check_error is not None:
-            result["warning"] = (
-                "Could not check which TrainJobs used this runtime, so any that "
-                "still reference it will now fail."
-            )
-            result["dependency_check_error"] = check_error
         return ToolResponse(data=result).model_dump()
 
     except Exception as e:
