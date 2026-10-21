@@ -32,13 +32,14 @@ from fastmcp import Client
 
 from kubeflow_mcp.core.policy import get_allowed_tools
 from kubeflow_mcp.core.server import CLIENT_MODULES, create_server
-from tests.eval.conftest import GATE_ARGS, payload
+from tests.eval.conftest import GATE_ARGS, READ_ARGS, payload
 
 # Every registered client is loaded, not only the default one, so a new client's
 # tools are judged as soon as it is added to CLIENT_MODULES.
 CLIENTS = list(CLIENT_MODULES)
 
 PERSONAS = ["readonly", "data-scientist", "ml-engineer", "platform-admin"]
+RESTRICTED_PERSONAS = ["readonly", "data-scientist", "ml-engineer"]
 PROXY_MODES = ["progressive", "semantic"]
 
 # CONVENTIONS.md: "trainer runtime previews use ToolResponse not
@@ -131,29 +132,39 @@ async def test_readonly_persona_exposes_no_mutating_tool():
     assert mutating == []
 
 
-@pytest.mark.parametrize("persona", ["readonly", "data-scientist", "ml-engineer"])
+async def test_every_hidden_read_only_tool_has_arguments():
+    tools = await _list_tools("platform-admin")
+    read_only = {name for name, tool in tools.items() if tool.annotations.read_only_hint is True}
+    hidden = set().union(*(read_only - get_allowed_tools(p) for p in RESTRICTED_PERSONAS))
+    assert hidden == set(READ_ARGS), "update READ_ARGS so every hidden read-only tool is judged"
+
+
+def _hidden_calls(persona: str) -> list[tuple[str, dict[str, Any]]]:
+    """Each tool the persona hides, mutating or read-only, with arguments that would run it."""
+    allowed = get_allowed_tools(persona)
+    calls = {name: {**args, "confirmed": True} for name, args in GATE_ARGS.items()}
+    calls.update(READ_ARGS)
+    return sorted((name, args) for name, args in calls.items() if name not in allowed)
+
+
+@pytest.mark.parametrize("persona", RESTRICTED_PERSONAS)
 async def test_hidden_tools_cannot_be_called(persona, k8s):
-    hidden = sorted(set(GATE_ARGS) - get_allowed_tools(persona))
     async with Client(create_server(clients=CLIENTS, persona=persona)) as client:
-        for name in hidden:
-            result = await client.call_tool(
-                name, {**GATE_ARGS[name], "confirmed": True}, raise_on_error=False
-            )
+        for name, args in _hidden_calls(persona):
+            result = await client.call_tool(name, args, raise_on_error=False)
             assert result.is_error, f"{persona} could call hidden tool {name}"
-    assert k8s.writes == []
+    # No request at all: a hidden read-only tool must not read either.
+    assert k8s.calls == []
 
 
 @pytest.mark.parametrize("mode", PROXY_MODES)
-@pytest.mark.parametrize("persona", ["readonly", "data-scientist", "ml-engineer"])
+@pytest.mark.parametrize("persona", RESTRICTED_PERSONAS)
 async def test_proxied_hidden_tools_cannot_be_called(mode, persona, k8s):
-    hidden = sorted(set(GATE_ARGS) - get_allowed_tools(persona))
     async with Client(create_server(clients=CLIENTS, persona=persona, mode=mode)) as client:
-        for name in hidden:
+        for name, args in _hidden_calls(persona):
             result = await client.call_tool(
-                "execute_tool",
-                {"tool_name": name, "arguments": {**GATE_ARGS[name], "confirmed": True}},
-                raise_on_error=False,
+                "execute_tool", {"tool_name": name, "arguments": args}, raise_on_error=False
             )
             body = payload(result)
             assert result.is_error or "error" in body, f"{mode}/{persona} ran hidden {name}"
-    assert k8s.writes == []
+    assert k8s.calls == []

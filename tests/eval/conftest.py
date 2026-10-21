@@ -39,6 +39,15 @@ GATE_ARGS: dict[str, dict[str, Any]] = {
     "update_training_job": {"name": "job-a", "action": "suspend"},
 }
 
+# Valid arguments for each read-only tool that some persona hides, so the persona
+# judges also try hidden tools that only read. A new one fails
+# test_every_hidden_read_only_tool_has_arguments until it is added here.
+READ_ARGS: dict[str, dict[str, Any]] = {
+    "inspect_controller": {},
+    "inspect_crd": {},
+    "wait_for_training": {"name": "job-a", "timeout_seconds": 1, "polling_interval": 1},
+}
+
 
 @dataclass
 class FakeKubernetes:
