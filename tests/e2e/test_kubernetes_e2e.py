@@ -47,6 +47,20 @@ NOOP_TRAIN_SCRIPT = (
     "    train()\n"
 )
 
+# Printed by COMPLETION_TRAIN_SCRIPT, so the logs prove the training code ran.
+COMPLETION_MARKER = "MCP_E2E_TRAINING_COMPLETED"
+COMPLETION_TRAIN_SCRIPT = (
+    "import torch\n"
+    "def train():\n"
+    "    print(f'PyTorch version: {torch.__version__}')\n"
+    f"    print('{COMPLETION_MARKER}')\n"
+    "if __name__ == '__main__':\n"
+    "    train()\n"
+)
+# Covers the image pull on a cold Kind node plus the run itself.
+COMPLETION_TIMEOUT_SECONDS = 600
+COMPLETION_POLL_SECONDS = 5
+
 INVALID_K8S_NAME = "INVALID_UPPERCASE_NAME"
 NON_EXISTENT_JOB = "non-existent-e2e-job-999"
 NON_EXISTENT_RUNTIME = "non-existent-runtime-999"
@@ -651,6 +665,82 @@ async def test_e2e_monitoring(mcp_session: ClientSession) -> None:
             assert "logs" in data
         else:
             assert logs_resp.get("error_code") in ("SDK_ERROR", "RESOURCE_NOT_FOUND")
+    finally:
+        try:
+            await mcp_session.call_tool(
+                "delete_training_job",
+                arguments={"name": job_name, "namespace": namespace, "confirmed": True},
+            )
+        except Exception:
+            logger.warning("cleanup failed for %s", job_name, exc_info=True)
+
+
+async def _job_diagnostics(session: ClientSession, name: str, namespace: str) -> str:
+    """Collect job status, steps, events and logs to explain a failed or slow job."""
+    parts = []
+    for tool in ("get_training_job", "get_training_events", "get_training_logs"):
+        try:
+            resp = await session.call_tool(tool, arguments={"name": name, "namespace": namespace})
+            parts.append(f"{tool}: {resp.content[0].text[:2000]}")
+        except Exception as exc:
+            parts.append(f"{tool}: failed to collect ({exc})")
+    return "\n".join(parts)
+
+
+@pytest.mark.asyncio
+async def test_e2e_cpu_trainjob_reaches_completion(mcp_session: ClientSession) -> None:
+    """A submitted CPU TrainJob is admitted, runs the script and finishes as Complete."""
+    custom_runtime_name = await _get_custom_runtime_name(mcp_session)
+    job_name = f"e2e-done-{uuid.uuid4().hex[:6]}"
+    namespace = "default"
+
+    try:
+        create_resp = await _call_tool(
+            mcp_session,
+            "run_custom_training",
+            {
+                "script": COMPLETION_TRAIN_SCRIPT,
+                "runtime": custom_runtime_name,
+                "name": job_name,
+                "namespace": namespace,
+                "gpu_per_node": 0,
+                "confirmed": True,
+            },
+        )
+        assert create_resp.get("success") is True, create_resp
+
+        status = None
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + COMPLETION_TIMEOUT_SECONDS
+        while loop.time() < deadline:
+            job_resp = await _call_tool(
+                mcp_session,
+                "get_training_job",
+                {"name": job_name, "namespace": namespace},
+            )
+            assert job_resp.get("success") is True, job_resp
+            status = job_resp["data"]["status"]
+            if status in ("Complete", "Failed"):
+                break
+            await asyncio.sleep(COMPLETION_POLL_SECONDS)
+
+        if status != "Complete":
+            details = await _job_diagnostics(mcp_session, job_name, namespace)
+            pytest.fail(
+                f"TrainJob {job_name} ended as {status!r} instead of Complete "
+                f"(timeout {COMPLETION_TIMEOUT_SECONDS}s)\n{details}"
+            )
+
+        logs_resp = await _call_tool(
+            mcp_session,
+            "get_training_logs",
+            {"name": job_name, "namespace": namespace},
+        )
+        assert logs_resp.get("success") is True, logs_resp
+        logs = logs_resp["data"]["logs"]
+        assert COMPLETION_MARKER in logs, (
+            f"Completion marker missing from logs of {job_name}:\n{logs[-2000:]}"
+        )
     finally:
         try:
             await mcp_session.call_tool(
