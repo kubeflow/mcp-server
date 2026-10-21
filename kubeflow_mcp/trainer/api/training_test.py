@@ -19,24 +19,35 @@ from __future__ import annotations
 import ast
 import inspect
 import threading
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
 from huggingface_hub.errors import GatedRepoError, RepositoryNotFoundError
+from kubeflow.trainer.options import Labels, Name
 from kubernetes.client.exceptions import ApiException
 from tests.common import FAILED, PREVIEW, VALIDATION_ERROR, TestCase, assert_test_case
 
+from kubeflow_mcp.common.utils import MCP_MANAGED_LABEL, MCP_MANAGED_VALUE
 from kubeflow_mcp.trainer.api.training import (
+    _build_dataset_preprocess_cfg,
     _build_fine_tune_config,
+    _build_initializer,
+    _build_lora_cfg,
     _build_runtime_patch,
+    _check_gpu_available,
     _forwarded_train_args,
+    _get_client,
     _has_required_params,
     _has_train_call,
+    _inject_ownership_label,
     _inject_trainer_hf_home,
     _make_train_func,
+    _sdk_error,
     _should_apply_hf_dataset_workaround,
     _uncalled_train_call,
+    _validate_fine_tune_params,
     _validate_resources_per_node,
     fine_tune,
     run_container_training,
@@ -1130,3 +1141,542 @@ class TestBuildRuntimePatch:
         assert [type(o).__name__ for o in options] == ["Labels", "Annotations"]
         assert options[0].labels == {"team": "ml"}
         assert options[1].annotations == {"owner": "alice"}
+
+
+# ─── Script parsing & uncalled train edge cases ─────────────────────────────
+
+
+class TestUncalledTrainCallEdgeCases:
+    def test_uncalled_train_with_required_params_and_no_func_args_raises(self):
+        script = "def train(lr, batch_size):\n    pass\n"
+        with pytest.raises(
+            ValueError,
+            match="User-defined train\\(\\) requires parameters but no func_args were provided.",
+        ):
+            _uncalled_train_call(script, func_args=None)
+
+    def test_has_required_params_kwonly_arg_without_default(self):
+        code_without_default = "def train(*, lr):\n    pass\n"
+        def_node_without_default = ast.parse(code_without_default).body[0]
+        assert _has_required_params(def_node_without_default) is True
+
+        code_with_default = "def train(*, lr=0.01):\n    pass\n"
+        def_node_with_default = ast.parse(code_with_default).body[0]
+        assert _has_required_params(def_node_with_default) is False
+
+    def test_uncalled_train_async_function_wraps_in_asyncio_run(self):
+        script = "async def train():\n    pass\n"
+        lines = _uncalled_train_call(script)
+        assert lines == ["import asyncio", "asyncio.run(train())"]
+
+        func = _make_train_func(script)
+        assert callable(func)
+
+    def test_forwarded_train_args_with_var_kwargs(self):
+        code = "def train(**kwargs):\n    pass\n"
+        def_node = ast.parse(code).body[0]
+        args_str = _forwarded_train_args(def_node, {"lr": 0.01, "epochs": 5})
+        assert "lr=lr" in args_str
+        assert "epochs=epochs" in args_str
+
+
+# ─── Client resolution & Ownership labels ───────────────────────────────────
+
+
+class TestClientAndOwnershipLabel:
+    def test_get_client_singleton_vs_namespace(self):
+        with (
+            patch("kubeflow_mcp.trainer.api.training.get_trainer_client") as mock_singleton,
+            patch(
+                "kubeflow_mcp.trainer.api.training.get_trainer_client_for_namespace"
+            ) as mock_scoped,
+        ):
+            mock_singleton.return_value = "singleton-client"
+            mock_scoped.return_value = "scoped-client"
+
+            assert _get_client(None) == "singleton-client"
+            mock_singleton.assert_called_once()
+            mock_scoped.assert_not_called()
+
+            assert _get_client("custom-ns") == "scoped-client"
+            mock_scoped.assert_called_once_with("custom-ns")
+
+    def test_inject_ownership_label_merges_into_existing_labels(self):
+        existing_label = Labels(labels={"app": "training-job"})
+        options = [existing_label]
+        _inject_ownership_label(options)
+        assert len(options) == 1
+        assert options[0].labels["app"] == "training-job"
+        assert options[0].labels[MCP_MANAGED_LABEL] == MCP_MANAGED_VALUE
+
+    def test_inject_ownership_label_appends_when_no_labels_present(self):
+        options = []
+        _inject_ownership_label(options)
+        assert len(options) == 1
+        assert isinstance(options[0], Labels)
+        assert options[0].labels == {MCP_MANAGED_LABEL: MCP_MANAGED_VALUE}
+
+
+# ─── SDK Error wrapper details ──────────────────────────────────────────────
+
+
+class TestSdkErrorHandling:
+    def test_sdk_error_with_cause(self):
+        cause = ValueError("original connection error")
+        err = RuntimeError("wrapper error")
+        err.__cause__ = cause
+        result = _sdk_error(err, hint="check connection")
+        assert result["success"] is False
+        assert result["error_code"] == "SDK_ERROR"
+        assert result["details"] == {"cause": "original connection error"}
+        assert result["hint"] == "check connection"
+
+    def test_sdk_error_with_response_text(self):
+        err = Exception("k8s api call failed")
+        err.response = SimpleNamespace(text='{"message": "resource not found"}')
+        result = _sdk_error(err)
+        assert result["details"] == {"response": '{"message": "resource not found"}'}
+
+    def test_sdk_error_with_failing_response_text(self):
+        class BrokenResponse:
+            @property
+            def text(self):
+                raise RuntimeError("unreadable stream")
+
+        err = Exception("read failed")
+        err.response = BrokenResponse()
+        result = _sdk_error(err)
+        assert result["details"] is None
+
+
+# ─── GPU availability & Resource validation ─────────────────────────────────
+
+
+class TestGpuAvailabilityAndResourceValidation:
+    def test_check_gpu_available_zero_gpus_returns_error(self):
+        with patch(
+            "kubeflow_mcp.trainer.api.planning.get_cluster_resources",
+            return_value={"data": {"gpu_total": 0}},
+        ):
+            err = _check_gpu_available()
+            assert err is not None
+            assert err["error_code"] == "VALIDATION_ERROR"
+            assert "fine_tune() requires GPUs" in err["error"]
+            assert err["details"]["tool_selection"]["recommended"] == "run_custom_training"
+
+    def test_check_gpu_available_positive_gpus_returns_none(self):
+        with patch(
+            "kubeflow_mcp.trainer.api.planning.get_cluster_resources",
+            return_value={"data": {"gpu_total": 8}},
+        ):
+            assert _check_gpu_available() is None
+
+    def test_check_gpu_available_handles_exception_gracefully(self):
+        with patch(
+            "kubeflow_mcp.trainer.api.planning.get_cluster_resources",
+            side_effect=Exception("cluster API unreachable"),
+        ):
+            assert _check_gpu_available() is None
+
+    def test_validate_resources_per_node_rejects_bool(self):
+        err = _validate_resources_per_node({"cpu": True})
+        assert err is not None
+        assert "must be a string or a number" in err.error
+
+
+# ─── fine_tune parameter validation and helpers ─────────────────────────────
+
+
+class TestFineTuneValidationAndConfigExtended:
+    def test_validate_fine_tune_params_invalid_dtype(self):
+        err = _validate_fine_tune_params(
+            model="hf://meta-llama/Llama-3-8B",
+            dataset="hf://tatsu-lab/alpaca",
+            namespace=None,
+            name=None,
+            dtype="fp16",
+            loss=None,
+            dataset_source=None,
+            batch_size=4,
+            epochs=1,
+            num_nodes=1,
+            lora_rank=8,
+            lora_alpha=16,
+            lora_dropout=None,
+            confirmed=True,
+        )
+        assert err is not None
+        assert err["error_code"] == "VALIDATION_ERROR"
+        assert "Must be 'bf16' or 'fp32'" in err["error"]
+
+    def test_validate_fine_tune_params_invalid_loss(self):
+        err = _validate_fine_tune_params(
+            model="hf://meta-llama/Llama-3-8B",
+            dataset="hf://tatsu-lab/alpaca",
+            namespace=None,
+            name=None,
+            dtype="bf16",
+            loss="INVALID_LOSS_NAME",
+            dataset_source=None,
+            batch_size=4,
+            epochs=1,
+            num_nodes=1,
+            lora_rank=8,
+            lora_alpha=16,
+            lora_dropout=None,
+            confirmed=True,
+        )
+        assert err is not None
+        assert err["error_code"] == "VALIDATION_ERROR"
+        assert "Invalid loss 'INVALID_LOSS_NAME'" in err["error"]
+
+    def test_validate_fine_tune_params_invalid_dataset_source(self):
+        err = _validate_fine_tune_params(
+            model="hf://meta-llama/Llama-3-8B",
+            dataset="hf://tatsu-lab/alpaca",
+            namespace=None,
+            name=None,
+            dtype="bf16",
+            loss=None,
+            dataset_source="unknown_format",
+            batch_size=4,
+            epochs=1,
+            num_nodes=1,
+            lora_rank=8,
+            lora_alpha=16,
+            lora_dropout=None,
+            confirmed=True,
+        )
+        assert err is not None
+        assert err["error_code"] == "VALIDATION_ERROR"
+        assert "Invalid dataset_source 'unknown_format'" in err["error"]
+
+    def test_validate_fine_tune_params_when_sdk_not_available(self):
+        with patch("kubeflow_mcp.trainer.api.training._SDK_AVAILABLE", False):
+            err = _validate_fine_tune_params(
+                model="hf://meta-llama/Llama-3-8B",
+                dataset="hf://tatsu-lab/alpaca",
+                namespace=None,
+                name=None,
+                dtype=None,
+                loss=None,
+                dataset_source=None,
+                batch_size=4,
+                epochs=1,
+                num_nodes=1,
+                lora_rank=8,
+                lora_alpha=16,
+                lora_dropout=None,
+                confirmed=True,
+            )
+            assert err is not None
+            assert err["error_code"] == "SDK_ERROR"
+            assert "Required training libraries not available" in err["error"]
+
+    def test_build_lora_cfg_extended_options(self):
+        cfg = _build_lora_cfg(
+            lora_rank=16,
+            lora_alpha=32,
+            lora_dropout=0.05,
+            use_dora=True,
+            quantize_base=True,
+            apply_lora_to_mlp=True,
+            apply_lora_to_output=True,
+            lora_attn_modules=["q_proj", "v_proj"],
+        )
+        assert cfg.apply_lora_to_mlp is True
+        assert cfg.apply_lora_to_output is True
+        assert cfg.lora_attn_modules == ["q_proj", "v_proj"]
+
+    def test_build_dataset_preprocess_cfg_all_none_returns_none(self):
+        assert _build_dataset_preprocess_cfg(None, None, None, None, None) is None
+
+    def test_build_dataset_preprocess_cfg_with_arguments(self):
+        ds = _build_dataset_preprocess_cfg(
+            dataset_source="json",
+            dataset_split="train",
+            dataset_train_on_input=True,
+            dataset_system_prompt="system prompt",
+            dataset_column_map={"prompt": "instruction"},
+        )
+        assert ds is not None
+        assert ds.split == "train"
+        assert ds.train_on_input is True
+        assert ds.new_system_prompt == "system prompt"
+        assert ds.column_map == {"prompt": "instruction"}
+
+    def test_build_initializer_s3_with_credentials_and_region(self):
+        init = _build_initializer(
+            model="s3://my-bucket/model",
+            dataset="s3://my-bucket/dataset",
+            s3_endpoint="https://s3.custom.io",
+            s3_access_key_id="KEY",
+            s3_secret_access_key="SECRET",
+            s3_region="us-west-2",
+            s3_role_arn="arn:aws:iam::123:role/trainer",
+        )
+        assert init.model.storage_uri == "s3://my-bucket/model"
+        assert init.dataset.storage_uri == "s3://my-bucket/dataset"
+        assert init.model.endpoint == "https://s3.custom.io"
+        assert init.model.region == "us-west-2"
+        assert init.model.role_arn == "arn:aws:iam::123:role/trainer"
+
+    def test_fine_tune_preview_includes_optional_fields(self):
+        with patch(PATCH_GPU_CHECK, return_value=None):
+            result = fine_tune(
+                model="hf://org/model",
+                dataset="hf://org/ds",
+                name="fine-tune-preview",
+                dtype="bf16",
+                loss="CEWithChunkedOutputLoss",
+                dataset_source="json",
+                dataset_split="train",
+                apply_lora_to_mlp=True,
+                apply_lora_to_output=True,
+                lora_attn_modules=["q_proj"],
+                s3_endpoint="https://s3.local",
+                confirmed=False,
+            )
+            assert result["status"] == "preview"
+            cfg = result["config"]
+            assert cfg["name"] == "fine-tune-preview"
+            assert cfg["loss"] == "CEWithChunkedOutputLoss"
+            assert cfg["dataset_source"] == "json"
+            assert cfg["apply_lora_to_mlp"] is True
+            assert cfg["s3_endpoint"] == "https://s3.local"
+
+
+# ─── fine_tune submission & error handling ──────────────────────────────────
+
+
+class TestFineTuneConfirmedExtended:
+    @patch(PATCH_GPU_CHECK, return_value=None)
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_fine_tune_confirmed_with_name_and_all_options(self, mock_client_fn, _ns, _gpu):
+        mock_client = MagicMock()
+        mock_client.train.return_value = "custom-named-job"
+        mock_client_fn.return_value = mock_client
+
+        result = fine_tune(
+            model="hf://org/model",
+            dataset="hf://org/ds",
+            runtime="torchtune",
+            name="custom-named-job",
+            dtype="bf16",
+            loss="CEWithChunkedOutputLoss",
+            resources_per_node={"cpu": 4},
+            dataset_source="json",
+            dataset_split="train",
+            apply_lora_to_mlp=True,
+            confirmed=True,
+        )
+        assert result["success"] is True
+        assert result["data"]["job_name"] == "custom-named-job"
+
+        call_kwargs = mock_client.train.call_args.kwargs
+        options = call_kwargs["options"]
+        name_opts = [o for o in options if isinstance(o, Name)]
+        assert len(name_opts) == 1
+        assert name_opts[0].name == "custom-named-job"
+
+        trainer = call_kwargs["trainer"]
+        assert trainer.config.loss is not None
+        assert trainer.config.dtype is not None
+        assert trainer.config.dataset_preprocess_config is not None
+
+    @patch(PATCH_GPU_CHECK, return_value=None)
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_fine_tune_confirmed_sdk_exception_returns_sdk_error(self, mock_client_fn, _ns, _gpu):
+        mock_client = MagicMock()
+        mock_client.train.side_effect = RuntimeError("SDK client backend connection failure")
+        mock_client_fn.return_value = mock_client
+
+        result = fine_tune(
+            model="hf://org/model",
+            dataset="hf://org/ds",
+            runtime="torchtune",
+            confirmed=True,
+        )
+        assert result["success"] is False
+        assert result["error_code"] == "SDK_ERROR"
+        assert "SDK client backend connection failure" in result["error"]
+        assert "Read trainer://guides/troubleshooting" in result["hint"]
+
+
+# ─── run_custom_training extended tests ─────────────────────────────────────
+
+
+class TestRunCustomTrainingExtended:
+    def test_run_custom_training_sdk_not_available(self):
+        with patch("kubeflow_mcp.trainer.api.training._SDK_AVAILABLE", False):
+            res = run_custom_training(script="print(1)", confirmed=True)
+            assert res["success"] is False
+            assert res["error_code"] == "SDK_ERROR"
+
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_run_custom_training_workspace_volume_injection(self, mock_client_fn, _ns):
+        mock_client = MagicMock()
+        mock_client.train.return_value = "custom-job"
+        mock_client_fn.return_value = mock_client
+
+        res = run_custom_training(
+            script="print('hello')",
+            volumes=[{"name": "custom-data", "persistentVolumeClaim": {"claimName": "pvc"}}],
+            volume_mounts=[{"name": "custom-data", "mountPath": "/data"}],
+            confirmed=True,
+        )
+        assert res["success"] is True
+
+        call_kwargs = mock_client.train.call_args.kwargs
+        options = call_kwargs["options"]
+        runtime_patch = options[0]
+        node_spec = runtime_patch.training_runtime_spec.template.spec.replicated_jobs[
+            0
+        ].template.spec.template.spec
+        volume_names = [v["name"] for v in node_spec.volumes]
+        assert "workspace" in volume_names
+        assert "custom-data" in volume_names
+
+        mount_paths = [m["mountPath"] for m in node_spec.containers[0].volume_mounts]
+        assert "/workspace" in mount_paths
+        assert "/data" in mount_paths
+
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_run_custom_training_workspace_volume_already_present_no_duplicate(
+        self, mock_client_fn, _ns
+    ):
+        mock_client = MagicMock()
+        mock_client.train.return_value = "custom-job"
+        mock_client_fn.return_value = mock_client
+
+        res = run_custom_training(
+            script="print('hello')",
+            volumes=[{"name": "my-workspace", "emptyDir": {}}],
+            volume_mounts=[{"name": "my-workspace", "mountPath": "/workspace"}],
+            confirmed=True,
+        )
+        assert res["success"] is True
+
+        call_kwargs = mock_client.train.call_args.kwargs
+        options = call_kwargs["options"]
+        runtime_patch = options[0]
+        node_spec = runtime_patch.training_runtime_spec.template.spec.replicated_jobs[
+            0
+        ].template.spec.template.spec
+        assert len(node_spec.volumes) == 1
+        assert node_spec.volumes[0]["name"] == "my-workspace"
+
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_run_custom_training_with_explicit_name(self, mock_client_fn, _ns):
+        mock_client = MagicMock()
+        mock_client.train.return_value = "explicit-train-job"
+        mock_client_fn.return_value = mock_client
+
+        res = run_custom_training(
+            script="print('hello')",
+            name="explicit-train-job",
+            confirmed=True,
+        )
+        assert res["success"] is True
+        call_kwargs = mock_client.train.call_args.kwargs
+        options = call_kwargs["options"]
+        name_opts = [o for o in options if isinstance(o, Name)]
+        assert len(name_opts) == 1
+        assert name_opts[0].name == "explicit-train-job"
+
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_run_custom_training_sdk_exception_returns_sdk_error(self, mock_client_fn, _ns):
+        mock_client = MagicMock()
+        mock_client.train.side_effect = RuntimeError("Kubernetes rejected custom job")
+        mock_client_fn.return_value = mock_client
+
+        res = run_custom_training(script="print('hello')", confirmed=True)
+        assert res["success"] is False
+        assert res["error_code"] == "SDK_ERROR"
+        assert "Kubernetes rejected custom job" in res["error"]
+        assert "Read trainer://guides/troubleshooting" in res["hint"]
+
+
+# ─── run_container_training extended tests ──────────────────────────────────
+
+
+class TestRunContainerTrainingExtended:
+    def test_run_container_training_sdk_not_available(self):
+        with patch("kubeflow_mcp.trainer.api.training._SDK_AVAILABLE", False):
+            res = run_container_training(image="torch:latest", confirmed=True)
+            assert res["success"] is False
+            assert res["error_code"] == "SDK_ERROR"
+
+    def test_run_container_training_bounds_error(self):
+        res = run_container_training(image="torch:latest", num_nodes=9999)
+        assert res["success"] is False
+        assert res["error_code"] == "VALIDATION_ERROR"
+
+    def test_run_container_training_resource_error(self):
+        res = run_container_training(image="torch:latest", resources_per_node={"cpu": True})
+        assert res["success"] is False
+        assert res["error_code"] == "VALIDATION_ERROR"
+
+    def test_run_container_training_preview_with_extra_configs(self):
+        res = run_container_training(
+            image="torch:latest",
+            name="container-preview-test",
+            labels={"team": "ml"},
+            annotations={"env": "prod"},
+            volumes=[{"name": "vol", "emptyDir": {}}],
+            volume_mounts=[{"name": "vol", "mountPath": "/data"}],
+            node_selector={"gpu": "true"},
+            tolerations=[{"key": "gpu", "operator": "Exists"}],
+            affinity={"nodeAffinity": {}},
+            service_account_name="trainer-sa",
+            image_pull_secrets=[{"name": "regcred"}],
+            confirmed=False,
+        )
+        assert res["status"] == "preview"
+        cfg = res["config"]
+        assert cfg["name"] == "container-preview-test"
+        assert cfg["labels"] == {"team": "ml"}
+        assert cfg["annotations"] == {"env": "prod"}
+        assert cfg["node_selector"] == {"gpu": "true"}
+        assert cfg["service_account_name"] == "trainer-sa"
+
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_run_container_training_confirmed_with_name_and_options(self, mock_client_fn, _ns):
+        mock_client = MagicMock()
+        mock_client.train.return_value = "named-container-job"
+        mock_client_fn.return_value = mock_client
+
+        res = run_container_training(
+            image="torch:latest",
+            name="named-container-job",
+            labels={"team": "ml"},
+            confirmed=True,
+        )
+        assert res["success"] is True
+        assert res["data"]["job_name"] == "named-container-job"
+
+        call_kwargs = mock_client.train.call_args.kwargs
+        options = call_kwargs["options"]
+        name_opts = [o for o in options if isinstance(o, Name)]
+        assert len(name_opts) == 1
+        assert name_opts[0].name == "named-container-job"
+
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_run_container_training_sdk_exception_returns_sdk_error(self, mock_client_fn, _ns):
+        mock_client = MagicMock()
+        mock_client.train.side_effect = RuntimeError("Container runtime unavailable")
+        mock_client_fn.return_value = mock_client
+
+        res = run_container_training(image="torch:latest", confirmed=True)
+        assert res["success"] is False
+        assert res["error_code"] == "SDK_ERROR"
+        assert "Container runtime unavailable" in res["error"]
+        assert "Read trainer://guides/troubleshooting" in res["hint"]
