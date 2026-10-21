@@ -42,6 +42,9 @@ class ErrorCode:
     TIMEOUT = "TIMEOUT"
     CIRCUIT_OPEN = "CIRCUIT_OPEN"
     RATE_LIMITED = "RATE_LIMITED"
+    # Kubernetes 409: the resource already exists, or it changed since it was read.
+    # A caller problem, so it is not an infrastructure error.
+    CONFLICT = "CONFLICT"
 
 
 def is_infrastructure_error(result: Any) -> bool:
