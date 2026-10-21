@@ -155,14 +155,39 @@ def test_load_config_env_overrides_file(tmp_path):
     assert cfg.server.persona == "platform-admin"
 
 
-def test_load_config_ignores_non_mapping_yaml(tmp_path, caplog):
+@pytest.mark.parametrize(
+    ("contents", "message"),
+    [
+        ("server: [invalid", "Failed to load configuration file"),
+        ("- trainer\n- optimizer\n", "root must be a mapping"),
+        ("null\n", "root must be a mapping"),
+        ("~\n", "root must be a mapping"),
+    ],
+)
+def test_load_config_rejects_invalid_yaml_and_non_mapping_roots(tmp_path, contents, message):
     config_file = tmp_path / "config.yaml"
-    config_file.write_text("- trainer\n- optimizer\n")
+    config_file.write_text(contents)
 
-    cfg = load_config(config_path=config_file)
+    with pytest.raises(ValueError, match=message):
+        load_config(config_path=config_file)
 
+
+# TODO(test): test config_path that doesn't exist falls back to default search
+# TODO(test): test auth config env overrides (KUBEFLOW_MCP_AUTH_TOKEN, KUBEFLOW_MCP_JWKS_URI)
+# TODO(test): test OTEL env, controller namespace, and multiple clients
+
+
+def test_load_config_rejects_missing_explicit_config_file(tmp_path):
+    config_file = tmp_path / "missing.yaml"
+
+    with pytest.raises(FileNotFoundError, match="Configuration file not found"):
+        load_config(config_path=config_file)
+
+
+def test_load_config_default_discovery_still_uses_defaults_if_no_file():
+    with patch("kubeflow_mcp.core.config._find_config_file", return_value=None):
+        cfg = load_config()
     assert cfg.server.clients == ["trainer"]
-    assert "Config root must be a mapping" in caplog.text
 
 
 def test_find_config_file_prefers_project_local_config(tmp_path):
@@ -177,11 +202,3 @@ def test_find_config_file_prefers_project_local_config(tmp_path):
         patch("kubeflow_mcp.core.config.Path.cwd", return_value=tmp_path),
     ):
         assert _find_config_file() == local_config
-
-
-# TODO(test): test config_path that doesn't exist falls back to default search
-# TODO(test): test malformed YAML handled gracefully
-# TODO(test): test auth config env overrides (KUBEFLOW_MCP_AUTH_TOKEN, KUBEFLOW_MCP_JWKS_URI)
-# TODO(test): test OTEL_EXPORTER_OTLP_ENDPOINT env override
-# TODO(test): test KUBEFLOW_MCP_CONTROLLER_NAMESPACE env override
-# TODO(test): test multiple clients from KUBEFLOW_MCP_CLIENTS env var

@@ -37,7 +37,7 @@ from kubeflow_mcp.common.constants import (
     TOOL_NEXT_HINTS,
     TOOL_TO_PHASE,
     ErrorCode,
-    is_infrastructure_error,
+    record_tool_result,
 )
 from kubeflow_mcp.core.dynamic_tools import get_mode_tools, init_dynamic_tools
 from kubeflow_mcp.core.health import (
@@ -152,7 +152,7 @@ def _inject_meta(result: Any, tool_name: str) -> Any:
     return result
 
 
-def _audit_wrap(tool_func):
+def _audit_wrap(tool_func, *, is_dynamic_execute_tool: bool = False):
     """Wrap a tool function with rate limiting, circuit breaking, audit logging, and response metadata."""
     tracer = get_tracer("kubeflow_mcp.tools")
 
@@ -206,9 +206,12 @@ def _audit_wrap(tool_func):
                     "error_code": ErrorCode.RATE_LIMITED,
                 }
 
-            breaker = get_breaker(tool_name)
-            generation = breaker.acquire()
-            if generation is None:
+            # In dynamic modes, execute_tool delegates to target tools that manage
+            # their own per-tool circuit breakers. Bypass the outer breaker to prevent
+            # failures in one tool from tripping the circuit for unrelated tools.
+            breaker = None if is_dynamic_execute_tool else get_breaker(tool_name)
+            generation = breaker.acquire() if breaker is not None else None
+            if breaker is not None and generation is None:
                 duration_ms = int((time.monotonic() - start) * 1000)
                 span.set_attribute("tool.success", False)
                 span.set_attribute("tool.duration_ms", duration_ms)
@@ -222,20 +225,16 @@ def _audit_wrap(tool_func):
                 result = tool_func(**kwargs)
                 duration_ms = int((time.monotonic() - start) * 1000)
                 is_success = (
-                    "error_code" not in result and "error" not in result
-                    if isinstance(result, dict)
-                    else True
+                    record_tool_result(breaker, result, generation)
+                    if breaker is not None
+                    else (
+                        "error_code" not in result and "error" not in result
+                        if isinstance(result, dict)
+                        else True
+                    )
                 )
                 span.set_attribute("tool.success", is_success)
                 span.set_attribute("tool.duration_ms", duration_ms)
-                # Only a real success resets the breaker. A result that says nothing
-                # about the backend hands its half-open slot back instead.
-                if is_success:
-                    breaker.record_success(generation)
-                elif is_infrastructure_error(result):
-                    breaker.record_failure(generation)
-                else:
-                    breaker.release(generation)
 
                 logger.info(
                     "tool_call",
@@ -248,10 +247,18 @@ def _audit_wrap(tool_func):
                         "duration_ms": duration_ms,
                     },
                 )
-                return _inject_meta(result, tool_name)
+                # In dynamic modes, execute_tool proxies calls to target tools.
+                # Inject metadata using the delegated tool's phase and next hints.
+                target_tool = (
+                    kwargs["tool_name"]
+                    if is_dynamic_execute_tool and isinstance(kwargs.get("tool_name"), str)
+                    else tool_name
+                )
+                return _inject_meta(result, target_tool)
             except Exception as exc:
                 duration_ms = int((time.monotonic() - start) * 1000)
-                breaker.record_failure(generation)
+                if breaker is not None:
+                    breaker.record_failure(generation)
                 span.set_attribute("tool.success", False)
                 span.set_attribute("tool.duration_ms", duration_ms)
                 span.set_attribute("error.type", type(exc).__qualname__)
@@ -509,7 +516,10 @@ def create_server(  # noqa: C901
         meta_tools = get_mode_tools(mode)
 
         for meta_func in meta_tools:
-            audited = _audit_wrap(meta_func)
+            audited = _audit_wrap(
+                meta_func,
+                is_dynamic_execute_tool=meta_func.__name__ == "execute_tool",
+            )
             mcp.tool()(audited)
             logger.debug(f"Registered meta-tool: {meta_func.__name__}")
 

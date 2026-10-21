@@ -15,6 +15,7 @@
 """Input validation and security checks."""
 
 import ast
+import ipaddress
 import re
 from typing import Any
 
@@ -110,6 +111,29 @@ def validate_k8s_subdomain_name(name: str, field: str = "name") -> ToolError | N
 # Every character a valid image reference can contain, digests included.
 _IMAGE_REFERENCE_CHARS = re.compile(r"[A-Za-z0-9._:/@+=-]+")
 _IMAGE_DIGEST = re.compile(r"[a-z0-9]+(?:[+._-][a-z0-9]+)*:[A-Za-z0-9=_-]+")
+# A registry host given as a bracketed IPv6 address, with an optional port,
+# e.g. ``[::1]:5000/``. Only valid as the first path component.
+_BRACKETED_IPV6_HOST = re.compile(r"\[([0-9A-Fa-f:.]+)\](:[0-9]+)?/")
+
+
+def _normalize_bracketed_ipv6_host(image: str) -> tuple[str, str | None]:
+    """Replace a bracketed IPv6 registry host such as ``[::1]:5000`` with ``localhost``.
+
+    The brackets are only valid around the registry host, so the remaining checks
+    run against an equivalent reference with a plain hostname in its place. The
+    port is kept. Returns the reference to validate and an error reason, which is
+    ``None`` when the host is valid or the image has no bracketed host.
+    """
+    if not image.startswith("["):
+        return image, None
+    host = _BRACKETED_IPV6_HOST.match(image)
+    if host is None:
+        return image, "has an invalid bracketed IPv6 registry host"
+    try:
+        ipaddress.IPv6Address(host.group(1))
+    except ValueError:
+        return image, "has an invalid IPv6 address in its registry host"
+    return "localhost" + (host.group(2) or "") + image[host.end() - 1 :], None
 
 
 def validate_image_reference(image: str | None, field: str = "image") -> ToolError | None:
@@ -118,7 +142,8 @@ def validate_image_reference(image: str | None, field: str = "image") -> ToolErr
     This deliberately does not enforce the full OCI grammar, which is easy to get
     wrong (e.g. uppercase is legal in a registry host but not in a repository path).
     It only catches references Kubernetes could never pull, and keeps valid forms
-    such as ``localhost:5000/a/b:tag`` and ``img:tag@sha256:...`` working.
+    such as ``localhost:5000/a/b:tag``, ``[::1]:5000/a/b:tag`` and
+    ``img:tag@sha256:...`` working.
     ``None`` is valid: the tool then uses the runtime's default image.
 
     Returns ToolError if invalid, None if valid.
@@ -137,10 +162,12 @@ def validate_image_reference(image: str | None, field: str = "image") -> ToolErr
         return _invalid("cannot be empty")
     if any(ch.isspace() for ch in image):
         return _invalid("must not contain whitespace")
-    if not _IMAGE_REFERENCE_CHARS.fullmatch(image):
-        return _invalid("contains characters not allowed in an image reference")
 
-    name, has_digest, digest = image.partition("@")
+    reference, host_error = _normalize_bracketed_ipv6_host(image)
+    if host_error or not _IMAGE_REFERENCE_CHARS.fullmatch(reference):
+        return _invalid(host_error or "contains characters not allowed in an image reference")
+
+    name, has_digest, digest = reference.partition("@")
     if has_digest:
         if not _IMAGE_DIGEST.fullmatch(digest):
             return _invalid("has an invalid digest (expected e.g. 'img@sha256:<hex>')")

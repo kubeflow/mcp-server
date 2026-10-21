@@ -248,3 +248,88 @@ async def test_server_info_reports_package_version():
             assert client.server_info.version == __version__
     finally:
         set_effective_persona(previous)
+
+
+def test_audit_wrap_execute_tool_circuit_breaker_isolation(monkeypatch):
+    from kubeflow_mcp.common.constants import ErrorCode
+    from kubeflow_mcp.core import dynamic_tools, server
+    from kubeflow_mcp.core.resilience import CircuitBreaker, CircuitState
+
+    breakers = {}
+
+    def test_get_breaker(name):
+        return breakers.setdefault(name, CircuitBreaker())
+
+    # Keep this test independent of breakers left behind by other tests.
+    monkeypatch.setattr(server, "get_breaker", test_get_breaker)
+    monkeypatch.setattr(dynamic_tools, "get_breaker", test_get_breaker)
+
+    def make_fail(name):
+        def fn():
+            return {"error": "k8s connection reset", "error_code": ErrorCode.KUBERNETES_ERROR}
+
+        fn.__name__ = name
+        return fn
+
+    failing_tools = [make_fail(f"k8s_err_{i}") for i in range(5)]
+
+    def healthy_worker():
+        return {"status": "ok"}
+
+    dynamic_tools.init_dynamic_tools(failing_tools + [healthy_worker], {})
+    audited_exec = server._audit_wrap(
+        dynamic_tools.execute_tool,
+        is_dynamic_execute_tool=True,
+    )
+
+    for i in range(5):
+        res = audited_exec(tool_name=f"k8s_err_{i}")
+        assert res["error_code"] == ErrorCode.KUBERNETES_ERROR
+        assert breakers[f"k8s_err_{i}"].state == CircuitState.CLOSED
+        assert breakers[f"k8s_err_{i}"].failure_count == 1
+
+    # No shared breaker is even created for the execute_tool wrapper.
+    assert "execute_tool" not in breakers
+
+    # Healthy tool executes successfully through audited execute_tool
+    healthy_res = audited_exec(tool_name="healthy_worker")
+    assert healthy_res == {"status": "ok"}
+
+    # The bypass is specific to dynamic-mode execution, not any function
+    # that happens to have the same name.
+    def execute_tool(tool_name):
+        return {"status": "ok", "tool": tool_name}
+
+    ordinary_tool = server._audit_wrap(execute_tool)
+    assert ordinary_tool(tool_name="standalone") == {"status": "ok", "tool": "standalone"}
+    assert "execute_tool" in breakers
+
+
+def test_audit_wrap_preserves_dynamic_tool_meta(monkeypatch):
+    from kubeflow_mcp.common.constants import TOOL_NEXT_HINTS, TOOL_TO_PHASE
+    from kubeflow_mcp.core.dynamic_tools import execute_tool, init_dynamic_tools
+    from kubeflow_mcp.core.server import _audit_wrap
+
+    def meta_worker():
+        return {"status": "ok"}
+
+    init_dynamic_tools([meta_worker], {})
+    monkeypatch.setitem(TOOL_TO_PHASE, "meta_worker", "evaluation")
+    monkeypatch.setitem(TOOL_NEXT_HINTS, "meta_worker", "View metrics")
+
+    audited_exec = _audit_wrap(execute_tool, is_dynamic_execute_tool=True)
+    res = audited_exec(tool_name="meta_worker")
+    assert res["status"] == "ok"
+    assert res.get("_meta") == {"phase": "evaluation", "next": "View metrics"}
+
+
+async def test_progressive_mode_e2e_meta_and_breaker():
+    previous = get_effective_persona()
+    try:
+        async with Client(create_server(mode="progressive")) as client:
+            # execute_tool returns _meta workflow guidance in progressive mode
+            res = await client.call_tool("execute_tool", {"tool_name": "health_check"})
+            assert res.structured_content["_meta"]["phase"] == "health"
+            assert "next" in res.structured_content["_meta"]
+    finally:
+        set_effective_persona(previous)

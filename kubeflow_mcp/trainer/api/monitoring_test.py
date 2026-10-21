@@ -806,6 +806,19 @@ class TestGetTrainingEvents:
 
     @patch(PATCH_NS_CHECK, return_value=None)
     @patch(PATCH_CLIENT)
+    def test_limit_keeps_most_recent_events(self, mock_client_fn, _ns):
+        # The SDK returns events oldest first; the newest one usually explains a failure.
+        events = [
+            SimpleNamespace(reason=f"r{i}", message=f"m{i}", event_time=None) for i in range(5)
+        ]
+        mock_client_fn.return_value = _make_mock_client(get_job_events=events)
+
+        result = get_training_events("my-job", limit=2)
+
+        assert [e["reason"] for e in result["data"]["events"]] == ["r3", "r4"]
+
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
     def test_sdk_error(self, mock_client_fn, _ns):
         mock_client_fn.return_value = _make_mock_client(
             get_job_events=RuntimeError("api unavailable")
