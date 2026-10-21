@@ -204,6 +204,19 @@ def _check_string_list(value: Any, key: str, path: Path) -> None:
             raise _shape_error(path, f"{key}[]", "a string", item)
 
 
+def _validate_categories(patterns: list[str], key: str, path: Path) -> None:
+    """Reject unknown ``category:`` references before a policy can be applied."""
+    valid_categories = ", ".join(sorted(TOOL_PHASES))
+    for pattern in patterns:
+        if pattern.startswith("category:"):
+            category = pattern.removeprefix("category:")
+            if category not in TOOL_PHASES:
+                raise PolicyFileError(
+                    f"Invalid policy file {path}: unknown category {category!r} in '{key}'. "
+                    f"Valid categories: {valid_categories}"
+                )
+
+
 def _validate_policy_section(policy: dict[str, Any], path: Path) -> None:
     """Check the ``policy:`` mapping in place."""
     for key in ("allow", "deny"):
@@ -212,6 +225,7 @@ def _validate_policy_section(policy: dict[str, Any], path: Path) -> None:
                 policy[key] = []
             else:
                 _check_string_list(policy[key], f"policy.{key}", path)
+                _validate_categories(policy[key], f"policy.{key}", path)
 
     # An empty ``namespaces:`` keeps meaning "no namespace restriction".
     if policy.get("namespaces") is not None:

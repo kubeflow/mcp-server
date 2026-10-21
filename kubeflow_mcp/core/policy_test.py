@@ -22,6 +22,7 @@ import pytest
 from tests.common import TestCase
 
 from kubeflow_mcp.core.policy import (
+    PolicyFileError,
     _expand_category,
     _load_policy_file,
     _matches_pattern,
@@ -372,6 +373,26 @@ def test_wrong_policy_shape_blocks_every_reader(write_policy_yaml, reader):
 
     with pytest.raises(RuntimeError, match="Invalid policy file"):
         reader(*args)
+
+
+def test_known_policy_categories_are_accepted(write_policy_yaml):
+    write_policy_yaml("policy:\n  allow: [category:planning]\n  deny: [category:monitoring]\n")
+
+    assert _load_policy_file() == {
+        "policy": {"allow": ["category:planning"], "deny": ["category:monitoring"]}
+    }
+
+
+@pytest.mark.parametrize("key", ["allow", "deny"])
+def test_unknown_policy_category_fails_closed(write_policy_yaml, key):
+    policy_path = write_policy_yaml(f"policy:\n  {key}: [category:trainig]\n")
+
+    with pytest.raises(
+        PolicyFileError,
+        match=r"unknown category 'trainig'.*Valid categories:.*training",
+    ) as exc_info:
+        _load_policy_file()
+    assert str(policy_path) in str(exc_info.value)
 
 
 def test_well_formed_policy_file_is_unchanged(write_policy_yaml):
