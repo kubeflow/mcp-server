@@ -36,7 +36,9 @@ jobs:
       fail-fast: false
       matrix:
         kubernetes-version: ["1.32.3"]
-        trainer-ref: ["v2.3.0"]  # CI baseline; >=2.3.0,<2.4.0 supported at runtime
+        # v2.3.0, pinned to a commit so a moved tag cannot change what runs.
+        # CI baseline; >=2.3.0,<2.4.0 supported at runtime
+        trainer-ref: ["658725bdae5c7e3a0854d93ac6ff492e109a22ab"]
 
     steps:
       - name: Checkout repository
@@ -60,7 +62,9 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v7
         with:
-          enable-cache: true
+          # No shared cache: this job runs Trainer code, so a saved cache
+          # could be poisoned and restored by a later trusted run.
+          enable-cache: false
 
       - name: Synchronize dependencies
         run: uv sync --all-extras --group dev
