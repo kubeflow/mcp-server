@@ -71,6 +71,95 @@ class TestCreateSession:
         assert name_opts and name_opts[0].name == "etl"
 
 
+class TestCreateGuardsInput:
+    """num_executors and spark_conf reach the cluster, so both are bounded."""
+
+    def test_executor_count_above_max_rejected(self):
+        out = sessions.create_spark_session(
+            num_executors=sessions._MAX_EXECUTORS + 1, confirmed=True
+        )
+        assert out["success"] is False
+        assert out["error_code"] == "VALIDATION_ERROR"
+
+    def test_executor_count_at_max_allowed(self):
+        # The ceiling itself must stay usable.
+        out = sessions.create_spark_session(num_executors=sessions._MAX_EXECUTORS)
+        assert out["status"] == "preview"
+
+    @pytest.mark.parametrize(
+        "key",
+        [
+            "spark.kubernetes.container.image",
+            "spark.kubernetes.driver.container.image",
+            "spark.kubernetes.authenticate.driver.serviceAccountName",
+            "spark.kubernetes.namespace",
+            "spark.kubernetes.driver.podTemplateFile",
+            "spark.kubernetes.driver.volumes.hostPath.data.mount.path",
+            "spark.kubernetes.executor.secrets.my-secret",
+        ],
+    )
+    def test_server_managed_conf_keys_rejected(self, key):
+        """These would change the image, identity, namespace or mounts without
+        appearing in the confirm-gate preview."""
+        out = sessions.create_spark_session(
+            name="etl", spark_conf={key: "x"}, namespace="default", confirmed=True
+        )
+        assert out["success"] is False
+        assert out["error_code"] == "VALIDATION_ERROR"
+        assert key in out["error"]
+
+    def test_restricted_key_rejected_before_the_preview(self):
+        # Refused up front, not after the user has already confirmed.
+        out = sessions.create_spark_session(
+            name="etl", spark_conf={"spark.kubernetes.container.image": "evil:latest"}
+        )
+        assert out.get("status") != "preview"
+        assert out["error_code"] == "VALIDATION_ERROR"
+
+    def test_ordinary_spark_conf_still_allowed(self):
+        out = sessions.create_spark_session(
+            name="etl", spark_conf={"spark.sql.shuffle.partitions": "8"}
+        )
+        assert out["status"] == "preview"
+        assert out["config"]["spark_conf"] == {"spark.sql.shuffle.partitions": "8"}
+
+
+class TestPreviewShowsEffectiveNamespace:
+    def test_omitted_namespace_resolved_in_preview(self):
+        with patch.object(sessions, "get_spark_effective_namespace", return_value="team-a"):
+            out = sessions.create_spark_session(name="etl")
+        assert out["config"]["namespace"] == "team-a"
+        assert "team-a" in out["message"]
+
+    def test_explicit_namespace_kept(self):
+        out = sessions.create_spark_session(name="etl", namespace="default")
+        assert out["config"]["namespace"] == "default"
+
+    def test_unresolvable_namespace_still_previews(self):
+        with patch.object(
+            sessions, "get_spark_effective_namespace", side_effect=RuntimeError("no kubeconfig")
+        ):
+            out = sessions.create_spark_session(name="etl")
+        assert out["status"] == "preview"
+        assert out["config"]["namespace"] is None
+
+
+class TestDeleteUsesSparkResolver:
+    """The ownership guard must resolve the namespace through the same function
+    the client factory uses, or it could check one namespace and delete in another."""
+
+    def test_guard_checks_the_resolved_namespace(self, spark_persona):
+        spark_persona("data-scientist")
+        with (
+            patch.object(sessions, "get_spark_effective_namespace", return_value="team-a"),
+            patch.object(
+                sessions, "get_spark_session_ownership", return_value="unmanaged"
+            ) as ownership,
+        ):
+            sessions.delete_spark_session("x", confirmed=True)
+        ownership.assert_called_once_with("x", "team-a")
+
+
 class TestCreateFailsAfterProvisioning:
     """``connect()`` can fail after the CR exists. Reporting only the error would
     leave a running, MCP-labelled session the caller never hears about."""
