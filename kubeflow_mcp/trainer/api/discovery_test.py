@@ -34,6 +34,7 @@ from kubeflow_mcp.conftest import (
 )
 from kubeflow_mcp.trainer.api.discovery import (
     _JOB_STATUS_FILTER_ALIASES,
+    _fetch_packages_via_pod,
     _get_runtime_image,
     _trainjob_runtime_to_mcp,
     get_runtime,
@@ -296,6 +297,16 @@ class TestGetRuntime:
         mock_fetch_packages.assert_called_once_with("torch-distributed", runtime_obj=mock_rt)
         assert result["data"]["packages"] == [{"name": "torch", "version": "2.0"}]
 
+    @patch("kubeflow_mcp.trainer.api.discovery.get_trainer_client")
+    def test_get_runtime_sdk_error_wrapped(self, mock_client_fn):
+        mock_client = MagicMock()
+        mock_client.get_runtime.side_effect = RuntimeError("connection refused")
+        mock_client_fn.return_value = mock_client
+
+        result = get_runtime("any-runtime")
+        assert result["success"] is False
+        assert result["error_code"] == ErrorCode.SDK_ERROR
+
 
 class TestGetRuntimeImage:
     @patch("kubeflow_mcp.trainer.api.discovery.get_trainer_client")
@@ -368,6 +379,179 @@ class TestGetRuntimeImage:
 
         image = _get_runtime_image("cluster-runtime")
         assert image == "docker.io/kubeflow/fallback:v1"
+
+    @patch("kubeflow_mcp.trainer.api.discovery.get_custom_objects_api")
+    @patch("kubeflow_mcp.trainer.api.discovery.get_trainer_client")
+    def test_fallback_custom_objects_exception_returns_none(
+        self, mock_client_fn, mock_custom_api_fn
+    ):
+        mock_client_fn.side_effect = RuntimeError("SDK lookup failed")
+        mock_custom_api = MagicMock()
+        mock_custom_api.get_cluster_custom_object.side_effect = Exception("CRD access denied")
+        mock_custom_api_fn.return_value = mock_custom_api
+
+        assert _get_runtime_image("missing-cr") is None
+
+
+class TestFetchPackagesViaPod:
+    @patch("kubeflow_mcp.trainer.api.discovery._get_runtime_image", return_value=None)
+    def test_image_not_found_returns_error(self, mock_get_image):
+        res = _fetch_packages_via_pod("unknown-runtime")
+        assert "packages_error" in res
+        assert "Could not extract container image" in res["packages_error"]
+
+    @patch(
+        "kubeflow_mcp.trainer.api.discovery._get_runtime_image",
+        return_value="pytorch/pytorch:latest",
+    )
+    @patch(
+        "kubeflow_mcp.trainer.api.discovery.get_trainer_effective_namespace",
+        return_value="restricted-ns",
+    )
+    @patch(
+        "kubeflow_mcp.trainer.api.discovery.check_namespace_allowed",
+        return_value=MagicMock(error="Namespace 'restricted-ns' not allowed"),
+    )
+    def test_namespace_policy_denied(self, mock_policy, mock_ns, mock_get_image):
+        res = _fetch_packages_via_pod("my-runtime")
+        assert "packages_error" in res
+        assert "not allowed by policy" in res["packages_error"]
+
+    @patch(
+        "kubeflow_mcp.trainer.api.discovery._get_runtime_image",
+        return_value="pytorch/pytorch:latest",
+    )
+    @patch(
+        "kubeflow_mcp.trainer.api.discovery.get_trainer_effective_namespace",
+        return_value="default",
+    )
+    @patch("kubeflow_mcp.trainer.api.discovery.check_namespace_allowed", return_value=None)
+    @patch("kubeflow_mcp.trainer.api.discovery.get_core_v1_api")
+    def test_pod_creation_error_returns_error(
+        self, mock_core_api, mock_policy, mock_ns, mock_get_image
+    ):
+        mock_core = MagicMock()
+        mock_core.create_namespaced_pod.side_effect = RuntimeError("cluster quota exceeded")
+        mock_core_api.return_value = mock_core
+
+        res = _fetch_packages_via_pod("my-runtime")
+        assert "packages_error" in res
+        assert "Failed to create pip-list pod: cluster quota exceeded" in res["packages_error"]
+        mock_core.delete_namespaced_pod.assert_not_called()
+
+    @patch(
+        "kubeflow_mcp.trainer.api.discovery._get_runtime_image",
+        return_value="pytorch/pytorch:latest",
+    )
+    @patch(
+        "kubeflow_mcp.trainer.api.discovery.get_trainer_effective_namespace",
+        return_value="default",
+    )
+    @patch("kubeflow_mcp.trainer.api.discovery.check_namespace_allowed", return_value=None)
+    @patch("kubeflow_mcp.trainer.api.discovery.get_core_v1_api")
+    @patch("kubeflow_mcp.trainer.api.discovery._PACKAGES_POD_TIMEOUT", 0.05)
+    @patch("kubeflow_mcp.trainer.api.discovery._PACKAGES_POLL_INTERVAL", 0.01)
+    def test_pod_timeout_returns_error_and_deletes_pod(
+        self, mock_core_api, mock_policy, mock_ns, mock_get_image
+    ):
+        mock_core = MagicMock()
+        mock_pod = MagicMock()
+        mock_pod.status.phase = "Pending"
+        mock_core.read_namespaced_pod.return_value = mock_pod
+        mock_core_api.return_value = mock_core
+
+        res = _fetch_packages_via_pod("my-runtime")
+        assert "packages_error" in res
+        assert "did not complete within" in res["packages_error"]
+        mock_core.delete_namespaced_pod.assert_called_once()
+        _, delete_kwargs = mock_core.delete_namespaced_pod.call_args
+        assert delete_kwargs.get("grace_period_seconds") == 0
+
+    @patch(
+        "kubeflow_mcp.trainer.api.discovery._get_runtime_image",
+        return_value="pytorch/pytorch:latest",
+    )
+    @patch(
+        "kubeflow_mcp.trainer.api.discovery.get_trainer_effective_namespace",
+        return_value="default",
+    )
+    @patch("kubeflow_mcp.trainer.api.discovery.check_namespace_allowed", return_value=None)
+    @patch("kubeflow_mcp.trainer.api.discovery.get_core_v1_api")
+    def test_pod_failed_phase_returns_error_with_logs(
+        self, mock_core_api, mock_policy, mock_ns, mock_get_image
+    ):
+        mock_core = MagicMock()
+        mock_pod = MagicMock()
+        mock_pod.status.phase = "Failed"
+        mock_core.read_namespaced_pod.return_value = mock_pod
+        mock_core.read_namespaced_pod_log.return_value = "OOMKilled: exit code 137"
+        mock_core_api.return_value = mock_core
+
+        res = _fetch_packages_via_pod("my-runtime")
+        assert res["packages_error"] == "pip-list pod failed"
+        assert "OOMKilled" in res["logs"]
+        mock_core.delete_namespaced_pod.assert_called_once()
+
+    @patch(
+        "kubeflow_mcp.trainer.api.discovery._get_runtime_image",
+        return_value="pytorch/pytorch:latest",
+    )
+    @patch(
+        "kubeflow_mcp.trainer.api.discovery.get_trainer_effective_namespace",
+        return_value="default",
+    )
+    @patch("kubeflow_mcp.trainer.api.discovery.check_namespace_allowed", return_value=None)
+    @patch("kubeflow_mcp.trainer.api.discovery.get_core_v1_api")
+    def test_pod_succeeded_parses_packages(
+        self, mock_core_api, mock_policy, mock_ns, mock_get_image
+    ):
+        mock_core = MagicMock()
+        mock_pod = MagicMock()
+        mock_pod.status.phase = "Succeeded"
+        mock_core.read_namespaced_pod.return_value = mock_pod
+        mock_core.read_namespaced_pod_log.return_value = (
+            "Package    Version\n"
+            "---        ---\n"
+            "pip        23.2.1\n"
+            "torch      2.1.0\n"
+            "torchtune  0.1.0\n"
+        )
+        mock_core_api.return_value = mock_core
+
+        res = _fetch_packages_via_pod("my-runtime")
+        assert "packages" in res
+        assert res["total"] == 3
+        assert res["packages"] == [
+            {"name": "pip", "version": "23.2.1"},
+            {"name": "torch", "version": "2.1.0"},
+            {"name": "torchtune", "version": "0.1.0"},
+        ]
+        mock_core.delete_namespaced_pod.assert_called_once()
+
+    @patch(
+        "kubeflow_mcp.trainer.api.discovery._get_runtime_image",
+        return_value="pytorch/pytorch:latest",
+    )
+    @patch(
+        "kubeflow_mcp.trainer.api.discovery.get_trainer_effective_namespace",
+        return_value="default",
+    )
+    @patch("kubeflow_mcp.trainer.api.discovery.check_namespace_allowed", return_value=None)
+    @patch("kubeflow_mcp.trainer.api.discovery.get_core_v1_api")
+    def test_pod_cleanup_exception_handled_gracefully(
+        self, mock_core_api, mock_policy, mock_ns, mock_get_image
+    ):
+        mock_core = MagicMock()
+        mock_pod = MagicMock()
+        mock_pod.status.phase = "Succeeded"
+        mock_core.read_namespaced_pod.return_value = mock_pod
+        mock_core.read_namespaced_pod_log.return_value = "torch 2.1.0"
+        mock_core.delete_namespaced_pod.side_effect = RuntimeError("API server transient error")
+        mock_core_api.return_value = mock_core
+
+        res = _fetch_packages_via_pod("my-runtime")
+        assert "packages" in res
+        assert res["packages"] == [{"name": "torch", "version": "2.1.0"}]
 
 
 # ---------------------------------------------------------------------------
@@ -659,3 +843,46 @@ def test_get_training_job_keeps_failed_step_beyond_the_cap():
     assert data["next_steps"][0] == (
         f"get_training_logs(name='job-a', step='{failed_name}') — failed step"
     )
+
+
+def test_list_training_jobs_rejects_limit_below_one():
+    result = list_training_jobs(limit=0)
+    assert result["success"] is False
+    assert result["error_code"] == ErrorCode.VALIDATION_ERROR
+    assert "limit must be >= 1" in result["error"]
+
+
+def test_list_training_jobs_namespace_not_allowed_short_circuits():
+    from kubeflow_mcp.common.types import ToolError as ToolErrorModel
+
+    with patch(
+        "kubeflow_mcp.trainer.api.discovery.check_namespace_allowed",
+        return_value=ToolErrorModel(error="namespace blocked", error_code="PERMISSION_DENIED"),
+    ):
+        result = list_training_jobs(namespace="restricted")
+    assert result["success"] is False
+    assert result["error_code"] == ErrorCode.PERMISSION_DENIED
+
+
+def test_get_training_job_created_status_suggests_events():
+    client = MagicMock()
+    client.get_job.return_value = _fake_job("job-created", status="Created")
+    with patch(
+        "kubeflow_mcp.trainer.api.discovery.get_trainer_client_for_namespace",
+        return_value=client,
+    ):
+        result = get_training_job("job-created")
+    next_steps = result["data"]["next_steps"]
+    assert any("get_training_events" in step for step in next_steps)
+
+
+def test_get_training_job_sdk_error_wrapped():
+    client = MagicMock()
+    client.get_job.side_effect = RuntimeError("backend unreachable")
+    with patch(
+        "kubeflow_mcp.trainer.api.discovery.get_trainer_client_for_namespace",
+        return_value=client,
+    ):
+        result = get_training_job("job-err")
+    assert result["success"] is False
+    assert result["error_code"] == ErrorCode.SDK_ERROR
