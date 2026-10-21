@@ -675,6 +675,31 @@ async def test_e2e_monitoring(mcp_session: ClientSession) -> None:
             logger.warning("cleanup failed for %s", job_name, exc_info=True)
 
 
+async def _cleanup_trainjob(session: Any, name: str, namespace: str) -> str | None:
+    """Delete a TrainJob and return why cleanup failed, or None if it is gone.
+
+    A tool error comes back as a result with ``is_error`` set rather than an
+    exception, so the result is checked too. A job that is already gone counts
+    as cleaned up.
+    """
+    try:
+        resp = await session.call_tool(
+            "delete_training_job",
+            arguments={"name": name, "namespace": namespace, "confirmed": True},
+        )
+    except Exception as exc:
+        return f"cleanup of TrainJob {name} raised: {exc}"
+    if not resp.is_error:
+        return None
+    text = resp.content[0].text if resp.content else ""
+    try:
+        if json.loads(text).get("error_code") == "RESOURCE_NOT_FOUND":
+            return None
+    except (ValueError, AttributeError):
+        pass
+    return f"cleanup of TrainJob {name} failed: {text[:500]}"
+
+
 async def _job_diagnostics(session: ClientSession, name: str, namespace: str) -> str:
     """Collect job status, steps, events and logs to explain a failed or slow job."""
     parts = []
@@ -693,6 +718,7 @@ async def test_e2e_cpu_trainjob_reaches_completion(mcp_session: ClientSession) -
     custom_runtime_name = await _get_custom_runtime_name(mcp_session)
     job_name = f"e2e-done-{uuid.uuid4().hex[:6]}"
     namespace = "default"
+    passed = False
 
     try:
         create_resp = await _call_tool(
@@ -741,14 +767,14 @@ async def test_e2e_cpu_trainjob_reaches_completion(mcp_session: ClientSession) -
         assert COMPLETION_MARKER in logs, (
             f"Completion marker missing from logs of {job_name}:\n{logs[-2000:]}"
         )
+        passed = True
     finally:
-        try:
-            await mcp_session.call_tool(
-                "delete_training_job",
-                arguments={"name": job_name, "namespace": namespace, "confirmed": True},
-            )
-        except Exception:
-            logger.warning("cleanup failed for %s", job_name, exc_info=True)
+        cleanup_error = await _cleanup_trainjob(mcp_session, job_name, namespace)
+        if cleanup_error:
+            logger.warning("%s", cleanup_error)
+            # Fail on a leaked job, but don't hide the original failure if there was one.
+            if passed:
+                pytest.fail(cleanup_error)
 
 
 @pytest.mark.asyncio
