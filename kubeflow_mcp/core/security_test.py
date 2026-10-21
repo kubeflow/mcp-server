@@ -734,3 +734,43 @@ class TestValidateImageReference:
         assert err is not None
         assert err.error_code == "VALIDATION_ERROR"
         assert "repository path must be lowercase" in err.error
+
+    @pytest.mark.parametrize(
+        "image",
+        [
+            "[::1]:5000/team/image:tag",
+            "[::1]/image",
+            "[2001:db8::1]:5000/team/image:tag",
+            "[2001:DB8::1]:5000/image:tag",
+            "[::ffff:192.0.2.1]:5000/image",
+            f"[::1]:5000/image@{_SHA256}",
+        ],
+    )
+    def test_accepts_bracketed_ipv6_registry_host(self, image):
+        assert validate_image_reference(image) is None
+
+    @pytest.mark.parametrize(
+        "image",
+        [
+            "[::1]",
+            "[::1]:5000",
+            "[::1]:5000:tag",
+            "[]:5000/image",
+            "[::1/image",
+            "[::1]:port/image",
+            "[not-an-ip]:5000/image",
+            "[1.2.3.4]:5000/image",
+            "[::1%eth0]:5000/image",
+            "team/[::1]:5000/image",
+            "[::1]:5000/team/[::2]/image",
+        ],
+    )
+    def test_rejects_malformed_bracketed_registry_host(self, image):
+        err = validate_image_reference(image)
+        assert err is not None
+        assert err.error_code == "VALIDATION_ERROR"
+
+    def test_bracketed_ipv6_host_still_requires_lowercase_repository_path(self):
+        err = validate_image_reference("[::1]:5000/Team/image:tag")
+        assert err is not None
+        assert "repository path must be lowercase" in err.error
