@@ -31,8 +31,8 @@ from kubeflow_mcp.common.utils import (
     MCP_MANAGED_LABEL,
     MCP_MANAGED_VALUE,
     get_spark_client_for_namespace,
+    get_spark_effective_namespace,
     get_spark_session_ownership,
-    get_trainer_effective_namespace,
 )
 from kubeflow_mcp.core.policy import get_effective_persona
 from kubeflow_mcp.core.security import check_namespace_allowed, validate_k8s_name
@@ -43,6 +43,50 @@ logger = logging.getLogger(__name__)
 # RFC 1123 label — SparkConnect names become Kubernetes object + service names.
 _K8S_NAME_RE = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
 _MAX_NAME_LEN = 52  # leave headroom for operator-appended suffixes (-svc, -server)
+
+# A typo (1000 instead of 100) would otherwise ask the cluster for 1000 executor
+# pods. The ceiling is deliberately generous; it only stops runaway requests.
+_MAX_EXECUTORS = 100
+
+# ``spark_conf`` is forwarded to the SDK verbatim, so these keys would let a
+# caller change *what runs and as whom* — a different image, a different service
+# account, a namespace outside the allowlist, or host mounts and secrets — none
+# of which are visible in the confirm-gate preview. Resources, naming and
+# namespace all have dedicated parameters, so refuse these rather than merge
+# them silently.
+_DENIED_SPARK_CONF_PREFIXES: tuple[str, ...] = (
+    "spark.kubernetes.authenticate.",  # service accounts, tokens, OAuth
+    "spark.kubernetes.namespace",  # would escape check_namespace_allowed()
+    "spark.kubernetes.container.image",  # arbitrary image
+    "spark.kubernetes.driver.container.image",
+    "spark.kubernetes.executor.container.image",
+    "spark.kubernetes.driver.podtemplatefile",  # whole-pod override
+    "spark.kubernetes.executor.podtemplatefile",
+    "spark.kubernetes.driver.volumes.",  # host mounts
+    "spark.kubernetes.executor.volumes.",
+    "spark.kubernetes.driver.secrets.",  # secret injection
+    "spark.kubernetes.executor.secrets.",
+    "spark.kubernetes.driver.secretkeyref.",
+    "spark.kubernetes.executor.secretkeyref.",
+)
+
+
+def _validate_spark_conf(spark_conf: dict[str, str] | None) -> str | None:
+    """Return an error message if *spark_conf* sets a restricted key, else None."""
+    if not spark_conf:
+        return None
+    denied = sorted(
+        key for key in spark_conf if key.strip().lower().startswith(_DENIED_SPARK_CONF_PREFIXES)
+    )
+    if not denied:
+        return None
+    return (
+        "spark_conf may not set server-managed keys: "
+        + ", ".join(denied)
+        + ". These control the image, service account, namespace, pod template, "
+        "volumes or secrets. Use the namespace, driver_resources and "
+        "executor_resources parameters instead."
+    )
 
 
 def _generate_session_name() -> str:
@@ -140,20 +184,33 @@ def create_spark_session(
     if ns_err is not None:
         return ns_err.model_dump()
 
-    if num_executors is not None and num_executors < 0:
+    if num_executors is not None and not 0 <= num_executors <= _MAX_EXECUTORS:
         return ToolError(
-            error=f"num_executors must be >= 0, got {num_executors}",
+            error=f"num_executors must be between 0 and {_MAX_EXECUTORS}, got {num_executors}",
             error_code=ErrorCode.VALIDATION_ERROR,
         ).model_dump()
+
+    conf_err = _validate_spark_conf(spark_conf)
+    if conf_err is not None:
+        return ToolError(error=conf_err, error_code=ErrorCode.VALIDATION_ERROR).model_dump()
 
     session_name = name or _generate_session_name()
     name_err = _validate_session_name(session_name)
     if name_err is not None:
         return ToolError(error=name_err, error_code=ErrorCode.VALIDATION_ERROR).model_dump()
 
+    # Show the namespace the session will actually land in, not the bare None the
+    # caller passed: the user is confirming a mutation and should see its target.
+    effective_ns = namespace
+    if effective_ns is None:
+        try:
+            effective_ns = get_spark_effective_namespace(None)
+        except Exception:
+            effective_ns = None
+
     config: dict[str, Any] = {
         "name": session_name,
-        "namespace": namespace,
+        "namespace": effective_ns,
         "num_executors": num_executors,
         "executor_resources": executor_resources,
         "driver_resources": driver_resources,
@@ -167,7 +224,7 @@ def create_spark_session(
             config=config,
             message=(
                 f"Will create SparkConnect session '{session_name}'"
-                + (f" in namespace '{namespace}'" if namespace else "")
+                + (f" in namespace '{effective_ns}'" if effective_ns else "")
                 + ". Set confirmed=True to execute."
             ),
         ).model_dump()
@@ -265,7 +322,7 @@ def delete_spark_session(
     ns = namespace
     if ns is None:
         try:
-            ns = get_trainer_effective_namespace(None)
+            ns = get_spark_effective_namespace(None)
         except Exception:
             ns = None
 

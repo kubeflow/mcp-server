@@ -274,20 +274,33 @@ _spark_ns_client_cache: dict[str, Any] = {}
 _spark_ns_client_lock = threading.Lock()
 
 
+def get_spark_effective_namespace(namespace: str | None = None) -> str:
+    """Namespace for SparkConnect operations: explicit arg, else the resolved default.
+
+    The single resolver for the spark module. Every spark caller — the client
+    factory and the ownership guard alike — must go through this, so the
+    namespace a request is *policy-checked* against can never drift from the one
+    it *operates* in. Currently delegates to :func:`get_trainer_effective_namespace`
+    (both clients share the Kubernetes backend's notion of the default); keeping
+    one function means a future spark-specific default cannot desynchronise the
+    two call sites.
+    """
+    return get_trainer_effective_namespace(namespace)
+
+
 def get_spark_client_for_namespace(namespace: str | None = None) -> Any:
     """Return a SparkClient targeting the given namespace.
 
-    When *namespace* is ``None`` the effective default namespace is resolved via
-    the same path :func:`kubeflow_mcp.core.security.check_namespace_allowed` uses
-    (:func:`get_trainer_effective_namespace`) and the client is scoped to it, so
-    the namespace a request is *policy-checked* against always matches the one the
+    When *namespace* is ``None`` the effective default is resolved via
+    :func:`get_spark_effective_namespace` and the client is scoped to it, so the
+    namespace a request is *policy-checked* against always matches the one the
     SparkClient actually *operates* in — closing a potential namespace-allowlist
     bypass where the SDK's own default could diverge from the checked namespace.
     Falls back to the unscoped singleton only if resolution fails.
     """
     if namespace is None:
         try:
-            namespace = get_trainer_effective_namespace(None)
+            namespace = get_spark_effective_namespace(None)
         except Exception:
             return get_spark_client()
     with _spark_ns_client_lock:
