@@ -85,6 +85,7 @@ def test_get_tracer_returns_noop_when_otel_unavailable(monkeypatch: pytest.Monke
     with tracer.start_as_current_span("span") as span:
         span.set_attribute("k", "v")
         span.record_exception(ValueError("boom"))
+        span.set_status("OK", "all good")
 
 
 def test_setup_tracing_noop_when_otel_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -316,6 +317,31 @@ def test_setup_tracing_reuses_existing_provider(monkeypatch: pytest.MonkeyPatch)
     assert calls["endpoint"] == "http://collector:4318/v1/traces"
     assert "processor" in calls
     assert "set_called" not in calls
+
+
+def test_setup_tracing_already_initialized_same_endpoint(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(telemetry, "_OTEL_AVAILABLE", True)
+    monkeypatch.setattr(telemetry, "_tracing_initialized", True)
+    monkeypatch.setattr(telemetry, "_configured_endpoint", "http://collector:4318/v1/traces")
+    with caplog.at_level(logging.WARNING, logger=telemetry.__name__):
+        assert telemetry.setup_tracing("http://collector:4318/v1/traces") is True
+    assert "Tracing already initialized" not in caplog.text
+
+
+def test_setup_tracing_already_initialized_different_endpoint_logs_warning(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(telemetry, "_OTEL_AVAILABLE", True)
+    monkeypatch.setattr(telemetry, "_tracing_initialized", True)
+    monkeypatch.setattr(telemetry, "_configured_endpoint", "http://collector-1:4318/v1/traces")
+    with caplog.at_level(logging.WARNING, logger=telemetry.__name__):
+        assert telemetry.setup_tracing("http://collector-2:4318/v1/traces") is True
+    assert (
+        "Tracing already initialized for endpoint 'http://collector-1:4318/v1/traces'; "
+        "ignoring new endpoint 'http://collector-2:4318/v1/traces'."
+    ) in caplog.text
 
 
 def test_audit_wrap_sets_span_attributes_on_success(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -639,3 +665,32 @@ async def test_traceparent_in_request_meta_reaches_tool_audit_log(meta, expected
 
     audit = [e for e in get_log_buffer() if e["message"] == "tool_call"][-1]
     assert audit.get("trace_id") == expected_trace_id
+
+
+def test_audit_wrap_rate_limiter_rejection(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Rate-limited path sets tool.success=False on the span and returns RATE_LIMITED."""
+    import kubeflow_mcp.core.server as server_mod
+
+    span = _FakeSpan()
+    tracer = _FakeTracer(span)
+    breaker = _FakeBreaker()
+    fake_limiter = SimpleNamespace(acquire=lambda: False)
+
+    monkeypatch.setattr(server_mod, "_rate_limiter", fake_limiter)
+    monkeypatch.setattr(server_mod, "with_correlation_id", lambda: "cid-789")
+    monkeypatch.setattr(server_mod, "get_effective_persona", lambda: "readonly")
+    monkeypatch.setattr(server_mod, "get_tracer", lambda _name: tracer)
+    monkeypatch.setattr(server_mod, "get_breaker", lambda _tool: breaker)
+
+    def sample_tool(**_kwargs):
+        return {"ok": True}
+
+    wrapped = _audit_wrap(sample_tool)
+    result = wrapped(name="model-x")
+
+    assert span.attributes["tool.success"] is False
+    assert "tool.duration_ms" in span.attributes
+    assert result["error_code"] == ErrorCode.RATE_LIMITED
+    assert "Rate limit exceeded" in result["error"]
+    assert breaker.failures == 0
+    assert breaker.successes == 0

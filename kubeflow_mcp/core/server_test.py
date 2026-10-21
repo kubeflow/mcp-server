@@ -333,3 +333,101 @@ async def test_progressive_mode_e2e_meta_and_breaker():
             assert "next" in res.structured_content["_meta"]
     finally:
         set_effective_persona(previous)
+
+
+def test_configure_resilience():
+    import kubeflow_mcp.core.server as server_mod
+
+    previous = server_mod._rate_limiter
+    try:
+        server_mod.configure_resilience(rate_limit=5.0, rate_capacity=15.0)
+        assert server_mod._rate_limiter is not None
+        assert server_mod._rate_limiter.rate == 5.0
+        assert server_mod._rate_limiter.capacity == 15.0
+    finally:
+        server_mod._rate_limiter = previous
+
+
+def test_sections_for_persona_handles_client_import_error(monkeypatch):
+    from kubeflow_mcp.core.server import _sections_for_persona
+
+    patched_clients = {
+        "trainer": "kubeflow_mcp.trainer",
+        "missing_client": "kubeflow_mcp.nonexistent_client_module",
+    }
+    monkeypatch.setattr("kubeflow_mcp.core.server.CLIENT_MODULES", patched_clients)
+
+    sections = _sections_for_persona("readonly")
+    assert isinstance(sections, list)
+    assert len(sections) > 0
+
+
+def test_is_blocked_variants():
+    from kubeflow_mcp.core.server import _is_blocked
+
+    # Non-dict data returns False
+    assert _is_blocked({"success": True}) is False
+    assert _is_blocked({"success": True, "data": "not-a-dict"}) is False
+
+    # Direct blockers or incompatible
+    assert _is_blocked({"success": True, "data": {"compatible": False}}) is True
+    assert _is_blocked({"success": True, "data": {"blockers": ["Missing GPU"]}}) is True
+
+    # Nested compatibility report (as in pre_flight)
+    assert _is_blocked({"success": True, "data": {"compatibility": {"compatible": False}}}) is True
+    assert (
+        _is_blocked({"success": True, "data": {"compatibility": {"blockers": ["CUDA mismatch"]}}})
+        is True
+    )
+
+    # Compatible and no blockers
+    assert _is_blocked({"success": True, "data": {"compatible": True, "blockers": []}}) is False
+
+
+def test_is_preview_variants():
+    from kubeflow_mcp.core.server import _is_preview
+
+    # status="preview" returns True for any tool
+    assert _is_preview({"status": "preview"}, "any_tool") is True
+
+    # Legacy preview tool with data.action="preview" returns True
+    assert (
+        _is_preview(
+            {"data": {"action": "preview"}},
+            "create_runtime",
+        )
+        is True
+    )
+    assert (
+        _is_preview(
+            {"data": {"action": "preview"}},
+            "patch_runtime",
+        )
+        is True
+    )
+    assert (
+        _is_preview(
+            {"data": {"action": "preview"}},
+            "delete_runtime",
+        )
+        is True
+    )
+
+    # Non-legacy tool with data.action="preview" returns False (preserves hint)
+    assert (
+        _is_preview(
+            {"data": {"action": "preview"}},
+            "list_training_jobs",
+        )
+        is False
+    )
+
+    # Legacy preview tool with non-preview data returns False
+    assert (
+        _is_preview(
+            {"data": {"action": "execute"}},
+            "create_runtime",
+        )
+        is False
+    )
+    assert _is_preview({"data": None}, "create_runtime") is False
