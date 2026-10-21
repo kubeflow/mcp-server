@@ -165,9 +165,22 @@ jobs:
           name: dist-${{ needs.prepare.outputs.version }}
           path: dist/
 
+  # Scan the release image before anything is published. create-tag depends on it,
+  # so fixable CRITICAL CVEs stop the tag, PyPI, the image and the GitHub Release.
+  image-scan:
+    name: Scan release image
+    needs: [prepare]
+    permissions:
+      contents: read
+    uses: ./.github/workflows/image-scan.yaml
+    with:
+      ref: ${{ needs.prepare.outputs.branch }}
+      version: ${{ needs.prepare.outputs.version }}
+      fail-on-findings: true
+
   create-tag:
     name: Create and push tag
-    needs: [prepare, build]
+    needs: [prepare, build, image-scan]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.1
@@ -212,6 +225,7 @@ jobs:
     secrets: inherit
     with:
       version: ${{ needs.prepare.outputs.version }}
+      skip-scan: true  # image-scan already gated this release
 
   github-release:
     name: Create GitHub Release

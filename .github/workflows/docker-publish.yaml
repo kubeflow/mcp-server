@@ -16,13 +16,32 @@ on:
         description: 'Release version/tag to build (used for image tags and checkout ref).'
         required: true
         type: string
+      skip-scan:
+        description: 'Skip the pre-push image scan because the caller already ran it.'
+        required: false
+        type: boolean
+        default: false
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  # Scan before anything is pushed, so a vulnerable image never reaches GHCR.
+  # Blocks a versioned push on fixable CRITICAL CVEs; on pull requests it only reports.
+  scan:
+    if: ${{ !inputs.skip-scan }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/image-scan.yaml
+    with:
+      ref: ${{ inputs.version || github.ref }}
+      version: ${{ inputs.version }}
+      fail-on-findings: ${{ github.event_name != 'pull_request' && inputs.version != '' }}
+
   build-and-push:
+    needs: scan
+    if: ${{ !cancelled() && (needs.scan.result == 'success' || needs.scan.result == 'skipped') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -86,47 +105,6 @@ jobs:
             type=raw,value=${{ steps.ver.outputs.major_minor }},enable=${{ steps.ver.outputs.stable == 'true' }}
             type=raw,value=${{ steps.ver.outputs.major }},enable=${{ steps.ver.outputs.stable == 'true' }}
             type=raw,value=latest,enable=${{ steps.ver.outputs.stable == 'true' }}
-
-      # Scan before anything is pushed, so a vulnerable image never reaches GHCR.
-      # A multi-platform build cannot be loaded into the local Docker daemon, so
-      # each published platform is built (from the same cache) into a tarball and
-      # scanned on its own. Blocks a release on fixable CRITICAL CVEs in either
-      # platform; on pull requests it only reports.
-      - name: Build image for scanning (linux/amd64)
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          platforms: linux/amd64
-          outputs: type=docker,dest=${{ runner.temp }}/scan-amd64.tar
-          build-args: VERSION=${{ inputs.version }}
-          cache-from: type=gha
-
-      - name: Scan linux/amd64 image for critical CVEs (Trivy)
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          input: ${{ runner.temp }}/scan-amd64.tar
-          format: table
-          exit-code: ${{ steps.ver.outputs.push == 'true' && '1' || '0' }}
-          severity: CRITICAL
-          ignore-unfixed: true
-
-      - name: Build image for scanning (linux/arm64)
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          platforms: linux/arm64
-          outputs: type=docker,dest=${{ runner.temp }}/scan-arm64.tar
-          build-args: VERSION=${{ inputs.version }}
-          cache-from: type=gha
-
-      - name: Scan linux/arm64 image for critical CVEs (Trivy)
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          input: ${{ runner.temp }}/scan-arm64.tar
-          format: table
-          exit-code: ${{ steps.ver.outputs.push == 'true' && '1' || '0' }}
-          severity: CRITICAL
-          ignore-unfixed: true
 
       - name: Build and push
         id: build
