@@ -602,3 +602,58 @@ def test_serve_reports_invalid_clients_environment_cleanly(monkeypatch):
     assert result.exit_code == 1
     assert "at least one client must be specified" in result.output
     assert "Traceback" not in result.output
+
+
+# --- status: import error handling ---
+
+
+def test_status_shows_not_installed_on_importerror():
+    """status command displays 'not installed' when a client module raises ImportError."""
+    with patch("importlib.import_module", side_effect=ImportError("missing module")):
+        runner = CliRunner()
+        result = runner.invoke(cli, ["status"])
+        assert result.exit_code == 0
+        assert "not installed" in result.output
+
+
+# --- serve: HTTP DNS rebinding protection middleware ---
+
+
+def test_serve_http_dns_rebinding_protection_enabled():
+    """HTTP transport includes DNSRebindingProtectionMiddleware when enabled."""
+    from kubeflow_mcp.core.config import SecurityConfig
+    from kubeflow_mcp.core.transport_security import DNSRebindingProtectionMiddleware
+
+    config = _make_default_config()
+    config.security = SecurityConfig(enable_dns_rebinding_protection=True)
+    mock_server, _, modules_patch = _make_serve_mocks(config=config)
+
+    with patch.dict(sys.modules, modules_patch):
+        runner = CliRunner()
+        runner.invoke(cli, ["serve", "--transport", "http"])
+
+    mock_server.run.assert_called_once()
+    _, kwargs = mock_server.run.call_args
+    middleware = kwargs.get("middleware")
+    assert middleware is not None
+    assert any(m.cls is DNSRebindingProtectionMiddleware for m in middleware)
+
+
+def test_serve_http_dns_rebinding_protection_disabled_logs_warning():
+    """HTTP transport logs warning and omits middleware when protection is disabled."""
+    from kubeflow_mcp.core.config import SecurityConfig
+
+    config = _make_default_config()
+    config.security = SecurityConfig(enable_dns_rebinding_protection=False)
+    mock_server, _, modules_patch = _make_serve_mocks(config=config)
+    logger = modules_patch["kubeflow_mcp.core.logging"].setup_logging.return_value
+
+    with patch.dict(sys.modules, modules_patch):
+        runner = CliRunner()
+        runner.invoke(cli, ["serve", "--transport", "http"])
+
+    mock_server.run.assert_called_once()
+    _, kwargs = mock_server.run.call_args
+    assert kwargs.get("middleware") is None
+    warnings = [c.args[0] for c in logger.warning.call_args_list]
+    assert any("DNS rebinding protection is disabled" in w for w in warnings)
