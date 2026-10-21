@@ -68,6 +68,21 @@ def _trainjob_runtime_to_mcp(runtime: object | None) -> dict[str, str] | None:
     return None
 
 
+def _trainjob_created_at_to_mcp(job: object) -> str | None:
+    """Serialize a TrainJob creation timestamp as an ISO 8601 string."""
+    created_at = getattr(job, "creation_timestamp", None)
+    if created_at is None:
+        return None
+    if isinstance(created_at, str):
+        return created_at
+    isoformat = getattr(created_at, "isoformat", None)
+    if callable(isoformat):
+        serialized = isoformat()
+        if isinstance(serialized, str):
+            return serialized
+    return None
+
+
 # Upper bound on steps returned by get_training_job, so a large multi-node job
 # cannot blow up the response. The step summary still counts every step.
 MAX_JOB_STEPS = 32
@@ -126,7 +141,7 @@ def list_training_jobs(
     Returns:
         dict: Response containing:
 
-        - ``jobs`` (list): List of jobs with ``name``, ``status``, ``runtime``
+        - ``jobs`` (list): List of jobs with ``name``, ``status``, ``runtime``, and ``created_at``
         - ``total`` (int): Total matching jobs
         - ``returned`` (int): Number of jobs included in the response
         - ``has_more`` (bool): Whether matching jobs were omitted by ``limit``
@@ -178,6 +193,7 @@ def list_training_jobs(
                 "name": job.name,
                 "status": job.status if hasattr(job, "status") else "Unknown",
                 "runtime": _trainjob_runtime_to_mcp(jr),
+                "created_at": _trainjob_created_at_to_mcp(job),
             }
             job_list.append(job_data)
 
@@ -210,10 +226,7 @@ def get_training_job(name: str, namespace: str | None = None) -> dict[str, Any]:
         namespace: K8s namespace. Uses default from kubeconfig when omitted.
 
     Returns:
-        dict: Response containing ``name``, ``status``, ``runtime``, ``num_nodes``,
-        ``steps`` (each step's ``name``, pod ``status``, ``pod``, ``device`` and
-        ``device_count``; failed steps first, at most ``MAX_JOB_STEPS``) and
-        ``step_summary`` (step counts by status).
+        dict: Response containing ``name``, ``status``, ``runtime``, and ``created_at``.
 
     Raises:
         ToolError: If job not found (``RESOURCE_NOT_FOUND``).
@@ -265,6 +278,7 @@ def get_training_job(name: str, namespace: str | None = None) -> dict[str, Any]:
             "name": job.name,
             "status": status,
             "runtime": _trainjob_runtime_to_mcp(jr),
+            "created_at": _trainjob_created_at_to_mcp(job),
             "steps": steps,
             "step_summary": step_summary,
         }
