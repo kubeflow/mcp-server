@@ -1,0 +1,22 @@
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayBackend
+metadata:
+  name: model-provider
+  namespace: agentgateway-system
+spec:
+  ai:
+    groups:
+      - providers:
+          - name: model-provider
+            custom:
+              model: example-model
+              formats:
+                - type: Completions
+                  path: /v1/chat/completions
+            host: model-provider.example.com
+            port: 443
+            policies:
+              auth:
+                secretRef:
+                  name: model-provider-auth
+              tls: {}

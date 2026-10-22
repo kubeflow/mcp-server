@@ -1,0 +1,38 @@
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDatasource
+metadata:
+  name: prometheus
+  namespace: observability
+spec:
+  instanceSelector:
+    matchLabels:
+      app.kubernetes.io/name: kubeflow-observability
+  datasource:
+    name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    # Replace with the Prometheus Service address used by the cluster.
+    url: http://prometheus.monitoring.svc.cluster.local:9090
+    isDefault: true
+    editable: false
+    jsonData: {}
+---
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDatasource
+metadata:
+  name: tempo
+  namespace: observability
+spec:
+  instanceSelector:
+    matchLabels:
+      app.kubernetes.io/name: kubeflow-observability
+  datasource:
+    name: Tempo
+    uid: tempo
+    type: tempo
+    access: proxy
+    # Replace with the Tempo Service address used by the cluster.
+    url: http://tempo.observability.svc.cluster.local:3200
+    editable: false
+    jsonData:
