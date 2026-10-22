@@ -924,7 +924,7 @@ class TestWaitForTraining:
         assert result["success"] is True
         assert result["data"]["reached"] is False
         assert result["data"]["queue_status"] == queue_status
-        assert "Job is still queued in 'gpu-pool'" in result["data"]["hint"]
+        assert "Job is queued waiting for quota in 'gpu-pool'" in result["data"]["hint"]
         assert "trainer://guides/queue-states" in result["data"]["hint"]
 
     @patch(PATCH_NS_CHECK, return_value=None)
@@ -947,7 +947,7 @@ class TestWaitForTraining:
         assert result["success"] is True
         assert result["data"]["reached"] is False
         assert result["data"]["queue_status"] == queue_status
-        assert "Job cannot be admitted by queue 'wrong-queue'" in result["data"]["hint"]
+        assert "Job is inadmissible in queue 'wrong-queue'" in result["data"]["hint"]
         assert "trainer://guides/queue-states" in result["data"]["hint"]
 
     @patch(PATCH_NS_CHECK, return_value=None)

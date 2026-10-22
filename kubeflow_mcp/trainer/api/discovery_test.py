@@ -43,6 +43,14 @@ from kubeflow_mcp.trainer.api.discovery import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _default_trainer_client():
+    default = MagicMock()
+    default.backend.namespace = "default"
+    with patch("kubeflow_mcp.common.utils.get_trainer_client", return_value=default):
+        yield
+
+
 class TestJobStatusFilterAliases:
     def test_succeeded_maps_to_complete(self):
         assert _JOB_STATUS_FILTER_ALIASES["Succeeded"] == "Complete"
@@ -669,6 +677,42 @@ def test_get_training_job_terminal_status_skips_queue_status():
     assert result["data"]["status"] == "Complete"
     assert "queue_status" not in result["data"]
     mock_queue_status.assert_not_called()
+
+
+def test_get_training_job_queue_lookup_uses_client_namespace_when_omitted():
+    client = MagicMock()
+    client.get_job.return_value = _fake_job("job-a", status="Created")
+    client.backend.namespace = "team-a"
+    with (
+        patch(
+            "kubeflow_mcp.trainer.api.discovery.get_trainer_client_for_namespace",
+            return_value=client,
+        ),
+        patch("kubeflow_mcp.common.utils.get_trainer_client", return_value=client),
+        patch(
+            "kubeflow_mcp.trainer.api.discovery.get_trainjob_queue_status",
+            return_value=None,
+        ) as mock_queue_status,
+    ):
+        result = get_training_job("job-a")
+
+    assert result["success"] is True
+    mock_queue_status.assert_called_once_with(
+        name="job-a", namespace="team-a", job_status="Created"
+    )
+
+
+def test_get_training_job_namespace_resolution_failure_with_allowlist_fails_closed():
+    with (
+        patch("kubeflow_mcp.core.policy.get_allowed_namespaces", return_value=["team-a"]),
+        patch("kubeflow_mcp.common.utils.get_trainer_client", side_effect=RuntimeError("boom")),
+        patch("kubeflow_mcp.trainer.api.discovery.get_trainer_client_for_namespace") as mock_client,
+    ):
+        result = get_training_job("job-a")
+
+    assert result["success"] is False
+    assert result["error_code"] == ErrorCode.PERMISSION_DENIED
+    mock_client.assert_not_called()
 
 
 # ─── get_training_job steps ─────────────────────────────────────────────────

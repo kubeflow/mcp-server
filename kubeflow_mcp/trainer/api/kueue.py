@@ -210,6 +210,19 @@ def get_trainjob_queue_status(
         return None
 
 
+def queue_hint(queue_status: dict[str, Any]) -> str | None:
+    """Next-step hint for a Kueue state that blocks the job, else None."""
+    q_name = queue_status.get("queue_name")
+    state = queue_status.get("state")
+    if state == "inadmissible":
+        return f"Job is inadmissible in queue '{q_name}'. Check queue configuration (see trainer://guides/queue-states)"
+    if state == "queued":
+        return f"Job is queued waiting for quota in '{q_name}'. Read trainer://guides/queue-states"
+    if state == "evicted":
+        return f"Job was evicted ({queue_status.get('reason')}) from queue '{q_name}'. Read trainer://guides/queue-states"
+    return None
+
+
 def _parse_workload_status(wl: dict[str, Any], queue_name: str | None) -> dict[str, Any]:
     """Parse Workload conditions and metadata into a normalized status dictionary."""
     wl_queue = wl.get("spec", {}).get("queueName") or queue_name

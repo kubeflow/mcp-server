@@ -34,7 +34,7 @@ from kubeflow_mcp.core.security import (
     truncate_log_output,
     validate_k8s_name,
 )
-from kubeflow_mcp.trainer.api.kueue import get_trainjob_queue_status
+from kubeflow_mcp.trainer.api.kueue import get_trainjob_queue_status, queue_hint
 
 logger = logging.getLogger(__name__)
 
@@ -410,26 +410,6 @@ def get_training_events(
         ).model_dump()
 
 
-def _format_queue_timeout_hint(queue_status: dict[str, Any]) -> str | None:
-    """Format contextual timeout hint based on Kueue queue status."""
-    state = queue_status.get("state")
-    q_name = queue_status.get("queue_name")
-    q_reason = queue_status.get("reason")
-    if state == "queued":
-        return (
-            f"Job is still queued in '{q_name}' waiting for quota. "
-            "Extend timeout_seconds or check queue capacity. Read trainer://guides/queue-states"
-        )
-    if state == "inadmissible":
-        return (
-            f"Job cannot be admitted by queue '{q_name}'. "
-            "Check queue configuration (see trainer://guides/queue-states)"
-        )
-    if state == "evicted":
-        return f"Job was evicted ({q_reason}) from queue '{q_name}'. Read trainer://guides/queue-states"
-    return None
-
-
 def _timeout_response(
     client: Any, name: str, namespace: str | None, timeout_seconds: int
 ) -> dict[str, Any]:
@@ -453,7 +433,7 @@ def _timeout_response(
     }
     if queue_status is not None:
         data["queue_status"] = queue_status
-        hint = _format_queue_timeout_hint(queue_status)
+        hint = queue_hint(queue_status)
         if hint:
             data["hint"] = hint
     return ToolResponse(data=data).model_dump()

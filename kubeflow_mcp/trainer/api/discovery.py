@@ -36,7 +36,7 @@ from kubeflow_mcp.core.security import (
     validate_k8s_name,
     validate_runtime_name,
 )
-from kubeflow_mcp.trainer.api.kueue import get_trainjob_queue_status
+from kubeflow_mcp.trainer.api.kueue import get_trainjob_queue_status, queue_hint
 
 logger = logging.getLogger(__name__)
 
@@ -203,19 +203,6 @@ def list_training_jobs(
         ).model_dump()
 
 
-def _queue_hint(queue_status: dict[str, Any]) -> str | None:
-    """Next-step hint for a Kueue state that blocks the job, else None."""
-    q_name = queue_status.get("queue_name")
-    state = queue_status.get("state")
-    if state == "inadmissible":
-        return f"Job is inadmissible in queue '{q_name}'. Check queue configuration (see trainer://guides/queue-states)"
-    if state == "queued":
-        return f"Job is queued waiting for quota in '{q_name}'. Read trainer://guides/queue-states"
-    if state == "evicted":
-        return f"Job was evicted ({queue_status.get('reason')}) from queue '{q_name}'. Read trainer://guides/queue-states"
-    return None
-
-
 def get_training_job(name: str, namespace: str | None = None) -> dict[str, Any]:
     """Get details of a specific training job.
 
@@ -288,15 +275,14 @@ def get_training_job(name: str, namespace: str | None = None) -> dict[str, Any]:
 
         queue_status = None
         if status not in ("Complete", "Failed"):
-            effective_ns = namespace or str(
-                getattr(getattr(client, "backend", None), "namespace", None) or "default"
-            )
             queue_status = get_trainjob_queue_status(
-                name=name, namespace=effective_ns, job_status=status
+                name=name,
+                namespace=get_trainer_effective_namespace(namespace),
+                job_status=status,
             )
         if queue_status is not None:
             data["queue_status"] = queue_status
-            hint = _queue_hint(queue_status)
+            hint = queue_hint(queue_status)
             if hint:
                 next_steps.insert(0, hint)
 
