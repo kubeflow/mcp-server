@@ -37,6 +37,7 @@ from kubeflow_mcp.common import utils as mcp_utils
 from kubeflow_mcp.conftest import create_mock_trainjob, verify_tool_error, verify_tool_success
 from kubeflow_mcp.core.policy import get_allowed_tools
 from kubeflow_mcp.trainer.api.platform import (
+    _get_controller_namespace,
     create_runtime,
     delete_runtime,
     inspect_controller,
@@ -447,8 +448,101 @@ def test_inspect_controller_auto_discovery_is_exempt_from_policy(
     assert verify_tool_success(result)["namespace"] == "kubeflow"
 
 
-# Remaining TODOs are outside this PR's runtime CRUD slice.
-# TODO(test): test inspect_crd — lists all Trainer CRDs
-# TODO(test): test inspect_crd(name) — returns CRD schema and conditions
-# TODO(test): test inspect_crd — invalid CRD name
-# TODO(test): test inspect_controller(view="logs") — returns controller logs
+# ─── _get_controller_namespace ───────────────────────────────────────────────
+
+
+def test_get_controller_namespace_from_env(monkeypatch):
+    monkeypatch.setenv("KUBEFLOW_MCP_CONTROLLER_NAMESPACE", "custom-controller-ns")
+    assert _get_controller_namespace() == "custom-controller-ns"
+
+
+def test_get_controller_namespace_from_config(monkeypatch):
+    monkeypatch.delenv("KUBEFLOW_MCP_CONTROLLER_NAMESPACE", raising=False)
+    mock_cfg = MagicMock()
+    mock_cfg.trainer.controller_namespace = "config-controller-ns"
+    monkeypatch.setattr("kubeflow_mcp.core.config.load_config", lambda: mock_cfg)
+    assert _get_controller_namespace() == "config-controller-ns"
+
+
+def test_get_controller_namespace_handles_config_exception(monkeypatch):
+    monkeypatch.delenv("KUBEFLOW_MCP_CONTROLLER_NAMESPACE", raising=False)
+
+    def raise_err():
+        raise RuntimeError("config broken")
+
+    monkeypatch.setattr("kubeflow_mcp.core.config.load_config", raise_err)
+    assert _get_controller_namespace() is None
+
+
+# ─── patch_runtime edge cases ───────────────────────────────────────────────
+
+
+def test_patch_runtime_missing_patch():
+    result = patch_runtime(name="torch-distributed", patch=None)
+    error = verify_tool_error(result, error_code=VALIDATION_ERROR)
+    assert "patch parameter is required" in error["error"]
+
+
+def test_patch_runtime_generic_exception(mock_k8s_apis):
+    custom = mock_k8s_apis["custom"]
+    custom.patch_cluster_custom_object.side_effect = ApiException(
+        status=500, reason="Internal Error"
+    )
+
+    result = patch_runtime(
+        name="torch-distributed",
+        patch={"spec": {"template": {}}},
+        confirmed=True,
+    )
+
+    verify_tool_error(result, error_code=KUBERNETES_ERROR)
+
+
+# ─── create_runtime edge cases ──────────────────────────────────────────────
+
+
+def test_create_runtime_missing_spec():
+    result = create_runtime(name="new-runtime", spec=None)
+    error = verify_tool_error(result, error_code=VALIDATION_ERROR)
+    assert "spec parameter is required" in error["error"]
+
+
+def test_create_runtime_generic_exception(mock_k8s_apis):
+    custom = mock_k8s_apis["custom"]
+    custom.create_cluster_custom_object.side_effect = ApiException(
+        status=503, reason="Service Unavailable"
+    )
+
+    result = create_runtime(
+        name="new-runtime",
+        spec={"template": {}},
+        confirmed=True,
+    )
+
+    verify_tool_error(result, error_code=KUBERNETES_ERROR)
+
+
+# ─── delete_runtime edge cases ──────────────────────────────────────────────
+
+
+def test_delete_runtime_not_found(mock_k8s_apis):
+    custom = mock_k8s_apis["custom"]
+    custom.list_cluster_custom_object.return_value = {"items": []}
+    custom.delete_cluster_custom_object.side_effect = ApiException(status=404, reason="Not Found")
+
+    result = delete_runtime(name="nonexistent-runtime", confirmed=True)
+
+    error = verify_tool_error(result, error_code=RESOURCE_NOT_FOUND)
+    assert "not found" in error["error"]
+
+
+def test_delete_runtime_generic_exception(mock_k8s_apis):
+    custom = mock_k8s_apis["custom"]
+    custom.list_cluster_custom_object.return_value = {"items": []}
+    custom.delete_cluster_custom_object.side_effect = ApiException(
+        status=500, reason="Internal Error"
+    )
+
+    result = delete_runtime(name="torch-distributed", confirmed=True)
+
+    verify_tool_error(result, error_code=KUBERNETES_ERROR)
