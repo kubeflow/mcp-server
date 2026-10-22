@@ -97,6 +97,19 @@ def test_patch_runtime_validation(test_case):
                 "confirmed": False,
             },
         ),
+        TestCase(
+            name="preview accepts mlPolicy and podGroupPolicy",
+            expected_status=SUCCESS,
+            config={
+                "name": "torchtune-llama",
+                "spec": {
+                    "mlPolicy": {"numNodes": 1, "torch": {}},
+                    "podGroupPolicy": {"coscheduling": {}},
+                    "template": {},
+                },
+                "confirmed": False,
+            },
+        ),
     ],
 )
 def test_create_runtime_validation(test_case):
@@ -233,6 +246,46 @@ def test_create_runtime_confirmed_creates_runtime(mock_k8s_apis):
         },
         _request_timeout=mcp_utils.K8S_TIMEOUT,
     )
+
+
+def test_create_runtime_sets_labels_and_annotations_on_metadata(mock_k8s_apis):
+    # ClusterTrainingRuntime has no spec.labels; the SDK only lists runtimes
+    # whose metadata carries the trainer.kubeflow.org/framework label.
+    api = mock_k8s_apis["custom"]
+    api.create_cluster_custom_object.return_value = {"metadata": {"resourceVersion": "1"}}
+    labels = {"trainer.kubeflow.org/framework": "torch"}
+    annotations = {"team": "ml"}
+    ml_policy = {"numNodes": 1, "torch": {}}
+
+    result = create_runtime(
+        "new-runtime",
+        spec={
+            "labels": labels,
+            "annotations": annotations,
+            "mlPolicy": ml_policy,
+            "template": {},
+        },
+        confirmed=True,
+    )
+
+    verify_tool_success(result)
+    body = api.create_cluster_custom_object.call_args.kwargs["body"]
+    assert body["metadata"] == {
+        "name": "new-runtime",
+        "labels": labels,
+        "annotations": annotations,
+    }
+    assert body["spec"] == {"mlPolicy": ml_policy, "template": {}}
+
+
+def test_create_runtime_preview_sets_labels_on_metadata():
+    labels = {"trainer.kubeflow.org/framework": "torch"}
+
+    result = create_runtime("new-runtime", spec={"labels": labels, "template": {}})
+
+    body = verify_tool_success(result)["body"]
+    assert body["metadata"] == {"name": "new-runtime", "labels": labels}
+    assert body["spec"] == {"template": {}}
 
 
 def test_create_runtime_name_collision_returns_kubernetes_error(mock_k8s_apis):

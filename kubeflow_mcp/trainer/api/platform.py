@@ -46,7 +46,9 @@ _LOG_TAIL_DEFAULT = 200
 _DEFAULT_CONTROLLER_NAMESPACES = ["kubeflow", "kubeflow-system"]
 
 _PATCH_ALLOWED_KEYS = frozenset({"spec", "metadata"})
-_SPEC_ALLOWED_KEYS = frozenset({"template", "labels", "annotations"})
+_SPEC_ALLOWED_KEYS = frozenset({"mlPolicy", "podGroupPolicy", "template", "labels", "annotations"})
+# Accepted in ``spec`` for convenience but belong on the runtime's metadata.
+_SPEC_METADATA_KEYS = ("labels", "annotations")
 
 
 def _get_controller_namespace() -> str | None:
@@ -393,13 +395,15 @@ def create_runtime(
 ) -> dict[str, Any]:
     """Create a new ClusterTrainingRuntime.
 
-    Top-level spec keys are restricted to ``template``, ``labels``, and
-    ``annotations``; deep structure is validated by the K8s API.
-    Intended for platform-admin persona only.
+    Top-level spec keys are restricted to ``mlPolicy``, ``podGroupPolicy``,
+    ``template``, ``labels``, and ``annotations``; ``labels`` and
+    ``annotations`` are set on the runtime's metadata. Deep structure is
+    validated by the K8s API. Intended for platform-admin persona only.
 
     Args:
         name: Name for the new runtime.
-        spec: Spec dict. Allowed top-level keys: template, labels, annotations.
+        spec: Spec dict. Allowed top-level keys: mlPolicy, podGroupPolicy,
+            template, labels, annotations.
         confirmed: Must be True to create. False returns a preview.
 
     Returns:
@@ -423,11 +427,13 @@ def create_runtime(
             error_code=ErrorCode.VALIDATION_ERROR,
         ).model_dump()
 
+    metadata: dict[str, Any] = {"name": name}
+    metadata.update({k: spec[k] for k in _SPEC_METADATA_KEYS if k in spec})
     body = {
         "apiVersion": f"{trainer_constants.GROUP}/{trainer_constants.VERSION}",
         "kind": "ClusterTrainingRuntime",
-        "metadata": {"name": name},
-        "spec": spec,
+        "metadata": metadata,
+        "spec": {k: v for k, v in spec.items() if k not in _SPEC_METADATA_KEYS},
     }
 
     if not confirmed:
