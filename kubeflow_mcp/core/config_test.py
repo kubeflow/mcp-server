@@ -172,11 +172,6 @@ def test_load_config_rejects_invalid_yaml_and_non_mapping_roots(tmp_path, conten
         load_config(config_path=config_file)
 
 
-# TODO(test): test config_path that doesn't exist falls back to default search
-# TODO(test): test auth config env overrides (KUBEFLOW_MCP_AUTH_TOKEN, KUBEFLOW_MCP_JWKS_URI)
-# TODO(test): test OTEL env, controller namespace, and multiple clients
-
-
 def test_load_config_rejects_missing_explicit_config_file(tmp_path):
     config_file = tmp_path / "missing.yaml"
 
@@ -202,3 +197,46 @@ def test_find_config_file_prefers_project_local_config(tmp_path):
         patch("kubeflow_mcp.core.config.Path.cwd", return_value=tmp_path),
     ):
         assert _find_config_file() == local_config
+
+
+def test_load_config_auth_env_overrides():
+    with (
+        patch("kubeflow_mcp.core.config._find_config_file", return_value=None),
+        patch.dict(
+            "os.environ",
+            {
+                "KUBEFLOW_MCP_AUTH_TOKEN": "test-token",
+                "KUBEFLOW_MCP_JWKS_URI": "https://example.com/jwks",
+            },
+        ),
+    ):
+        cfg = load_config()
+    assert cfg.auth.auth_token == "test-token"
+    assert cfg.auth.jwks_uri == "https://example.com/jwks"
+
+
+def test_load_config_otel_env_override():
+    with (
+        patch("kubeflow_mcp.core.config._find_config_file", return_value=None),
+        patch.dict("os.environ", {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://otel:4318"}),
+    ):
+        cfg = load_config()
+    assert cfg.observability.otel_endpoint == "http://otel:4318"
+
+
+def test_load_config_controller_namespace_override():
+    with (
+        patch("kubeflow_mcp.core.config._find_config_file", return_value=None),
+        patch.dict("os.environ", {"KUBEFLOW_MCP_CONTROLLER_NAMESPACE": "kubeflow-system"}),
+    ):
+        cfg = load_config()
+    assert cfg.trainer.controller_namespace == "kubeflow-system"
+
+
+def test_load_config_multiple_clients_override():
+    with (
+        patch("kubeflow_mcp.core.config._find_config_file", return_value=None),
+        patch.dict("os.environ", {"KUBEFLOW_MCP_CLIENTS": "trainer, optimizer, hub "}),
+    ):
+        cfg = load_config()
+    assert cfg.server.clients == ["trainer", "optimizer", "hub"]
