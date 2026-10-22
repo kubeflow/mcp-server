@@ -20,6 +20,8 @@ import os
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from kubeflow_mcp.common.utils import (
     MCP_MANAGED_LABEL,
     MCP_MANAGED_VALUE,
@@ -227,6 +229,11 @@ class TestGetTrainerEffectiveNamespace:
     def test_falls_back_to_default(self, mock_trainer):
         mock_trainer.return_value = SimpleNamespace(backend=SimpleNamespace())
         assert get_trainer_effective_namespace(None) == "default"
+
+    @patch(PATCH_TRAINER_CLIENT, side_effect=RuntimeError("no kubeconfig"))
+    def test_propagates_lookup_error(self, mock_trainer):
+        with pytest.raises(RuntimeError):
+            get_trainer_effective_namespace(None)
 
 
 class TestGetTrainerClientForNamespace:

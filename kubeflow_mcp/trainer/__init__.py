@@ -317,6 +317,10 @@ CLIENT_RESOURCES: dict[str, tuple[str, str]] = {
         "resources/troubleshooting.md",
         "Error-to-fix tables, diagnostics, known limitations.",
     ),
+    "trainer://guides/queue-states": (
+        "resources/queue-states.md",
+        "Kueue admission states, troubleshooting queued/inadmissible jobs, and agent recovery actions.",
+    ),
 }
 
 # ─── Instruction sections (full tier; compact/minimal auto-derived) ────────
@@ -361,6 +365,7 @@ MONITORING AND LIFECYCLE:
 - wait_for_training(name) -> block until Complete/Failed (caution: blocks MCP connection)
 - All monitoring tools accept optional namespace= to query jobs in a different namespace
 - Suspended jobs show status "Created" in the API — this is a known controller behavior
+- On clusters with Kueue, get_training_job() surfaces queue_status (queued/admitted/inadmissible/evicted). Do NOT manually resume Kueue-managed suspended jobs. Read trainer://guides/queue-states for guidance
 - delete_training_job(name, confirmed=True) -> remove job permanently (preview first, non-admin personas can only delete MCP-created jobs)
 - update_training_job(name, action="suspend"|"resume", confirmed=True) -> pause/resume without deleting (preview first, non-admin personas can only modify MCP-created jobs)""",
     },

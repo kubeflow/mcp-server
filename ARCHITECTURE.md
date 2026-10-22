@@ -287,6 +287,9 @@ rules:
   - apiGroups: [""]
     resources: ["pods", "pods/log", "events"]
     verbs: ["list", "get"]
+  - apiGroups: ["kueue.x-k8s.io"]
+    resources: ["workloads"]
+    verbs: ["list", "get"]
 
   # Discovery: list/get runtimes; Platform: patch/create/delete runtimes
   - apiGroups: ["trainer.kubeflow.org"]
@@ -325,11 +328,14 @@ rules:
   - apiGroups: [""]
     resources: ["pods", "pods/log", "events"]
     verbs: ["list", "get"]
+  - apiGroups: ["kueue.x-k8s.io"]
+    resources: ["workloads"]
+    verbs: ["list", "get"]
 ```
 
 #### Namespace-Scoped (recommended for multi-tenant)
 
-TrainJob / pod / event access can use a namespaced `Role` + `RoleBinding`. Cluster-scoped
+TrainJob / pod / event / Kueue workload access can use a namespaced `Role` + `RoleBinding`. Cluster-scoped
 resources (`nodes`, `namespaces`, `clustertrainingruntimes`, CRDs) still need a
 `ClusterRole` + `ClusterRoleBinding` — a RoleBinding alone cannot grant them.
 

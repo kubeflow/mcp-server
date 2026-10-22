@@ -47,6 +47,16 @@ def _reset_circuit_breakers():
     reset_breakers()
 
 
+@pytest.fixture(autouse=True)
+def _reset_kueue_cache():
+    """Clear Kueue API discovery cache between tests."""
+    from kubeflow_mcp.trainer.api.kueue import reset_kueue_cache
+
+    reset_kueue_cache()
+    yield
+    reset_kueue_cache()
+
+
 @pytest.fixture
 def mock_env_vars():
     """Fixture to set and clean up environment variables."""

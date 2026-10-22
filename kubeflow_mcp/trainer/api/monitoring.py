@@ -34,6 +34,7 @@ from kubeflow_mcp.core.security import (
     truncate_log_output,
     validate_k8s_name,
 )
+from kubeflow_mcp.trainer.api.kueue import get_trainjob_queue_status, queue_hint
 
 logger = logging.getLogger(__name__)
 
@@ -409,6 +410,35 @@ def get_training_events(
         ).model_dump()
 
 
+def _timeout_response(
+    client: Any, name: str, namespace: str | None, timeout_seconds: int
+) -> dict[str, Any]:
+    """Build the wait timeout response, enriched with Kueue queue status when available."""
+    queue_status = None
+    try:
+        effective_ns = (
+            namespace
+            or getattr(getattr(client, "backend", None), "namespace", None)
+            or get_trainer_effective_namespace(namespace)
+        )
+        queue_status = get_trainjob_queue_status(name=name, namespace=str(effective_ns))
+    except Exception as e:
+        logger.debug("Failed to resolve Kueue status for %s on timeout: %s", name, e)
+    data: dict[str, Any] = {
+        "job": name,
+        "status": "Unknown",
+        "reached": False,
+        "message": f"Timeout after {timeout_seconds}s",
+        "hint": "Use get_training_events to check for scheduling issues",
+    }
+    if queue_status is not None:
+        data["queue_status"] = queue_status
+        hint = queue_hint(queue_status)
+        if hint:
+            data["hint"] = hint
+    return ToolResponse(data=data).model_dump()
+
+
 def wait_for_training(
     name: str,
     target_statuses: list[str] | str = "Complete",
@@ -472,6 +502,7 @@ def wait_for_training(
             error_code=ErrorCode.VALIDATION_ERROR,
         ).model_dump()
 
+    client: Any = None
     try:
         if timeout_seconds < 1:
             return ToolError(
@@ -510,15 +541,7 @@ def wait_for_training(
         ).model_dump()
 
     except TimeoutError:
-        return ToolResponse(
-            data={
-                "job": name,
-                "status": "Unknown",
-                "reached": False,
-                "message": f"Timeout after {timeout_seconds}s",
-                "hint": "Use get_training_events to check for scheduling issues",
-            }
-        ).model_dump()
+        return _timeout_response(client, name, namespace, timeout_seconds)
     except Exception as e:
         if isinstance(e, RuntimeError) and str(e) == f"TrainJob {name} is Failed":
             return ToolResponse(

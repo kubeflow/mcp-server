@@ -774,3 +774,14 @@ class TestValidateImageReference:
         err = validate_image_reference("[::1]:5000/Team/image:tag")
         assert err is not None
         assert "repository path must be lowercase" in err.error
+
+
+@patch("kubeflow_mcp.common.utils.get_trainer_client", side_effect=RuntimeError("no kubeconfig"))
+@patch("kubeflow_mcp.core.policy.get_allowed_namespaces", return_value=["team-a"])
+def test_check_namespace_allowed_fails_closed_on_lookup_error(_allowed, _client):
+    from kubeflow_mcp.common.constants import ErrorCode
+    from kubeflow_mcp.core.security import check_namespace_allowed
+
+    err = check_namespace_allowed(None)
+    assert err is not None
+    assert err.error_code == ErrorCode.PERMISSION_DENIED
