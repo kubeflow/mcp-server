@@ -47,10 +47,12 @@ def list_spark_sessions(
         - ``sessions`` (list): Sessions with ``name``, ``state``, ``namespace``,
           ``service_name``, ``driver_pod_name``
         - ``total`` (int): Total matching sessions
+        - ``truncated`` (bool): True when ``limit`` cut the list, so more exist
 
     Example:
         >>> list_spark_sessions(state="Ready")
-        {"data": {"sessions": [{"name": "spark-connect-ab12", "state": "Ready"}], "total": 1}}
+        {"data": {"sessions": [{"name": "spark-connect-ab12", "state": "Ready"}],
+                  "total": 1, "truncated": False}}
     """
     ns_err = check_namespace_allowed(namespace)
     if ns_err is not None:
@@ -71,8 +73,15 @@ def list_spark_sessions(
             want = state.strip().lower()
             sessions = [s for s in sessions if (s.get("state") or "").lower() == want]
 
+        shown = sessions[:limit]
         return ToolResponse(
-            data={"sessions": sessions[:limit], "total": len(sessions)}
+            data={
+                "sessions": shown,
+                "total": len(sessions),
+                # Signal the cut so an agent knows to raise `limit` rather than
+                # assuming it has seen every session.
+                "truncated": len(shown) < len(sessions),
+            }
         ).model_dump()
 
     except ImportError as e:
@@ -119,7 +128,8 @@ def get_spark_session(name: str, namespace: str | None = None) -> dict[str, Any]
         if state == "failed":
             next_steps = [
                 f"get_spark_session_logs(name='{name}') — check driver output for the failure",
-                f"delete_spark_session(name='{name}', confirmed=True) — tear down and recreate",
+                f"delete_spark_session(name='{name}') — preview the teardown, "
+                "then repeat with confirmed=True",
             ]
         elif state in ("notready", "provisioning"):
             next_steps = [

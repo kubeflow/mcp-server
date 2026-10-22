@@ -124,6 +124,35 @@ class TestCreateGuardsInput:
         assert out["config"]["spark_conf"] == {"spark.sql.shuffle.partitions": "8"}
 
 
+class TestCreateBoundsTimeouts:
+    """connect() blocks a server thread for the whole timeout, so both are bounded."""
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("timeout", sessions._MAX_TIMEOUT + 1),
+            ("timeout", 0),
+            ("timeout", -1),
+            ("connect_timeout", sessions._MAX_CONNECT_TIMEOUT + 1),
+            ("connect_timeout", 0),
+            ("connect_timeout", -5),
+        ],
+    )
+    def test_out_of_range_rejected(self, field, value):
+        out = sessions.create_spark_session(name="etl", confirmed=True, **{field: value})
+        assert out["success"] is False
+        assert out["error_code"] == "VALIDATION_ERROR"
+        assert field in out["error"]
+
+    def test_ceiling_values_allowed(self):
+        out = sessions.create_spark_session(
+            name="etl",
+            timeout=sessions._MAX_TIMEOUT,
+            connect_timeout=sessions._MAX_CONNECT_TIMEOUT,
+        )
+        assert out["status"] == "preview"
+
+
 class TestPreviewShowsEffectiveNamespace:
     def test_omitted_namespace_resolved_in_preview(self):
         with patch.object(sessions, "get_spark_effective_namespace", return_value="team-a"):

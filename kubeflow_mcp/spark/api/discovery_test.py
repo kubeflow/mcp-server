@@ -24,6 +24,39 @@ from kubeflow_mcp.conftest import make_spark_session_info
 from kubeflow_mcp.spark.api import discovery
 
 
+class TestListTruncation:
+    """`limit` silently cut the list, so an agent could not tell more existed."""
+
+    def test_truncated_flag_set_when_limit_cuts(self, mock_spark_client):
+        mock_spark_client.list_sessions.return_value = [
+            make_spark_session_info(f"s{i}") for i in range(5)
+        ]
+        out = discovery.list_spark_sessions(limit=2)
+        assert out["data"]["truncated"] is True
+        assert len(out["data"]["sessions"]) == 2
+        assert out["data"]["total"] == 5
+
+    def test_not_truncated_when_everything_fits(self, mock_spark_client):
+        mock_spark_client.list_sessions.return_value = [
+            make_spark_session_info("a"),
+            make_spark_session_info("b"),
+        ]
+        out = discovery.list_spark_sessions(limit=10)
+        assert out["data"]["truncated"] is False
+        assert out["data"]["total"] == 2
+
+
+class TestNextStepsRespectConfirmGate:
+    def test_failed_session_hint_previews_before_deleting(self, mock_spark_client):
+        """The hint must not tell an agent to delete with confirmed=True outright."""
+        mock_spark_client.get_session.return_value = make_spark_session_info("x", state="Failed")
+        out = discovery.get_spark_session("x")
+        delete_hints = [s for s in out["data"]["next_steps"] if "delete_spark_session" in s]
+        assert delete_hints
+        assert all("confirmed=True) —" not in h for h in delete_hints)
+        assert any("preview" in h for h in delete_hints)
+
+
 class TestListSessions:
     def test_list_and_serialize(self, mock_spark_client):
         mock_spark_client.list_sessions.return_value = [
