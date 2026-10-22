@@ -136,10 +136,9 @@ runs somewhere else, so the two `kubeflow-mcp-trainer-version` documents have
 nowhere to go while the Deployment and Service are still created. Point those two
 documents at the Trainer namespace and set `KUBEFLOW_SYSTEM_NAMESPACE` to match.
 
-**The pod is `Ready` but calls still fail** — `/ready` is evaluated once when routes
-are registered and never re-checked, so it carries no more signal than `/health`. If
-the Kubernetes API becomes unreachable the pod stays `Ready` and keeps taking
-traffic from the Service.
+**The pod is not `Ready` (`/ready` returns 503)** — `/ready` dynamically checks
+Kubernetes API reachability, Trainer CRD existence/version, and essential RBAC permissions.
+If the pod fails readiness, check `kubectl logs <pod>` to see the specific diagnostic failure.
 
 **A service mesh blocks traffic to the pod** — the Deployment sets
 `sidecar.istio.io/inject: "false"`. If your mesh enforces strict mTLS, remove that

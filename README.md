@@ -105,13 +105,14 @@ GET /ready   # readiness: client modules loaded, packaged resources present, and
 ```
 
 `/ready` returns HTTP 200 `{"status": "ready"}` when configured client modules are loaded,
-packaged resources are present, and initial startup diagnostics (Kubernetes API reachability,
-Trainer CRD registration/version, and essential RBAC permissions) succeed.
+packaged resources are present, and readiness diagnostics (Kubernetes API reachability,
+Trainer CRD registration/version, and essential RBAC permissions scoped to the configured persona) succeed.
+The route dynamically refreshes these checks on probe invocations so the pod recovers if cluster dependencies become available after startup.
 
-If startup diagnostics or resource loading fail, `/ready` returns HTTP 503 with a structured
-`"diagnostics"` payload reporting the failed check, resource, verb, namespace, and category
-(`api_unreachable`, `crd_missing`, `crd_version_unsupported`, `permission_denied`) . For on-demand re-evaluation by AI agents during runtime, use
-the `check_compatibility()` tool.
+If diagnostics or resource loading fail, `/ready` returns HTTP 503 `{"status": "not_ready"}`
+and logs failure details (check, resource, verb, namespace, category) to server logs
+to avoid exposing cluster internals over unauthenticated HTTP. For authenticated, on-demand
+re-evaluation by AI agents during runtime, use the `check_compatibility()` tool.
 
 **Environment variables**
 

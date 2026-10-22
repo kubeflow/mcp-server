@@ -141,9 +141,9 @@ curl http://localhost:8000/health   # liveness  — server process is up
 curl http://localhost:8000/ready    # readiness — clients loaded, resources ready
 ```
 
-`/ready` returns `200` only when both `clients_ready` and `resources_ready` are `true`. It does
-**not** contact Kubernetes; a 503 means a client module failed to load or a packaged resource file
-is missing — check server logs, not cluster health.
+`/ready` returns `200` when client modules are loaded, packaged resources are present, and
+Kubernetes/CRD/RBAC readiness diagnostics pass. A 503 means a client module failed to load,
+a packaged resource is missing, or cluster prerequisites failed — check server logs for details.
 
 ### 3. MCP Inspector (no LLM required)
 
@@ -348,7 +348,7 @@ make inspector
 |---------|-------|-----|
 | `"kubernetes": false` in `health_check` | Server cannot reach the K8s API | Check `kubectl cluster-info`; verify kubeconfig or ServiceAccount permissions |
 | `Trainer CRD not found` | Kubeflow Trainer not installed or wrong version | Install the Trainer version the [compatibility matrix](../README.md#requirements) lists for your MCP server release |
-| `/ready` returns `503` (`{"status": "not_ready"}`) | A client module failed to load or a packaged resource file is missing | Check server logs; reinstall the package if a resource file is missing |
+| `/ready` returns `503` (`{"status": "not_ready"}`) | A client module failed to load, a packaged resource is missing, or K8s/CRD/RBAC readiness checks failed | Check server logs (`kubectl logs`) for diagnostic failure details |
 | Agent has no tool for submitting a job | Persona is `readonly` | Set `KUBEFLOW_MCP_PERSONA=data-scientist` or higher |
 | `"was not created by MCP"` when deleting | Job was not submitted through MCP tools | Use `platform-admin` persona, or re-create the job via MCP tools |
 | Empty namespace or 403 listing runtimes | In-cluster pod running in the wrong namespace | Deploy in the same namespace as your TrainJobs (see [`examples/kubernetes/`](../examples/kubernetes/)) |
