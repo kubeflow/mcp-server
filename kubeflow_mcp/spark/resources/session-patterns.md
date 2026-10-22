@@ -16,6 +16,7 @@ get_spark_session(name)                 # poll until state == "Ready"
 #   from pyspark.sql import SparkSession
 #   spark = SparkSession.builder.remote("sc://<service>:15002").getOrCreate()
 get_spark_session_logs(name)            # inspect driver output if something looks wrong
+delete_spark_session(name)              # preview the teardown
 delete_spark_session(name, confirmed=True)   # tear down when finished
 ```
 

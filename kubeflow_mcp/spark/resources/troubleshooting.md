@@ -11,7 +11,7 @@ Error-to-fix reference for the `spark` client tools.
 | `get_spark_session_logs` → "has no driver pod yet" | Session still `Provisioning` | Poll `get_spark_session(name)` until `state == "Ready"`, then retry |
 | `RESOURCE_NOT_FOUND` on get/delete/logs | Wrong name or namespace | `list_spark_sessions(namespace=...)` to find the exact name |
 | Session stuck in `NotReady` | Insufficient cluster resources or image pull issues | `get_spark_session_logs(name)`; check quotas and executor resource requests |
-| Session `Failed` | Driver crashed at startup | Read logs, `delete_spark_session(name, confirmed=True)`, recreate with corrected config |
+| Session `Failed` | Driver crashed at startup | Read logs, `delete_spark_session(name)` to preview then repeat with `confirmed=True`, recreate with corrected config |
 
 ## Known limitations
 

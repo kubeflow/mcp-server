@@ -45,12 +45,12 @@ def session_info_to_dict(info: Any) -> dict[str, Any]:
     created = getattr(info, "creation_timestamp", None)
     created_str = created.isoformat() if hasattr(created, "isoformat") else created
 
-    # The released ``kubeflow[spark]`` baseline (0.4.0/0.4.1) names the
-    # driver-pod field ``pod_name``; unreleased SDK ``main`` renamed it to
+    # The field was renamed across SDK releases: 0.4.x exposes the driver pod as
+    # ``pod_name``, 0.5.0 (the baseline this module targets) as
     # ``driver_pod_name``. Read ``pod_name`` first and fall back to
-    # ``driver_pod_name`` (first non-``None`` wins) so the pod name is correct
-    # on the supported release today and keeps working if the rename ships in a
-    # future release. The MCP-facing key stays ``driver_pod_name`` regardless.
+    # ``driver_pod_name`` (first non-``None`` wins) so both spellings work and a
+    # future rename cannot silently return ``None``. The MCP-facing key stays
+    # ``driver_pod_name`` regardless.
     driver_pod_name = getattr(info, "pod_name", None)
     if driver_pod_name is None:
         driver_pod_name = getattr(info, "driver_pod_name", None)

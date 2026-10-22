@@ -48,6 +48,12 @@ _MAX_NAME_LEN = 52  # leave headroom for operator-appended suffixes (-svc, -serv
 # pods. The ceiling is deliberately generous; it only stops runaway requests.
 _MAX_EXECUTORS = 100
 
+# ``connect()`` blocks the calling thread for up to these many seconds, so an
+# unbounded value (timeout=86400) would hold a server thread for a day. One hour
+# is far longer than a session needs to become Ready.
+_MAX_TIMEOUT = 3600
+_MAX_CONNECT_TIMEOUT = 3600
+
 # ``spark_conf`` is forwarded to the SDK verbatim, so these keys would let a
 # caller change *what runs and as whom* — a different image, a different service
 # account, a namespace outside the allowlist, or host mounts and secrets — none
@@ -140,6 +146,36 @@ def _provisioned_session_or_none(
     return ToolResponse(data=data).model_dump()
 
 
+def _validate_create_inputs(
+    num_executors: int | None,
+    timeout: int,
+    connect_timeout: int,
+    spark_conf: dict[str, str] | None,
+) -> ToolError | None:
+    """Bound the inputs that reach the cluster or hold a server thread."""
+    if num_executors is not None and not 0 <= num_executors <= _MAX_EXECUTORS:
+        return ToolError(
+            error=f"num_executors must be between 0 and {_MAX_EXECUTORS}, got {num_executors}",
+            error_code=ErrorCode.VALIDATION_ERROR,
+        )
+
+    for label, value, ceiling in (
+        ("timeout", timeout, _MAX_TIMEOUT),
+        ("connect_timeout", connect_timeout, _MAX_CONNECT_TIMEOUT),
+    ):
+        if not 1 <= value <= ceiling:
+            return ToolError(
+                error=f"{label} must be between 1 and {ceiling} seconds, got {value}",
+                error_code=ErrorCode.VALIDATION_ERROR,
+            )
+
+    conf_err = _validate_spark_conf(spark_conf)
+    if conf_err is not None:
+        return ToolError(error=conf_err, error_code=ErrorCode.VALIDATION_ERROR)
+
+    return None
+
+
 def create_spark_session(
     name: str | None = None,
     num_executors: int | None = None,
@@ -184,15 +220,9 @@ def create_spark_session(
     if ns_err is not None:
         return ns_err.model_dump()
 
-    if num_executors is not None and not 0 <= num_executors <= _MAX_EXECUTORS:
-        return ToolError(
-            error=f"num_executors must be between 0 and {_MAX_EXECUTORS}, got {num_executors}",
-            error_code=ErrorCode.VALIDATION_ERROR,
-        ).model_dump()
-
-    conf_err = _validate_spark_conf(spark_conf)
-    if conf_err is not None:
-        return ToolError(error=conf_err, error_code=ErrorCode.VALIDATION_ERROR).model_dump()
+    sizing_err = _validate_create_inputs(num_executors, timeout, connect_timeout, spark_conf)
+    if sizing_err is not None:
+        return sizing_err.model_dump()
 
     session_name = name or _generate_session_name()
     name_err = _validate_session_name(session_name)
