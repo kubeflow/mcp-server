@@ -405,6 +405,7 @@ def create_server(  # noqa: C901
     mode: str = "full",
     instruction_tier: str = "full",
     auth_provider: Any = None,
+    client_configuration_provider: Any = None,
 ) -> FastMCP:
     """Create MCP server with dynamic client loading.
 
@@ -418,6 +419,12 @@ def create_server(  # noqa: C901
               - "semantic": 2 meta-tools (find_tools, execute_tool)
         instruction_tier: Instruction verbosity — "full", "compact", or "minimal"
         auth_provider: Optional FastMCP auth provider for HTTP transport.
+        client_configuration_provider: Optional callable that maps the caller's
+            verified access token to a ``kubernetes.client.Configuration``. When
+            set, every tool call builds its Kubernetes and Trainer clients from
+            that configuration instead of the server's kubeconfig, and a call
+            the provider cannot serve is refused. See
+            :class:`~kubeflow_mcp.core.middleware.RequestClientConfigurationMiddleware`.
 
     Returns:
         Configured FastMCP server instance
@@ -452,10 +459,17 @@ def create_server(  # noqa: C901
     mcp: FastMCP = FastMCP("kubeflow-mcp-server", version=__version__, **mcp_kwargs)
 
     # Bridge FastMCP async context into sync _audit_wrap via ContextVars
-    from kubeflow_mcp.core.middleware import AuditIdentityMiddleware, ToolErrorMiddleware
+    from kubeflow_mcp.core.middleware import (
+        AuditIdentityMiddleware,
+        RequestClientConfigurationMiddleware,
+        ToolErrorMiddleware,
+    )
 
     mcp.add_middleware(AuditIdentityMiddleware())
     mcp.add_middleware(ToolErrorMiddleware())
+    if client_configuration_provider is not None:
+        mcp.add_middleware(RequestClientConfigurationMiddleware(client_configuration_provider))
+        logger.info("Per-request Kubernetes client configuration enabled")
 
     # Merge tool metadata from client modules
     all_descriptions: dict[str, str] = {}

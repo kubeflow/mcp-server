@@ -48,7 +48,7 @@ kubeflow_mcp/                    # Main Python package (unit tests co-located as
 │   ├── dynamic_tools.py         # full / progressive / semantic tool modes
 │   ├── health.py                # health_check, get_server_logs
 │   ├── telemetry.py             # Optional OpenTelemetry tracing
-│   ├── middleware.py            # Audit identity ContextVars
+│   ├── middleware.py            # Audit identity ContextVars, per-request client hook
 │   ├── config.py                # Config precedence (CLI > env > file)
 │   ├── logging.py               # Structured logging
 │   └── resources.py             # MCP resource registration

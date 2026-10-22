@@ -16,9 +16,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+
+import pytest
+from kubernetes import client as k8s_client
 
 from kubeflow_mcp.common.utils import (
     MCP_MANAGED_LABEL,
@@ -32,6 +36,8 @@ from kubeflow_mcp.common.utils import (
     get_trainer_client_for_namespace,
     get_trainer_effective_namespace,
     get_trainer_ownership,
+    get_version_api,
+    request_client_configuration,
     reset_clients,
 )
 
@@ -263,3 +269,115 @@ class TestGetTrainerClientForNamespace:
         assert mock_cls.call_count == 1
         with _ns_client_lock:
             _ns_client_cache.pop("cache-ns", None)
+
+
+def _configuration(host: str) -> k8s_client.Configuration:
+    cfg = k8s_client.Configuration()
+    cfg.host = host
+    cfg.api_key = {"authorization": f"Bearer token-for-{host}"}
+    return cfg
+
+
+class TestRequestClientConfiguration:
+    """Clients built inside a request block use that block's identity and nothing else."""
+
+    @pytest.fixture(autouse=True)
+    def _clean_caches(self):
+        reset_clients()
+        yield
+        reset_clients()
+
+    def test_api_helpers_use_request_configuration(self):
+        cfg = _configuration("https://alice.example")
+        with (
+            patch(PATCH_GET_API_CLIENT) as process_client,
+            request_client_configuration(cfg),
+        ):
+            for api in (get_core_v1_api(), get_custom_objects_api(), get_version_api()):
+                assert api.api_client.configuration is cfg
+        process_client.assert_not_called()
+
+    def test_no_kubeconfig_is_loaded_for_a_request(self):
+        """The server's own credentials must never be read to serve a caller."""
+        with (
+            patch("kubernetes.config.load_kube_config") as mock_kube,
+            patch("kubernetes.config.load_incluster_config") as mock_incluster,
+            request_client_configuration(_configuration("https://alice.example")),
+        ):
+            get_core_v1_api()
+        mock_kube.assert_not_called()
+        mock_incluster.assert_not_called()
+
+    def test_outside_block_uses_process_client(self):
+        with request_client_configuration(_configuration("https://alice.example")):
+            pass
+        with patch(PATCH_GET_API_CLIENT) as process_client:
+            get_core_v1_api()
+        process_client.assert_called_once()
+
+    def test_api_clients_closed_when_block_exits(self):
+        """An unclosed ApiClient keeps its thread pool until process exit (atexit)."""
+        with patch.object(k8s_client.ApiClient, "close") as mock_close:
+            with request_client_configuration(_configuration("https://alice.example")):
+                get_core_v1_api()
+                get_custom_objects_api()
+                mock_close.assert_not_called()
+            assert mock_close.call_count == 2
+
+    @patch("kubeflow_mcp.common.utils.TrainerClient")
+    def test_trainer_client_built_from_request_configuration(self, mock_cls):
+        cfg = _configuration("https://alice.example")
+        with request_client_configuration(cfg):
+            get_trainer_client_for_namespace("team-a")
+        backend_config = mock_cls.call_args.kwargs["backend_config"]
+        assert backend_config.namespace == "team-a"
+        assert backend_config.client_configuration is cfg
+
+    @patch("kubeflow_mcp.common.utils.TrainerClient")
+    def test_trainer_client_not_shared_across_requests(self, mock_cls):
+        """Two callers reading the same namespace must not share a client."""
+        from kubeflow_mcp.common.utils import _ns_client_cache, _ns_client_lock
+
+        mock_cls.side_effect = lambda **_: MagicMock()
+        with request_client_configuration(_configuration("https://alice.example")):
+            alice = get_trainer_client_for_namespace("shared")
+            assert get_trainer_client_for_namespace("shared") is alice
+        with request_client_configuration(_configuration("https://bob.example")):
+            bob = get_trainer_client_for_namespace("shared")
+        assert alice is not bob
+        with _ns_client_lock:
+            assert "shared" not in _ns_client_cache
+
+    @patch("kubeflow_mcp.common.utils.TrainerClient")
+    def test_trainer_backend_client_closed_when_block_exits(self, mock_cls):
+        trainer = MagicMock()
+        mock_cls.return_value = trainer
+        with request_client_configuration(_configuration("https://alice.example")):
+            get_trainer_client_for_namespace("team-a")
+            trainer.backend.core_api.api_client.close.assert_not_called()
+        trainer.backend.core_api.api_client.close.assert_called_once()
+
+    @patch("kubeflow_mcp.common.utils.TrainerClient")
+    def test_default_namespace_client_bypasses_singleton(self, mock_cls):
+        cfg = _configuration("https://alice.example")
+        with (
+            patch("kubeflow_mcp.common.utils._get_process_trainer_client") as singleton,
+            request_client_configuration(cfg),
+        ):
+            get_trainer_client_for_namespace(None)
+        singleton.assert_not_called()
+        backend_config = mock_cls.call_args.kwargs["backend_config"]
+        assert backend_config.namespace is None
+        assert backend_config.client_configuration is cfg
+
+    async def test_concurrent_requests_are_isolated(self):
+        """Interleaved requests on one event loop each see only their own identity."""
+
+        async def call(host: str) -> str:
+            with request_client_configuration(_configuration(host)):
+                await asyncio.sleep(0)
+                api = await asyncio.to_thread(get_core_v1_api)
+                return api.api_client.configuration.host
+
+        hosts = [f"https://user-{i}.example" for i in range(8)]
+        assert await asyncio.gather(*(call(h) for h in hosts)) == hosts

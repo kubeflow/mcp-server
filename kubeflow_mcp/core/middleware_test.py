@@ -17,13 +17,19 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastmcp import Client, FastMCP
+from fastmcp.server.auth import AccessToken
+from kubernetes import client as k8s_client
 
+from kubeflow_mcp.common.utils import get_core_v1_api
 from kubeflow_mcp.core.middleware import (
     AuditIdentityMiddleware,
+    RequestClientConfigurationMiddleware,
     ToolErrorMiddleware,
     _request_id_var,
     _user_id_var,
@@ -277,3 +283,140 @@ class TestToolErrorMiddleware:
             set_effective_persona(previous_persona)
         assert result.is_error is True
         assert result.structured_content["error_code"] == "VALIDATION_ERROR"
+
+
+def _bearer_configuration(token: str) -> k8s_client.Configuration:
+    cfg = k8s_client.Configuration()
+    cfg.host = "https://kubernetes.example"
+    cfg.api_key = {"authorization": f"Bearer {token}"}
+    return cfg
+
+
+class TestRequestClientConfigurationMiddleware:
+    """The per-request client hook runs each call as its caller, or refuses it."""
+
+    @staticmethod
+    def _server(provider) -> tuple[FastMCP, list[str]]:
+        mcp = FastMCP("test")
+        mcp.add_middleware(RequestClientConfigurationMiddleware(provider))
+        executed: list[str] = []
+
+        @mcp.tool
+        def whoami() -> dict:
+            # A sync tool runs in a worker thread, so this also checks that the
+            # request configuration crosses into it.
+            executed.append("whoami")
+            api = get_core_v1_api()
+            return {"authorization": api.api_client.configuration.api_key["authorization"]}
+
+        return mcp, executed
+
+    async def test_tool_clients_use_provider_configuration(self) -> None:
+        token = AccessToken(token="alice-token", client_id="alice", scopes=[])
+        seen: list[AccessToken | None] = []
+
+        def provider(access_token):
+            seen.append(access_token)
+            return _bearer_configuration(access_token.token)
+
+        mcp, _ = self._server(provider)
+        with patch("kubeflow_mcp.core.middleware.get_access_token", return_value=token):
+            async with Client(mcp) as client:
+                result = await client.call_tool_mcp("whoami", {})
+        assert result.is_error is False
+        assert result.structured_content == {"authorization": "Bearer alice-token"}
+        assert seen == [token]
+
+    async def test_async_provider_is_awaited(self) -> None:
+        async def provider(_token):
+            return _bearer_configuration("async-token")
+
+        mcp, _ = self._server(provider)
+        async with Client(mcp) as client:
+            result = await client.call_tool_mcp("whoami", {})
+        assert result.structured_content == {"authorization": "Bearer async-token"}
+
+    async def test_none_from_provider_refuses_without_running_tool(self) -> None:
+        """No credentials for the caller must never mean running as the server."""
+        mcp, executed = self._server(lambda _token: None)
+        async with Client(mcp) as client:
+            result = await client.call_tool_mcp("whoami", {})
+        assert result.is_error is True
+        assert result.structured_content["error_code"] == "PERMISSION_DENIED"
+        assert executed == []
+
+    async def test_provider_error_refuses_and_does_not_log_message(self, caplog) -> None:
+        """Provider errors can echo the token, so only the exception type is logged."""
+
+        def provider(_token):
+            raise ValueError("token secret-value rejected by exchange")
+
+        mcp, executed = self._server(provider)
+        with caplog.at_level(logging.DEBUG, logger="kubeflow_mcp.core.middleware"):
+            async with Client(mcp) as client:
+                result = await client.call_tool_mcp("whoami", {})
+        assert result.is_error is True
+        assert result.structured_content["error_code"] == "PERMISSION_DENIED"
+        assert executed == []
+        assert "secret-value" not in caplog.text
+        assert "secret-value" not in str(result.structured_content)
+
+    async def test_create_server_wires_provider(self) -> None:
+        """With a provider set, upstream tools run under it (here: refused)."""
+        previous_persona = get_effective_persona()
+        try:
+            mcp = create_server(client_configuration_provider=lambda _token: None)
+            async with Client(mcp) as client:
+                result = await client.call_tool_mcp("get_training_job", {"name": "my-job"})
+        finally:
+            set_effective_persona(previous_persona)
+        assert result.is_error is True
+        assert result.structured_content["error_code"] == "PERMISSION_DENIED"
+
+    async def test_write_tool_runs_as_caller(self) -> None:
+        """The ownership read and the delete itself both use the caller's configuration."""
+        from kubeflow_mcp.common.utils import MCP_MANAGED_LABEL, MCP_MANAGED_VALUE
+
+        ownership_auth: list[str] = []
+
+        def get_namespaced_custom_object(api, **_kwargs):
+            ownership_auth.append(api.api_client.configuration.api_key["authorization"])
+            return {"metadata": {"labels": {MCP_MANAGED_LABEL: MCP_MANAGED_VALUE}}}
+
+        trainer = MagicMock()
+        previous_persona = get_effective_persona()
+        try:
+            mcp = create_server(
+                persona="data-scientist",
+                client_configuration_provider=lambda _token: _bearer_configuration("bob-token"),
+            )
+            with (
+                patch("kubeflow_mcp.common.utils.TrainerClient", return_value=trainer) as cls,
+                patch.object(
+                    k8s_client.CustomObjectsApi,
+                    "get_namespaced_custom_object",
+                    get_namespaced_custom_object,
+                ),
+            ):
+                async with Client(mcp) as client:
+                    result = await client.call_tool_mcp(
+                        "delete_training_job",
+                        {"name": "my-job", "namespace": "team-b", "confirmed": True},
+                    )
+        finally:
+            set_effective_persona(previous_persona)
+        assert result.is_error is False, result.structured_content
+        assert ownership_auth == ["Bearer bob-token"]
+        backend_config = cls.call_args.kwargs["backend_config"]
+        assert backend_config.namespace == "team-b"
+        assert backend_config.client_configuration.api_key == {"authorization": "Bearer bob-token"}
+        trainer.delete_job.assert_called_once_with(name="my-job")
+
+    def test_create_server_default_has_no_hook(self) -> None:
+        """Single-tenant deployments keep the server's own kubeconfig identity."""
+        previous_persona = get_effective_persona()
+        try:
+            mcp = create_server()
+        finally:
+            set_effective_persona(previous_persona)
+        assert not any(isinstance(m, RequestClientConfigurationMiddleware) for m in mcp.middleware)
