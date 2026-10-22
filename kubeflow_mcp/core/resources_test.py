@@ -24,7 +24,7 @@ def _fake_mcp() -> tuple[MagicMock, dict]:
     """Return a mock FastMCP that records each registered handler by URI."""
     handlers: dict = {}
 
-    def resource(uri):
+    def resource(uri, **_kwargs):
         def decorator(fn):
             handlers[uri] = fn
             return fn
@@ -66,3 +66,58 @@ def test_module_without_resources_is_skipped(tmp_path):
 
     assert register_resources(mcp, {"stub": SimpleNamespace()}) is True
     assert handlers == {}
+
+
+def _fake_skill_module(tmp_path, name: str, resources: dict, skills: dict) -> SimpleNamespace:
+    pkg = tmp_path / name
+    pkg.mkdir()
+    for filename, _description in resources.values():
+        (pkg / filename).write_text(f"{name}:{filename}", encoding="utf-8")
+    return SimpleNamespace(
+        __file__=str(pkg / "__init__.py"), CLIENT_RESOURCES=resources, CLIENT_SKILLS=skills
+    )
+
+
+def test_duplicate_skill_alias_keeps_first_and_warns(tmp_path, caplog):
+    """Two clients claiming the same skill:// URI must not overwrite each other."""
+    alias = "skill://kubeflow/troubleshooting"
+    trainer = _fake_skill_module(
+        tmp_path,
+        "trainer",
+        {"trainer://guides/troubleshooting": ("troubleshooting.md", "Trainer guide")},
+        {"kubeflow-training": {"aliases": {alias: "trainer://guides/troubleshooting"}}},
+    )
+    optimizer = _fake_skill_module(
+        tmp_path,
+        "optimizer",
+        {"optimizer://guides/troubleshooting": ("troubleshooting.md", "Optimizer guide")},
+        {"kubeflow-optimizer": {"aliases": {alias: "optimizer://guides/troubleshooting"}}},
+    )
+    mcp, handlers = _fake_mcp()
+
+    with caplog.at_level("WARNING"):
+        complete = register_resources(mcp, {"trainer": trainer, "optimizer": optimizer})
+
+    assert complete is False
+    assert handlers[alias]() == "trainer:troubleshooting.md"
+    assert sum(1 for call in mcp.resource.call_args_list if call.args[0] == alias) == 1
+    assert any(alias in r.message and "duplicate" in r.message for r in caplog.records)
+
+
+def test_skill_alias_is_distinguishable_from_its_source(tmp_path):
+    source = "trainer://guides/troubleshooting"
+    alias = "skill://kubeflow/troubleshooting"
+    module = _fake_skill_module(
+        tmp_path,
+        "trainer",
+        {source: ("troubleshooting.md", "Trainer guide")},
+        {"kubeflow-training": {"aliases": {alias: source}}},
+    )
+    mcp, handlers = _fake_mcp()
+
+    register_resources(mcp, {"trainer": module})
+
+    assert handlers[source].__name__ == "troubleshooting"
+    assert handlers[alias].__name__ == "kubeflow_troubleshooting"
+    assert handlers[alias].__doc__ == f"Trainer guide (Agent Skill alias of {source})"
+    assert handlers[alias]() == handlers[source]()
