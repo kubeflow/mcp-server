@@ -21,17 +21,22 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from kubeflow_mcp.common.utils import (
+    _NS_CLIENT_CACHE_MAX,
     MCP_MANAGED_LABEL,
     MCP_MANAGED_VALUE,
     OWNERSHIP_MANAGED,
     OWNERSHIP_MISSING,
     OWNERSHIP_UNMANAGED,
     _get_api_client,
+    get_apiextensions_api,
     get_core_v1_api,
     get_custom_objects_api,
+    get_trainer_client,
     get_trainer_client_for_namespace,
+    get_trainer_custom_objects_api,
     get_trainer_effective_namespace,
     get_trainer_ownership,
+    get_version_api,
     reset_clients,
 )
 
@@ -195,6 +200,23 @@ class TestGetCoreV1Api:
         mock_api_client.assert_called_once()
 
 
+class TestGetVersionApi:
+    @patch(PATCH_GET_API_CLIENT)
+    def test_returns_version_api_instance(self, mock_api_client):
+        mock_api_client.return_value = MagicMock()
+        result = get_version_api()
+        from kubernetes.client import VersionApi
+
+        assert isinstance(result, VersionApi)
+
+    @patch(PATCH_GET_API_CLIENT)
+    def test_uses_shared_api_client(self, mock_api_client):
+        shared_client = MagicMock()
+        mock_api_client.return_value = shared_client
+        get_version_api()
+        mock_api_client.assert_called_once()
+
+
 class TestGetCustomObjectsApi:
     @patch(PATCH_GET_API_CLIENT)
     def test_returns_custom_objects_api_instance(self, mock_api_client):
@@ -210,6 +232,45 @@ class TestGetCustomObjectsApi:
         mock_api_client.return_value = shared_client
         get_custom_objects_api()
         mock_api_client.assert_called_once()
+
+
+class TestGetApiextensionsApi:
+    @patch(PATCH_GET_API_CLIENT)
+    def test_returns_apiextensions_api_instance(self, mock_api_client):
+        mock_api_client.return_value = MagicMock()
+        result = get_apiextensions_api()
+        from kubernetes.client import ApiextensionsV1Api
+
+        assert isinstance(result, ApiextensionsV1Api)
+
+    @patch(PATCH_GET_API_CLIENT)
+    def test_uses_shared_api_client(self, mock_api_client):
+        shared_client = MagicMock()
+        mock_api_client.return_value = shared_client
+        get_apiextensions_api()
+        mock_api_client.assert_called_once()
+
+
+class TestGetTrainerCustomObjectsApi:
+    @patch(PATCH_CUSTOM_API)
+    def test_delegates_to_get_custom_objects_api(self, mock_custom_api):
+        mock_instance = MagicMock()
+        mock_custom_api.return_value = mock_instance
+        result = get_trainer_custom_objects_api()
+        assert result is mock_instance
+        mock_custom_api.assert_called_once()
+
+
+class TestGetTrainerClient:
+    def test_returns_trainer_client_singleton(self):
+        reset_clients()
+        with patch("kubeflow_mcp.common.utils.TrainerClient") as mock_cls:
+            mock_cls.return_value = MagicMock(name="trainer-singleton")
+            first = get_trainer_client()
+            second = get_trainer_client()
+            assert first is second
+            assert mock_cls.call_count == 1
+        reset_clients()
 
 
 class TestGetTrainerEffectiveNamespace:
@@ -263,3 +324,26 @@ class TestGetTrainerClientForNamespace:
         assert mock_cls.call_count == 1
         with _ns_client_lock:
             _ns_client_cache.pop("cache-ns", None)
+
+    @patch("kubeflow_mcp.common.utils.TrainerClient")
+    def test_cache_eviction_when_maxsize_exceeded(self, mock_cls):
+        from kubeflow_mcp.common.utils import _ns_client_cache, _ns_client_lock
+
+        reset_clients()
+        try:
+            for i in range(_NS_CLIENT_CACHE_MAX):
+                get_trainer_client_for_namespace(f"ns-{i}")
+
+            with _ns_client_lock:
+                assert len(_ns_client_cache) == _NS_CLIENT_CACHE_MAX
+                assert "ns-0" in _ns_client_cache
+
+            # 65th namespace should evict the oldest ("ns-0")
+            get_trainer_client_for_namespace("ns-overflow")
+
+            with _ns_client_lock:
+                assert len(_ns_client_cache) == _NS_CLIENT_CACHE_MAX
+                assert "ns-0" not in _ns_client_cache
+                assert "ns-overflow" in _ns_client_cache
+        finally:
+            reset_clients()
