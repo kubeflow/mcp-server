@@ -69,6 +69,10 @@ class TestIsK8sNotFound:
         exc.__context__ = context
         assert is_k8s_not_found(exc) is True
 
+    def test_returns_false_when_kubernetes_import_fails(self):
+        with patch.dict("sys.modules", {"kubernetes.client.exceptions": None}):
+            assert is_k8s_not_found(RuntimeError("not found")) is False
+
 
 class TestExceptionDetails:
     def test_includes_exception_type_and_message(self):
