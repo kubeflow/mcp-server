@@ -22,6 +22,7 @@ See also: kubeflow_mcp/trainer/api/architecture_test.py for full metadata consis
 
 import hashlib
 
+import pytest
 from fastmcp import Client
 
 from kubeflow_mcp import __version__
@@ -50,10 +51,155 @@ class TestToolDescriptionIntegrity:
         assert checksums
         assert all(len(digest) == 16 for digest in checksums.values())
 
-    # TODO(test): pin checksum baseline and assert equality across releases
-    # TODO(test): test create_server produces deterministic tool set per persona
-    # TODO(test): test health tools are always included regardless of persona
-    # TODO(test): test dynamic mode tools are subset of full mode
+    BASELINE_TOOL_DESCRIPTION_CHECKSUMS = {
+        "check_compatibility": "573e13e9d156d057",
+        "create_runtime": "4a91f8bf0943cff7",
+        "delete_runtime": "9be2a848a27133ec",
+        "delete_training_job": "7a230704e6e9cbca",
+        "estimate_resources": "06c315693b2fff3d",
+        "fine_tune": "263902adb969a394",
+        "get_cluster_resources": "d436bd50321a4b46",
+        "get_runtime": "f8c86da73be2a5d3",
+        "get_training_events": "acc2f87c0a493f09",
+        "get_training_job": "23014441e9139a88",
+        "get_training_logs": "18a5a86ffb60e5b9",
+        "inspect_controller": "70a7ca6464ed602d",
+        "inspect_crd": "960ddaa7c98a9f79",
+        "list_runtimes": "cd64d3b91647788b",
+        "list_training_jobs": "8041a71321166d53",
+        "patch_runtime": "681a0b91a85e48ea",
+        "pre_flight": "0cf3cacccf2f7104",
+        "run_container_training": "cc49f789d27e3250",
+        "run_custom_training": "ae983eca798ece9a",
+        "update_training_job": "64c03e724ebe68c0",
+        "wait_for_training": "23cdfb81cfe136d2",
+    }
+
+    def test_description_checksums_match_baseline(self):
+        """Pin checksum baseline and assert equality across releases."""
+        checksums = {
+            name: hashlib.sha256(desc.encode()).hexdigest()[:16]
+            for name, desc in sorted(CLIENT_TOOL_DESCRIPTIONS.items())
+        }
+        assert checksums == self.BASELINE_TOOL_DESCRIPTION_CHECKSUMS
+
+
+class TestCreateServer:
+    """Tests for create_server tool registration, persona filtering, modes, and policy."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("persona", "expected_count"),
+        [
+            ("readonly", 12),
+            ("data-scientist", 16),
+            ("ml-engineer", 20),
+            ("platform-admin", 23),
+        ],
+    )
+    async def test_create_server_deterministic_tools_per_persona(self, persona, expected_count):
+        """create_server produces deterministic tool set per persona."""
+        previous = get_effective_persona()
+        try:
+            s1 = create_server(persona=persona)
+            tools1 = [t.name for t in await s1.list_tools()]
+            s2 = create_server(persona=persona)
+            tools2 = [t.name for t in await s2.list_tools()]
+            assert len(tools1) == expected_count
+            assert tools1 == tools2
+        finally:
+            set_effective_persona(previous)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "persona",
+        ["readonly", "data-scientist", "ml-engineer", "platform-admin"],
+    )
+    async def test_health_tools_always_included_regardless_of_persona(self, persona):
+        """Health tools are always included regardless of persona."""
+        previous = get_effective_persona()
+        try:
+            server = create_server(persona=persona)
+            tool_names = {t.name for t in await server.list_tools()}
+            assert {"health_check", "get_server_logs"}.issubset(tool_names)
+        finally:
+            set_effective_persona(previous)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("mode", "expected_meta_tools"),
+        [
+            ("progressive", {"list_tools", "describe_tools", "execute_tool"}),
+            ("semantic", {"find_tools", "execute_tool"}),
+        ],
+    )
+    async def test_dynamic_mode_tools_are_subset_of_full_mode(self, mode, expected_meta_tools):
+        """Dynamic mode meta-tools proxy a subset of full mode tools."""
+        previous = get_effective_persona()
+        try:
+            full_server = create_server(persona="platform-admin", mode="full")
+            full_tools = {t.name for t in await full_server.list_tools()}
+
+            dynamic_server = create_server(persona="readonly", mode=mode)
+            meta_tools = {t.name for t in await dynamic_server.list_tools()}
+            assert meta_tools == expected_meta_tools
+
+            from kubeflow_mcp.core.dynamic_tools import TOOL_REGISTRY
+
+            assert set(TOOL_REGISTRY.keys()).issubset(full_tools)
+        finally:
+            set_effective_persona(previous)
+
+    def test_invalid_mode_raises_value_error(self):
+        """Invalid mode raises ValueError with allowed choices."""
+        with pytest.raises(ValueError, match="Invalid mode 'invalid'"):
+            create_server(mode="invalid")
+
+    @pytest.mark.asyncio
+    async def test_read_only_policy_excludes_write_tools(self, monkeypatch):
+        """read_only policy excludes write tools even for platform-admin."""
+        previous = get_effective_persona()
+        try:
+            monkeypatch.setattr("kubeflow_mcp.core.server.is_read_only", lambda: True)
+            server = create_server(persona="platform-admin")
+            tool_names = {t.name for t in await server.list_tools()}
+            assert len(tool_names) == 15
+            write_tools = {
+                "fine_tune",
+                "run_custom_training",
+                "run_container_training",
+                "delete_training_job",
+                "update_training_job",
+                "create_runtime",
+                "patch_runtime",
+                "delete_runtime",
+            }
+            assert tool_names.isdisjoint(write_tools)
+        finally:
+            set_effective_persona(previous)
+
+    def test_unknown_client_logs_warning_and_skips(self, caplog):
+        """create_server warns on unknown client module and skips it."""
+        with caplog.at_level("WARNING"):
+            create_server(clients=["unknown_client"])
+        assert "Unknown client 'unknown_client'" in caplog.text
+
+    def test_failed_client_import_logs_warning(self, monkeypatch, caplog):
+        """create_server warns when client module fails to import."""
+
+        def mock_import(name):
+            raise ImportError("Simulated failure")
+
+        monkeypatch.setattr("importlib.import_module", mock_import)
+        with caplog.at_level("WARNING"):
+            create_server(clients=["trainer"])
+        assert "Failed to import client 'trainer'" in caplog.text
+
+    def test_auth_provider_attached(self):
+        """create_server attaches auth_provider to FastMCP when provided."""
+        mock_auth = object()
+        server = create_server(auth_provider=mock_auth)
+        assert server.auth is mock_auth
 
 
 class TestInjectMetaBlockedResponses:
