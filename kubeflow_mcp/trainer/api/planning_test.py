@@ -34,6 +34,7 @@ from kubeflow_mcp.trainer.api.planning import (
     _parse_k8s_version,
     _suggest_hf_model_ids,
     estimate_resources,
+    pre_flight,
 )
 
 
@@ -455,3 +456,52 @@ def test_estimate_resources_returns_sdk_error_for_api_failure():
 
     assert result["success"] is False
     assert result["error_code"] == "SDK_ERROR"
+
+
+def _pre_flight_with_cluster_nodes(runtime_names=("torchtune-llama3.2-1b",), **list_node_kwargs):
+    compat = {
+        "success": True,
+        "data": {"compatible": True, "checks": {}, "blockers": [], "platform": "kubernetes"},
+    }
+    runtimes = {"success": True, "data": {"runtimes": [{"name": n} for n in runtime_names]}}
+    core = MagicMock()
+    core.list_node.configure_mock(**list_node_kwargs)
+    with (
+        patch("kubeflow_mcp.trainer.api.planning.check_compatibility", return_value=compat),
+        patch("kubeflow_mcp.common.utils.get_core_v1_api", return_value=core),
+        patch("kubeflow_mcp.trainer.api.discovery.list_runtimes", return_value=runtimes),
+    ):
+        return pre_flight()["data"]
+
+
+def test_pre_flight_reports_unknown_gpus_when_node_list_fails():
+    # A failed node list (e.g. an RBAC 403) says nothing about GPUs, so pre_flight
+    # must not claim "No GPUs" or steer the agent from fine_tune() to gloo.
+    from kubernetes.client.exceptions import ApiException
+
+    data = _pre_flight_with_cluster_nodes(side_effect=ApiException(status=403, reason="Forbidden"))
+
+    assert data["cluster"]["success"] is False
+    assert "403" in data["cluster"]["error"]
+    assert not any("No GPUs" in step for step in data["next_steps"])
+    assert any("GPU availability unknown" in step for step in data["next_steps"])
+    assert data["tool_selection"]["recommended"] is None
+
+
+def test_pre_flight_reports_no_gpus_for_cpu_only_cluster():
+    data = _pre_flight_with_cluster_nodes(return_value=SimpleNamespace(items=[]))
+
+    assert data["cluster"]["gpu_total"] == 0
+    assert "No GPUs detected — LLM fine-tuning requires GPUs" in data["next_steps"]
+    assert data["tool_selection"]["recommended"] == "run_custom_training"
+
+
+def test_pre_flight_reports_missing_runtimes_when_node_list_also_fails():
+    from kubernetes.client.exceptions import ApiException
+
+    data = _pre_flight_with_cluster_nodes(
+        runtime_names=(), side_effect=ApiException(status=403, reason="Forbidden")
+    )
+
+    assert data["tool_selection"]["recommended"] is None
+    assert "No runtimes installed — install a ClusterTrainingRuntime first" in data["next_steps"]
