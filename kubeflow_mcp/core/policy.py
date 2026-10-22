@@ -86,6 +86,10 @@ PERSONAS: dict[str, dict[str, Any]] = {
             "get_training_events",
             "health_check",
             "get_server_logs",
+            # Spark (read-only session inspection)
+            "list_spark_sessions",
+            "get_spark_session",
+            "get_spark_session_logs",
         ]
     },
     "data-scientist": {
@@ -95,6 +99,9 @@ PERSONAS: dict[str, dict[str, Any]] = {
             "run_custom_training",
             "wait_for_training",
             "delete_training_job",
+            # Spark (session lifecycle)
+            "create_spark_session",
+            "delete_spark_session",
         ],
     },
     "ml-engineer": {
@@ -109,7 +116,7 @@ PERSONAS: dict[str, dict[str, Any]] = {
     "platform-admin": {"tools": "*"},
 }
 
-DESTRUCTIVE_TOOLS = {"delete_training_job", "delete_runtime"}
+DESTRUCTIVE_TOOLS = {"delete_training_job", "delete_runtime", "delete_spark_session"}
 
 # ─── Runtime persona ───────────────────────
 # Set once at server startup by create_server(); tools read via get_effective_persona().
