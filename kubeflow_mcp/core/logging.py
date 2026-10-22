@@ -25,6 +25,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from kubeflow_mcp.core.security import is_sensitive_key, mask_sensitive_data
+from kubeflow_mcp.core.telemetry import current_trace_ids
 
 correlation_id: ContextVar[str] = ContextVar("correlation_id", default="")
 request_context: ContextVar[dict[str, Any] | None] = ContextVar("request_context", default=None)
@@ -94,6 +95,7 @@ class StructuredFormatter(logging.Formatter):
             "message": _redact_text(record.getMessage()),
             "correlation_id": correlation_id.get() or None,
         }
+        log_dict.update(current_trace_ids())
 
         if record.exc_info:
             log_dict["exception"] = _redact_text(self.formatException(record.exc_info))
@@ -143,6 +145,7 @@ class BufferingHandler(logging.Handler):
             "logger": record.name,
             "message": _redact_text(record.getMessage()),
         }
+        log_entry.update(current_trace_ids())
         _log_buffer.append(log_entry)
 
 

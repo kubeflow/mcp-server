@@ -545,3 +545,117 @@ def test_get_training_job_namespace_not_allowed_short_circuits():
 
     assert result["success"] is False
     assert result["error_code"] == ErrorCode.PERMISSION_DENIED
+
+
+# ─── get_training_job steps ─────────────────────────────────────────────────
+
+
+def _step(name, status, pod=None):
+    return SimpleNamespace(
+        name=name, status=status, pod_name=pod or f"pod-{name}", device="cpu", device_count="1"
+    )
+
+
+def _job_with_steps(steps, status="Running", num_nodes=2):
+    job = _fake_job("job-a", status=status)
+    job.steps = steps
+    job.num_nodes = num_nodes
+    return job
+
+
+def _get_job(job):
+    with (
+        patch("kubeflow_mcp.trainer.api.discovery.check_namespace_allowed", return_value=None),
+        patch("kubeflow_mcp.trainer.api.discovery.get_trainer_client_for_namespace") as client,
+    ):
+        client.return_value.get_job.return_value = job
+        return get_training_job(name="job-a")
+
+
+def test_get_training_job_reports_steps_sorted_with_summary():
+    job = _job_with_steps(
+        [
+            _step("node-1", "Pending"),
+            _step("dataset-initializer", "Succeeded"),
+            _step("node-0", "Running"),
+            _step("model-initializer", None),
+        ]
+    )
+
+    data = verify_tool_success(_get_job(job))
+
+    assert [s["name"] for s in data["steps"]] == [
+        "dataset-initializer",
+        "model-initializer",
+        "node-0",
+        "node-1",
+    ]
+    assert data["steps"][2] == {
+        "name": "node-0",
+        "status": "Running",
+        "pod": "pod-node-0",
+        "device": "cpu",
+        "device_count": "1",
+    }
+    assert data["steps"][1]["status"] == "Unknown"
+    assert data["step_summary"] == {
+        "total": 4,
+        "by_status": {"Pending": 1, "Running": 1, "Succeeded": 1, "Unknown": 1},
+        "truncated": False,
+    }
+    assert data["num_nodes"] == 2
+
+
+def test_get_training_job_points_at_failed_step_logs():
+    job = _job_with_steps([_step("node-0", "Running"), _step("node-1", "Failed")])
+
+    data = verify_tool_success(_get_job(job))
+
+    assert data["next_steps"][0] == ("get_training_logs(name='job-a', step='node-1') — failed step")
+
+
+def test_get_training_job_pending_steps_suggest_events():
+    job = _job_with_steps([_step("node-0", "Pending")])
+
+    data = verify_tool_success(_get_job(job))
+
+    assert any("pods pending" in hint for hint in data["next_steps"])
+
+
+def test_get_training_job_without_steps_returns_empty_list():
+    data = verify_tool_success(_get_job(_fake_job("job-a", status="Created")))
+
+    assert data["steps"] == []
+    assert data["step_summary"] == {"total": 0, "by_status": {}, "truncated": False}
+    assert "num_nodes" not in data
+
+
+def test_get_training_job_bounds_the_step_list():
+    from kubeflow_mcp.trainer.api.discovery import MAX_JOB_STEPS
+
+    steps = [_step(f"node-{i:02d}", "Running") for i in range(MAX_JOB_STEPS + 8)]
+
+    data = verify_tool_success(_get_job(_job_with_steps(steps, num_nodes=len(steps))))
+
+    assert len(data["steps"]) == MAX_JOB_STEPS
+    assert data["step_summary"]["total"] == MAX_JOB_STEPS + 8
+    assert data["step_summary"]["truncated"] is True
+    assert data["step_summary"]["by_status"] == {"Running": MAX_JOB_STEPS + 8}
+
+
+def test_get_training_job_keeps_failed_step_beyond_the_cap():
+    from kubeflow_mcp.trainer.api.discovery import MAX_JOB_STEPS
+
+    count = MAX_JOB_STEPS + 8
+    steps = [_step(f"node-{i:02d}", "Running") for i in range(count - 1)]
+    steps.append(_step(f"node-{count - 1:02d}", "Failed"))
+
+    data = verify_tool_success(_get_job(_job_with_steps(steps, num_nodes=count)))
+
+    failed_name = f"node-{count - 1:02d}"
+    assert data["steps"][0]["name"] == failed_name
+    assert len(data["steps"]) == MAX_JOB_STEPS
+    assert data["step_summary"]["by_status"]["Failed"] == 1
+    assert data["next_steps"][0] == (
+        f"get_training_logs(name='job-a', step='{failed_name}') — failed step"
+    )

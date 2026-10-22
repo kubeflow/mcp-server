@@ -14,6 +14,8 @@
 
 """Tests for common/constants.py — error classification, phase maps."""
 
+from unittest.mock import MagicMock
+
 from packaging.specifiers import SpecifierSet
 from packaging.version import Version
 
@@ -31,6 +33,7 @@ from kubeflow_mcp.common.constants import (
     TOOL_TO_PHASE,
     ErrorCode,
     is_infrastructure_error,
+    record_tool_result,
 )
 
 
@@ -64,6 +67,45 @@ class TestIsInfrastructureError:
     def test_rate_limited_is_not_infrastructure(self):
         result = {"error": "rate limited", "error_code": ErrorCode.RATE_LIMITED}
         assert is_infrastructure_error(result) is False
+
+
+class TestRecordToolResult:
+    def test_success_result_records_success(self):
+        breaker = MagicMock()
+        result = {"data": {"status": "ok"}}
+        assert record_tool_result(breaker, result, generation=42) is True
+        breaker.record_success.assert_called_once_with(42)
+        breaker.record_failure.assert_not_called()
+        breaker.release.assert_not_called()
+
+    def test_non_dict_result_records_success(self):
+        breaker = MagicMock()
+        assert record_tool_result(breaker, "plain_string", generation=1) is True
+        breaker.record_success.assert_called_once_with(1)
+        breaker.record_failure.assert_not_called()
+        breaker.release.assert_not_called()
+
+    def test_infrastructure_error_records_failure(self):
+        breaker = MagicMock()
+        result = {"error": "connection refused", "error_code": ErrorCode.KUBERNETES_ERROR}
+        assert record_tool_result(breaker, result, generation=7) is False
+        breaker.record_failure.assert_called_once_with(7)
+        breaker.record_success.assert_not_called()
+        breaker.release.assert_not_called()
+
+    def test_non_infrastructure_error_releases_slot(self):
+        breaker = MagicMock()
+        result = {"error": "not found", "error_code": ErrorCode.RESOURCE_NOT_FOUND}
+        assert record_tool_result(breaker, result, generation=5) is False
+        breaker.release.assert_called_once_with(5)
+        breaker.record_success.assert_not_called()
+        breaker.record_failure.assert_not_called()
+
+    def test_default_generation_is_none(self):
+        breaker = MagicMock()
+        result = {"data": "ok"}
+        assert record_tool_result(breaker, result) is True
+        breaker.record_success.assert_called_once_with(None)
 
 
 class TestToolPhases:

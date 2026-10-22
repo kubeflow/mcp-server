@@ -12,8 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
+import pytest
 from fastmcp import FastMCP
 from starlette.testclient import TestClient
 
@@ -55,7 +56,9 @@ def test_ready_probe_rejects_incomplete_startup() -> None:
     assert response.json() == {"status": "not_ready"}
 
 
-def test_ready_probe_includes_diagnostics_on_failure() -> None:
+def test_ready_probe_omits_diagnostics_from_payload_and_logs(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     diagnostics = [
         ReadinessDiagnostic(
             check="trainer_crd",
@@ -76,17 +79,16 @@ def test_ready_probe_includes_diagnostics_on_failure() -> None:
     ]
     mcp = FastMCP("test-server")
     register_probe_routes(mcp, is_ready=False, diagnostics=diagnostics)
-    with TestClient(mcp.http_app(transport="streamable-http")) as client:
-        response = client.get("/ready")
+    with caplog.at_level("WARNING"):
+        with TestClient(mcp.http_app(transport="streamable-http")) as client:
+            response = client.get("/ready")
 
     assert response.status_code == 503
     data = response.json()
-    assert data["status"] == "not_ready"
-    assert len(data["diagnostics"]) == 2
-    assert data["diagnostics"][0]["category"] == "crd_missing"
-    assert data["diagnostics"][0]["resource"] == "trainjobs.trainer.kubeflow.org"
-    assert data["diagnostics"][1]["category"] == "permission_denied"
-    assert data["diagnostics"][1]["verb"] == "list"
+    assert data == {"status": "not_ready"}
+    assert "diagnostics" not in data
+    assert any("CRD trainjobs.trainer.kubeflow.org not found" in r.message for r in caplog.records)
+    assert any("Permission denied: list trainjobs" in r.message for r in caplog.records)
 
 
 def test_ready_probe_backward_compatible_without_diagnostics() -> None:
@@ -121,7 +123,9 @@ def test_create_server_readiness_healthy_when_k8s_ok() -> None:
     assert response.json() == {"status": "ready"}
 
 
-def test_create_server_readiness_fails_with_diagnostics_when_k8s_fails() -> None:
+def test_create_server_readiness_fails_without_leaking_diagnostics(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     failed_diag = ReadinessDiagnostic(
         check="trainer_crd",
         status="fail",
@@ -134,15 +138,15 @@ def test_create_server_readiness_fails_with_diagnostics_when_k8s_fails() -> None
         return_value=(False, [failed_diag]),
     ):
         mcp = create_server()
-        with TestClient(mcp.http_app(transport="streamable-http")) as client:
-            response = client.get("/ready")
+        with caplog.at_level("WARNING"):
+            with TestClient(mcp.http_app(transport="streamable-http")) as client:
+                response = client.get("/ready")
 
     assert response.status_code == 503
     data = response.json()
-    assert data["status"] == "not_ready"
-    assert len(data["diagnostics"]) == 1
-    assert data["diagnostics"][0]["category"] == "crd_missing"
-    assert data["diagnostics"][0]["check"] == "trainer_crd"
+    assert data == {"status": "not_ready"}
+    assert "diagnostics" not in data
+    assert any("CRD trainjobs.trainer.kubeflow.org not found" in r.message for r in caplog.records)
 
 
 def test_ready_probe_rejects_unknown_configured_client() -> None:
@@ -180,3 +184,56 @@ def test_probes_remain_available_when_mcp_auth_is_enabled() -> None:
     assert health_response.status_code == 200
     assert ready_response.status_code == 200
     assert mcp_response.status_code == 401
+
+
+def test_ready_probe_recovers_when_diagnostics_recover() -> None:
+    """Verify /ready refreshes diagnostics dynamically and recovers without server restart."""
+    failed_diag = ReadinessDiagnostic(
+        check="k8s_api",
+        status="fail",
+        message="Kubernetes API unreachable",
+        category="api_unreachable",
+    )
+    passed_diag = ReadinessDiagnostic(
+        check="k8s_api",
+        status="pass",
+        message="Kubernetes API reachable",
+    )
+    with patch(
+        "kubeflow_mcp.core.server.run_readiness_diagnostics",
+        side_effect=[
+            (False, [failed_diag]),
+            (True, [passed_diag]),
+        ],
+    ):
+        mcp = create_server()
+        with TestClient(mcp.http_app(transport="streamable-http")) as client:
+            # 1. Initial probe fails (e.g. cluster temporarily unavailable)
+            resp1 = client.get("/ready")
+            assert resp1.status_code == 503
+            assert resp1.json() == {"status": "not_ready"}
+            assert "diagnostics" not in resp1.json()
+
+            # 2. Cluster recovers; next probe succeeds without server restart
+            resp2 = client.get("/ready")
+            assert resp2.status_code == 200
+            assert resp2.json() == {"status": "ready"}
+
+
+def test_ready_probe_handles_unexpected_exception_in_check(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    mcp = FastMCP("test-server")
+    register_probe_routes(
+        mcp,
+        readiness_check=MagicMock(side_effect=RuntimeError("Unexpected probe failure")),
+    )
+    with caplog.at_level("WARNING"):
+        with TestClient(mcp.http_app(transport="streamable-http")) as client:
+            response = client.get("/ready")
+
+    assert response.status_code == 503
+    data = response.json()
+    assert data == {"status": "not_ready"}
+    assert "error" not in data
+    assert any("Unexpected probe failure" in r.message for r in caplog.records)

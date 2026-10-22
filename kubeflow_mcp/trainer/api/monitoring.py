@@ -334,7 +334,8 @@ def get_training_events(
     Args:
         name: TrainJob name.
         namespace: K8s namespace. Uses default from kubeconfig when omitted.
-        limit: Maximum events to return. Defaults to 50.
+        limit: Maximum events to return; the most recent ones are kept.
+            Defaults to 50.
 
     Returns:
         dict: Response containing:
@@ -344,7 +345,7 @@ def get_training_events(
           ``involved_object_name``, ``reason``, ``message``, ``event_time``
         - ``total`` (int): Total event count
         - ``returned`` (int): Number of events included in the response
-        - ``has_more`` (bool): Whether more events were omitted by ``limit``
+        - ``has_more`` (bool): Whether older events were omitted by ``limit``
     """
     name_err = validate_k8s_name(name)
     if name_err is not None:
@@ -365,7 +366,8 @@ def get_training_events(
         events = client.get_job_events(name=name)
 
         event_list = []
-        for event in events[:limit]:
+        # Events come oldest first; keep the most recent ones, which explain failures.
+        for event in events[-limit:]:
             et = getattr(event, "event_time", None)
             if et is not None and hasattr(et, "isoformat"):
                 event_time_str = et.isoformat()

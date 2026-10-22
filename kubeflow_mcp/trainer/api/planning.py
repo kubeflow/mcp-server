@@ -70,6 +70,21 @@ def _suggest_hf_model_ids(model: str, limit: int = 3) -> list[str]:
         return []
 
 
+def _is_confirmed_missing(error: Exception) -> bool:
+    """Return True when a Hub error confirms the repo does not exist.
+
+    The Hub raises RepositoryNotFoundError for private or gated repos and missing
+    auth too (401, GatedRepoError), and a 401 is ambiguous: an anonymous request
+    gets it for a missing repo as well. Only a plain 404 is treated as a
+    nonexistent repo, so an access failure is never reported as bad input.
+    """
+    from huggingface_hub.errors import GatedRepoError, RepositoryNotFoundError
+
+    if not isinstance(error, RepositoryNotFoundError) or isinstance(error, GatedRepoError):
+        return False
+    return getattr(getattr(error, "response", None), "status_code", None) == 404
+
+
 def _get_model_info_from_hf(model: str) -> dict[str, Any] | None:
     """Fetch model info from HuggingFace Hub.
 
@@ -90,7 +105,7 @@ def _get_model_info_from_hf(model: str) -> dict[str, Any] | None:
             return result
 
         from huggingface_hub import model_info
-        from huggingface_hub.errors import GatedRepoError, RepositoryNotFoundError
+        from huggingface_hub.errors import RepositoryNotFoundError
 
         try:
             info = model_info(model, timeout=10)
@@ -100,13 +115,7 @@ def _get_model_info_from_hf(model: str) -> dict[str, Any] | None:
             # Other failures (auth, rate-limit, network, metadata) fall through
             # to the outer handler unchanged, with no extra Hub request.
             not_found: dict[str, Any] = {"error": str(e)}
-            # The Hub raises this error for private or gated repos and missing
-            # auth too (401, GatedRepoError), and a 401 is ambiguous: an anonymous
-            # request gets it for a missing repo as well. Only a plain 404 is
-            # treated as a nonexistent repo, so an access failure is never
-            # reported as bad input.
-            status_code = getattr(getattr(e, "response", None), "status_code", None)
-            if status_code == 404 and not isinstance(e, GatedRepoError):
+            if _is_confirmed_missing(e):
                 not_found["kind"] = "not_found"
             suggestions = _suggest_hf_model_ids(model)
             if suggestions:
@@ -366,63 +375,36 @@ def _check_rbac_permissions(
     timeout: int,
 ) -> None:
     """Check RBAC permissions for core operations via SelfSubjectAccessReview."""
-    from kubernetes.client import (
-        V1ResourceAttributes,
-        V1SelfSubjectAccessReview,
-        V1SelfSubjectAccessReviewSpec,
-    )
+    from kubeflow_mcp.core.health import _check_rbac_permission, get_trainer_rbac_checks
 
-    from kubeflow_mcp.common.constants import TRAINER_CRD_GROUP
-
-    required = [
-        ("trainjobs", "list", TRAINER_CRD_GROUP, namespace),
-        ("trainjobs", "create", TRAINER_CRD_GROUP, namespace),
-        ("clustertrainingruntimes", "list", TRAINER_CRD_GROUP, ""),
-    ]
     rbac_results: dict[str, dict[str, Any]] = {}
     try:
         auth_api = get_authorization_v1_api()
-        for resource, verb, group, ns in required:
+        for resource, verb, group, ns in get_trainer_rbac_checks(namespace):
             key = f"{verb}_{resource}"
-            try:
-                review = V1SelfSubjectAccessReview(
-                    spec=V1SelfSubjectAccessReviewSpec(
-                        resource_attributes=V1ResourceAttributes(
-                            namespace=ns or "",
-                            verb=verb,
-                            group=group,
-                            resource=resource,
-                        )
-                    )
-                )
-                result = auth_api.create_self_subject_access_review(
-                    body=review,
-                    _request_timeout=timeout,
-                )
-                allowed = getattr(getattr(result, "status", None), "allowed", False)
-                if allowed:
-                    rbac_results[key] = {
-                        "status": "pass",
-                        "resource": resource,
-                        "verb": verb,
-                        "namespace": ns,
-                    }
-                else:
-                    reason = (
-                        getattr(getattr(result, "status", None), "reason", None)
-                        or "denied by RBAC policy"
-                    )
-                    rbac_results[key] = {
-                        "status": "fail",
-                        "resource": resource,
-                        "verb": verb,
-                        "namespace": ns,
-                        "reason": reason,
-                    }
-                    scope = f"in namespace '{ns}'" if ns else "(cluster-scoped)"
-                    blockers.append(f"Missing permission: {verb} {group}/{resource} {scope}")
-            except Exception as e:
-                rbac_results[key] = {"status": "warn", "error": str(e)}
+            diag = _check_rbac_permission(auth_api, resource, verb, group, ns, timeout)
+            if diag.status == "pass":
+                rbac_results[key] = {
+                    "status": "pass",
+                    "resource": resource,
+                    "verb": verb,
+                    "namespace": ns,
+                }
+            elif diag.status == "fail":
+                rbac_results[key] = {
+                    "status": "fail",
+                    "resource": resource,
+                    "verb": verb,
+                    "namespace": ns,
+                    "reason": diag.reason or "denied by RBAC policy",
+                }
+                scope = f"in namespace '{ns}'" if ns else "(cluster-scoped)"
+                blockers.append(f"Missing permission: {verb} {group}/{resource} {scope}")
+            else:
+                rbac_results[key] = {
+                    "status": "warn",
+                    "error": diag.reason or diag.message,
+                }
     except Exception as e:
         rbac_results["authorization_api"] = {"status": "warn", "error": str(e)}
 

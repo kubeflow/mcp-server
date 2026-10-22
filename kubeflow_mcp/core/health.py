@@ -135,6 +135,7 @@ class ReadinessDiagnostic:
     resource: str = ""
     verb: str = ""
     namespace: str = ""
+    reason: str = ""
 
     def to_dict(self) -> dict[str, str]:
         """Convert diagnostic result to a JSON-serializable dictionary."""
@@ -151,6 +152,8 @@ class ReadinessDiagnostic:
             d["verb"] = self.verb
         if self.namespace:
             d["namespace"] = self.namespace
+        if self.reason:
+            d["reason"] = self.reason
         return d
 
 
@@ -209,6 +212,7 @@ def _check_rbac_permission(
             resource=resource,
             verb=verb,
             namespace=namespace,
+            reason=reason,
         )
     except Exception as e:
         logger.warning("RBAC check failed for %s %s: %s", verb, resource, e)
@@ -220,47 +224,116 @@ def _check_rbac_permission(
             resource=resource,
             verb=verb,
             namespace=namespace,
+            reason=str(e),
         )
 
 
-def run_readiness_diagnostics() -> tuple[bool, list[ReadinessDiagnostic]]:
+def _requires_job_creation(persona: str | None) -> bool:
+    """Determine if the configured persona requires TrainJob creation permissions."""
+    from kubeflow_mcp.core.policy import get_allowed_tools, is_read_only
+
+    if is_read_only():
+        return False
+
+    if persona == "readonly":
+        return False
+
+    if not persona:
+        # Default to requiring write permissions when persona is unspecified
+        return True
+
+    allowed = get_allowed_tools(persona)
+    if allowed is None:
+        # None indicates unrestricted access (*)
+        return True
+
+    creation_tools = {"fine_tune", "run_custom_training", "run_container_training"}
+    return bool(allowed.intersection(creation_tools))
+
+
+def get_trainer_rbac_checks(
+    namespace: str,
+    persona: str | None = None,
+) -> list[tuple[str, str, str, str]]:
+    """Return required (resource, verb, group, namespace) tuples for Trainer operations."""
+    from kubeflow_mcp.common.constants import TRAINER_CRD_GROUP
+
+    checks = [
+        ("trainjobs", "list", TRAINER_CRD_GROUP, namespace),
+    ]
+    if _requires_job_creation(persona):
+        checks.append(("trainjobs", "create", TRAINER_CRD_GROUP, namespace))
+    checks.append(("clustertrainingruntimes", "list", TRAINER_CRD_GROUP, ""))
+    return checks
+
+
+def run_readiness_diagnostics(
+    *,
+    clients: list[str] | None = None,
+    persona: str | None = None,
+) -> tuple[bool, list[ReadinessDiagnostic]]:
     """Run startup readiness diagnostics.
 
     Evaluates:
-      1. Kubernetes API reachability (list namespaces)
-      2. Kubeflow Trainer CRD presence and supported version
-      3. Essential RBAC permissions (trainjobs list/create, runtimes list)
+      1. Kubernetes API reachability
+      2. Kubeflow Trainer CRD presence and supported version (when trainer client is enabled)
+      3. Essential RBAC permissions (scoped to read/write based on persona)
+
+    Args:
+        clients: Configured client modules (e.g. ["trainer"]). Defaults to ["trainer"].
+        persona: Configured persona (e.g. "readonly", "data-scientist").
 
     Returns:
         tuple[bool, list[ReadinessDiagnostic]]: (all_passed, diagnostics_list)
     """
+    from kubernetes.client.exceptions import ApiException
+
     from kubeflow_mcp.common.constants import (
         MIN_TRAINER_CRD_VERSION,
-        TRAINER_CRD_GROUP,
         TRAINER_CRD_NAME,
     )
     from kubeflow_mcp.common.utils import (
         K8S_TIMEOUT,
         get_apiextensions_api,
         get_authorization_v1_api,
-        get_core_v1_api,
+        get_version_api,
     )
 
     diagnostics: list[ReadinessDiagnostic] = []
+    active_clients = clients if clients is not None else ["trainer"]
 
     # 1. Kubernetes API reachability
     try:
-        v1 = get_core_v1_api()
-        v1.list_namespace(limit=1, _request_timeout=K8S_TIMEOUT)
+        version_api = get_version_api()
+        version_api.get_code(_request_timeout=K8S_TIMEOUT)
         diagnostics.append(
             ReadinessDiagnostic(
                 check="k8s_api",
                 status="pass",
                 message="Kubernetes API reachable",
-                resource="namespaces",
-                verb="list",
             )
         )
+    except ApiException as e:
+        if e.status == 403:
+            logger.info("Readiness: K8s API reachable (version endpoint restricted): %s", e)
+            diagnostics.append(
+                ReadinessDiagnostic(
+                    check="k8s_api",
+                    status="pass",
+                    message="Kubernetes API reachable (version endpoint restricted)",
+                )
+            )
+        else:
+            logger.warning("Readiness: K8s API error: %s", e)
+            diagnostics.append(
+                ReadinessDiagnostic(
+                    check="k8s_api",
+                    status="fail",
+                    message=f"Kubernetes API error: {e.reason or e.status}",
+                    category="api_error",
+                )
+            )
+            return False, diagnostics
     except Exception as e:
         logger.warning("Readiness: K8s API unreachable: %s", e)
         diagnostics.append(
@@ -269,87 +342,93 @@ def run_readiness_diagnostics() -> tuple[bool, list[ReadinessDiagnostic]]:
                 status="fail",
                 message="Kubernetes API unreachable",
                 category="api_unreachable",
-                resource="namespaces",
-                verb="list",
             )
         )
         # Short-circuit: do not attempt downstream CRD or RBAC checks if API is down
         return False, diagnostics
 
-    # 2. Trainer CRD existence and supported version
-    try:
-        api_ext = get_apiextensions_api()
-        crd = api_ext.read_custom_resource_definition(
-            TRAINER_CRD_NAME,
-            _request_timeout=K8S_TIMEOUT,
-        )
-        versions = getattr(getattr(crd, "spec", None), "versions", []) or []
-        served = [v.name for v in versions if getattr(v, "served", False)]
-        if MIN_TRAINER_CRD_VERSION in served:
-            diagnostics.append(
-                ReadinessDiagnostic(
-                    check="trainer_crd",
-                    status="pass",
-                    message=f"CRD {TRAINER_CRD_NAME} serves {MIN_TRAINER_CRD_VERSION}",
-                    resource=TRAINER_CRD_NAME,
-                )
+    # 2. Trainer CRD existence and supported version (only when trainer client is enabled)
+    if "trainer" in active_clients:
+        try:
+            api_ext = get_apiextensions_api()
+            crd = api_ext.read_custom_resource_definition(
+                TRAINER_CRD_NAME,
+                _request_timeout=K8S_TIMEOUT,
             )
-        else:
+            versions = getattr(getattr(crd, "spec", None), "versions", []) or []
+            served = [v.name for v in versions if getattr(v, "served", False)]
+            if MIN_TRAINER_CRD_VERSION in served:
+                diagnostics.append(
+                    ReadinessDiagnostic(
+                        check="trainer_crd",
+                        status="pass",
+                        message=f"CRD {TRAINER_CRD_NAME} serves {MIN_TRAINER_CRD_VERSION}",
+                        resource=TRAINER_CRD_NAME,
+                    )
+                )
+            else:
+                diagnostics.append(
+                    ReadinessDiagnostic(
+                        check="trainer_crd",
+                        status="fail",
+                        message=(
+                            f"CRD {TRAINER_CRD_NAME} does not serve {MIN_TRAINER_CRD_VERSION}"
+                            f" (served: {', '.join(served) if served else 'none'})"
+                        ),
+                        category="crd_version_unsupported",
+                        resource=TRAINER_CRD_NAME,
+                    )
+                )
+        except Exception as e:
+            logger.warning("Readiness: Trainer CRD check failed: %s", e)
             diagnostics.append(
                 ReadinessDiagnostic(
                     check="trainer_crd",
                     status="fail",
-                    message=(
-                        f"CRD {TRAINER_CRD_NAME} does not serve {MIN_TRAINER_CRD_VERSION}"
-                        f" (served: {', '.join(served) if served else 'none'})"
-                    ),
-                    category="crd_version_unsupported",
+                    message=f"CRD {TRAINER_CRD_NAME} not found or not accessible",
+                    category="crd_missing",
                     resource=TRAINER_CRD_NAME,
                 )
             )
-    except Exception as e:
-        logger.warning("Readiness: Trainer CRD check failed: %s", e)
-        diagnostics.append(
-            ReadinessDiagnostic(
-                check="trainer_crd",
-                status="fail",
-                message=f"CRD {TRAINER_CRD_NAME} not found or not accessible",
-                category="crd_missing",
-                resource=TRAINER_CRD_NAME,
+
+        # 3. RBAC permission checks
+        try:
+            auth_api = get_authorization_v1_api()
+        except Exception as e:
+            logger.warning("Readiness: cannot create AuthorizationV1Api: %s", e)
+            diagnostics.append(
+                ReadinessDiagnostic(
+                    check="rbac",
+                    status="warn",
+                    message="Could not initialize authorization API for RBAC checks",
+                    category="unknown",
+                )
             )
-        )
+            all_passed = all(d.status != "fail" for d in diagnostics)
+            return all_passed, diagnostics
 
-    # 3. RBAC permission checks
-    try:
-        auth_api = get_authorization_v1_api()
-    except Exception as e:
-        logger.warning("Readiness: cannot create AuthorizationV1Api: %s", e)
-        diagnostics.append(
-            ReadinessDiagnostic(
-                check="rbac",
-                status="warn",
-                message="Could not initialize authorization API for RBAC checks",
-                category="unknown",
+        # Resolve effective namespace
+        try:
+            from kubeflow_mcp.common.utils import get_trainer_effective_namespace
+
+            namespace = get_trainer_effective_namespace()
+        except Exception as e:
+            logger.warning("Readiness: failed to resolve effective namespace: %s", e)
+            diagnostics.append(
+                ReadinessDiagnostic(
+                    check="trainer_namespace",
+                    status="fail",
+                    message=f"Failed to resolve effective namespace: {e}",
+                    category="namespace_resolution_failed",
+                )
             )
-        )
-        all_passed = all(d.status != "fail" for d in diagnostics)
-        return all_passed, diagnostics
+            all_passed = all(d.status != "fail" for d in diagnostics)
+            return all_passed, diagnostics
 
-    # Resolve effective namespace
-    try:
-        from kubeflow_mcp.common.utils import get_trainer_effective_namespace
-
-        namespace = get_trainer_effective_namespace()
-    except Exception:
-        namespace = "default"
-
-    rbac_checks = [
-        ("trainjobs", "list", TRAINER_CRD_GROUP, namespace),
-        ("trainjobs", "create", TRAINER_CRD_GROUP, namespace),
-        ("clustertrainingruntimes", "list", TRAINER_CRD_GROUP, ""),
-    ]
-    for resource, verb, group, ns in rbac_checks:
-        diagnostics.append(_check_rbac_permission(auth_api, resource, verb, group, ns, K8S_TIMEOUT))
+        for resource, verb, group, ns in get_trainer_rbac_checks(namespace, persona=persona):
+            diagnostics.append(
+                _check_rbac_permission(auth_api, resource, verb, group, ns, K8S_TIMEOUT)
+            )
 
     all_passed = all(d.status != "fail" for d in diagnostics)
     return all_passed, diagnostics

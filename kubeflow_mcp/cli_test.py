@@ -159,6 +159,37 @@ def test_serve_rejects_unknown_persona_from_env_or_config():
     mock_create_server.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    ("policy_text", "message"),
+    [
+        ('policy:\n  read_only: true\n  deny: ["delete_*"\n', "Failed to load policy file"),
+        ("policy:\n  deny: risk:destructive\n", "'policy.deny' must be a list of strings"),
+        ("policy:\n  read_only: 'false'\n", "'policy.read_only' must be true or false"),
+    ],
+    ids=["unparseable", "single-string", "wrong-type"],
+)
+def test_serve_reports_policy_file_errors_without_traceback(
+    tmp_path, monkeypatch, policy_text, message
+):
+    """A policy file that cannot be used still stops the server, with its message only."""
+    from kubeflow_mcp.core.policy import reload_policy
+
+    policy_path = tmp_path / ".kf-mcp-policy.yaml"
+    policy_path.write_text(policy_text)
+    monkeypatch.setattr("kubeflow_mcp.core.config._find_config_file", lambda: None)
+    monkeypatch.setattr("kubeflow_mcp.core.policy._get_policy_paths", lambda: [policy_path])
+    reload_policy()
+    try:
+        result = CliRunner().invoke(cli, ["serve"])
+    finally:
+        reload_policy()
+
+    assert result.exit_code == 1
+    assert message in result.output
+    assert "Traceback" not in result.output
+    assert not isinstance(result.exception, RuntimeError)
+
+
 def test_serve_rejects_unknown_persona_from_real_environment(monkeypatch):
     """KUBEFLOW_MCP_PERSONA goes through the real load_config(), with no config or policy file."""
     from kubeflow_mcp.core.policy import reload_policy

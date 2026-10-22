@@ -28,7 +28,9 @@ from kubeflow_mcp.core.security import (
     is_safe_python_code,
     mask_sensitive_data,
     truncate_log_output,
+    validate_image_reference,
     validate_k8s_name,
+    validate_k8s_subdomain_name,
     validate_namespace,
     validate_resource_limits,
     validate_runtime_name,
@@ -634,3 +636,141 @@ class TestValidateRuntimeName:
     def test_accepts_label_at_63_chars(self):
         assert validate_runtime_name("a" * 63) is None
         assert validate_runtime_name(".".join(["a" * 63] * 3)) is None
+
+
+class TestValidateK8sSubdomainName:
+    """Shared DNS-subdomain check, used for runtime and ServiceAccount names."""
+
+    @pytest.mark.parametrize("name", ["default", "trainer.sa-1", "a" * 63, "a.b." + "c" * 63])
+    def test_accepts_valid_names(self, name):
+        assert validate_k8s_subdomain_name(name, "service_account_name") is None
+
+    @pytest.mark.parametrize(
+        "name",
+        ["", "INVALID_NAME", "bad service account", "sa/name", "a" * 254, "a" * 64 + ".b"],
+    )
+    def test_rejects_invalid_names(self, name):
+        err = validate_k8s_subdomain_name(name, "service_account_name")
+        assert err is not None
+        assert err.error_code == "VALIDATION_ERROR"
+        assert "service_account_name" in err.error
+
+
+_SHA256 = "sha256:" + "a" * 64
+
+
+class TestValidateImageReference:
+    """Only clearly malformed references are rejected, so real images keep working."""
+
+    @pytest.mark.parametrize(
+        "image",
+        [
+            "nginx",
+            "ghcr.io/kubeflow/mcp-server:latest",
+            "localhost:5000/img:tag",
+            "registry.example.com:5000/a/b/c:tag",
+            f"img@{_SHA256}",
+            f"img:tag@{_SHA256}",
+            "a/b_c.d-e:tag",
+            "MyRegistry.io/app:1",
+            "pytorch/pytorch:2.0",
+        ],
+    )
+    def test_accepts_valid_references(self, image):
+        assert validate_image_reference(image) is None
+
+    def test_none_is_valid(self):
+        assert validate_image_reference(None) is None
+
+    @pytest.mark.parametrize(
+        "image",
+        [
+            "",
+            "   ",
+            "not a valid image!!",
+            "img!!",
+            "img:",
+            "img::double",
+            "-leading/x",
+            "/img",
+            "a//b",
+            "img/",
+            "img@",
+            "img@sha256",
+            f"@{_SHA256}",
+            ":tag",
+        ],
+    )
+    def test_rejects_malformed_references(self, image):
+        err = validate_image_reference(image)
+        assert err is not None
+        assert err.error_code == "VALIDATION_ERROR"
+
+    @pytest.mark.parametrize(
+        "image",
+        [
+            "img@sha256:x",
+            "img@sha256:" + "a" * 63,
+            "img@sha256:" + "a" * 65,
+            "img@sha256:" + "g" * 64,
+        ],
+    )
+    def test_rejects_malformed_sha256_digest(self, image):
+        err = validate_image_reference(image)
+        assert err is not None
+        assert err.error_code == "VALIDATION_ERROR"
+        assert "SHA-256 digest" in err.error
+
+    @pytest.mark.parametrize(
+        "image",
+        [
+            "UPPER/image:tag",
+            "Ubuntu:latest",
+            "myregistry.com:5000/MyOrg/app:tag",
+        ],
+    )
+    def test_rejects_uppercase_repository_path(self, image):
+        err = validate_image_reference(image)
+        assert err is not None
+        assert err.error_code == "VALIDATION_ERROR"
+        assert "repository path must be lowercase" in err.error
+
+    @pytest.mark.parametrize(
+        "image",
+        [
+            "[::1]:5000/team/image:tag",
+            "[::1]/image",
+            "[2001:db8::1]:5000/team/image:tag",
+            "[2001:DB8::1]:5000/image:tag",
+            "[::ffff:192.0.2.1]:5000/image",
+            f"[::1]:5000/image@{_SHA256}",
+        ],
+    )
+    def test_accepts_bracketed_ipv6_registry_host(self, image):
+        assert validate_image_reference(image) is None
+
+    @pytest.mark.parametrize(
+        "image",
+        [
+            "[::1]",
+            "[::1]:5000",
+            "[::1]:5000:tag",
+            "[]:5000/image",
+            "[::1/image",
+            "[::1]:port/image",
+            "[not-an-ip]:5000/image",
+            "[1.2.3.4]:5000/image",
+            "[::1%eth0]:5000/image",
+            "team/[::1]:5000/image",
+            "[::1]:5000/team/[::2]/image",
+        ],
+    )
+    def test_rejects_malformed_bracketed_registry_host(self, image):
+        err = validate_image_reference(image)
+        assert err is not None
+        assert err.error_code == "VALIDATION_ERROR"
+
+    def test_bracketed_ipv6_host_still_requires_lowercase_repository_path(self):
+        err = validate_image_reference("[::1]:5000/Team/image:tag")
+        assert err is not None
+        assert "repository path must be lowercase" in err.error

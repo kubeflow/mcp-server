@@ -21,11 +21,15 @@ import inspect
 import threading
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
+from huggingface_hub.errors import GatedRepoError, RepositoryNotFoundError
+from kubernetes.client.exceptions import ApiException
 from tests.common import FAILED, PREVIEW, VALIDATION_ERROR, TestCase, assert_test_case
 
 from kubeflow_mcp.trainer.api.training import (
     _build_fine_tune_config,
+    _build_runtime_patch,
     _forwarded_train_args,
     _has_required_params,
     _has_train_call,
@@ -42,6 +46,15 @@ from kubeflow_mcp.trainer.api.training import (
 PATCH_CLIENT = "kubeflow_mcp.trainer.api.training._get_client"
 PATCH_NS_CHECK = "kubeflow_mcp.trainer.api.training.check_namespace_allowed"
 PATCH_GPU_CHECK = "kubeflow_mcp.trainer.api.training._check_gpu_available"
+
+
+@pytest.fixture(autouse=True)
+def _offline_hub(monkeypatch):
+    """fine_tune(confirmed=True) checks hf:// repos on the Hub; keep unit tests offline."""
+    monkeypatch.setattr("huggingface_hub.model_info", MagicMock())
+    monkeypatch.setattr("huggingface_hub.dataset_info", MagicMock())
+    monkeypatch.setattr("huggingface_hub.list_models", MagicMock(return_value=[]))
+
 
 # ─── fine_tune validation ───────────────────────────────────────────────────
 
@@ -331,6 +344,334 @@ def test_fine_tune_validates_resources_before_gpu_preflight():
 
     assert result["error_code"] == VALIDATION_ERROR
     gpu_check.assert_not_called()
+
+
+# ─── fine_tune Hugging Face model/dataset checks ────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("model", "dataset"),
+    [
+        ("hf://org/ model", "hf://org/ds"),
+        ("hf://org/model", "hf://only-one-segment"),
+        ("hf://org/../model", "hf://org/ds"),
+    ],
+)
+@pytest.mark.parametrize("confirmed", [False, True])
+def test_fine_tune_rejects_bad_hf_reference_without_resolving_namespace(model, dataset, confirmed):
+    """Malformed hf:// input must be rejected before the namespace is resolved."""
+    with (
+        patch("kubeflow_mcp.core.policy.get_allowed_namespaces", return_value=["team-a"]),
+        patch("kubeflow_mcp.common.utils.get_trainer_effective_namespace") as mock_resolve_ns,
+        patch(PATCH_CLIENT) as mock_client,
+        patch(PATCH_GPU_CHECK) as gpu_check,
+    ):
+        result = fine_tune(
+            model=model,
+            dataset=dataset,
+            runtime="torchtune-llama",
+            namespace=None,
+            confirmed=confirmed,
+        )
+
+    assert result["success"] is False
+    assert result["error_code"] == VALIDATION_ERROR
+    mock_resolve_ns.assert_not_called()
+    mock_client.assert_not_called()
+    gpu_check.assert_not_called()
+
+
+def _hub_error(error_cls: type[Exception], status_code: int) -> Exception:
+    request = httpx.Request("GET", "https://huggingface.co/api/models/x")
+    return error_cls("Hub error", response=httpx.Response(status_code, request=request))
+
+
+@pytest.mark.parametrize(
+    ("model", "dataset"),
+    [
+        ("hf://", "hf://org/ds"),
+        ("hf://bad!name", "hf://org/ds"),
+        ("hf://org/model/extra", "hf://org/ds"),
+        ("hf://org//model", "hf://org/ds"),
+        ("hf://org/bad name", "hf://org/ds"),
+        (" hf://org/model", "hf://org/ds"),  # leading whitespace skips the hf:// check
+        ("hf://org/model", "hf://squad"),  # datasets need org/name, unlike models
+        ("hf://org/model", "hf://org//ds"),
+        ("hf://org/model", "hf://org/ds/my path"),  # whitespace in the dataset subpath
+        ("hf://org/model", "hf://org/ds/../other"),  # path traversal in the subpath
+    ],
+)
+def test_fine_tune_preview_rejects_malformed_hf_references(model, dataset):
+    with patch(PATCH_GPU_CHECK) as gpu_check, patch("huggingface_hub.model_info") as hub:
+        result = fine_tune(
+            model=model,
+            dataset=dataset,
+            runtime="torchtune-llama",
+        )
+
+    assert result["error_code"] == VALIDATION_ERROR
+    gpu_check.assert_not_called()
+    hub.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("model", "dataset"),
+    [
+        ("hf://org/model", "hf://org/ds/subdir"),
+        ("hf://gpt2", "hf://org/ds"),  # the Hub still serves unscoped model names
+        (
+            "hf://org/model",
+            "s3://my-bucket/path with spaces",
+        ),  # non-HF refs with spaces are allowed
+    ],
+)
+def test_fine_tune_preview_accepts_valid_hf_references_without_hub_call(model, dataset):
+    with (
+        patch(PATCH_NS_CHECK, return_value=None),
+        patch(PATCH_GPU_CHECK, return_value=None),
+        patch("huggingface_hub.model_info") as model_hub,
+        patch("huggingface_hub.dataset_info") as dataset_hub,
+    ):
+        result = fine_tune(model=model, dataset=dataset, runtime="torchtune-llama")
+
+    assert result["status"] == "preview"
+    model_hub.assert_not_called()
+    dataset_hub.assert_not_called()
+
+
+def test_fine_tune_reports_bad_model_before_runtime_error():
+    with patch(PATCH_GPU_CHECK, return_value=None):
+        result = fine_tune(model="hf://a/b/c", dataset="hf://org/ds", runtime="")
+
+    assert result["error_code"] == VALIDATION_ERROR
+    assert "model reference" in result["error"]
+
+
+@pytest.mark.parametrize(
+    ("hub_function", "model", "missing"),
+    [
+        ("huggingface_hub.model_info", "hf://org/model", "model"),
+        ("huggingface_hub.model_info", "hf://gpt3-typo", "model"),  # unscoped model
+        ("huggingface_hub.dataset_info", "hf://org/model", "dataset"),
+    ],
+)
+def test_fine_tune_submission_rejects_confirmed_missing_repo(hub_function, model, missing):
+    with (
+        patch(PATCH_NS_CHECK, return_value=None),
+        patch(PATCH_CLIENT) as client,
+        patch(hub_function, side_effect=_hub_error(RepositoryNotFoundError, 404)),
+        patch("huggingface_hub.list_models", return_value=[]),
+    ):
+        result = fine_tune(
+            model=model,
+            dataset="hf://org/ds",
+            runtime="torchtune-llama",
+            confirmed=True,
+        )
+
+    assert result["error_code"] == VALIDATION_ERROR
+    assert f"Hugging Face {missing}" in result["error"]
+    assert "does not exist" in result["error"]  # the Hub check, not the format check
+    client.assert_not_called()
+
+
+def test_fine_tune_submission_missing_unscoped_model_returns_suggestions():
+    with (
+        patch(PATCH_NS_CHECK, return_value=None),
+        patch(PATCH_CLIENT) as client,
+        patch(
+            "huggingface_hub.model_info",
+            side_effect=_hub_error(RepositoryNotFoundError, 404),
+        ),
+        patch(
+            "huggingface_hub.list_models",
+            return_value=[MagicMock(id="gpt2"), MagicMock(id="gpt2-medium")],
+        ),
+    ):
+        result = fine_tune(
+            model="hf://gpt2-typo",
+            dataset="hf://org/ds",
+            runtime="torchtune-llama",
+            confirmed=True,
+        )
+
+    assert result["error_code"] == VALIDATION_ERROR
+    assert result["details"]["suggestions"] == ["gpt2", "gpt2-medium"]
+    client.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "hub_error",
+    [
+        _hub_error(GatedRepoError, 403),
+        _hub_error(RepositoryNotFoundError, 401),
+        ConnectionError("Hub unreachable"),
+    ],
+    ids=["gated", "private-or-anonymous", "hub-unavailable"],
+)
+def test_fine_tune_submission_not_blocked_by_inaccessible_or_unavailable_hub(hub_error):
+    with (
+        patch(PATCH_NS_CHECK, return_value=None),
+        patch(PATCH_CLIENT) as client_fn,
+        patch("huggingface_hub.model_info", side_effect=hub_error),
+        patch("huggingface_hub.dataset_info", side_effect=hub_error),
+        patch("huggingface_hub.list_models", return_value=[]),
+    ):
+        client_fn.return_value.train.return_value = "train-job"
+        result = fine_tune(
+            model="hf://org/model",
+            dataset="hf://org/ds",
+            runtime="torchtune-llama",
+            confirmed=True,
+        )
+
+    assert result["success"] is True
+    client_fn.return_value.train.assert_called_once()
+
+
+_TRAINING_TOOLS = [
+    (run_custom_training, {"script": "print('hello')", "runtime": "torch-distributed"}),
+    (run_container_training, {"image": "pytorch/pytorch:2.0"}),
+    (
+        fine_tune,
+        {"model": "hf://org/model", "dataset": "hf://org/dataset", "runtime": "torchtune-llama"},
+    ),
+]
+
+
+@pytest.mark.parametrize(("tool", "config"), _TRAINING_TOOLS)
+@pytest.mark.parametrize(
+    "bad_name", ["INVALID_NAME", "bad service account", "sa/name", "", "a" * 254]
+)
+def test_training_tools_reject_invalid_service_account_before_any_call(tool, config, bad_name):
+    with patch(PATCH_CLIENT) as mock_client, patch(PATCH_GPU_CHECK) as gpu_check:
+        result = tool(**config, service_account_name=bad_name, confirmed=True)
+
+    assert result["success"] is False
+    assert result["error_code"] == VALIDATION_ERROR
+    mock_client.assert_not_called()
+    gpu_check.assert_not_called()
+
+
+@pytest.mark.parametrize(("tool", "config"), _TRAINING_TOOLS)
+def test_training_tools_reject_invalid_service_account_without_resolving_namespace(tool, config):
+    """An invalid ServiceAccount name must be rejected before resolving default namespace."""
+    with (
+        patch("kubeflow_mcp.core.policy.get_allowed_namespaces", return_value=["team-a"]),
+        patch("kubeflow_mcp.common.utils.get_trainer_effective_namespace") as mock_resolve_ns,
+        patch(PATCH_CLIENT) as mock_client,
+        patch(PATCH_GPU_CHECK) as gpu_check,
+    ):
+        result = tool(**config, namespace=None, service_account_name="INVALID_NAME", confirmed=True)
+
+    assert result["success"] is False
+    assert result["error_code"] == VALIDATION_ERROR
+    mock_resolve_ns.assert_not_called()
+    mock_client.assert_not_called()
+    gpu_check.assert_not_called()
+
+
+@pytest.mark.parametrize(("tool", "config"), _TRAINING_TOOLS)
+def test_training_tools_accept_dotted_service_account(tool, config):
+    with patch(PATCH_NS_CHECK, return_value=None), patch(PATCH_GPU_CHECK, return_value=None):
+        result = tool(**config, service_account_name="trainer.sa-1")
+
+    assert result["status"] == "preview"
+
+
+def _forbidden(**_kwargs):
+    """Mimic the SDK, which wraps the Kubernetes ApiException in a RuntimeError."""
+    try:
+        raise ApiException(status=403, reason="Forbidden")
+    except ApiException as e:
+        raise RuntimeError("Failed to create TrainJob") from e
+
+
+def _forbidden_without_from(**_kwargs):
+    """Wrap the 403 without ``from``, so it is only on ``__context__``."""
+    try:
+        raise ApiException(status=403, reason="Forbidden")
+    except ApiException:
+        raise RuntimeError("Failed to create TrainJob")  # noqa: B904
+
+
+@pytest.mark.parametrize("raise_forbidden", [_forbidden, _forbidden_without_from])
+@patch(PATCH_NS_CHECK, return_value=None)
+@patch(PATCH_CLIENT)
+def test_forbidden_submission_returns_permission_denied(mock_client_fn, _ns, raise_forbidden):
+    """A 403 from RBAC or an admission policy is a permission problem, not SDK_ERROR."""
+    mock_client_fn.return_value.train.side_effect = raise_forbidden
+
+    result = run_custom_training(
+        script="print('hello')",
+        runtime="torch-distributed",
+        service_account_name="privileged-sa",
+        confirmed=True,
+    )
+
+    assert result["success"] is False
+    assert result["error_code"] == "PERMISSION_DENIED"
+    assert "service_account_name" in result["hint"]
+
+
+@pytest.mark.parametrize(
+    ("tool", "config"),
+    [
+        (run_custom_training, {"script": "print('hello')", "runtime": "torch-distributed"}),
+        (run_container_training, {}),
+    ],
+)
+@pytest.mark.parametrize("bad_image", ["   ", "img::double", "-leading/x"])
+def test_training_tools_reject_invalid_image_before_sdk_call(tool, config, bad_image):
+    with patch(PATCH_CLIENT) as mock_client:
+        result = tool(**config, image=bad_image, confirmed=True)
+
+    assert result["success"] is False
+    assert result["error_code"] == VALIDATION_ERROR
+    mock_client.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("tool", "config"),
+    [
+        (run_custom_training, {"script": "print('hello')", "runtime": "torch-distributed"}),
+        (run_container_training, {}),
+    ],
+)
+def test_training_tools_reject_invalid_image_without_resolving_namespace(tool, config):
+    """A malformed image must be rejected before resolving the default namespace."""
+    with (
+        patch("kubeflow_mcp.core.policy.get_allowed_namespaces", return_value=["team-a"]),
+        patch("kubeflow_mcp.common.utils.get_trainer_effective_namespace") as mock_resolve_ns,
+        patch(PATCH_CLIENT) as mock_client,
+    ):
+        result = tool(**config, namespace=None, image="img::double", confirmed=True)
+
+    assert result["success"] is False
+    assert result["error_code"] == VALIDATION_ERROR
+    mock_resolve_ns.assert_not_called()
+    mock_client.assert_not_called()
+
+
+def test_run_container_training_rejects_empty_image():
+    """The image is required here, so "" is an error, unlike run_custom_training."""
+    with patch(PATCH_CLIENT) as mock_client:
+        result = run_container_training(image="", confirmed=True)
+
+    assert result["error_code"] == VALIDATION_ERROR
+    mock_client.assert_not_called()
+
+
+# "" counts as unset: agents often send it for unused optional fields, and the SDK
+# then falls back to the runtime image.
+@pytest.mark.parametrize("image", [None, "", "localhost:5000/team/trainer:v1"])
+def test_run_custom_training_accepts_valid_or_missing_image(image):
+    with patch(PATCH_NS_CHECK, return_value=None):
+        result = run_custom_training(
+            script="print('hello')", runtime="torch-distributed", image=image
+        )
+
+    assert result["status"] == "preview"
 
 
 class TestRunCustomTrainingConfirmed:
@@ -714,3 +1055,78 @@ def test_inject_trainer_hf_home_exception_handling():
     assert k8s_utils.get_trainer_cr_from_builtin_trainer is original_func, (
         "Monkey-patch function identity was not restored after exception"
     )
+
+
+# ─── _build_runtime_patch ───────────────────────────────────────────────────
+
+_ENV = [{"name": "HF_HOME", "value": "/cache"}]
+_VOLUMES = [{"name": "data", "persistentVolumeClaim": {"claimName": "data-pvc"}}]
+_MOUNTS = [{"name": "data", "mountPath": "/data"}]
+
+
+def _pod_specs(options: list) -> dict:
+    """Map each replicated job name in the RuntimePatch to its pod spec patch."""
+    runtime_patch = options[0]
+    jobs = runtime_patch.training_runtime_spec.template.spec.replicated_jobs
+    return {job.name: job.template.spec.template.spec for job in jobs}
+
+
+class TestBuildRuntimePatch:
+    def test_no_options_returns_empty_list(self):
+        assert _build_runtime_patch() == []
+
+    def test_pod_fields_go_to_node_pod_spec(self):
+        affinity = {
+            "nodeAffinity": {
+                "requiredDuringSchedulingIgnoredDuringExecution": {
+                    "nodeSelectorTerms": [
+                        {"matchExpressions": [{"key": "zone", "operator": "In", "values": ["a"]}]}
+                    ]
+                }
+            }
+        }
+        pull_secrets = [{"name": "registry-creds"}]
+        options = _build_runtime_patch(
+            node_selector={"gpu": "a100"},
+            tolerations=[{"key": "gpu", "operator": "Exists"}],
+            affinity=affinity,
+            service_account_name="trainer-sa",
+            image_pull_secrets=pull_secrets,
+            env=_ENV,
+            volume_mounts=_MOUNTS,
+        )
+
+        specs = _pod_specs(options)
+        assert list(specs) == ["node"]
+        node = specs["node"]
+        assert node.node_selector == {"gpu": "a100"}
+        assert node.tolerations == [{"key": "gpu", "operator": "Exists"}]
+        assert node.affinity == affinity
+        assert node.service_account_name == "trainer-sa"
+        assert node.image_pull_secrets == pull_secrets
+        assert [(c.name, c.env, c.volume_mounts) for c in node.containers] == [
+            ("node", _ENV, _MOUNTS)
+        ]
+
+    def test_initializers_get_volumes_when_enabled(self):
+        options = _build_runtime_patch(
+            volumes=_VOLUMES, volume_mounts=_MOUNTS, has_initializers=True
+        )
+
+        specs = _pod_specs(options)
+        assert list(specs) == ["node", "dataset-initializer", "model-initializer"]
+        for name in ("dataset-initializer", "model-initializer"):
+            assert specs[name].volumes == _VOLUMES
+            assert [(c.name, c.volume_mounts) for c in specs[name].containers] == [(name, _MOUNTS)]
+
+    def test_initializers_not_patched_without_has_initializers(self):
+        options = _build_runtime_patch(volumes=_VOLUMES, volume_mounts=_MOUNTS)
+
+        assert list(_pod_specs(options)) == ["node"]
+
+    def test_labels_and_annotations_are_separate_options(self):
+        options = _build_runtime_patch(labels={"team": "ml"}, annotations={"owner": "alice"})
+
+        assert [type(o).__name__ for o in options] == ["Labels", "Annotations"]
+        assert options[0].labels == {"team": "ml"}
+        assert options[1].annotations == {"owner": "alice"}

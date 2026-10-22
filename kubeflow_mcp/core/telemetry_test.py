@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from contextlib import contextmanager
 from types import SimpleNamespace
@@ -339,7 +340,8 @@ def test_audit_wrap_sets_span_attributes_on_success(monkeypatch: pytest.MonkeyPa
     assert span.attributes["gen_ai.tool.name"] == "sample_tool"
     assert span.attributes["mcp.method.name"] == "tools/call"
     assert span.attributes["gen_ai.operation.name"] == "execute_tool"
-    assert tracer.last_span_name == "tools/call sample_tool"
+    # FastMCP owns the SERVER span "tools/call <tool>"; ours is its INTERNAL child.
+    assert tracer.last_span_name == "execute_tool sample_tool"
     # mcp.protocol.version from SDK
     from kubeflow_mcp.core.server import _MCP_PROTOCOL_VERSION
 
@@ -352,11 +354,11 @@ def test_audit_wrap_sets_span_attributes_on_success(monkeypatch: pytest.MonkeyPa
     assert "tool.duration_ms" in span.attributes
     assert span.attributes["tool.args_preview"] == "{}"
     assert breaker.successes == 1
-    # Verify SpanKind.SERVER is passed when OTel is available
+    # Verify SpanKind.INTERNAL is passed when OTel is available
     from kubeflow_mcp.core.server import SpanKind as _SpanKind
 
     if _SpanKind is not None:
-        assert tracer.last_span_kwargs.get("kind") == _SpanKind.SERVER
+        assert tracer.last_span_kwargs.get("kind") == _SpanKind.INTERNAL
 
 
 def test_audit_wrap_sets_mcp_context_attributes(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -537,3 +539,103 @@ def test_audit_wrap_circuit_breaker_open(monkeypatch: pytest.MonkeyPatch) -> Non
     assert "tool.duration_ms" in span.attributes
     assert "error" in result
     assert result["error_code"] == "CIRCUIT_OPEN"
+
+
+# ─── Trace context propagation ──────────────────────────────────────────────
+
+_TRACE_ID = "4bf92f3577b34da6a3ce929d0e0e4736"
+_PARENT_SPAN_ID = "00f067aa0ba902b7"
+_TRACEPARENT = f"00-{_TRACE_ID}-{_PARENT_SPAN_ID}-01"
+
+
+@contextmanager
+def _incoming_trace_context(traceparent: str | None):
+    """Attach the context a server would extract from an incoming traceparent."""
+    from opentelemetry import context
+    from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+
+    carrier = {"traceparent": traceparent} if traceparent is not None else {}
+    token = context.attach(TraceContextTextMapPropagator().extract(carrier))
+    try:
+        yield
+    finally:
+        context.detach(token)
+
+
+def _log_record(message: str = "tool_call") -> logging.LogRecord:
+    return logging.LogRecord("kubeflow_mcp.test", logging.INFO, __file__, 1, message, None, None)
+
+
+@pytest.mark.parametrize(
+    ("traceparent", "expected"),
+    [
+        (_TRACEPARENT, {"trace_id": _TRACE_ID, "span_id": _PARENT_SPAN_ID}),
+        (None, {}),
+        ("garbage", {}),
+        (f"00-{'0' * 32}-{_PARENT_SPAN_ID}-01", {}),  # all-zero trace id is invalid
+    ],
+    ids=["valid", "missing", "malformed", "zero-trace-id"],
+)
+def test_current_trace_ids(traceparent, expected):
+    with _incoming_trace_context(traceparent):
+        assert telemetry.current_trace_ids() == expected
+
+
+def test_structured_log_includes_trace_ids_only_when_a_span_is_active():
+    from kubeflow_mcp.core.logging import StructuredFormatter
+
+    formatter = StructuredFormatter()
+    with _incoming_trace_context(_TRACEPARENT):
+        inside = json.loads(formatter.format(_log_record()))
+    outside = json.loads(formatter.format(_log_record()))
+
+    assert inside["trace_id"] == _TRACE_ID
+    assert inside["span_id"] == _PARENT_SPAN_ID
+    assert "trace_id" not in outside
+    assert "span_id" not in outside
+
+
+def test_buffered_log_includes_trace_ids():
+    from kubeflow_mcp.core.logging import BufferingHandler, get_log_buffer
+
+    with _incoming_trace_context(_TRACEPARENT):
+        BufferingHandler().emit(_log_record("buffered"))
+
+    assert get_log_buffer()[-1]["trace_id"] == _TRACE_ID
+
+
+@pytest.mark.parametrize(
+    ("meta", "expected_trace_id"),
+    [
+        ({"traceparent": _TRACEPARENT}, _TRACE_ID),
+        (None, None),
+        ({"traceparent": "not-a-traceparent"}, None),
+    ],
+    ids=["valid", "missing", "malformed"],
+)
+async def test_traceparent_in_request_meta_reaches_tool_audit_log(meta, expected_trace_id):
+    """The traceparent an agent sends in _meta ends up on the tool's audit log."""
+    from fastmcp import Client, FastMCP
+
+    from kubeflow_mcp.core.logging import BufferingHandler, get_log_buffer
+
+    def traced_probe_tool() -> dict:
+        """Tool used to check trace context propagation."""
+        return {"success": True}
+
+    mcp = FastMCP("trace-test")
+    mcp.tool()(_audit_wrap(traced_probe_tool))
+    root = logging.getLogger("kubeflow_mcp")
+    handler = BufferingHandler()
+    previous_level = root.level
+    root.addHandler(handler)
+    root.setLevel(logging.INFO)
+    try:
+        async with Client(mcp) as client:
+            await client.call_tool("traced_probe_tool", {}, meta=meta)
+    finally:
+        root.removeHandler(handler)
+        root.setLevel(previous_level)
+
+    audit = [e for e in get_log_buffer() if e["message"] == "tool_call"][-1]
+    assert audit.get("trace_id") == expected_trace_id

@@ -26,6 +26,8 @@ The Kubeflow MCP Server exposes Kubeflow Training operations as [Model Context P
 
 ## Get Started
 
+> New here? See the **[Quickstart & Troubleshooting guide](docs/quickstart.md)** for a step-by-step path from installation to a working MCP client.
+
 ### Install from PyPI
 
 ```bash
@@ -299,8 +301,14 @@ export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
 kubeflow-mcp serve
 ```
 
-Each tool invocation emits a span with attributes:
+Each tool invocation emits an `execute_tool <tool>` span with attributes:
 `tool.name`, `tool.args_preview`, `tool.success`, `tool.duration_ms`, `kubeflow.persona`, and `correlation_id`.
+It is a child of the `tools/call <tool>` span that FastMCP creates, which continues the
+caller's trace when the request `_meta` carries a W3C `traceparent`.
+
+JSON logs and `get_server_logs` entries include `trace_id` and `span_id` while a span is
+active, so logs can be joined to traces. A missing or malformed `traceparent` just starts
+a new trace.
 
 ## Development
 
@@ -321,6 +329,7 @@ make inspector TRANSPORT=sse      # Inspector + SSE (deprecated; start server se
 
 ## Documentation
 
+- **[Quickstart & Troubleshooting](docs/quickstart.md)**: Install, connect a client, verify connectivity, and diagnose common failures
 - **[CONTRIBUTING](CONTRIBUTING.md)**: Development workflow and PR guidelines
 - **[ROADMAP](ROADMAP.md)**: Project roadmap
 - **[SECURITY](SECURITY.md)**: Vulnerability reporting; see [ARCHITECTURE.md#security-model](ARCHITECTURE.md#security-model) for threat model, RBAC, and hardening

@@ -42,7 +42,9 @@ from kubeflow_mcp.core.security import (
     check_namespace_allowed,
     is_safe_python_code,
     mask_sensitive_data,
+    validate_image_reference,
     validate_k8s_name,
+    validate_k8s_subdomain_name,
     validate_training_bounds,
 )
 
@@ -329,6 +331,120 @@ def _should_apply_hf_dataset_workaround(dataset: str) -> bool:
     return bool(hf_repo and len(hf_repo.split("/")) == 2)
 
 
+_HF_REPO_PART_RE = re.compile(r"[a-zA-Z0-9._-]+")
+
+
+def _hf_repo_id(uri: str, *, dataset: bool) -> str | None:
+    """Return the repo ID of an ``hf://`` URI, or None if it is malformed.
+
+    Models and datasets differ because the Trainer initializers parse them
+    differently. The model initializer passes the whole path to
+    ``snapshot_download``, so an unscoped model such as ``hf://gpt2`` works. The
+    dataset initializer reads the second path segment, so a dataset needs
+    ``org/name`` and may add a subpath (``hf://org/ds/subpath``).
+    """
+    parts = uri.removeprefix("hf://").rstrip("/").split("/")
+    # A subpath is not checked against the repo pattern, so block path traversal here.
+    if "" in parts or any(part in (".", "..") for part in parts):
+        return None
+    if dataset:
+        repo_parts = parts[:2] if len(parts) >= 2 else []
+    else:
+        repo_parts = parts if len(parts) <= 2 else []
+    if not repo_parts or not all(_HF_REPO_PART_RE.fullmatch(p) for p in repo_parts):
+        return None
+    return "/".join(repo_parts)
+
+
+def _validate_hf_reference_formats(model: str, dataset: str) -> ToolError | None:
+    """Check that ``hf://`` model and dataset references are well formed.
+
+    Local check only, so it is safe in preview. Other schemes (e.g. ``s3://``)
+    are left alone.
+    """
+    for field, uri, is_dataset, example in (
+        ("model", model, False, "hf://[<org>/]<model>"),
+        ("dataset", dataset, True, "hf://<org>/<dataset>[/<path>]"),
+    ):
+        # Check whitespace for hf:// references, including leading whitespace (e.g. " hf://org/model").
+        # Non-HF references (e.g. s3:// paths with spaces) are out of scope and left alone.
+        if (uri.startswith("hf://") or uri.strip().startswith("hf://")) and any(
+            ch.isspace() for ch in uri
+        ):
+            return ToolError(
+                error=f"Invalid Hugging Face {field} reference '{uri}' (must not contain whitespace)",
+                error_code=ErrorCode.VALIDATION_ERROR,
+            )
+        if uri.startswith("hf://") and _hf_repo_id(uri, dataset=is_dataset) is None:
+            return ToolError(
+                error=f"Invalid Hugging Face {field} reference '{uri}' (expected {example})",
+                error_code=ErrorCode.VALIDATION_ERROR,
+            )
+    return None
+
+
+def _check_hf_repos_exist(model: str, dataset: str) -> dict[str, Any] | None:
+    """On submission, reject ``hf://`` repos the Hub confirms missing (404).
+
+    Gated, private and unreachable repos do not block submission: without auth
+    the Hub cannot tell a missing repo from an inaccessible one, and a Hub outage
+    must not stop training. Those cases are logged and the job proceeds.
+
+    Without an ``HF_TOKEN`` on the MCP host, the Hub answers 401 even for a
+    missing repo, so in that setup this check never rejects anything.
+    """
+    from huggingface_hub import dataset_info, model_info
+
+    from kubeflow_mcp.trainer.api.planning import _get_model_info_from_hf, _suggest_hf_model_ids
+
+    if model.startswith("hf://"):
+        repo_id = _hf_repo_id(model, dataset=False)
+        if "/" in repo_id:
+            info = _get_model_info_from_hf(repo_id) or {}
+            if info.get("kind") == "not_found":
+                return ToolError(
+                    error=f"Hugging Face model '{repo_id}' does not exist",
+                    error_code=ErrorCode.VALIDATION_ERROR,
+                    details={"suggestions": info["suggestions"]}
+                    if info.get("suggestions")
+                    else None,
+                ).model_dump()
+            if "error" in info:
+                logger.warning(
+                    "Could not verify model %s, submitting anyway: %s", repo_id, info["error"]
+                )
+        # _get_model_info_from_hf() only accepts org/name, so check an unscoped model directly.
+        elif _hub_confirms_missing(model_info, repo_id, "model"):
+            suggestions = _suggest_hf_model_ids(repo_id)
+            return ToolError(
+                error=f"Hugging Face model '{repo_id}' does not exist",
+                error_code=ErrorCode.VALIDATION_ERROR,
+                details={"suggestions": suggestions} if suggestions else None,
+            ).model_dump()
+
+    if dataset.startswith("hf://"):
+        repo_id = _hf_repo_id(dataset, dataset=True)
+        if _hub_confirms_missing(dataset_info, repo_id, "dataset"):
+            return ToolError(
+                error=f"Hugging Face dataset '{repo_id}' does not exist",
+                error_code=ErrorCode.VALIDATION_ERROR,
+            ).model_dump()
+    return None
+
+
+def _hub_confirms_missing(fetch: Callable[..., Any], repo_id: str, kind: str) -> bool:
+    """Return True only when the Hub confirms ``repo_id`` missing; log other failures."""
+    from kubeflow_mcp.trainer.api.planning import _is_confirmed_missing
+
+    try:
+        fetch(repo_id, timeout=10)
+    except Exception as e:
+        if _is_confirmed_missing(e):
+            return True
+        logger.warning("Could not verify %s %s, submitting anyway: %s", kind, repo_id, e)
+    return False
+
+
 def _sdk_error(e: Exception, hint: str | None = None) -> dict[str, Any]:
     """Convert an exception into a ToolError dict with optional K8s response detail."""
     details: dict[str, Any] | None = None
@@ -339,6 +455,20 @@ def _sdk_error(e: Exception, hint: str | None = None) -> dict[str, Any]:
             details = {"response": e.response.text}  # type: ignore[union-attr]
         except Exception:
             pass
+    # The SDK wraps the Kubernetes ApiException, so check the cause for a 403 (and the
+    # context, for errors raised without ``from``, as is_k8s_not_found does). RBAC or
+    # an admission policy (e.g. one restricting service_account_name) denied the
+    # request: that is a permission problem to report, not a transient SDK failure.
+    if any(getattr(err, "status", None) == 403 for err in (e, e.__cause__ or e.__context__)):
+        return ToolError(
+            error=str(e),
+            error_code=ErrorCode.PERMISSION_DENIED,
+            details=details,
+            hint=(
+                "The cluster denied this request. Check that you may create TrainJobs in "
+                "this namespace and use the requested service_account_name."
+            ),
+        ).model_dump()
     return ToolError(
         error=str(e),
         error_code=ErrorCode.SDK_ERROR,
@@ -350,6 +480,18 @@ def _sdk_error(e: Exception, hint: str | None = None) -> dict[str, Any]:
 # Kubernetes resource quantity, e.g. "8", "0.5", "500m", "10G", "1.5Gi". No sign is
 # allowed because a resource request cannot be negative.
 _K8S_QUANTITY_RE = re.compile(r"(\d+(\.\d*)?|\.\d+)([KMGTPE]i|[numkMGTPE]|[eE][+-]?\d+)?")
+
+
+def _validate_service_account_name(name: str | None) -> ToolError | None:
+    """Validate the optional ServiceAccount name syntax before any cluster call.
+
+    This only checks the name. Whether the caller may use that account is enforced
+    by the cluster (RBAC or an admission policy); a denial surfaces as
+    PERMISSION_DENIED via _sdk_error().
+    """
+    if name is None:
+        return None
+    return validate_k8s_subdomain_name(name, "service_account_name")
 
 
 def _validate_resources_per_node(resources: dict[str, Any] | None) -> ToolError | None:
@@ -569,6 +711,8 @@ def _build_runtime_patch(
 
 
 def _validate_fine_tune_params(
+    model: str,
+    dataset: str,
     namespace: str | None,
     name: str | None,
     dtype: str | None,
@@ -588,14 +732,16 @@ def _validate_fine_tune_params(
             error="Required training libraries not available", error_code=ErrorCode.SDK_ERROR
         ).model_dump()
 
-    ns_err = check_namespace_allowed(namespace)
-    if ns_err:
-        return ns_err.model_dump()
-
+    # Local checks first. With an allowlist and no namespace, the namespace check
+    # resolves the default through the Trainer SDK, so it must not run on bad input.
     if name:
         err = validate_k8s_name(name)
         if err:
             return err.model_dump()
+
+    hf_err = _validate_hf_reference_formats(model, dataset)
+    if hf_err:
+        return hf_err.model_dump()
 
     if dtype and dtype not in ("bf16", "fp32"):
         return ToolError(
@@ -617,11 +763,6 @@ def _validate_fine_tune_params(
             error_code=ErrorCode.VALIDATION_ERROR,
         ).model_dump()
 
-    if not confirmed:
-        gpu_err = _check_gpu_available()
-        if gpu_err:
-            return gpu_err
-
     bounds_err = validate_training_bounds(
         batch_size=batch_size,
         epochs=epochs,
@@ -632,7 +773,18 @@ def _validate_fine_tune_params(
     )
     if bounds_err:
         return bounds_err.model_dump()
-    return None
+
+    ns_err = check_namespace_allowed(namespace)
+    if ns_err:
+        return ns_err.model_dump()
+
+    if not confirmed:
+        gpu_err = _check_gpu_available()
+        if gpu_err:
+            return gpu_err
+
+    # The Hub call runs last, on submission only, after every local check passed.
+    return _check_hf_repos_exist(model, dataset) if confirmed else None
 
 
 def _check_gpu_available() -> dict[str, Any] | None:
@@ -832,8 +984,12 @@ def fine_tune(
 
     Args:
         model: Model URI. Use ``hf://`` prefix for HuggingFace (e.g.,
-            ``hf://google/gemma-2b``) or ``s3://`` prefix for S3.
-        dataset: Dataset URI. Same prefix rules as ``model``.
+            ``hf://google/gemma-2b`` or an unscoped ``hf://gpt2``) or ``s3://``
+            prefix for S3. On submission, a model the Hub confirms missing is
+            rejected; this check needs ``HF_TOKEN`` on the MCP host, since the Hub
+            answers 401 for a missing repo without a token.
+        dataset: Dataset URI. Same prefix rules as ``model``, but a HuggingFace
+            dataset needs ``org/name`` (e.g. ``hf://tatsu-lab/alpaca``).
         runtime: ClusterTrainingRuntime name. Must be a torchtune runtime.
             Run ``list_runtimes()`` to see what is installed in your cluster.
         name: Custom TrainJob name. Auto-generated if omitted.
@@ -900,11 +1056,15 @@ def fine_tune(
     try:
         # Before _validate_fine_tune_params(): its GPU preflight queries the cluster, and
         # invalid input should never trigger an external call.
-        resources_err = _validate_resources_per_node(resources_per_node)
-        if resources_err:
-            return resources_err.model_dump()
+        input_err = _validate_resources_per_node(
+            resources_per_node
+        ) or _validate_service_account_name(service_account_name)
+        if input_err:
+            return input_err.model_dump()
 
         validation_err = _validate_fine_tune_params(
+            model=model,
+            dataset=dataset,
             namespace=namespace,
             name=name,
             dtype=dtype,
@@ -1122,7 +1282,7 @@ def run_custom_training(
             function signature must accept matching parameter names.
         packages: Pip packages to install (e.g., ``["torch", "transformers"]``).
         image: Custom base container image for the training pod. Uses runtime
-            default if omitted.
+            default if omitted or empty.
         pip_index_urls: Custom PyPI mirror URLs (e.g., internal Nexus/Artifactory).
         resources_per_node: Full resource dict for the training pod (e.g.,
             ``{"cpu": "8", "memory": "32Gi", "gpu": 2}``). When provided,
@@ -1153,27 +1313,31 @@ def run_custom_training(
                 error_code=ErrorCode.SDK_ERROR,
             ).model_dump()
 
-        ns_err = check_namespace_allowed(namespace)
-        if ns_err:
-            return ns_err.model_dump()
+        input_err = _validate_resources_per_node(
+            resources_per_node
+        ) or _validate_service_account_name(service_account_name)
+        if input_err:
+            return input_err.model_dump()
 
+        # Input checks run before the namespace check: with an allowlist and no
+        # namespace, that check resolves the default through the Trainer SDK.
         bounds_err = validate_training_bounds(
             num_nodes=num_nodes,
             gpu_per_node=gpu_per_node,
             script=script,
             packages=packages,
-        )
+        ) or validate_image_reference(image or None)  # "" means unset: the SDK skips it too
         if bounds_err:
             return bounds_err.model_dump()
+
+        ns_err = check_namespace_allowed(namespace)
+        if ns_err:
+            return ns_err.model_dump()
 
         if name:
             err = validate_k8s_name(name)
             if err:
                 return err.model_dump()
-
-        resources_err = _validate_resources_per_node(resources_per_node)
-        if resources_err:
-            return resources_err.model_dump()
 
         effective_resources = resources_per_node or (
             {"gpu": gpu_per_node} if gpu_per_node > 0 else None
@@ -1360,25 +1524,29 @@ def run_container_training(
                 error_code=ErrorCode.SDK_ERROR,
             ).model_dump()
 
-        ns_err = check_namespace_allowed(namespace)
-        if ns_err:
-            return ns_err.model_dump()
+        input_err = _validate_resources_per_node(
+            resources_per_node
+        ) or _validate_service_account_name(service_account_name)
+        if input_err:
+            return input_err.model_dump()
 
+        # Input checks run before the namespace check: with an allowlist and no
+        # namespace, that check resolves the default through the Trainer SDK.
         bounds_err = validate_training_bounds(
             num_nodes=num_nodes,
             gpu_per_node=gpu_per_node,
-        )
+        ) or validate_image_reference(image)
         if bounds_err:
             return bounds_err.model_dump()
+
+        ns_err = check_namespace_allowed(namespace)
+        if ns_err:
+            return ns_err.model_dump()
 
         if name:
             err = validate_k8s_name(name)
             if err:
                 return err.model_dump()
-
-        resources_err = _validate_resources_per_node(resources_per_node)
-        if resources_err:
-            return resources_err.model_dump()
 
         effective_resources = resources_per_node or (
             {"gpu": gpu_per_node} if gpu_per_node > 0 else None
