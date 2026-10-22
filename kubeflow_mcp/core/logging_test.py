@@ -27,9 +27,12 @@ from kubeflow_mcp.core.logging import (
     StructuredFormatter,
     _redact_dict,
     _redact_text,
+    correlation_id,
     get_log_buffer,
+    get_logger,
     request_context,
     setup_logging,
+    with_correlation_id,
 )
 
 _JWT = "eyJhbGciOiJIUzI1NiJ9.SECRETPAYLOAD.sig"
@@ -282,6 +285,82 @@ class TestLogPathsRedactConsistently:
         assert buffered == "calling API with Authorization: ***"
         assert buffered == structured
         assert buffered in ConsoleFormatter().format(record)
+
+
+class TestCorrelationId:
+    @pytest.fixture(autouse=True)
+    def _reset_correlation_id(self):
+        token = correlation_id.set("")
+        try:
+            yield
+        finally:
+            correlation_id.reset(token)
+
+    def test_with_correlation_id_sets_and_returns_uuid(self):
+        cid = with_correlation_id()
+        assert isinstance(cid, str)
+        assert len(cid) == 36
+        assert correlation_id.get() == cid
+
+    def test_structured_formatter_includes_correlation_id(self):
+        cid = with_correlation_id()
+        record = logging.LogRecord("test", logging.INFO, __file__, 1, "hello", (), None)
+        output = json.loads(StructuredFormatter().format(record))
+        assert output["correlation_id"] == cid
+
+    def test_structured_formatter_correlation_id_none_when_empty(self):
+        correlation_id.set("")
+        record = logging.LogRecord("test", logging.INFO, __file__, 1, "hello", (), None)
+        output = json.loads(StructuredFormatter().format(record))
+        assert output["correlation_id"] is None
+
+    def test_console_formatter_includes_correlation_id_prefix(self):
+        cid = with_correlation_id()
+        record = logging.LogRecord("test", logging.INFO, __file__, 1, "hello", (), None)
+        formatted = ConsoleFormatter().format(record)
+        assert f"[{cid[:8]}]" in formatted
+
+    def test_console_formatter_omits_correlation_id_when_empty(self):
+        correlation_id.set("")
+        record = logging.LogRecord("test", logging.INFO, __file__, 1, "hello", (), None)
+        formatted = ConsoleFormatter().format(record)
+        assert "]" not in formatted
+
+
+class TestRedactTextEdgeCases:
+    def test_sensitive_key_with_trailing_empty_value(self):
+        assert _redact_text("password=") == "password="
+        assert _redact_text("secret: ") == "secret: "
+
+
+class TestGetLogger:
+    def test_get_logger_prefixes_name(self):
+        logger = get_logger("my_component")
+        assert logger.name == "kubeflow_mcp.my_component"
+
+
+class TestConsoleFormatterColors:
+    @pytest.mark.parametrize(
+        ("level", "color"),
+        [
+            (logging.DEBUG, ConsoleFormatter.COLORS["DEBUG"]),
+            (logging.INFO, ConsoleFormatter.COLORS["INFO"]),
+            (logging.WARNING, ConsoleFormatter.COLORS["WARNING"]),
+            (logging.ERROR, ConsoleFormatter.COLORS["ERROR"]),
+            (logging.CRITICAL, ConsoleFormatter.COLORS["CRITICAL"]),
+        ],
+    )
+    def test_console_formatter_colors(self, level, color):
+        record = logging.LogRecord("test", level, __file__, 1, "test message", (), None)
+        formatted = ConsoleFormatter().format(record)
+        assert color in formatted
+        assert ConsoleFormatter.RESET in formatted
+
+    def test_console_formatter_unknown_level(self):
+        record = logging.LogRecord("test", 99, __file__, 1, "custom level", (), None)
+        record.levelname = "CUSTOM"
+        formatted = ConsoleFormatter().format(record)
+        assert formatted.startswith(ConsoleFormatter.RESET)
 
 
 class TestSetupLogging:
