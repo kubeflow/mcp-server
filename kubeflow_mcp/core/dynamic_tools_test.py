@@ -350,3 +350,84 @@ def test_find_tools_uses_rebuilt_registry_after_reinit(monkeypatch):
 
     assert "mode" not in second  # semantic search, not the keyword fallback
     assert [t["name"] for t in second["tools"]] == ["beta_tool"]
+
+
+# ─── Progressive Discovery & Meta-tools ──────────────────────────────────────
+
+
+class TestListTools:
+    def test_list_tools_empty_prefix_returns_all_categories(self):
+        result = dynamic_tools.list_tools("")
+        assert "categories" in result
+        assert "category_tools" in result
+        assert "hint" in result
+        assert "other" in result["categories"]
+        assert result["category_tools"]["other"] == 2
+
+    def test_list_tools_category_filter(self):
+        result = dynamic_tools.list_tools("other")
+        assert result["category"] == "other"
+        assert len(result["tools"]) == 2
+        tool_names = [t["name"] for t in result["tools"]]
+        assert "probe_tool" in tool_names
+        assert "failing_tool" in tool_names
+
+    def test_list_tools_prefix_matching(self):
+        result = dynamic_tools.list_tools("probe")
+        assert result["prefix"] == "probe"
+        assert len(result["matching_tools"]) == 1
+        assert result["matching_tools"][0]["name"] == "probe_tool"
+
+
+class TestDescribeTools:
+    def test_describe_tools_exceeds_max_limit(self):
+        tool_names = ["tool1", "tool2", "tool3", "tool4", "tool5", "tool6"]
+        result = dynamic_tools.describe_tools(tool_names)
+        assert result == {"error": "Max 5 tools at a time to conserve tokens"}
+
+    def test_describe_tools_missing_tool(self):
+        result = dynamic_tools.describe_tools(["nonexistent_tool"])
+        assert result == {"tools": [{"name": "nonexistent_tool", "error": "Tool not found"}]}
+
+    def test_describe_tools_returns_schema_and_parameters(self):
+        result = dynamic_tools.describe_tools(["probe_tool"])
+        assert len(result["tools"]) == 1
+        tool_schema = result["tools"][0]
+        assert tool_schema["name"] == "probe_tool"
+        assert tool_schema["category"] == "other"
+        assert "parameters" in tool_schema
+        assert "name" in tool_schema["parameters"]
+        assert tool_schema["parameters"]["name"]["type"] == "<class 'str'>"
+
+
+class TestExecuteToolEdgeCases:
+    def test_execute_tool_missing_tool(self):
+        result = dynamic_tools.execute_tool("nonexistent_tool")
+        assert "error" in result
+        assert "available" in result
+        assert "Tool 'nonexistent_tool' not found" in result["error"]
+
+    def test_execute_tool_none_arguments(self):
+        def zero_arg_tool() -> dict:
+            """Tool with no arguments."""
+            return {"status": "ok"}
+
+        dynamic_tools.init_dynamic_tools([zero_arg_tool], {})
+        result = dynamic_tools.execute_tool("zero_arg_tool", None)
+        assert result == {"status": "ok"}
+
+
+class TestGetModeTools:
+    def test_get_mode_tools_progressive(self):
+        tools = dynamic_tools.get_mode_tools("progressive")
+        tool_names = [t.__name__ for t in tools]
+        assert tool_names == ["list_tools", "describe_tools", "execute_tool"]
+
+    def test_get_mode_tools_semantic(self):
+        tools = dynamic_tools.get_mode_tools("semantic")
+        tool_names = [t.__name__ for t in tools]
+        assert tool_names == ["find_tools", "execute_tool"]
+
+    def test_get_mode_tools_invalid_mode_raises(self):
+        with pytest.raises(ValueError, match="Unknown dynamic mode"):
+            dynamic_tools.get_mode_tools("invalid_mode")
