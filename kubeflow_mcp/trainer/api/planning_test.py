@@ -238,6 +238,58 @@ def test_non_not_found_error_skips_suggestions():
     mock_list.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        "gpt2",
+        "hf://gpt2",
+        "bert-base-uncased",
+        "_my_model",
+        "google/gemma-2b",
+        "hf://google/gemma-2b",
+    ],
+)
+def test_estimate_resources_accepts_valid_model_formats(model_id):
+    mock_info = SimpleNamespace(
+        id=model_id.removeprefix("hf://"),
+        safetensors=SimpleNamespace(total=137_000_000),
+        card_data=None,
+        library_name="transformers",
+        pipeline_tag="text-generation",
+    )
+    with patch("huggingface_hub.model_info", return_value=mock_info) as mock_hub:
+        result = estimate_resources(model_id)
+
+    raw_id = model_id.removeprefix("hf://")
+    mock_hub.assert_called_once_with(raw_id, timeout=10)
+    assert result["success"] is True
+    assert result["data"]["params_billions"] == 0.14
+
+
+@pytest.mark.parametrize(
+    "invalid_id",
+    [
+        ".",
+        "..",
+        "-",
+        "../a",
+        "org/..",
+        ".foo",
+    ],
+)
+def test_estimate_resources_rejects_malformed_edge_cases(invalid_id):
+    with (
+        patch("huggingface_hub.list_models", return_value=[]),
+        patch("huggingface_hub.model_info") as mock_info,
+    ):
+        result = estimate_resources(invalid_id)
+
+    mock_info.assert_not_called()
+    assert result["success"] is False
+    assert result["error_code"] == "VALIDATION_ERROR"
+    assert "Invalid HuggingFace model ID format" in result["error"]
+
+
 # ─── Pure helpers (version parse / resource estimate) ───────────────────────
 
 
