@@ -444,10 +444,10 @@ class TestResourceLoading:
 
 class TestPhaseToSection:
     def test_all_phases_mapped(self):
-        # Each client module owns and maps its own phases (the server merges
-        # every module's PHASE_TO_SECTION). Verify the trainer module covers the
-        # phases its own tools use — phases contributed by other modules (e.g.
-        # spark_*) are mapped by those modules, not here.
+        # Each client module owns and maps its own phases (the server merges every
+        # module's PHASE_TO_SECTION). Verify the trainer module covers the phases its
+        # own tools use; phases from other modules (e.g. spark_*, pipelines_*) are
+        # mapped by those modules, not here.
         trainer_phases = {TOOL_TO_PHASE[t.__name__] for t in TOOLS if t.__name__ in TOOL_TO_PHASE}
         for phase in trainer_phases:
             assert phase in PHASE_TO_SECTION, f"Phase '{phase}' not in PHASE_TO_SECTION"

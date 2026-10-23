@@ -90,6 +90,12 @@ PERSONAS: dict[str, dict[str, Any]] = {
             "list_spark_sessions",
             "get_spark_session",
             "get_spark_session_logs",
+            # Pipelines
+            "list_pipelines",
+            "get_pipeline",
+            "list_pipeline_runs",
+            "get_pipeline_run",
+            "get_pipeline_logs",
         ]
     },
     "data-scientist": {
@@ -102,6 +108,8 @@ PERSONAS: dict[str, dict[str, Any]] = {
             # Spark (session lifecycle)
             "create_spark_session",
             "delete_spark_session",
+            # Pipelines
+            "create_pipeline_run",
         ],
     },
     "ml-engineer": {
@@ -111,12 +119,21 @@ PERSONAS: dict[str, dict[str, Any]] = {
             "update_training_job",
             "inspect_crd",
             "inspect_controller",
+            # Pipelines: KFP runs carry no MCP ownership label, so these act on any
+            # run in the namespace and sit above data-scientist.
+            "stop_pipeline_run",
+            "retry_pipeline_run",
         ],
     },
     "platform-admin": {"tools": "*"},
 }
 
-DESTRUCTIVE_TOOLS = {"delete_training_job", "delete_runtime", "delete_spark_session"}
+DESTRUCTIVE_TOOLS = {
+    "delete_training_job",
+    "delete_runtime",
+    "delete_spark_session",
+    "stop_pipeline_run",
+}
 
 # Tools matched by each ``risk:<level>`` policy pattern.
 RISK_LEVELS: dict[str, set[str]] = {"destructive": DESTRUCTIVE_TOOLS}
