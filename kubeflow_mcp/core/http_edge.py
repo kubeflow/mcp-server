@@ -20,6 +20,7 @@ import logging
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
+import anyio
 from fastmcp import FastMCP
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -50,7 +51,7 @@ def register_probe_routes(
 
         if readiness_check is not None and current_ready:
             try:
-                current_ready, raw_diags = readiness_check()
+                current_ready, raw_diags = await anyio.to_thread.run_sync(readiness_check)
                 current_diagnostics = (
                     [d for d in raw_diags if d.status != "pass"] if raw_diags else None
                 )
