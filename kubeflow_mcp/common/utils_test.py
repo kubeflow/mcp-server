@@ -17,8 +17,11 @@
 from __future__ import annotations
 
 import os
-from types import SimpleNamespace
+import sys
+from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from kubeflow_mcp.common.utils import (
     MCP_MANAGED_LABEL,
@@ -26,9 +29,14 @@ from kubeflow_mcp.common.utils import (
     OWNERSHIP_MANAGED,
     OWNERSHIP_MISSING,
     OWNERSHIP_UNMANAGED,
+    PIPELINES_NAMESPACE_ENV,
+    PIPELINES_TOKEN_ENV,
+    PIPELINES_URL_ENV,
     _get_api_client,
     get_core_v1_api,
     get_custom_objects_api,
+    get_pipelines_client,
+    get_pipelines_effective_namespace,
     get_trainer_client_for_namespace,
     get_trainer_effective_namespace,
     get_trainer_ownership,
@@ -263,3 +271,53 @@ class TestGetTrainerClientForNamespace:
         assert mock_cls.call_count == 1
         with _ns_client_lock:
             _ns_client_cache.pop("cache-ns", None)
+
+
+class TestPipelinesClient:
+    @pytest.fixture
+    def fake_sdk(self, monkeypatch):
+        """A stand-in ``kubeflow.pipelines`` so the factory runs without kfp."""
+        sdk = ModuleType("kubeflow.pipelines")
+        sdk.KubernetesBackendConfig = lambda **kwargs: SimpleNamespace(**kwargs)
+        sdk.PipelinesClient = MagicMock(side_effect=lambda backend_config: backend_config)
+        monkeypatch.setitem(sys.modules, "kubeflow.pipelines", sdk)
+        for var in (PIPELINES_URL_ENV, PIPELINES_TOKEN_ENV, PIPELINES_NAMESPACE_ENV):
+            monkeypatch.delenv(var, raising=False)
+        reset_clients()
+        yield sdk
+        reset_clients()
+
+    def test_namespace_is_passed_explicitly(self, fake_sdk):
+        config = get_pipelines_client("team-a")
+
+        assert config.namespace == "team-a"
+        assert config.base_url is None and config.user_token is None
+
+    def test_url_and_token_come_from_the_environment(self, fake_sdk, monkeypatch):
+        monkeypatch.setenv(PIPELINES_URL_ENV, "https://kfp.example.com")
+        monkeypatch.setenv(PIPELINES_TOKEN_ENV, "secret")
+
+        config = get_pipelines_client("team-a")
+
+        assert config.base_url == "https://kfp.example.com"
+        assert config.user_token == "secret"
+
+    def test_cached_per_namespace_and_cleared_by_reset(self, fake_sdk):
+        assert get_pipelines_client("a") is get_pipelines_client("a")
+        assert get_pipelines_client("a") is not get_pipelines_client("b")
+        assert fake_sdk.PipelinesClient.call_count == 2
+
+        reset_clients()
+        get_pipelines_client("a")
+
+        assert fake_sdk.PipelinesClient.call_count == 3
+
+    def test_effective_namespace_order(self, monkeypatch):
+        monkeypatch.delenv(PIPELINES_NAMESPACE_ENV, raising=False)
+        with patch(
+            "kubeflow_mcp.common.utils.get_trainer_effective_namespace", return_value="kube-default"
+        ):
+            assert get_pipelines_effective_namespace("explicit") == "explicit"
+            assert get_pipelines_effective_namespace(None) == "kube-default"
+            monkeypatch.setenv(PIPELINES_NAMESPACE_ENV, " pipelines-ns ")
+            assert get_pipelines_effective_namespace(None) == "pipelines-ns"

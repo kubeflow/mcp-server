@@ -118,6 +118,10 @@ class TestToolPhases:
             "lifecycle",
             "platform",
             "health",
+            "pipelines_discovery",
+            "pipelines_monitoring",
+            "pipelines_runs",
+            "pipelines_lifecycle",
         }
         assert set(TOOL_PHASES.keys()) == expected
 
