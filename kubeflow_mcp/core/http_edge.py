@@ -18,9 +18,15 @@ from fastmcp import FastMCP
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
+from kubeflow_mcp.core.http_metrics import set_server_ready
+
 
 def register_probe_routes(mcp: FastMCP, *, is_ready: bool = True) -> None:
-    """Register unauthenticated probes on the FastMCP HTTP application."""
+    """Register unauthenticated probes on the FastMCP HTTP application.
+
+    The readiness gauge is fed from the same flag ``/ready`` answers with.
+    """
+    set_server_ready(is_ready)
 
     @mcp.custom_route("/health", methods=["GET"], include_in_schema=False)
     async def health(_request: Request) -> Response:

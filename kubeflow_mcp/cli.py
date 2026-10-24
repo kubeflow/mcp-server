@@ -190,19 +190,23 @@ def serve(
 
         from starlette.middleware import Middleware
 
+        from kubeflow_mcp.core.http_metrics import HTTPMetricsMiddleware
         from kubeflow_mcp.core.transport_security import (
             DNSRebindingProtectionMiddleware,
             build_transport_security_settings,
         )
 
+        # Outermost, so requests rejected by the layers below are counted too.
+        http_middleware = [Middleware(HTTPMetricsMiddleware)]
+
         security_settings = build_transport_security_settings(cfg.security)
         if security_settings.enable_dns_rebinding_protection:
-            http_middleware = [
+            http_middleware.append(
                 Middleware(
                     DNSRebindingProtectionMiddleware,
                     settings=security_settings,
                 )
-            ]
+            )
         else:
             logger.warning(
                 "DNS rebinding protection is disabled — set "

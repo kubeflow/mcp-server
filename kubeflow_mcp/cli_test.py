@@ -602,3 +602,28 @@ def test_serve_reports_invalid_clients_environment_cleanly(monkeypatch):
     assert result.exit_code == 1
     assert "at least one client must be specified" in result.output
     assert "Traceback" not in result.output
+
+
+def test_serve_http_transports_install_http_metrics_middleware_outermost():
+    from kubeflow_mcp.core.http_metrics import HTTPMetricsMiddleware
+
+    for transport in ("http", "sse"):
+        mock_server, _, modules_patch = _make_serve_mocks()
+
+        with patch.dict(sys.modules, modules_patch):
+            runner = CliRunner()
+            runner.invoke(cli, ["serve", "--transport", transport])
+
+        _, kwargs = mock_server.run.call_args
+        assert kwargs["middleware"][0].cls is HTTPMetricsMiddleware
+
+
+def test_serve_stdio_transport_has_no_http_middleware():
+    mock_server, _, modules_patch = _make_serve_mocks()
+
+    with patch.dict(sys.modules, modules_patch):
+        runner = CliRunner()
+        runner.invoke(cli, ["serve", "--transport", "stdio"])
+
+    _, kwargs = mock_server.run.call_args
+    assert "middleware" not in kwargs
