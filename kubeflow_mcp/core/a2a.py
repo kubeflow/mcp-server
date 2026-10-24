@@ -59,6 +59,7 @@ and streaming can be added later for a consumer that actually needs it.
 from __future__ import annotations
 
 import inspect
+import json
 import logging
 import uuid
 from collections.abc import Callable, Mapping
@@ -79,6 +80,11 @@ A2A_PATH = "/a2a"
 
 # Revision of the A2A specification this implementation was written against.
 A2A_PROTOCOL_VERSION = "0.3.0"
+
+# Upper bound on a delegation request body. A delegation carries a tool name
+# and its arguments, so this is far above any legitimate payload while still
+# bounding what an unauthenticated caller can make the server hold in memory.
+_MAX_BODY_BYTES = 1 * 1024 * 1024
 
 # "message/send" is the standard A2A method. "tasks/send" is the older name,
 # accepted so clients written against the earlier revision keep working.
@@ -118,6 +124,38 @@ def _error(
         {"jsonrpc": "2.0", "error": {"code": code, "message": message}, "id": msg_id},
         status_code=status_code,
     )
+
+
+class _PayloadTooLarge(Exception):
+    """Raised when a request body exceeds the delegation size limit."""
+
+
+async def _read_body(request: Request) -> bytes:
+    """Read the request body, refusing an oversized one before parsing.
+
+    ``request.json()`` buffers the whole body first, so a large payload is
+    already resident before any limit could be applied. Content-Length is
+    checked to reject early where it is present, and the stream is measured
+    as it arrives because a chunked request does not declare a length.
+    """
+    declared = request.headers.get("content-length")
+    if declared is not None:
+        try:
+            if int(declared) > _MAX_BODY_BYTES:
+                raise _PayloadTooLarge
+        except ValueError:
+            # An unparseable header proves nothing; the stream guard below
+            # still bounds what is read.
+            pass
+
+    chunks: list[bytes] = []
+    received = 0
+    async for chunk in request.stream():
+        received += len(chunk)
+        if received > _MAX_BODY_BYTES:
+            raise _PayloadTooLarge
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 def _safe_id(body: Any) -> Any:
@@ -215,6 +253,11 @@ def extract_delegation(params: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
             {"kind": "data", "data": {"tool": "fine_tune", "arguments": {...}}}
         ]}}
 
+    The Message envelope is validated before any part is read. The A2A v0.3
+    Message schema requires ``role`` and ``messageId``, and a delegation is a
+    client turn, so a message with ``role: agent`` or no id is rejected rather
+    than executed.
+
     Raises:
         ValueError: With a caller-facing message when the shape is wrong. The
             caller sees invalid-params rather than a 500.
@@ -222,6 +265,20 @@ def extract_delegation(params: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
     message = params.get("message")
     if not isinstance(message, Mapping):
         raise ValueError("params.message must be an object")
+
+    kind = message.get("kind")
+    if kind is not None and kind != "message":
+        raise ValueError('params.message.kind must be "message"')
+
+    role = message.get("role")
+    if role != "user":
+        raise ValueError(
+            f'params.message.role must be "user". A delegation is a client turn; got {role!r}.'
+        )
+
+    message_id = message.get("messageId")
+    if not isinstance(message_id, str) or not message_id:
+        raise ValueError("params.message.messageId must be a non-empty string")
 
     parts = message.get("parts")
     if not isinstance(parts, list) or not parts:
@@ -304,6 +361,87 @@ async def _authenticate(request: Request, auth_provider: Any) -> tuple[bool, str
     return True, _token_subject(access_token)
 
 
+async def _dispatch(
+    body: Any,
+    tool_map: Mapping[str, Callable[..., Any]],
+    subject: str | None,
+) -> Response:  # noqa: C901
+    # A JSON-RPC request is an object. Arrays, null, and scalars are
+    # rejected here so that reading fields below cannot raise.
+    if not isinstance(body, Mapping):
+        return _error(_INVALID_REQUEST, "Request must be a JSON object")
+
+    msg_id = _safe_id(body)
+
+    if body.get("jsonrpc") != "2.0":
+        return _error(_INVALID_REQUEST, 'Missing or invalid "jsonrpc": must be "2.0"', msg_id)
+
+    method = body.get("method")
+    if not isinstance(method, str):
+        return _error(_INVALID_REQUEST, "Method must be a string", msg_id)
+    if method not in _SEND_METHODS:
+        return _error(
+            _METHOD_NOT_FOUND,
+            f"Method not found: {method}. Supported: {', '.join(sorted(_SEND_METHODS))}",
+            msg_id,
+        )
+
+    params = body.get("params", {})
+    if not isinstance(params, Mapping):
+        return _error(_INVALID_PARAMS, "params must be an object", msg_id)
+
+    try:
+        tool_name, arguments = extract_delegation(params)
+    except ValueError as exc:
+        return _error(_INVALID_PARAMS, str(exc), msg_id)
+
+    tool_func = tool_map.get(tool_name)
+    if tool_func is None:
+        # The tool is absent because it does not exist or because the
+        # active persona cannot reach it; both are refusals to serve.
+        return _error(
+            _UNSUPPORTED_OPERATION,
+            f"Tool '{tool_name}' is not available to this agent.",
+            msg_id,
+        )
+
+    # Validate the arguments against the tool's signature *before* calling
+    # it. Binding here is the only place a TypeError means "the caller sent
+    # the wrong arguments"; once the tool is running, a TypeError is a
+    # fault inside the tool or the SDK and must not be reported to the
+    # caller as invalid-params.
+    try:
+        inspect.signature(tool_func).bind(**arguments)
+    except TypeError as exc:
+        return _error(_INVALID_PARAMS, f"Invalid arguments for '{tool_name}': {exc}", msg_id)
+
+    try:
+        # Tools are synchronous; run off the event loop so one delegated
+        # call cannot stall the server for everyone else. The verified
+        # subject is bound for the duration so the audit log records who
+        # the delegated call was made by.
+        with audit_identity(subject):
+            result = await run_in_threadpool(lambda: tool_func(**arguments))
+    except Exception:
+        logger.error("a2a_delegation_failed", extra={"tool": tool_name}, exc_info=True)
+        return _error(_INTERNAL_ERROR, f"Tool '{tool_name}' failed", msg_id)
+
+    # Stateless: the result comes back inline on the response. There is no
+    # task store to poll and no stream to subscribe to.
+    return JSONResponse(
+        {
+            "jsonrpc": "2.0",
+            "result": {
+                "kind": "message",
+                "role": "agent",
+                "messageId": uuid.uuid4().hex,
+                "parts": [{"kind": "data", "data": result}],
+            },
+            "id": msg_id,
+        }
+    )
+
+
 def register_a2a_routes(
     mcp: FastMCP,
     *,
@@ -327,6 +465,17 @@ def register_a2a_routes(
     clients = loaded_clients or []
     auth_required = auth_provider is not None
 
+    if not auth_required:
+        # The MCP endpoint already warns when it is unauthenticated, but
+        # delegation is worth calling out separately: any caller who can reach
+        # the port can run any tool the persona allows, with no credential and
+        # no identity in the audit trail.
+        logger.warning(
+            "a2a_unauthenticated: %s accepts delegated tool calls from any caller. "
+            "Configure --auth-token or JWT verification before exposing this server.",
+            A2A_PATH,
+        )
+
     @mcp.custom_route(AGENT_CARD_PATH, methods=["GET"], include_in_schema=False)
     async def agent_card(request: Request) -> Response:
         base = str(request.base_url).rstrip("/")
@@ -339,7 +488,7 @@ def register_a2a_routes(
         return JSONResponse(card, headers=dict(_CARD_HEADERS))
 
     @mcp.custom_route(A2A_PATH, methods=["POST"], include_in_schema=False)
-    async def a2a_endpoint(request: Request) -> Response:  # noqa: C901
+    async def a2a_endpoint(request: Request) -> Response:
         authorized, subject = await _authenticate(request, auth_provider)
         if not authorized:
             return JSONResponse(
@@ -349,81 +498,26 @@ def register_a2a_routes(
             )
 
         try:
-            body = await request.json()
-        except Exception:
+            raw = await _read_body(request)
+        except _PayloadTooLarge:
+            return _error(
+                _INVALID_REQUEST,
+                f"Request body exceeds the {_MAX_BODY_BYTES} byte limit",
+                status_code=413,
+            )
+
+        try:
+            body = json.loads(raw)
+        except ValueError:
             return _error(_PARSE_ERROR, "Invalid JSON payload")
 
-        # A JSON-RPC request is an object. Arrays, null, and scalars are
-        # rejected here so that reading fields below cannot raise.
-        if not isinstance(body, Mapping):
-            return _error(_INVALID_REQUEST, "Request must be a JSON object")
+        # JSON-RPC defines a notification as a request with no "id" member.
+        # The caller has said it wants no reply, so the request is processed
+        # and the response is dropped. An explicit "id": null is a request,
+        # not a notification, so absence is what is tested here.
+        notification = isinstance(body, Mapping) and "id" not in body
 
-        msg_id = _safe_id(body)
-
-        if body.get("jsonrpc") != "2.0":
-            return _error(_INVALID_REQUEST, 'Missing or invalid "jsonrpc": must be "2.0"', msg_id)
-
-        method = body.get("method")
-        if not isinstance(method, str):
-            return _error(_INVALID_REQUEST, "Method must be a string", msg_id)
-        if method not in _SEND_METHODS:
-            return _error(
-                _METHOD_NOT_FOUND,
-                f"Method not found: {method}. Supported: {', '.join(sorted(_SEND_METHODS))}",
-                msg_id,
-            )
-
-        params = body.get("params", {})
-        if not isinstance(params, Mapping):
-            return _error(_INVALID_PARAMS, "params must be an object", msg_id)
-
-        try:
-            tool_name, arguments = extract_delegation(params)
-        except ValueError as exc:
-            return _error(_INVALID_PARAMS, str(exc), msg_id)
-
-        tool_func = tool_map.get(tool_name)
-        if tool_func is None:
-            # The tool is absent because it does not exist or because the
-            # active persona cannot reach it; both are refusals to serve.
-            return _error(
-                _UNSUPPORTED_OPERATION,
-                f"Tool '{tool_name}' is not available to this agent.",
-                msg_id,
-            )
-
-        # Validate the arguments against the tool's signature *before* calling
-        # it. Binding here is the only place a TypeError means "the caller sent
-        # the wrong arguments"; once the tool is running, a TypeError is a
-        # fault inside the tool or the SDK and must not be reported to the
-        # caller as invalid-params.
-        try:
-            inspect.signature(tool_func).bind(**arguments)
-        except TypeError as exc:
-            return _error(_INVALID_PARAMS, f"Invalid arguments for '{tool_name}': {exc}", msg_id)
-
-        try:
-            # Tools are synchronous; run off the event loop so one delegated
-            # call cannot stall the server for everyone else. The verified
-            # subject is bound for the duration so the audit log records who
-            # the delegated call was made by.
-            with audit_identity(subject):
-                result = await run_in_threadpool(lambda: tool_func(**arguments))
-        except Exception:
-            logger.error("a2a_delegation_failed", extra={"tool": tool_name}, exc_info=True)
-            return _error(_INTERNAL_ERROR, f"Tool '{tool_name}' failed", msg_id)
-
-        # Stateless: the result comes back inline on the response. There is no
-        # task store to poll and no stream to subscribe to.
-        return JSONResponse(
-            {
-                "jsonrpc": "2.0",
-                "result": {
-                    "kind": "message",
-                    "role": "agent",
-                    "messageId": uuid.uuid4().hex,
-                    "parts": [{"kind": "data", "data": result}],
-                },
-                "id": msg_id,
-            }
-        )
+        response = await _dispatch(body, tool_map, subject)
+        if notification:
+            return Response(status_code=204)
+        return response

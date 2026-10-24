@@ -143,7 +143,18 @@ curl -X POST http://localhost:8000/a2a \
 Delegated calls go through the same persona filtering, rate limiting, and audit logging
 as MCP tool calls, and the confirm gate still applies: without `"confirmed": true` in
 `arguments`, a mutating tool returns a preview. Results are returned inline; streaming
-is not supported yet.
+is not supported yet. A request with no `id` is a JSON-RPC notification: it is executed
+but receives no response. Request bodies above 1 MiB are rejected before parsing.
+
+> **Note:** the confirm gate is a preview step, not an approval step. A calling agent can
+> set `"confirmed": true` on its first request and submit without a human seeing the
+> preview, exactly as an MCP client can. Restrict the persona (`KUBEFLOW_MCP_PERSONA`) or
+> the policy file if delegated callers should not reach mutating tools.
+
+> **Note:** with no auth configured, any caller that can reach the port can delegate to
+> every tool the persona allows, and the audit log records no identity for those calls.
+> The server logs a warning at startup in that case. Configure `--auth-token` or JWT
+> verification before exposing `/a2a`.
 
 **Environment variables**
 

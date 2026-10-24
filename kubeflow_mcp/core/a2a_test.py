@@ -316,6 +316,7 @@ def test_delegation_rejects_natural_language_only_request() -> None:
             "message": {
                 "role": "user",
                 "kind": "message",
+                "messageId": "m-1",
                 "parts": [{"kind": "text", "text": "fine-tune model X on dataset Y"}],
             }
         },
@@ -364,12 +365,186 @@ def test_delegation_rejects_non_object_params(params: Any) -> None:
     assert body["error"]["code"] == -32602
 
 
+# ─── A2A Message envelope ──────────────────────────────────
+
+
+def _recording_tool_client(calls: list[dict[str, Any]]):
+    """Client whose only tool records every invocation."""
+
+    def spy(**kwargs: Any) -> dict[str, Any]:
+        calls.append(kwargs)
+        return {"ok": True}
+
+    spy.__name__ = "spy"
+    return _a2a_client(tools={"spy": spy})
+
+
+@pytest.mark.parametrize(
+    "envelope",
+    [
+        pytest.param({"kind": "message", "messageId": "m-1"}, id="role-missing"),
+        pytest.param({"role": "agent", "kind": "message", "messageId": "m-1"}, id="role-agent"),
+        pytest.param({"role": "user", "kind": "message"}, id="message-id-missing"),
+        pytest.param({"role": "user", "kind": "message", "messageId": ""}, id="message-id-empty"),
+        pytest.param({"role": "user", "kind": "message", "messageId": 7}, id="message-id-not-str"),
+        pytest.param({"role": "user", "kind": "task", "messageId": "m-1"}, id="kind-wrong"),
+    ],
+)
+def test_delegation_rejects_message_that_violates_the_a2a_schema(envelope: dict) -> None:
+    """A2A v0.3 requires role and messageId; a delegation is a client turn."""
+    calls: list[dict[str, Any]] = []
+    request = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "message/send",
+        "params": {
+            "message": {
+                **envelope,
+                "parts": [{"kind": "data", "data": {"tool": "spy", "arguments": {}}}],
+            }
+        },
+    }
+    with _recording_tool_client(calls) as client:
+        body = client.post(A2A_PATH, json=request).json()
+
+    assert body["error"]["code"] == -32602
+    assert calls == [], "an invalid message must never reach the tool"
+
+
+# ─── JSON-RPC notifications ────────────────────────────────
+
+
+def test_notification_receives_no_response() -> None:
+    """A request with no id member must not be replied to."""
+    request = _send("fine_tune", {"model": "m", "dataset": "d"})
+    del request["id"]
+
+    with _a2a_client() as client:
+        response = client.post(A2A_PATH, json=request)
+
+    assert response.status_code == 204
+    assert response.content == b""
+
+
+def test_notification_still_runs_the_tool() -> None:
+    """The caller waived the reply, not the work."""
+    calls: list[dict[str, Any]] = []
+    request = _send("spy", {"x": 1})
+    del request["id"]
+
+    with _recording_tool_client(calls) as client:
+        response = client.post(A2A_PATH, json=request)
+
+    assert response.status_code == 204
+    assert calls == [{"x": 1}]
+
+
+def test_notification_suppresses_error_responses_too() -> None:
+    """Errors are responses, and a notification must not receive one."""
+    request = _send("nonexistent_tool")
+    del request["id"]
+
+    with _a2a_client() as client:
+        response = client.post(A2A_PATH, json=request)
+
+    assert response.status_code == 204
+    assert response.content == b""
+
+
+def test_explicit_null_id_is_a_request_not_a_notification() -> None:
+    """Absence of the id member is what denotes a notification."""
+    request = _send("fine_tune", {"model": "m", "dataset": "d"})
+    request["id"] = None
+
+    with _a2a_client() as client:
+        response = client.post(A2A_PATH, json=request)
+
+    assert response.status_code == 200
+    assert response.json()["id"] is None
+
+
+# ─── Body size limit ───────────────────────────────────────
+
+
+def test_oversized_body_is_refused_before_parsing() -> None:
+    from kubeflow_mcp.core.a2a import _MAX_BODY_BYTES
+
+    payload = b'{"jsonrpc":"2.0","id":1,"padding":"' + b"x" * (_MAX_BODY_BYTES + 1) + b'"}'
+
+    with _a2a_client() as client:
+        response = client.post(
+            A2A_PATH, content=payload, headers={"Content-Type": "application/json"}
+        )
+
+    assert response.status_code == 413
+    assert response.json()["error"]["code"] == -32600
+
+
+def test_oversized_body_is_refused_without_a_content_length_header() -> None:
+    """A chunked request declares no length, so the stream itself is measured."""
+    from kubeflow_mcp.core.a2a import _MAX_BODY_BYTES
+
+    def _chunks():
+        yield b'{"jsonrpc":"2.0","id":1,"padding":"'
+        for _ in range((_MAX_BODY_BYTES // 1024) + 2):
+            yield b"x" * 1024
+        yield b'"}'
+
+    with _a2a_client() as client:
+        response = client.post(
+            A2A_PATH, content=_chunks(), headers={"Content-Type": "application/json"}
+        )
+
+    assert response.status_code == 413
+
+
+def test_ordinary_body_is_still_accepted() -> None:
+    with _a2a_client() as client:
+        response = client.post(A2A_PATH, json=_send("fine_tune", {"model": "m", "dataset": "d"}))
+
+    assert response.status_code == 200
+
+
+# ─── Unauthenticated exposure ──────────────────────────────
+
+
+def test_mounting_without_auth_logs_a_warning(caplog) -> None:
+    """Operators should not discover an open delegation endpoint by accident."""
+    import logging as _logging
+
+    mcp = FastMCP("test-server")
+    with caplog.at_level(_logging.WARNING, logger="kubeflow_mcp.core.a2a"):
+        register_a2a_routes(mcp, tools={}, loaded_clients=[], auth_provider=None)
+
+    assert any("a2a_unauthenticated" in record.getMessage() for record in caplog.records)
+
+
+def test_mounting_with_auth_logs_no_warning(caplog) -> None:
+    import logging as _logging
+
+    from kubeflow_mcp.core.auth import APIKeyVerifier
+
+    mcp = FastMCP("test-server")
+    with caplog.at_level(_logging.WARNING, logger="kubeflow_mcp.core.a2a"):
+        register_a2a_routes(
+            mcp,
+            tools={},
+            loaded_clients=[],
+            auth_provider=APIKeyVerifier(expected_token="secret"),
+        )
+
+    assert not any("a2a_unauthenticated" in record.getMessage() for record in caplog.records)
+
+
+_VALID_ENVELOPE = {"role": "user", "kind": "message", "messageId": "m-1"}
+
+
 @pytest.mark.parametrize(
     "message",
     [
-        pytest.param({"parts": []}, id="empty-parts"),
-        pytest.param({"parts": "not-a-list"}, id="parts-not-list"),
-        pytest.param({}, id="no-parts"),
+        pytest.param({**_VALID_ENVELOPE, "parts": []}, id="empty-parts"),
+        pytest.param({**_VALID_ENVELOPE, "parts": "not-a-list"}, id="parts-not-list"),
+        pytest.param({**_VALID_ENVELOPE}, id="no-parts"),
         pytest.param([], id="message-not-object"),
     ],
 )
@@ -402,7 +577,14 @@ def test_delegation_rejects_malformed_datapart(data: Any) -> None:
         "jsonrpc": "2.0",
         "id": 1,
         "method": "message/send",
-        "params": {"message": {"parts": [{"kind": "data", "data": data}]}},
+        "params": {
+            "message": {
+                "role": "user",
+                "kind": "message",
+                "messageId": "m-1",
+                "parts": [{"kind": "data", "data": data}],
+            }
+        },
     }
     with _a2a_client() as client:
         body = client.post(A2A_PATH, json=request).json()
@@ -613,10 +795,13 @@ def test_extract_delegation_reads_datapart_past_leading_textpart() -> None:
     tool, arguments = extract_delegation(
         {
             "message": {
+                "role": "user",
+                "kind": "message",
+                "messageId": "m-1",
                 "parts": [
                     {"kind": "text", "text": "please fine-tune this"},
                     {"kind": "data", "data": {"tool": "fine_tune", "arguments": {"model": "m"}}},
-                ]
+                ],
             }
         }
     )
@@ -627,7 +812,14 @@ def test_extract_delegation_reads_datapart_past_leading_textpart() -> None:
 
 def test_extract_delegation_defaults_absent_arguments_to_empty() -> None:
     tool, arguments = extract_delegation(
-        {"message": {"parts": [{"kind": "data", "data": {"tool": "health_check"}}]}}
+        {
+            "message": {
+                "role": "user",
+                "kind": "message",
+                "messageId": "m-1",
+                "parts": [{"kind": "data", "data": {"tool": "health_check"}}],
+            }
+        }
     )
 
     assert tool == "health_check"
