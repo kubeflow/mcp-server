@@ -117,8 +117,9 @@ def resolve_namespace(namespace: str | None) -> tuple[str | None, ToolError | No
 
 def _http_status(exc: Exception) -> int | None:
     # kfp_server_api and kubernetes both raise an ``ApiException`` with an int status.
-    # Matched by type name so this works without importing either package.
-    if type(exc).__name__ != "ApiException":
+    # Matched by class name, including base classes, so this works without importing
+    # either package and still catches subclasses.
+    if not any(cls.__name__ == "ApiException" for cls in type(exc).__mro__):
         return None
     status = getattr(exc, "status", None)
     return status if isinstance(status, int) else None
