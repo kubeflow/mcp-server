@@ -85,6 +85,11 @@ def test_non_category_returns_as_is():
             config={"tool": "fine_tune", "pattern": "risk:destructive"},
             expected_output=False,
         ),
+        TestCase(
+            name="risk:unknown returns False",
+            config={"tool": "delete_training_job", "pattern": "risk:unknown"},
+            expected_output=False,
+        ),
     ],
 )
 def test_matches_pattern(test_case):
@@ -546,3 +551,9 @@ def test_inheritance_cycle_detection_raises_value_error():
     ):
         with pytest.raises(ValueError, match="Inheritance cycle detected"):
             get_allowed_tools("node-1")
+
+
+def test_get_allowed_tools_unknown_persona_raises():
+    """Unrecognized persona names must raise ValueError."""
+    with pytest.raises(ValueError, match="Unknown persona: invalid-persona"):
+        get_allowed_tools("invalid-persona")

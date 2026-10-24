@@ -180,6 +180,65 @@ class TestAuditIdentityMiddleware:
 
         await mw(context, call_next)
 
+    async def test_handles_exception_accessing_fastmcp_context(self) -> None:
+        """Exceptions raised when reading fastmcp_context are swallowed."""
+
+        class _FaultyContext:
+            @property
+            def fastmcp_context(self):
+                raise RuntimeError("fastmcp_context access failed")
+
+            request_context = None
+
+        mw = AuditIdentityMiddleware()
+
+        async def call_next(_ctx):
+            return "ok"
+
+        result = await mw(_FaultyContext(), call_next)
+        assert result == "ok"
+        assert get_mcp_request_id() is None
+
+    async def test_handles_exception_accessing_request_id(self) -> None:
+        """Exceptions raised when reading request_id are swallowed."""
+
+        class _FaultyFastMCPContext:
+            @property
+            def request_id(self):
+                raise RuntimeError("request_id access failed")
+
+        context = SimpleNamespace(
+            fastmcp_context=_FaultyFastMCPContext(),
+            request_context=None,
+        )
+        mw = AuditIdentityMiddleware()
+
+        async def call_next(_ctx):
+            return "ok"
+
+        result = await mw(context, call_next)
+        assert result == "ok"
+        assert get_mcp_request_id() is None
+
+    async def test_handles_exception_accessing_request_context(self) -> None:
+        """Exceptions raised when reading request_context are swallowed."""
+
+        class _FaultyContext:
+            fastmcp_context = None
+
+            @property
+            def request_context(self):
+                raise RuntimeError("request_context access failed")
+
+        mw = AuditIdentityMiddleware()
+
+        async def call_next(_ctx):
+            return "ok"
+
+        result = await mw(_FaultyContext(), call_next)
+        assert result == "ok"
+        assert get_user_id() is None
+
     async def test_no_request_context_for_user_id(self) -> None:
         """When request_context is None, user_id stays None."""
         context = _make_context(request_id=1)
