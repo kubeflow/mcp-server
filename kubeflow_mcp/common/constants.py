@@ -124,6 +124,12 @@ TOOL_PHASES: dict[str, list[str]] = {
         "delete_runtime",
     ],
     "health": ["health_check", "get_server_logs"],
+    # Pipelines client (kubeflow.pipelines.PipelinesClient). Prefixed so the phases
+    # never merge into the trainer's instruction sections.
+    "pipelines_discovery": ["list_pipelines", "get_pipeline"],
+    "pipelines_monitoring": ["list_pipeline_runs", "get_pipeline_run", "get_pipeline_logs"],
+    "pipelines_runs": ["create_pipeline_run"],
+    "pipelines_lifecycle": ["stop_pipeline_run", "retry_pipeline_run"],
 }
 
 # Reverse mapping: tool name -> phase
@@ -182,6 +188,15 @@ TOOL_NEXT_HINTS: dict[str, str] = {
     "patch_runtime": "Verify changes with get_runtime(name)",
     "create_runtime": "Verify with list_runtimes() or get_runtime(name)",
     "delete_runtime": "Confirm removal with list_runtimes()",
+    # Pipelines client
+    "list_pipelines": "Call get_pipeline(name) for its versions, or list_pipeline_runs()",
+    "get_pipeline": "Preview a run with create_pipeline_run(pipeline=name)",
+    "list_pipeline_runs": "Call get_pipeline_run(run_id) for a run's tasks and error",
+    "get_pipeline_run": "If it failed, read get_pipeline_logs(run_id) for the failing task",
+    "get_pipeline_logs": "Fix the cause, then preview retry_pipeline_run(run_id)",
+    "create_pipeline_run": "Follow the run with get_pipeline_run(run_id)",
+    "stop_pipeline_run": "Confirm with get_pipeline_run(run_id) that it is canceled",
+    "retry_pipeline_run": "Follow the retried run with get_pipeline_run(run_id)",
 }
 
 
@@ -227,9 +242,32 @@ SDK_COMPATIBILITY: dict[str, object] = {
             "covered_methods": [],
         },
         "pipelines": {
-            "status": "planned",
-            "sdk_client": "kubeflow.pipelines.Client",
-            "covered_methods": [],
+            "status": "implemented",
+            "sdk_client": "kubeflow.pipelines.PipelinesClient",
+            "covered_methods": [
+                "list_pipelines",
+                "get_pipeline",
+                "get_pipeline_version",
+                "list_pipeline_versions",
+                "list_runs",
+                "get_run",
+                "run",
+                "get_experiment",
+                "kfp_client().terminate_run",
+            ],
+            "uncovered_methods": [
+                "upload_pipeline",  # reads local files and takes code; register outside MCP
+                "delete_pipeline",
+                "wait_for_run_status",  # blocks; agents poll get_pipeline_run instead
+                "list_pipeline_versions(page_token)",  # get_pipeline returns the first page
+                "create_experiment",
+                "list_experiments",
+                "delete_experiment",
+            ],
+            "k8s_api_operations": [
+                "retry run (kfp.Client run API, run_service_retry_run)",
+                "task pod logs (CoreV1Api read_namespaced_pod_log)",
+            ],
         },
         "spark": {
             "status": "planned",

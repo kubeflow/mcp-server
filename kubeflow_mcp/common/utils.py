@@ -151,6 +151,55 @@ def get_trainer_client_for_namespace(namespace: str | None = None) -> Any:
         return client
 
 
+# Kubeflow Pipelines connection settings come only from the server environment, never
+# from tool arguments, so an agent cannot point the server at another endpoint.
+PIPELINES_URL_ENV = "KUBEFLOW_MCP_PIPELINES_URL"
+PIPELINES_TOKEN_ENV = "KUBEFLOW_MCP_PIPELINES_TOKEN"
+PIPELINES_NAMESPACE_ENV = "KUBEFLOW_MCP_PIPELINES_NAMESPACE"
+
+_pipelines_client_cache: dict[str, Any] = {}
+_pipelines_client_lock = threading.Lock()
+
+
+def get_pipelines_effective_namespace(namespace: str | None = None) -> str:
+    """Namespace for Kubeflow Pipelines calls.
+
+    Explicit argument first, then ``KUBEFLOW_MCP_PIPELINES_NAMESPACE``, then the same
+    kubeconfig default the trainer tools use.
+    """
+    if namespace:
+        return namespace
+    configured = os.environ.get(PIPELINES_NAMESPACE_ENV, "").strip()
+    if configured:
+        return configured
+    return get_trainer_effective_namespace(None)
+
+
+def get_pipelines_client(namespace: str) -> Any:
+    """Return a ``PipelinesClient`` bound to *namespace*.
+
+    The namespace is always passed explicitly, so the namespace a tool checks against
+    policy is the one the SDK operates in. Requires the ``kubeflow[pipelines]`` extra;
+    the import raises ``ImportError`` with install instructions when ``kfp`` is missing.
+    """
+    with _pipelines_client_lock:
+        if namespace in _pipelines_client_cache:
+            return _pipelines_client_cache[namespace]
+        from kubeflow.pipelines import KubernetesBackendConfig, PipelinesClient
+
+        config = KubernetesBackendConfig(
+            base_url=os.environ.get(PIPELINES_URL_ENV) or None,
+            user_token=os.environ.get(PIPELINES_TOKEN_ENV) or None,
+            namespace=namespace,
+        )
+        client = PipelinesClient(backend_config=config)
+        if len(_pipelines_client_cache) >= _NS_CLIENT_CACHE_MAX:
+            oldest = next(iter(_pipelines_client_cache))
+            del _pipelines_client_cache[oldest]
+        _pipelines_client_cache[namespace] = client
+        return client
+
+
 MCP_MANAGED_LABEL = "kubeflow-mcp/managed-by"
 MCP_MANAGED_VALUE = "mcp"
 _TRAINJOB_GROUP = "trainer.kubeflow.org"
@@ -203,3 +252,5 @@ def reset_clients() -> None:
     _get_api_client.cache_clear()
     with _ns_client_lock:
         _ns_client_cache.clear()
+    with _pipelines_client_lock:
+        _pipelines_client_cache.clear()

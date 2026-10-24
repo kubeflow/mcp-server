@@ -18,7 +18,7 @@ The Kubeflow MCP Server exposes Kubeflow Training operations as [Model Context P
 - **Security-First**: Persona gating, namespace enforcement, input validation, bearer/JWT auth
 - **Multi-Platform**: Auto-detects OpenShift, EKS, GKE with platform-specific guidance
 - **Token-Efficient**: Progressive/semantic modes compress 23 tools into 2-3 meta-tools
-- **Extensible**: Plugin architecture for additional Kubeflow clients (TODO: optimizer, hub)
+- **Extensible**: Plugin architecture for additional Kubeflow clients (pipelines; TODO: optimizer, hub)
 
 ## Demo
 
@@ -211,6 +211,24 @@ claude mcp add kubeflow -- kubeflow-mcp serve
 | Platform | `inspect_crd`, `inspect_controller`, `patch_runtime`, `create_runtime`, `delete_runtime` | Cluster inspection and runtime management |
 | Health | `health_check`, `get_server_logs` | Server diagnostics |
 
+### Pipelines client
+
+Enable with `--clients trainer,pipelines`. Wraps `kubeflow.pipelines.PipelinesClient`.
+
+| Phase | Tools | Description |
+|-------|-------|-------------|
+| Discovery | `list_pipelines`, `get_pipeline` | Browse registered pipelines and their versions |
+| Monitoring | `list_pipeline_runs`, `get_pipeline_run`, `get_pipeline_logs` | Follow runs, read task pod logs |
+| Runs | `create_pipeline_run`, `stop_pipeline_run`, `retry_pipeline_run` | Start, stop or retry runs (preview first) |
+
+Requires `kfp` on the server host (`pip install 'kubeflow[pipelines]'`); it is not in the
+`all` extra yet because `kfp` 2.17 needs `kubernetes<31`
+([kubeflow/pipelines#13390](https://github.com/kubeflow/pipelines/issues/13390)).
+Set `KUBEFLOW_MCP_PIPELINES_URL`, `KUBEFLOW_MCP_PIPELINES_TOKEN` or
+`KUBEFLOW_MCP_PIPELINES_NAMESPACE` when the defaults do not fit. Only registered pipelines
+can be run, by name. Stop and retry need the `ml-engineer` persona because KFP runs carry
+no MCP ownership label.
+
 
 ### Requirements
 
@@ -224,7 +242,7 @@ claude mcp add kubeflow -- kubeflow-mcp serve
 ### `kubeflow-mcp serve`
 
 ```bash
-# Modules: trainer, optimizer (stub), hub (stub)
+# Modules: trainer, pipelines, optimizer (stub), hub (stub)
 # Persona: readonly | data-scientist | ml-engineer | platform-admin
 # Mode: full | progressive | semantic
 # Instruction tier: full | compact | minimal

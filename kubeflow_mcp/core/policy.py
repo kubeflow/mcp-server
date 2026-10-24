@@ -86,6 +86,12 @@ PERSONAS: dict[str, dict[str, Any]] = {
             "get_training_events",
             "health_check",
             "get_server_logs",
+            # Pipelines
+            "list_pipelines",
+            "get_pipeline",
+            "list_pipeline_runs",
+            "get_pipeline_run",
+            "get_pipeline_logs",
         ]
     },
     "data-scientist": {
@@ -95,6 +101,8 @@ PERSONAS: dict[str, dict[str, Any]] = {
             "run_custom_training",
             "wait_for_training",
             "delete_training_job",
+            # Pipelines
+            "create_pipeline_run",
         ],
     },
     "ml-engineer": {
@@ -104,12 +112,16 @@ PERSONAS: dict[str, dict[str, Any]] = {
             "update_training_job",
             "inspect_crd",
             "inspect_controller",
+            # Pipelines: KFP runs carry no MCP ownership label, so these act on any
+            # run in the namespace and sit above data-scientist.
+            "stop_pipeline_run",
+            "retry_pipeline_run",
         ],
     },
     "platform-admin": {"tools": "*"},
 }
 
-DESTRUCTIVE_TOOLS = {"delete_training_job", "delete_runtime"}
+DESTRUCTIVE_TOOLS = {"delete_training_job", "delete_runtime", "stop_pipeline_run"}
 
 # ─── Runtime persona ───────────────────────
 # Set once at server startup by create_server(); tools read via get_effective_persona().

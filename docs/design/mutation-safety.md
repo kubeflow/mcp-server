@@ -20,6 +20,13 @@ See also: [CONVENTIONS.md](../CONVENTIONS.md) for module layout and naming,
 | `create_runtime` | platform-admin | n/a (cluster-scoped) | n/a | `ToolResponse` (legacy) | no |
 | `patch_runtime` | platform-admin | n/a (cluster-scoped) | n/a | `ToolResponse` (legacy) | no |
 | `delete_runtime` | platform-admin | n/a (cluster-scoped) | n/a | `ToolResponse` (legacy) | yes |
+| `create_pipeline_run` | data-scientist | yes | n/a (creates; KFP runs take no labels) | `PreviewResponse` | no |
+| `stop_pipeline_run` | ml-engineer | yes | no: KFP runs carry no MCP label | `PreviewResponse` | yes |
+| `retry_pipeline_run` | ml-engineer | yes | no: KFP runs carry no MCP label | `PreviewResponse` | no |
+
+KFP runs have no labels the server can set, so `stop_pipeline_run` and `retry_pipeline_run`
+cannot check MCP ownership. They sit at `ml-engineer` instead of `data-scientist`, and their
+previews say they act on any run in the namespace.
 
 ## Order of checks
 
