@@ -72,6 +72,14 @@ class TestListPipelines:
 
         assert result["error_code"] == "PERMISSION_DENIED"
 
+    def test_subclassed_api_exception_is_still_mapped(self, kfp_client):
+        class ForbiddenException(ApiException):
+            pass
+
+        kfp_client.list_pipelines.side_effect = ForbiddenException(403, "Forbidden")
+
+        assert list_pipelines()["error_code"] == "PERMISSION_DENIED"
+
     def test_missing_kfp_explains_how_to_install(self, kfp_client):
         kfp_client.list_pipelines.side_effect = ImportError("kfp is required")
 

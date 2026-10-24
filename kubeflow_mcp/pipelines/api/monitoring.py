@@ -156,6 +156,11 @@ def _read_pod_log(pod: str, namespace: str, tail_lines: int) -> str:
         # pod's default container instead.
         if getattr(e, "status", None) != 400:
             raise
+        logger.debug(
+            "Pod %s has no %r container (HTTP 400); reading its default container",
+            pod,
+            _STEP_CONTAINER,
+        )
         return api.read_namespaced_pod_log(
             name=pod, namespace=namespace, tail_lines=tail_lines, _request_timeout=K8S_TIMEOUT
         )
@@ -189,7 +194,11 @@ def get_pipeline_logs(
         task_err = validate_display_name(task, "task")
         if task_err is not None:
             return task_err.model_dump()
-    if not isinstance(tail_lines, int) or not 1 <= tail_lines <= MAX_TAIL_LINES:
+    if (
+        not isinstance(tail_lines, int)
+        or isinstance(tail_lines, bool)
+        or not 1 <= tail_lines <= MAX_TAIL_LINES
+    ):
         return ToolError(
             error=f"tail_lines must be between 1 and {MAX_TAIL_LINES}, got {tail_lines}",
             error_code=ErrorCode.VALIDATION_ERROR,

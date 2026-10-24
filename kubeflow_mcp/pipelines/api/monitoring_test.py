@@ -191,7 +191,7 @@ class TestGetPipelineLogs:
         assert data["pods"][0]["error"] == "invalid pod name"
         core_api.read_namespaced_pod_log.assert_not_called()
 
-    @pytest.mark.parametrize("tail_lines", [0, 1001, -5])
+    @pytest.mark.parametrize("tail_lines", [0, 1001, -5, True])
     def test_rejects_tail_lines_out_of_range(self, kfp_client, tail_lines):
         assert get_pipeline_logs(RUN_ID, tail_lines=tail_lines)["error_code"] == "VALIDATION_ERROR"
         kfp_client.get_run.assert_not_called()
