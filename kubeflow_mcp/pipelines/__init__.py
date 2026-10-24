@@ -62,12 +62,20 @@ TOOLS = [
 # ─── Tool metadata (owned by this client module) ───────────────────────────
 
 CLIENT_TOOL_DESCRIPTIONS: dict[str, str] = {
-    "list_pipelines": "List pipelines registered on Kubeflow Pipelines. Paged with page_token.",
-    "get_pipeline": "Get a registered pipeline by name, with its recent versions.",
-    "list_pipeline_runs": (
-        "List pipeline runs. Filter by pipeline, experiment or status (e.g. failed)."
+    "list_pipelines": (
+        "List registered pipelines (the blueprints, not their runs). Paged with page_token."
     ),
-    "get_pipeline_run": "Get a run's state, error, parameters and task states by run_id.",
+    "get_pipeline": (
+        "Get a registered pipeline (the blueprint) by name, with its recent versions. "
+        "For a run of it, use get_pipeline_run(run_id)."
+    ),
+    "list_pipeline_runs": (
+        "List pipeline runs (executions). Filter by pipeline, experiment or status (e.g. failed)."
+    ),
+    "get_pipeline_run": (
+        "Get one run (an execution of a pipeline) by its run_id: state, error, "
+        "parameters, task states, created_at and finished_at."
+    ),
     "get_pipeline_logs": (
         "Get logs of a run's task pods. Pass task= to read one task. Bounded output."
     ),

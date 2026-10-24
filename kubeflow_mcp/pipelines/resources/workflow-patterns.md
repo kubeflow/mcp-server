@@ -3,6 +3,12 @@
 How to use the `pipelines` client tools end to end. All tools take an optional
 `namespace`; without it the server's configured default is used.
 
+A **pipeline** is the registered blueprint, found by name (`list_pipelines`,
+`get_pipeline`). A **run** is one execution of it, found by its `run_id`
+(`list_pipeline_runs`, `get_pipeline_run`). Every response carries the IDs
+(`pipeline_id`, `run_id`, `experiment_id`), and every tool call is written to the
+server's audit log with sensitive values masked.
+
 ## Run a registered pipeline
 
 ```

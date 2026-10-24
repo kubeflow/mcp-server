@@ -15,6 +15,7 @@
 """Tests for the pipelines SDK-object serialization helpers."""
 
 import json
+from datetime import datetime, timezone
 from enum import Enum
 from types import SimpleNamespace
 
@@ -43,6 +44,20 @@ def test_run_summary_has_no_details():
     assert data["state"] == "succeeded"
     assert data["pipeline_id"] == "p-1"
     assert "tasks" not in data and "parameters" not in data
+
+
+def test_run_times_are_iso_strings():
+    run = make_run("SUCCEEDED")
+    run.finished_at = datetime(2026, 10, 20, 10, 0, tzinfo=timezone.utc)
+
+    data = run_to_dict(run)
+
+    assert data["created_at"] == "2026-10-20T09:30:00+00:00"
+    assert data["finished_at"] == "2026-10-20T10:00:00+00:00"
+
+
+def test_unfinished_run_has_no_finish_time():
+    assert run_to_dict(make_run("RUNNING"))["finished_at"] is None
 
 
 def test_enum_state_is_read_by_value():
