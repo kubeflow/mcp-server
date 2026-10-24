@@ -110,6 +110,54 @@ packaged resource Markdown file keeps `/ready` at 503 even though `/health` and 
 tools remain available; check the server logs and package contents rather than cluster
 dependencies.
 
+**Discovery and agent-to-agent delegation**
+
+With an HTTP transport, the server also publishes discovery documents and an
+[A2A](https://a2a-protocol.org/) delegation endpoint:
+
+```text
+GET  /mcp/server-card               # MCP Server Card (SEP-2127), public
+GET  /.well-known/mcp-server-card   # same card, .well-known alias, public
+GET  /.well-known/agent-card.json   # A2A Agent Card, public
+POST /a2a                           # A2A JSON-RPC delegation, requires auth when configured
+```
+
+The cards carry identity and high-level capabilities only. They never list tools or
+schemas; the concrete tool surface depends on persona and policy and stays behind auth.
+
+Orchestrators delegate with a standard `message/send` request carrying a structured
+`DataPart`, the same `{tool, arguments}` shape as an MCP tool call:
+
+```bash
+curl -X POST http://localhost:8000/a2a \
+  -H "Authorization: Bearer my-secret-token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0", "id": 1, "method": "message/send",
+    "params": {"message": {"role": "user", "kind": "message", "messageId": "m-1",
+      "parts": [{"kind": "data", "data": {
+        "tool": "fine_tune",
+        "arguments": {"model": "hf://google/gemma-2b", "dataset": "hf://tatsu-lab/alpaca"}
+      }}]}}
+  }'
+```
+
+Delegated calls go through the same persona filtering, rate limiting, and audit logging
+as MCP tool calls, and the confirm gate still applies: without `"confirmed": true` in
+`arguments`, a mutating tool returns a preview. Results are returned inline; streaming
+is not supported yet. A request with no `id` is a JSON-RPC notification: it is executed
+but receives no response. Request bodies above 1 MiB are rejected before parsing.
+
+> **Note:** the confirm gate is a preview step, not an approval step. A calling agent can
+> set `"confirmed": true` on its first request and submit without a human seeing the
+> preview, exactly as an MCP client can. Restrict the persona (`KUBEFLOW_MCP_PERSONA`) or
+> the policy file if delegated callers should not reach mutating tools.
+
+> **Note:** with no auth configured, any caller that can reach the port can delegate to
+> every tool the persona allows, and the audit log records no identity for those calls.
+> The server logs a warning at startup in that case. Configure `--auth-token` or JWT
+> verification before exposing `/a2a`.
+
 **Environment variables**
 
 | Variable | Default | Description |
