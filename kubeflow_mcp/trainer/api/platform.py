@@ -272,8 +272,38 @@ def inspect_controller(
                 "reason": ev.reason,
                 "message": ev.message,
                 "count": ev.count,
-                "first_seen": ev.first_timestamp.isoformat() if ev.first_timestamp else None,
-                "last_seen": ev.last_timestamp.isoformat() if ev.last_timestamp else None,
+                "first_seen": next(
+                    (
+                        timestamp.isoformat() if hasattr(timestamp, "isoformat") else str(timestamp)
+                        for timestamp in (
+                            getattr(ev, "first_timestamp", None),
+                            getattr(ev, "event_time", None),
+                            getattr(
+                                getattr(ev, "metadata", None),
+                                "creation_timestamp",
+                                None,
+                            ),
+                        )
+                        if timestamp is not None
+                    ),
+                    None,
+                ),
+                "last_seen": next(
+                    (
+                        timestamp.isoformat() if hasattr(timestamp, "isoformat") else str(timestamp)
+                        for timestamp in (
+                            getattr(ev, "last_timestamp", None),
+                            getattr(ev, "event_time", None),
+                            getattr(
+                                getattr(ev, "metadata", None),
+                                "creation_timestamp",
+                                None,
+                            ),
+                        )
+                        if timestamp is not None
+                    ),
+                    None,
+                ),
             }
             for ev in events.items
         ]
