@@ -111,6 +111,9 @@ PERSONAS: dict[str, dict[str, Any]] = {
 
 DESTRUCTIVE_TOOLS = {"delete_training_job", "delete_runtime"}
 
+# Tools matched by each ``risk:<level>`` policy pattern.
+RISK_LEVELS: dict[str, set[str]] = {"destructive": DESTRUCTIVE_TOOLS}
+
 # ─── Runtime persona ───────────────────────
 # Set once at server startup by create_server(); tools read via get_effective_persona().
 
@@ -217,6 +220,19 @@ def _validate_categories(patterns: list[str], key: str, path: Path) -> None:
                 )
 
 
+def _validate_risks(patterns: list[str], key: str, path: Path) -> None:
+    """Reject unknown ``risk:`` references, which would otherwise match no tool."""
+    valid_risks = ", ".join(sorted(RISK_LEVELS))
+    for pattern in patterns:
+        if pattern.startswith("risk:"):
+            risk = pattern.removeprefix("risk:")
+            if risk not in RISK_LEVELS:
+                raise PolicyFileError(
+                    f"Invalid policy file {path}: unknown risk {risk!r} in '{key}'. "
+                    f"Valid risks: {valid_risks}"
+                )
+
+
 def _validate_policy_section(policy: dict[str, Any], path: Path) -> None:
     """Check the ``policy:`` mapping in place."""
     for key in ("allow", "deny"):
@@ -226,6 +242,7 @@ def _validate_policy_section(policy: dict[str, Any], path: Path) -> None:
             else:
                 _check_string_list(policy[key], f"policy.{key}", path)
                 _validate_categories(policy[key], f"policy.{key}", path)
+                _validate_risks(policy[key], f"policy.{key}", path)
 
     # An empty ``namespaces:`` keeps meaning "no namespace restriction".
     if policy.get("namespaces") is not None:
@@ -301,10 +318,7 @@ def _expand_category(category: str) -> list[str]:
 def _matches_pattern(tool: str, pattern: str) -> bool:
     """Check if tool matches a pattern (supports wildcards)."""
     if pattern.startswith("risk:"):
-        risk = pattern[5:]
-        if risk == "destructive":
-            return tool in DESTRUCTIVE_TOOLS
-        return False
+        return tool in RISK_LEVELS.get(pattern[5:], set())
     return fnmatch.fnmatch(tool, pattern)
 
 
