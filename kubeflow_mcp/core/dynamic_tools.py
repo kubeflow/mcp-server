@@ -42,6 +42,7 @@ from kubeflow_mcp.common.constants import (
     ErrorCode,
     record_tool_result,
 )
+from kubeflow_mcp.core.metrics import record_circuit_open
 from kubeflow_mcp.core.resilience import get_breaker
 
 logger = logging.getLogger(__name__)
@@ -209,6 +210,7 @@ def execute_tool(tool_name: str, arguments: dict[str, Any] | None = None) -> dic
     breaker = get_breaker(tool_name)
     generation = breaker.acquire()
     if generation is None:
+        record_circuit_open(tool_name)
         return {
             "error": f"Circuit breaker open for '{tool_name}' — K8s API may be degraded. Retries automatically after recovery timeout.",
             "error_code": ErrorCode.CIRCUIT_OPEN,

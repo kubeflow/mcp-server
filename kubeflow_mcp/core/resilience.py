@@ -26,6 +26,8 @@ from enum import Enum
 from functools import wraps
 from typing import Any, TypeVar
 
+from kubeflow_mcp.core.metrics import record_circuit_transition
+
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
@@ -44,6 +46,8 @@ class CircuitBreaker:
     failure_threshold: int = 5
     recovery_timeout: float = 30.0
     half_open_max_calls: int = 3
+    # Tool the breaker guards; only used to label its metrics.
+    name: str = ""
 
     state: CircuitState = field(default=CircuitState.CLOSED)
     failure_count: int = field(default=0)
@@ -62,6 +66,17 @@ class CircuitBreaker:
             raise ValueError("half_open_max_calls must be greater than zero")
         self._lock = threading.Lock()
 
+    def _transition(self, to_state: CircuitState) -> None:
+        """Move to *to_state* and count the transition. Caller holds the lock.
+
+        A late failure reported while already OPEN re-enters the CLOSED -> OPEN
+        branch; the state does not change, so nothing is counted.
+        """
+        from_state = self.state
+        self.state = to_state
+        if from_state is not to_state:
+            record_circuit_transition(self.name, from_state.value, to_state.value)
+
     def acquire(self) -> int | None:
         """Reserve a call and return its probe generation, or None if it is refused.
 
@@ -74,7 +89,7 @@ class CircuitBreaker:
 
             if self.state == CircuitState.OPEN:
                 if time.monotonic() - self.last_failure_time >= self.recovery_timeout:
-                    self.state = CircuitState.HALF_OPEN
+                    self._transition(CircuitState.HALF_OPEN)
                     self.half_open_calls = 0
                     self._half_open_successes = 0
                     self._generation += 1
@@ -104,7 +119,7 @@ class CircuitBreaker:
             if self.state == CircuitState.HALF_OPEN:
                 self._half_open_successes += 1
                 if self._half_open_successes >= self.half_open_max_calls:
-                    self.state = CircuitState.CLOSED
+                    self._transition(CircuitState.CLOSED)
                     self.failure_count = 0
                     self._half_open_successes = 0
                     logger.info("Circuit breaker: HALF_OPEN -> CLOSED")
@@ -120,11 +135,11 @@ class CircuitBreaker:
             self.last_failure_time = time.monotonic()
 
             if self.state == CircuitState.HALF_OPEN:
-                self.state = CircuitState.OPEN
+                self._transition(CircuitState.OPEN)
                 self._half_open_successes = 0
                 logger.warning("Circuit breaker: HALF_OPEN -> OPEN")
             elif self.failure_count >= self.failure_threshold:
-                self.state = CircuitState.OPEN
+                self._transition(CircuitState.OPEN)
                 logger.warning(f"Circuit breaker: CLOSED -> OPEN (failures={self.failure_count})")
 
     def release(self, generation: int | None = None) -> None:
@@ -173,6 +188,7 @@ def get_breaker(name: str) -> CircuitBreaker:
             _breakers[name] = CircuitBreaker(
                 failure_threshold=int(_cb_defaults["failure_threshold"]),
                 recovery_timeout=float(_cb_defaults["recovery_timeout"]),
+                name=name,
             )
         return _breakers[name]
 
