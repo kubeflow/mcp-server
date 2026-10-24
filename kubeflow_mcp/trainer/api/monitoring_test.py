@@ -510,6 +510,147 @@ class TestGetTrainingLogs:
         assert result["data"]["logs"] == ""
 
 
+# ─── get_training_logs: empty log for a missing or pending step ─────────
+
+
+def _job_with_steps(*steps: tuple[str, str | None]):
+    """A TrainJob as the SDK returns it from ``get_job``: ``steps`` = its pods."""
+    return SimpleNamespace(
+        steps=[
+            SimpleNamespace(name=name, status=status, pod_name=f"job-{name}-0")
+            for name, status in steps
+        ]
+    )
+
+
+class TestGetTrainingLogsEmptyStep:
+    """The SDK yields no lines both for an unknown step and for a Pending pod;
+    the tool must say which, instead of returning an empty success."""
+
+    @patch(PATCH_EFF_NS, side_effect=RuntimeError("no fallback in this test"))
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_unknown_step_is_reported_not_found(self, mock_client_fn, _ns, _eff_ns):
+        mock_client_fn.return_value = _make_mock_client(
+            get_job_logs=[], get_job=_job_with_steps(("node-0", "Running"))
+        )
+        result = get_training_logs("my-job", step="node-1")
+        assert result["success"] is False
+        assert result["error_code"] == "RESOURCE_NOT_FOUND"
+        assert "node-1" in result["error"]
+        assert result["details"]["available_steps"] == ["node-0"]
+        assert "get_training_job" in result["hint"]
+
+    @patch(PATCH_EFF_NS, side_effect=RuntimeError("no fallback in this test"))
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_unknown_step_in_cursor_mode_is_reported_not_found(self, mock_client_fn, _ns, _eff_ns):
+        mock_client_fn.return_value = _make_mock_client(
+            get_job_logs=[], get_job=_job_with_steps(("node-0", "Running"))
+        )
+        # Previously this returned next_offset=0/total_lines=0 forever.
+        result = get_training_logs("my-job", step="worker-0", since_line=0)
+        assert result["success"] is False
+        assert result["error_code"] == "RESOURCE_NOT_FOUND"
+        assert "next_offset" not in result
+
+    @patch(PATCH_EFF_NS, side_effect=RuntimeError("no fallback in this test"))
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_pending_step_reports_status_and_next_steps(self, mock_client_fn, _ns, _eff_ns):
+        mock_client_fn.return_value = _make_mock_client(
+            get_job_logs=[], get_job=_job_with_steps(("node-0", "Pending"))
+        )
+        result = get_training_logs("my-job", step="node-0")
+        assert result["success"] is True
+        assert result["data"]["lines"] == 0
+        assert result["data"]["logs"] == ""
+        assert result["data"]["step_status"] == "Pending"
+        assert any("get_training_events" in s for s in result["data"]["next_steps"])
+
+    @patch(PATCH_EFF_NS, side_effect=RuntimeError("no fallback in this test"))
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_pending_step_in_cursor_mode_keeps_cursor_fields(self, mock_client_fn, _ns, _eff_ns):
+        mock_client_fn.return_value = _make_mock_client(
+            get_job_logs=[], get_job=_job_with_steps(("node-0", "Pending"))
+        )
+        result = get_training_logs("my-job", step="node-0", since_line=0)
+        assert result["success"] is True
+        assert result["data"]["next_offset"] == 0
+        assert result["data"]["total_lines"] == 0
+        assert result["data"]["step_status"] == "Pending"
+        assert "next_steps" in result["data"]
+
+    @patch(PATCH_EFF_NS, side_effect=RuntimeError("no fallback in this test"))
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_running_step_without_output_reports_status_only(self, mock_client_fn, _ns, _eff_ns):
+        mock_client_fn.return_value = _make_mock_client(
+            get_job_logs=[], get_job=_job_with_steps(("node-0", "Running"))
+        )
+        result = get_training_logs("my-job", step="node-0")
+        assert result["success"] is True
+        assert result["data"]["lines"] == 0
+        assert result["data"]["step_status"] == "Running"
+        assert "next_steps" not in result["data"]
+
+    @patch(PATCH_EFF_NS, side_effect=RuntimeError("no fallback in this test"))
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_job_without_pods_is_not_a_missing_step(self, mock_client_fn, _ns, _eff_ns):
+        # Just created or suspended: no pods, so no step can be checked yet.
+        mock_client_fn.return_value = _make_mock_client(get_job_logs=[], get_job=_job_with_steps())
+        result = get_training_logs("my-job", step="node-0")
+        assert result["success"] is True
+        assert result["data"]["lines"] == 0
+        assert result["data"]["step_status"] == "Unknown"
+        assert any("no pods yet" in s for s in result["data"]["next_steps"])
+
+    @patch(PATCH_EFF_NS, side_effect=RuntimeError("no fallback in this test"))
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_step_lookup_failure_keeps_plain_empty_response(self, mock_client_fn, _ns, _eff_ns):
+        mock_client_fn.return_value = _make_mock_client(
+            get_job_logs=[], get_job=RuntimeError("connection reset")
+        )
+        result = get_training_logs("my-job", step="node-0")
+        assert result["success"] is True
+        assert result["data"]["lines"] == 0
+        assert "step_status" not in result["data"]
+
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_step_lookup_is_skipped_when_logs_exist(self, mock_client_fn, _ns):
+        client = _make_mock_client(get_job_logs=["epoch 1"])
+        mock_client_fn.return_value = client
+        result = get_training_logs("my-job", step="node-0")
+        assert result["success"] is True
+        assert "step_status" not in result["data"]
+        client.get_job.assert_not_called()
+
+    @patch(PATCH_VALIDATE_NAME, return_value=None)
+    @patch(PATCH_CORE_V1)
+    @patch(PATCH_EFF_NS, return_value="default")
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_step_lookup_is_skipped_when_crash_logs_exist(
+        self, mock_client_fn, _ns, _eff_ns, mock_v1_fn, _validate
+    ):
+        client = _make_mock_client(get_job_logs=[])
+        mock_client_fn.return_value = client
+        mock_v1 = MagicMock()
+        mock_v1.list_namespaced_pod.return_value = SimpleNamespace(
+            items=[_trainjob_pod("crash-job", "node", index=0)]
+        )
+        mock_v1.read_namespaced_pod_log.return_value = "previous crash output"
+        mock_v1_fn.return_value = mock_v1
+        result = get_training_logs("crash-job", step="node-0")
+        assert result["success"] is True
+        assert "previous crash output" in result["data"]["logs"]
+        client.get_job.assert_not_called()
+
+
 # ─── get_training_logs cursor mode ──────────────────────────────────────
 
 
