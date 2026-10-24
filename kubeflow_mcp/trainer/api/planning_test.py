@@ -34,6 +34,7 @@ from kubeflow_mcp.trainer.api.planning import (
     _parse_k8s_version,
     _suggest_hf_model_ids,
     estimate_resources,
+    get_cluster_resources,
 )
 
 
@@ -455,3 +456,133 @@ def test_estimate_resources_returns_sdk_error_for_api_failure():
 
     assert result["success"] is False
     assert result["error_code"] == "SDK_ERROR"
+
+
+# ─── get_cluster_resources ──────────────────────────────────────────────────
+
+
+def _node(name, allocatable=None, *, ready=True, cordoned=False):
+    status = "True" if ready else "False"
+    return SimpleNamespace(
+        metadata=SimpleNamespace(name=name),
+        spec=SimpleNamespace(unschedulable=cordoned),
+        status=SimpleNamespace(
+            allocatable=allocatable,
+            conditions=[SimpleNamespace(type="Ready", status=status)],
+        ),
+    )
+
+
+def _cluster_with(*nodes):
+    api = MagicMock()
+    api.list_node.return_value = SimpleNamespace(items=list(nodes))
+    return patch("kubeflow_mcp.common.utils.get_core_v1_api", return_value=api)
+
+
+def test_get_cluster_resources_counts_gpus_from_any_vendor():
+    with _cluster_with(
+        _node("nv", {"nvidia.com/gpu": "4", "cpu": "32", "memory": "256Gi"}),
+        _node("amd", {"amd.com/gpu": "8", "cpu": "64"}),
+        _node("intel", {"gpu.intel.com/i915": "2"}),
+        _node("cpu-only", {"cpu": "4", "memory": "16Gi"}),
+    ):
+        data = get_cluster_resources()["data"]
+
+    assert data["gpu_total"] == 14
+    assert data["gpu_unavailable"] == 0
+    assert data["gpu_by_resource"] == {
+        "nvidia.com/gpu": 4,
+        "amd.com/gpu": 8,
+        "gpu.intel.com/i915": 2,
+    }
+    assert data["nodes_with_gpu"] == 3
+    assert data["node_count"] == 4
+    assert "hint" not in data
+    nv, amd, intel, cpu_only = data["nodes"]
+    assert nv == {
+        "name": "nv",
+        "memory": "256Gi",
+        "cpu": "32",
+        "ready": True,
+        "cordoned": False,
+        "gpus": 4,
+        "gpu_resources": {"nvidia.com/gpu": 4},
+    }
+    assert amd["gpus"] == 8 and intel["gpus"] == 2
+    assert "gpus" not in cpu_only
+
+
+def test_get_cluster_resources_excludes_not_ready_and_cordoned_nodes():
+    with _cluster_with(
+        _node("healthy", {"nvidia.com/gpu": "4"}),
+        _node("down", {"nvidia.com/gpu": "2"}, ready=False),
+        _node("drained", {"nvidia.com/gpu": "1"}, cordoned=True),
+    ):
+        data = get_cluster_resources()["data"]
+
+    assert data["gpu_total"] == 4
+    assert data["gpu_unavailable"] == 3
+    assert data["gpu_by_resource"] == {"nvidia.com/gpu": 4}
+    assert data["nodes_with_gpu"] == 1
+    assert data["node_count"] == 3
+    assert "hint" not in data
+    _, down, drained = data["nodes"]
+    assert (down["ready"], down["cordoned"], down["gpus"]) == (False, False, 2)
+    assert (drained["ready"], drained["cordoned"], drained["gpus"]) == (True, True, 1)
+
+
+def test_get_cluster_resources_hints_when_every_gpu_is_unschedulable():
+    with _cluster_with(
+        _node("down", {"nvidia.com/gpu": "8"}, ready=False),
+        _node("cpu-only", {"cpu": "4"}),
+    ):
+        data = get_cluster_resources()["data"]
+
+    assert data["gpu_total"] == 0
+    assert data["gpu_unavailable"] == 8
+    assert data["nodes_with_gpu"] == 0
+    assert "8 GPU(s) exist but are on NotReady or cordoned nodes" in data["hint"]
+
+
+def test_get_cluster_resources_tolerates_nodes_without_status_details():
+    bare = SimpleNamespace(
+        metadata=SimpleNamespace(name="fresh"),
+        spec=SimpleNamespace(unschedulable=None),
+        status=SimpleNamespace(allocatable=None, conditions=None),
+    )
+    with _cluster_with(bare, _node("ok", {"nvidia.com/gpu": "1"})):
+        data = get_cluster_resources()["data"]
+
+    fresh, _ = data["nodes"]
+    assert fresh == {
+        "name": "fresh",
+        "memory": None,
+        "cpu": None,
+        "ready": False,
+        "cordoned": False,
+    }
+    assert data["gpu_total"] == 1
+    assert data["node_count"] == 2
+
+
+def test_get_cluster_resources_ignores_non_integer_gpu_quantities():
+    with _cluster_with(
+        _node("odd", {"nvidia.com/gpu": "1.5", "amd.com/gpu": "0", "intel.com/gpu": "2"})
+    ):
+        data = get_cluster_resources()["data"]
+
+    assert data["gpu_total"] == 2
+    assert data["gpu_by_resource"] == {"intel.com/gpu": 2}
+
+
+def test_get_cluster_resources_returns_kubernetes_error_when_node_list_fails():
+    api = MagicMock()
+    api.list_node.side_effect = ConnectionError("Connection refused")
+
+    with patch("kubeflow_mcp.common.utils.get_core_v1_api", return_value=api):
+        result = get_cluster_resources()
+
+    assert result["success"] is False
+    assert result["error_code"] == "KUBERNETES_ERROR"
+    assert "Connection refused" in result["error"]
+    assert "gpu_total" not in result
