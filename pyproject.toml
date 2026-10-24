@@ -80,6 +80,13 @@ markers = [
     "smoke: basic import and metadata checks",
 ]
 [tool.uv]
+# Security overrides - Review periodically and remove if parent constraints allow natural upgrade
+override-dependencies = [
+    # fastmcp==4.1.2 - Added 2026-10-24 for security fix - https://github.com/PrefectHQ/fastmcp/security/advisories/GHSA-7xgj-8392-5q4r
+    "fastmcp==4.1.2",
+    # fastmcp-slim==4.1.2 - Added 2026-10-24 for security fix - https://github.com/PrefectHQ/fastmcp/security/advisories/GHSA-7xgj-8392-5q4r
+    "fastmcp-slim==4.1.2",
+]
 # Pin transitive deps to versions that resolve known CVEs detected by the OSV-Scanner workflow.
 constraint-dependencies = [
     "idna>=3.15",       # CVE-2026-45409
