@@ -17,6 +17,7 @@
 import logging
 import re
 from collections import deque
+from collections.abc import Callable
 from typing import Any
 
 from kubeflow.trainer.constants import constants as trainer_constants
@@ -409,6 +410,30 @@ def get_training_events(
         ).model_dump()
 
 
+class _JobAlreadyComplete(Exception):
+    """Raised from the status callback when the job finished without reaching a target."""
+
+    def __init__(self, status: str) -> None:
+        super().__init__(status)
+        self.status = status
+
+
+def _stop_when_complete(targets: set[str]) -> Callable[[Any], None]:
+    """Status callback that ends the wait once the job is Complete and that is not a target.
+
+    The SDK stops on its own for Failed. Without this, waiting for Running or
+    Created on a job that has already finished polls until the timeout, and the
+    caller is told to look for scheduling issues on a job that succeeded.
+    """
+
+    def _callback(job: Any) -> None:
+        status = getattr(job, "status", None)
+        if status == "Complete" and status not in targets:
+            raise _JobAlreadyComplete(status)
+
+    return _callback
+
+
 def wait_for_training(
     name: str,
     target_statuses: list[str] | str = "Complete",
@@ -437,6 +462,10 @@ def wait_for_training(
         - ``status`` (str): Final job status
         - ``reached`` (bool): Whether a target status was reached
         - ``message`` (str): Status message or timeout notice
+
+        Returns early with ``reached=False`` when the job is already ``Complete``
+        or ``Failed`` and that status is not in ``target_statuses``: the job will
+        never reach the target, so there is nothing left to wait for.
     """
     name_err = validate_k8s_name(name)
     if name_err is not None:
@@ -497,6 +526,7 @@ def wait_for_training(
             status=status_set,
             timeout=timeout_seconds,
             polling_interval=polling_interval,
+            callbacks=[_stop_when_complete(status_set)],
         )
 
         final_status = job.status if hasattr(job, "status") else "Unknown"
@@ -509,6 +539,17 @@ def wait_for_training(
             }
         ).model_dump()
 
+    except _JobAlreadyComplete as e:
+        waiting_for = ", ".join(sorted(status_set))
+        return ToolResponse(
+            data={
+                "job": name,
+                "status": e.status,
+                "reached": False,
+                "message": f"Job is already '{e.status}' and will not reach '{waiting_for}'",
+                "hint": "Use get_training_logs to read its output",
+            }
+        ).model_dump()
     except TimeoutError:
         return ToolResponse(
             data={
