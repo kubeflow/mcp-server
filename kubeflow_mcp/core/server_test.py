@@ -21,7 +21,9 @@ See also: kubeflow_mcp/trainer/api/architecture_test.py for full metadata consis
 """
 
 import hashlib
+from unittest import mock
 
+import pytest
 from fastmcp import Client
 
 from kubeflow_mcp import __version__
@@ -333,3 +335,31 @@ async def test_progressive_mode_e2e_meta_and_breaker():
             assert "next" in res.structured_content["_meta"]
     finally:
         set_effective_persona(previous)
+
+
+@pytest.mark.parametrize("mode", ["full", "progressive", "semantic"])
+async def test_string_false_confirmed_previews_in_every_mode(monkeypatch, mode):
+    """A string "false" must not pass the confirm gate, however the tool is reached."""
+    from kubeflow_mcp.trainer.api import lifecycle
+
+    trainer_client = mock.MagicMock()
+    monkeypatch.setattr(
+        lifecycle.mcp_utils, "get_trainer_client_for_namespace", lambda _ns: trainer_client
+    )
+    arguments = {"name": "demo-job", "namespace": "default", "confirmed": "false"}
+
+    previous = get_effective_persona()
+    try:
+        async with Client(create_server(persona="platform-admin", mode=mode)) as client:
+            if mode == "full":
+                res = await client.call_tool("delete_training_job", arguments)
+            else:
+                res = await client.call_tool(
+                    "execute_tool",
+                    {"tool_name": "delete_training_job", "arguments": arguments},
+                )
+    finally:
+        set_effective_persona(previous)
+
+    assert res.structured_content["status"] == "preview"
+    trainer_client.delete_job.assert_not_called()

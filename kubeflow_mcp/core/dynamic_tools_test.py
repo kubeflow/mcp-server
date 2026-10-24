@@ -220,6 +220,78 @@ def test_bad_arguments_do_not_consume_half_open_slot():
     assert breaker.half_open_calls == 0
 
 
+def gated_tool(name: str, epochs: int = 1, confirmed: bool = False) -> dict:
+    """Mutating tool with a confirm gate, like delete_training_job."""
+    if not confirmed:
+        return {"success": True, "status": "preview", "epochs": epochs}
+    _calls.append(name)
+    return {"success": True, "data": {"name": name, "epochs": epochs}}
+
+
+@pytest.mark.parametrize("confirmed", [False, "false", "False", "no", "off", "0", 0])
+def test_false_like_confirmed_returns_preview(confirmed):
+    dynamic_tools.init_dynamic_tools([gated_tool], {})
+
+    result = dynamic_tools.execute_tool("gated_tool", {"name": "job", "confirmed": confirmed})
+
+    assert result["status"] == "preview"
+    assert _calls == []
+
+
+@pytest.mark.parametrize("confirmed", [True, "true", "yes", "1", 1])
+def test_true_like_confirmed_executes(confirmed):
+    dynamic_tools.init_dynamic_tools([gated_tool], {})
+
+    result = dynamic_tools.execute_tool("gated_tool", {"name": "job", "confirmed": confirmed})
+
+    assert result["data"]["name"] == "job"
+    assert _calls == ["job"]
+
+
+@pytest.mark.parametrize("confirmed", ["maybe", "please", [], {}])
+def test_unparseable_confirmed_is_rejected_without_touching_breaker(confirmed):
+    dynamic_tools.init_dynamic_tools([gated_tool], {})
+    breaker = get_breaker("gated_tool")
+    breaker.state = CircuitState.HALF_OPEN
+    breaker.half_open_calls = 0
+
+    result = dynamic_tools.execute_tool("gated_tool", {"name": "job", "confirmed": confirmed})
+
+    assert result["error_code"] == ErrorCode.VALIDATION_ERROR
+    assert "confirmed" in result["error"]
+    assert _calls == []
+    assert breaker.half_open_calls == 0
+    assert breaker.failure_count == 0
+
+
+def test_arguments_are_coerced_like_full_mode():
+    dynamic_tools.init_dynamic_tools([gated_tool], {})
+
+    result = dynamic_tools.execute_tool(
+        "gated_tool", {"name": "job", "epochs": "3", "confirmed": "true"}
+    )
+
+    assert result["data"]["epochs"] == 3
+
+
+def test_omitted_arguments_keep_tool_defaults():
+    dynamic_tools.init_dynamic_tools([gated_tool], {})
+
+    result = dynamic_tools.execute_tool("gated_tool", {"name": "job"})
+
+    assert result == {"success": True, "status": "preview", "epochs": 1}
+
+
+def test_validation_error_does_not_echo_rejected_value():
+    dynamic_tools.init_dynamic_tools([gated_tool], {})
+
+    result = dynamic_tools.execute_tool("gated_tool", {"name": "job", "epochs": "hf_secret"})
+
+    assert result["error_code"] == ErrorCode.VALIDATION_ERROR
+    assert "epochs" in result["error"]
+    assert "hf_secret" not in result["error"]
+
+
 def test_tool_exception_still_counts_as_breaker_failure():
     breaker = get_breaker("failing_tool")
     for _ in range(breaker.failure_threshold):

@@ -34,7 +34,9 @@ import logging
 import threading
 import warnings
 from collections.abc import Callable
-from typing import Any
+from typing import Any, get_type_hints
+
+from pydantic import BaseModel, ConfigDict, ValidationError, create_model
 
 from kubeflow_mcp.common.constants import (
     TOOL_PHASES,
@@ -49,6 +51,38 @@ logger = logging.getLogger(__name__)
 # Populated by init_dynamic_tools() after server knows which tools are loaded.
 TOOL_REGISTRY: dict[str, dict[str, Any]] = {}
 TOOL_HIERARCHY: dict[str, list[str]] = {}
+
+
+def _build_args_model(func: Callable) -> type[BaseModel]:
+    """Build a pydantic model of a tool's parameters for execute_tool to validate against.
+
+    Full mode validates through FastMCP, which coerces input such as ``"false"`` to
+    ``False``. Without the same coercion here, ``confirmed="false"`` reaches the tool
+    as a truthy string and skips the confirm gate. The model only validates, so
+    execute_tool can reject bad arguments before it touches the circuit breaker.
+    """
+    hints = get_type_hints(func)
+    fields: dict[str, Any] = {}
+    for name, param in inspect.signature(func).parameters.items():
+        default = ... if param.default is inspect.Parameter.empty else param.default
+        fields[name] = (hints.get(name, Any), default)
+    return create_model(
+        f"{func.__name__}_arguments",
+        __config__=ConfigDict(extra="forbid", protected_namespaces=()),
+        **fields,
+    )
+
+
+def _format_validation_error(error: ValidationError) -> str:
+    """Summarize validation errors as ``field: message``.
+
+    Built from the error list rather than ``str(error)``, which echoes the rejected
+    input and could put a token passed in the wrong field into the response.
+    """
+    return "; ".join(
+        f"{'.'.join(str(part) for part in err['loc']) or 'arguments'}: {err['msg']}"
+        for err in error.errors()
+    )
 
 
 def init_dynamic_tools(
@@ -79,6 +113,7 @@ def init_dynamic_tools(
             "description": short_desc,
             "full_doc": doc,
             "func": func,
+            "args_model": _build_args_model(func),
         }
         TOOL_HIERARCHY.setdefault(category, []).append(name)
 
@@ -193,18 +228,19 @@ def execute_tool(tool_name: str, arguments: dict[str, Any] | None = None) -> dic
         return {"error": f"Tool '{tool_name}' not found", "available": list(TOOL_REGISTRY.keys())}
 
     func = TOOL_REGISTRY[tool_name]["func"]
-    args = arguments or {}
 
-    # Reject bad arguments before touching the breaker: they are a caller mistake,
-    # and returning after acquire() would also leak a half-open probe slot.
+    # Validate and coerce before touching the breaker: bad arguments are a caller
+    # mistake, and returning after acquire() would also leak a half-open probe slot.
     try:
-        inspect.signature(func).bind(**args)
-    except TypeError as e:
+        validated = TOOL_REGISTRY[tool_name]["args_model"].model_validate(arguments or {})
+    except ValidationError as e:
         return {
-            "error": f"Invalid arguments for '{tool_name}': {e}",
+            "error": f"Invalid arguments for '{tool_name}': {_format_validation_error(e)}",
             "error_code": ErrorCode.VALIDATION_ERROR,
             "tool": tool_name,
         }
+    # Pass only what the caller sent, so omitted parameters keep the tool's defaults.
+    args = {name: getattr(validated, name) for name in validated.model_fields_set}
 
     breaker = get_breaker(tool_name)
     generation = breaker.acquire()
