@@ -15,6 +15,7 @@
 """Planning tools for resource estimation and cluster inspection."""
 
 import logging
+import math
 import re
 from typing import Any
 
@@ -170,7 +171,9 @@ def _estimate_from_params(
     adapter_gb = round(weight_gb * 0.05, 2)
     activation_gb = round(weight_gb * 0.3 * (1 + (batch_size - 1) * 0.1), 2)
 
-    gpu_memory_gb = int(weight_gb + adapter_gb + activation_gb + OVERHEAD_GB)
+    # Round up: truncating 8.78 GB to 8 would place the model in the 8 GB tier,
+    # and the recommended GPU would be too small for it.
+    gpu_memory_gb = math.ceil(weight_gb + adapter_gb + activation_gb + OVERHEAD_GB)
     gpu_memory_gb = max(gpu_memory_gb, 1)
 
     if gpu_memory_gb <= 8:
