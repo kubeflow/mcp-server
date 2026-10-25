@@ -64,6 +64,15 @@ def test_serve_rejects_invalid_transport():
     assert "invalid value" in result.output.lower()
 
 
+def test_serve_rejects_invalid_log_format():
+    runner = CliRunner()
+    result = runner.invoke(cli, ["serve", "--log-format", "invalid"])
+    assert result.exit_code == 2
+    assert "invalid value" in result.output.lower()
+    assert "json" in result.output
+    assert "console" in result.output
+
+
 # --- serve: wiring — create_server receives correct args, server.run is called ---
 
 
@@ -602,3 +611,47 @@ def test_serve_reports_invalid_clients_environment_cleanly(monkeypatch):
     assert result.exit_code == 1
     assert "at least one client must be specified" in result.output
     assert "Traceback" not in result.output
+
+
+def test_serve_reports_invalid_log_format_from_environment_cleanly(monkeypatch):
+    monkeypatch.setattr("kubeflow_mcp.core.config._find_config_file", lambda: None)
+    result = CliRunner().invoke(cli, ["serve"], env={"LOG_FORMAT": "jsno"})
+
+    assert result.exit_code == 1
+    assert "format" in result.output
+    assert "jsno" in result.output
+    assert "'json'" in result.output
+    assert "'console'" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_serve_reports_invalid_log_format_from_yaml_cleanly(tmp_path, monkeypatch):
+    config_file = tmp_path / ".kubeflow-mcp.yaml"
+    config_file.write_text("logging:\n  format: invalid\n")
+    monkeypatch.setattr("kubeflow_mcp.core.config._find_config_file", lambda: config_file)
+    monkeypatch.delenv("LOG_FORMAT", raising=False)
+
+    result = CliRunner().invoke(cli, ["serve"])
+
+    assert result.exit_code == 1
+    assert "format" in result.output
+    assert "invalid" in result.output
+    assert "'json'" in result.output
+    assert "'console'" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_serve_reports_setup_logging_value_error_cleanly():
+    _, mock_create_server, modules_patch = _make_serve_mocks()
+    mock_setup_logging = modules_patch["kubeflow_mcp.core.logging"].setup_logging
+    mock_setup_logging.side_effect = ValueError(
+        "Unsupported log format 'invalid'; expected 'json' or 'console'"
+    )
+
+    with patch.dict(sys.modules, modules_patch):
+        result = CliRunner().invoke(cli, ["serve"])
+
+    assert result.exit_code == 1
+    assert "Unsupported log format 'invalid'; expected 'json' or 'console'" in result.output
+    assert "Traceback" not in result.output
+    mock_create_server.assert_not_called()

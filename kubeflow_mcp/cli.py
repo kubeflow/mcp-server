@@ -154,7 +154,10 @@ def serve(
     if otel_endpoint:
         cfg.observability.otel_endpoint = otel_endpoint
 
-    logger = setup_logging(level=log_level, format=log_format)
+    try:
+        logger = setup_logging(level=log_level, format=log_format)
+    except ValueError as e:
+        raise click.ClickException(str(e)) from e
     tracing_enabled = setup_tracing(endpoint=cfg.observability.otel_endpoint)
     logger.info(
         "Starting kubeflow-mcp",

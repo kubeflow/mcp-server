@@ -22,7 +22,7 @@ import uuid
 from collections import deque
 from contextvars import ContextVar
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal
 
 from kubeflow_mcp.core.security import is_sensitive_key, mask_sensitive_data
 from kubeflow_mcp.core.telemetry import current_trace_ids
@@ -151,13 +151,16 @@ class BufferingHandler(logging.Handler):
 
 def setup_logging(
     level: str = "INFO",
-    format: str | None = None,
+    format: Literal["json", "console"] | None = None,
 ) -> logging.Logger:
     """Configure logging for kubeflow-mcp.
 
     Args:
         level: Log level (DEBUG, INFO, WARNING, ERROR)
         format: Log format (json, console). Auto-detects if None.
+
+    Raises:
+        ValueError: If ``format`` is not ``None``, ``"json"``, or ``"console"``.
     """
     if format is None:
         format = "console" if sys.stderr.isatty() else "json"
@@ -165,8 +168,10 @@ def setup_logging(
     formatter: logging.Formatter
     if format == "json":
         formatter = StructuredFormatter()
-    else:
+    elif format == "console":
         formatter = ConsoleFormatter()
+    else:
+        raise ValueError(f"Unsupported log format {format!r}; expected 'json' or 'console'")
 
     handler = logging.StreamHandler(sys.stderr)
     handler.setFormatter(formatter)
