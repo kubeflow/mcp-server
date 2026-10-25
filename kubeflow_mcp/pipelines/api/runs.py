@@ -23,6 +23,7 @@ from kubeflow_mcp.common.types import PreviewResponse, ToolError, ToolResponse
 from kubeflow_mcp.common.utils import get_pipelines_client
 from kubeflow_mcp.pipelines.api._common import (
     TERMINAL_RUN_STATES,
+    _get_run_api,
     check_run_namespace,
     pipelines_error,
     resolve_namespace,
@@ -209,7 +210,12 @@ def stop_pipeline_run(
         ).model_dump()
 
     try:
-        client.kfp_client.terminate_run(run_id)
+        run_api = _get_run_api(client)
+        if run_api is not None:
+            run_api.run_service_terminate_run(run_id=run_id)
+        else:
+            # Fallback for older SDK without _backend.
+            client.kfp_client.terminate_run(run_id)
     except Exception as e:
         return pipelines_error(e, f"stop pipeline run '{run_id}'").model_dump()
 
@@ -217,7 +223,10 @@ def stop_pipeline_run(
         data={
             "run_id": run_id,
             "stopped": True,
-            "message": "Termination requested; the run moves to 'canceling', then 'canceled'",
+            "message": (
+                "Termination requested; the run moves to 'canceling', "
+                "then a terminal state ('canceled' or 'failed')"
+            ),
             "next_steps": [f"get_pipeline_run(run_id='{run_id}') to confirm it stopped"],
         }
     ).model_dump()
@@ -274,9 +283,13 @@ def retry_pipeline_run(
         ).model_dump()
 
     try:
-        # PipelinesClient has no retry method; kfp.Client's run API does. This is the
-        # only call through a private attribute, pinned by sdk_contracts_test.py.
-        client.kfp_client._run_api.run_service_retry_run(run_id=run_id)
+        # PipelinesClient has no retry method; use the KubernetesBackend run API
+        # directly, pinned by sdk_contracts_test.py.
+        run_api = _get_run_api(client)
+        if run_api is not None:
+            run_api.run_service_retry_run(run_id=run_id)
+        else:
+            client.kfp_client._run_api.run_service_retry_run(run_id=run_id)
     except Exception as e:
         return pipelines_error(e, f"retry pipeline run '{run_id}'").model_dump()
 

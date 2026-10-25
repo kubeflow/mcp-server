@@ -105,11 +105,78 @@ def test_run_in_different_namespace_is_refused(kfp_client, tool):
     from types import SimpleNamespace
 
     kfp_client.get_run.return_value = make_run("FAILED")
-    kfp_client.kfp_client.get_experiment.return_value = SimpleNamespace(
-        experiment_id="e-1", namespace="team-b"
+    kfp_client._backend.experiment_api.experiment_service_get_experiment.return_value = (
+        SimpleNamespace(experiment_id="e-1", namespace="team-b")
     )
 
     result = TOOLS_BY_NAME[tool](namespace="team-a", **CALLS[tool])
 
     assert result["error_code"] == "PERMISSION_DENIED"
     assert f"Run '{RUN_ID}' is not in namespace 'team-a'" in result["error"]
+
+
+@pytest.mark.parametrize("tool", RUN_TOOLS)
+def test_experiment_lookup_error_fails_closed(kfp_client, tool):
+    """When the experiment API raises, the call must be refused (fail-closed)."""
+    from kubeflow_mcp.pipelines.conftest import ApiException
+
+    kfp_client.get_run.return_value = make_run("FAILED")
+    kfp_client._backend.experiment_api.experiment_service_get_experiment.side_effect = ApiException(
+        500, "Internal Server Error"
+    )
+
+    result = TOOLS_BY_NAME[tool](namespace="team-a", **CALLS[tool])
+
+    assert result["error_code"] == "PERMISSION_DENIED"
+    assert "experiment lookup failed" in result["error"]
+
+
+@pytest.mark.parametrize("tool", RUN_TOOLS)
+def test_missing_experiment_id_fails_closed(kfp_client, tool):
+    """Runs without experiment_id must be refused (fail-closed)."""
+
+    run = make_run("FAILED")
+    run.experiment_id = None
+    kfp_client.get_run.return_value = run
+
+    result = TOOLS_BY_NAME[tool](namespace="team-a", **CALLS[tool])
+
+    assert result["error_code"] == "PERMISSION_DENIED"
+    assert "no experiment association" in result["error"]
+
+
+@pytest.mark.parametrize("tool", RUN_TOOLS)
+def test_empty_experiment_ns_with_allowlist_fails_closed(kfp_client, monkeypatch, tool):
+    """Empty experiment namespace + namespace allowlist → refuse (fail-closed)."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        "kubeflow_mcp.pipelines.api._common.get_allowed_namespaces", lambda: ["team-a"]
+    )
+    kfp_client.get_run.return_value = make_run("FAILED")
+    kfp_client._backend.experiment_api.experiment_service_get_experiment.return_value = (
+        SimpleNamespace(experiment_id="e-1", namespace="")
+    )
+
+    result = TOOLS_BY_NAME[tool](namespace="team-a", **CALLS[tool])
+
+    assert result["error_code"] == "PERMISSION_DENIED"
+    assert "no experiment namespace" in result["error"]
+
+
+@pytest.mark.parametrize("tool", RUN_TOOLS)
+def test_empty_experiment_ns_without_allowlist_succeeds(kfp_client, tool):
+    """Empty experiment namespace without allowlist → allow (single-user KFP)."""
+    from types import SimpleNamespace
+
+    kfp_client.get_run.return_value = make_run("FAILED")
+    kfp_client._backend.experiment_api.experiment_service_get_experiment.return_value = (
+        SimpleNamespace(experiment_id="e-1", namespace="")
+    )
+
+    result = TOOLS_BY_NAME[tool](namespace="team-a", **CALLS[tool])
+
+    # Should NOT get PERMISSION_DENIED from namespace check.
+    assert result.get("error_code") != "PERMISSION_DENIED" or "not in namespace" not in result.get(
+        "error", ""
+    )
