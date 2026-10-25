@@ -537,6 +537,25 @@ class TestGetTrainingLogsCursor:
 
     @patch(PATCH_NS_CHECK, return_value=None)
     @patch(PATCH_CLIENT)
+    def test_large_generator_cursor_page(self, mock_client_fn, _ns):
+        total = 100_000
+
+        def log_generator():
+            for i in range(total):
+                yield f"log line {i}"
+
+        mock_client_fn.return_value = _make_mock_client(get_job_logs=log_generator())
+
+        res = get_training_logs("my-job", since_line=total - 5, max_lines=5)
+
+        assert res["success"] is True
+        assert res["data"]["lines"] == 5
+        assert res["data"]["next_offset"] == total
+        assert res["data"]["total_lines"] == total
+        assert res["data"]["logs"] == "\n".join(f"log line {i}" for i in range(total - 5, total))
+
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
     def test_cursor_pagination_multi_step(self, mock_client_fn, _ns):
         lines = [f"line {i}" for i in range(500)]
         mock_client_fn.return_value = _make_mock_client(get_job_logs=lines)
@@ -691,6 +710,23 @@ class TestGetTrainingLogsCursor:
         assert res["data"]["lines"] == 0
         assert res["data"]["next_offset"] == 0
         assert res["data"]["total_lines"] == 0
+
+    @patch(PATCH_EFF_NS, side_effect=RuntimeError("kubeconfig missing"))
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_cursor_preserves_offset_when_reads_remain_empty(self, mock_client_fn, _ns, _eff_ns):
+        # Active logs remain empty across both reads; keep the caller's cursor.
+        mock_client_fn.return_value = _make_mock_client()
+        mock_client_fn.return_value.get_job_logs.side_effect = [[], []]
+
+        res = get_training_logs("my-job", since_line=1200, max_lines=10)
+
+        assert res["success"] is True
+        assert res["data"]["logs"] == ""
+        assert res["data"]["lines"] == 0
+        assert res["data"]["next_offset"] == 1200
+        assert res["data"]["total_lines"] == 0
+        assert mock_client_fn.return_value.get_job_logs.call_count == 2
 
     @patch(PATCH_NS_CHECK, return_value=None)
     @patch(PATCH_CLIENT)

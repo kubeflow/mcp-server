@@ -66,19 +66,14 @@ def _collect_log_lines(
     name: str,
     step: str,
     namespace: str | None,
-    cursor_mode: bool,
 ) -> tuple[list[str], bool]:
-    """Fetch log lines and attempt the previous-container fallback if empty.
+    """Fetch a bounded tail of log lines and attempt previous-container fallback.
 
     Returns (log_lines, fallback_was_used).
     """
-    if cursor_mode:
-        # No deque cap: cursor mode must be able to address any line index.
-        log_lines: list[str] = list(client.get_job_logs(name=name, step=step, follow=False))
-    else:
-        log_lines = list(
-            deque(client.get_job_logs(name=name, step=step, follow=False), maxlen=MAX_LOG_LINES)
-        )
+    log_lines = list(
+        deque(client.get_job_logs(name=name, step=step, follow=False), maxlen=MAX_LOG_LINES)
+    )
 
     if log_lines:
         return log_lines, False
@@ -123,15 +118,36 @@ def _collect_log_lines(
     return log_lines, True
 
 
+def _collect_cursor_log_page(
+    client: Any,
+    name: str,
+    step: str,
+    since_line: int,
+    effective_max: int,
+) -> tuple[list[str], int, list[str]]:
+    """Stream logs while retaining only the requested page and a rolling tail."""
+    page: list[str] = []
+    tail: deque[str] = deque(maxlen=MAX_LOG_LINES)
+    total = 0
+
+    for line in client.get_job_logs(name=name, step=step, follow=False):
+        tail.append(line)
+        if since_line <= total < since_line + effective_max:
+            page.append(line)
+        total += 1
+
+    return page, total, list(tail)
+
+
 def _cursor_response(
     name: str,
     step: str,
-    log_lines: list[str],
+    page: list[str],
+    total: int,
+    failure_tail: list[str],
     since_line: int,
-    effective_max: int,
 ) -> dict[str, Any]:
     """Build the cursor-mode response dict. Called only when since_line is set."""
-    total = len(log_lines)
 
     if since_line == total:
         return ToolResponse(
@@ -146,6 +162,19 @@ def _cursor_response(
         ).model_dump()
 
     if since_line > total:
+        # When an empty read races with newly appearing logs, keep the caller's
+        # cursor so it can poll again instead of resetting to offset zero.
+        if total == 0:
+            return ToolResponse(
+                data={
+                    "job": name,
+                    "step": step,
+                    "logs": "",
+                    "lines": 0,
+                    "next_offset": since_line,
+                    "total_lines": 0,
+                }
+            ).model_dump()
         return ToolResponse(
             data={
                 "job": name,
@@ -158,7 +187,6 @@ def _cursor_response(
             }
         ).model_dump()
 
-    page = log_lines[since_line : since_line + effective_max]
     out_lines: list[str] = []
     char_budget = MAX_CURSOR_CHARS
     for line in page:
@@ -182,7 +210,7 @@ def _cursor_response(
         "next_offset": since_line + len(out_lines),
         "total_lines": total,
     }
-    hint = extract_failure_hint("\n".join(log_lines[-MAX_LOG_LINES:]))
+    hint = extract_failure_hint("\n".join(failure_tail))
     if hint:
         data["failure_hint"] = hint
         data["next_steps"] = [
@@ -264,23 +292,32 @@ def get_training_logs(
             ).model_dump()
 
         client = get_trainer_client_for_namespace(namespace)
-        log_lines, _fallback_was_used = _collect_log_lines(
-            client, name, step, namespace, cursor_mode=since_line is not None
-        )
-
-        if since_line is not None and _fallback_was_used and log_lines:
-            return ToolError(
-                error=(
-                    "cursor mode unavailable: active container logs empty"
-                    " (pod may have restarted); call without since_line to read"
-                    " previous-container logs"
-                ),
-                error_code=ErrorCode.VALIDATION_ERROR,
-            ).model_dump()
 
         # ── Cursor mode ──────────────────────────────────────────────────────
         if since_line is not None:
-            return _cursor_response(name, step, log_lines, since_line, _effective_max)
+            page, total, failure_tail = _collect_cursor_log_page(
+                client, name, step, since_line, _effective_max
+            )
+            if total == 0:
+                # Preserve the previous-container fallback without buffering active logs.
+                fallback_lines, fallback_was_used = _collect_log_lines(
+                    client, name, step, namespace
+                )
+                if fallback_was_used and fallback_lines:
+                    return ToolError(
+                        error=(
+                            "cursor mode unavailable: active container logs empty"
+                            " (pod may have restarted); call without since_line to read"
+                            " previous-container logs"
+                        ),
+                        error_code=ErrorCode.VALIDATION_ERROR,
+                    ).model_dump()
+                # The fallback helper retains only a bounded tail, so its indices
+                # cannot be used as offsets into the full active log stream. Return
+                # an empty page and let the caller poll again.
+            return _cursor_response(name, step, page, total, failure_tail, since_line)
+
+        log_lines, _fallback_was_used = _collect_log_lines(client, name, step, namespace)
 
         # ── Tail mode (unchanged) ─────────────────────────────────────────────
         if len(log_lines) > _effective_max:
@@ -418,7 +455,7 @@ def wait_for_training(
 ) -> dict[str, Any]:
     """Wait for a job to reach one or more target statuses.
 
-    Blocks until the job reaches any of the expected statuses, or times out.
+    Blocks until the job reaches one of the expected statuses, or times out.
 
     Args:
         name: TrainJob name.
