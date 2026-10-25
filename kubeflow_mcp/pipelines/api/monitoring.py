@@ -22,6 +22,8 @@ from kubeflow_mcp.common.types import ToolError, ToolResponse
 from kubeflow_mcp.common.utils import K8S_TIMEOUT, get_core_v1_api, get_pipelines_client
 from kubeflow_mcp.core.security import truncate_log_output, validate_k8s_name
 from kubeflow_mcp.pipelines.api._common import (
+    ARGO_NODE_ID_ANNOTATION,
+    RUN_ID_LABEL,
     RUN_STATES,
     check_run_namespace,
     page_fields,
@@ -31,7 +33,7 @@ from kubeflow_mcp.pipelines.api._common import (
     validate_limit,
     validate_run_id,
 )
-from kubeflow_mcp.pipelines.types import run_pod_names, run_to_dict
+from kubeflow_mcp.pipelines.types import run_node_ids, run_to_dict
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +43,70 @@ MAX_LOG_PODS = 10
 MAX_LOG_CHARS = 10_000
 # Argo, which runs KFP tasks, puts the user's step in the "main" container.
 _STEP_CONTAINER = "main"
+# KFP annotates launcher (user step executor) pods with this runtime role.
+_LAUNCHER_ROLE = "launcher"
+_ROLE_ANNOTATION = "pipelines.kubeflow.org/runtime-role"
+
+
+def _resolve_run_pods(run: Any, namespace: str) -> list[tuple[str | None, str]]:
+    """Map a run's Argo node IDs to real K8s pod names.
+
+    KFP v2 / Argo 3.4+ uses ``POD_NAMES=v2``, where the pod names include the
+    template name and differ from the Argo node IDs stored in the run's task details.
+    This function lists live pods by the ``pipeline/runid`` label and maps them back
+    to the run's recorded node IDs.
+
+    Returns ``(task_display_name, real_pod_name)`` pairs. Prefers "launcher" pods
+    (user step executors) over "driver" pods (internal KFP orchestration).
+    """
+    node_entries = run_node_ids(run)
+    if not node_entries:
+        return []
+
+    try:
+        api = get_core_v1_api()
+        run_id = getattr(run, "run_id", None)
+        pod_list = api.list_namespaced_pod(
+            namespace=namespace,
+            label_selector=f"{RUN_ID_LABEL}={run_id}",
+            _request_timeout=K8S_TIMEOUT,
+        )
+    except Exception as e:
+        logger.warning("Could not list pods for run %s: %s", getattr(run, "run_id", "?"), e)
+        # Fall back to the raw node IDs (may 404 on real clusters, but
+        # preserves existing behavior for unit tests and when RBAC fails).
+        return node_entries
+
+    # Index live pods by their Argo node ID annotation.
+    # A single node ID can map to multiple pods (driver + launcher); prefer
+    # the launcher pod so we read the user's output, not the internal driver.
+    node_to_pod: dict[str, str] = {}
+    node_to_role: dict[str, str] = {}
+    for pod in getattr(pod_list, "items", []) or []:
+        meta = getattr(pod, "metadata", None)
+        if meta is None:
+            continue
+        pod_name = getattr(meta, "name", None)
+        if not pod_name:
+            continue
+        annotations = getattr(meta, "annotations", None) or {}
+        node_id = annotations.get(ARGO_NODE_ID_ANNOTATION) or pod_name
+        role = annotations.get(_ROLE_ANNOTATION, "")
+
+        existing_role = node_to_role.get(node_id, "")
+        # Prefer launcher over driver; if both are launcher, keep the first.
+        if node_id not in node_to_pod or (
+            role == _LAUNCHER_ROLE and existing_role != _LAUNCHER_ROLE
+        ):
+            node_to_pod[node_id] = pod_name
+            node_to_role[node_id] = role
+
+    # Map each recorded node ID to the resolved pod name.
+    result: list[tuple[str | None, str]] = []
+    for task_name, node_id in node_entries:
+        real_pod = node_to_pod.get(node_id, node_id)
+        result.append((task_name, real_pod))
+    return result
 
 
 def list_pipeline_runs(
@@ -222,7 +288,7 @@ def get_pipeline_logs(
     except Exception as e:
         return pipelines_error(e, f"get pipeline run '{run_id}'").model_dump()
 
-    all_pods = run_pod_names(run)
+    all_pods = _resolve_run_pods(run, ns)
     task_names = sorted({name for name, _ in all_pods if name})
     pods = [(name, pod) for name, pod in all_pods if task is None or name == task]
     if task is not None and not pods:

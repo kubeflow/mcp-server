@@ -105,8 +105,13 @@ def run_to_dict(run: Any, *, include_details: bool = False) -> dict[str, Any]:
     return data
 
 
-def run_pod_names(run: Any) -> list[tuple[str | None, str]]:
-    """Return ``(task name, pod name)`` for every pod KFP recorded for a run's tasks."""
+def run_node_ids(run: Any) -> list[tuple[str | None, str]]:
+    """Return ``(task name, argo node id)`` for every node KFP recorded for a run's tasks.
+
+    In KFP v2 / Argo 3.4+, the ``pod_name`` and ``child_tasks[].pod_name`` fields
+    contain Argo Workflow Node IDs, not real Kubernetes Pod names. Use
+    ``monitoring._resolve_run_pods()`` to map these to actual pods.
+    """
     pods: list[tuple[str | None, str]] = []
     for task in getattr(getattr(run, "run_details", None), "task_details", None) or []:
         name = getattr(task, "display_name", None)
@@ -117,14 +122,19 @@ def run_pod_names(run: Any) -> list[tuple[str | None, str]]:
             child_pod = getattr(child, "pod_name", None)
             if child_pod:
                 pods.append((name, child_pod))
-    # The same pod can be listed by a task and as a parent's child.
+    # The same node ID can be listed by a task and as a parent's child.
     return list(dict.fromkeys(pods))
+
+
+# Backward-compatible alias.
+run_pod_names = run_node_ids
 
 
 __all__ = [
     "MAX_TASKS",
     "pipeline_to_dict",
     "pipeline_version_to_dict",
+    "run_node_ids",
     "run_pod_names",
     "run_to_dict",
 ]

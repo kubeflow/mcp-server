@@ -161,19 +161,60 @@ _pipelines_client_cache: dict[str, Any] = {}
 _pipelines_client_lock = threading.Lock()
 
 
-def get_default_kubeconfig_namespace() -> str:
-    """Return the active context namespace from kubeconfig without loading TrainerClient."""
-    try:
-        from kubernetes import config
+_SA_NAMESPACE_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
 
-        _, active_context = config.list_kube_config_contexts()
-        if active_context and "context" in active_context:
-            ns = active_context["context"].get("namespace")
-            if ns:
-                return str(ns)
-    except Exception:
-        pass
-    return "default"
+
+def get_default_kubeconfig_namespace() -> str:
+    """Return the active context namespace from kubeconfig without loading TrainerClient.
+
+    Resolution order:
+    1. Active kubeconfig context namespace (honouring ``KUBECONFIG`` path lists).
+    2. In-cluster ServiceAccount namespace file (``/var/run/secrets/.../namespace``).
+    3. ``"default"`` when a valid kubeconfig exists but has no namespace field.
+
+    Genuine config-resolution failures (missing/corrupt kubeconfig *and* not in-cluster)
+    are raised so ``resolve_namespace()`` can fail closed.
+    """
+    from kubernetes import config
+
+    # Honour KUBECONFIG path lists, matching _get_api_client().
+    paths = os.getenv("KUBECONFIG") or "~/.kube/config"
+    kubeconfig_found = any(
+        os.path.exists(os.path.expanduser(p)) for p in paths.split(os.pathsep) if p
+    )
+
+    if kubeconfig_found:
+        try:
+            _, active_context = config.list_kube_config_contexts(config_file=paths)
+            if active_context and "context" in active_context:
+                ns = active_context["context"].get("namespace")
+                if ns:
+                    return str(ns)
+            # Kubeconfig exists but has no namespace field → "default" is the kubectl
+            # convention and safe when an allowlist is configured.
+            return "default"
+        except Exception:
+            # Corrupt / unreadable kubeconfig: fall through to in-cluster check.
+            pass
+
+    # In-cluster: read the projected ServiceAccount namespace file.
+    if os.path.isfile(_SA_NAMESPACE_PATH):
+        try:
+            with open(_SA_NAMESPACE_PATH) as fh:
+                ns = fh.read().strip()
+                if ns:
+                    return ns
+        except OSError:
+            pass
+
+    if kubeconfig_found:
+        # Had kubeconfig but it was corrupt, and not in-cluster either.
+        return "default"
+
+    # No kubeconfig, not in-cluster → let resolve_namespace() fail closed.
+    raise RuntimeError(
+        "Cannot determine default namespace: no kubeconfig found and not running in-cluster"
+    )
 
 
 def get_pipelines_effective_namespace(namespace: str | None = None) -> str:

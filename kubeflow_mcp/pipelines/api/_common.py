@@ -21,6 +21,7 @@ from typing import Any
 from kubeflow_mcp.common.constants import ErrorCode
 from kubeflow_mcp.common.types import ToolError, exception_details
 from kubeflow_mcp.common.utils import get_pipelines_effective_namespace
+from kubeflow_mcp.core.policy import get_allowed_namespaces
 from kubeflow_mcp.core.security import check_namespace_allowed, validate_namespace
 
 logger = logging.getLogger(__name__)
@@ -38,7 +39,7 @@ _RUN_ID_RE = re.compile(
 )
 # The SDK reports a missing object as a ValueError; these are its message prefixes.
 _NOT_FOUND_RE = re.compile(r"^(Pipeline|Pipeline version|Experiment) not found\b")
-_AMBIGUOUS_RE = re.compile(r"^Multiple (pipelines|versions) found\b")
+_AMBIGUOUS_RE = re.compile(r"^Multiple (pipelines|versions|experiments) found\b")
 
 RUN_STATES = frozenset(
     {"pending", "running", "succeeded", "skipped", "failed", "canceling", "canceled", "paused"}
@@ -46,6 +47,11 @@ RUN_STATES = frozenset(
 TERMINAL_RUN_STATES = frozenset({"succeeded", "skipped", "failed", "canceled"})
 
 INSTALL_HINT = "Install the pipelines extra on the server host: pip install 'kubeflow[pipelines]'"
+
+# KFP v2 labels every run's pods with this label.
+RUN_ID_LABEL = "pipeline/runid"
+# Argo Workflows annotations for mapping node IDs to pods.
+ARGO_NODE_ID_ANNOTATION = "workflows.argoproj.io/node-id"
 
 
 def validate_display_name(value: str | None, field: str) -> ToolError | None:
@@ -115,31 +121,86 @@ def resolve_namespace(namespace: str | None) -> tuple[str | None, ToolError | No
     return effective, None
 
 
+def _get_experiment_api(client: Any) -> Any | None:
+    """Return the experiment service API from the KubernetesBackend, or None."""
+    backend = getattr(client, "_backend", None)
+    if backend is not None:
+        api = getattr(backend, "experiment_api", None)
+        if api is not None:
+            return api
+    # Fallback: try kfp_client for older SDK versions.
+    kfp_c = getattr(client, "kfp_client", None)
+    return kfp_c
+
+
+def _get_run_api(client: Any) -> Any | None:
+    """Return the run service API from the KubernetesBackend, or None."""
+    backend = getattr(client, "_backend", None)
+    if backend is not None:
+        api = getattr(backend, "run_api", None)
+        if api is not None:
+            return api
+    return None
+
+
 def check_run_namespace(client: Any, run: Any, namespace: str) -> ToolError | None:
-    """Verify that a run belongs to the expected namespace via its experiment."""
+    """Verify that a run belongs to the expected namespace via its experiment.
+
+    Fails closed: if the experiment cannot be fetched or has no experiment_id, the
+    request is refused (PERMISSION_DENIED). Single-user standalone KFP with no
+    namespace allowlist configured is allowed when the experiment namespace is empty.
+    """
     exp_id = getattr(run, "experiment_id", None)
     if exp_id is None and isinstance(run, dict):
         exp_id = run.get("experiment_id")
+
+    run_id = getattr(run, "run_id", None) or (run.get("run_id") if isinstance(run, dict) else None)
+
     if not exp_id:
-        return None
+        logger.warning("Run '%s' has no experiment_id; refusing (fail-closed)", run_id)
+        return ToolError(
+            error=f"Run '{run_id}' has no experiment association; cannot verify namespace",
+            error_code=ErrorCode.PERMISSION_DENIED,
+        )
 
     try:
-        kfp_c = getattr(client, "kfp_client", None)
-        if kfp_c is None:
-            return None
-        exp = kfp_c.get_experiment(experiment_id=exp_id)
+        exp_api = _get_experiment_api(client)
+        if exp_api is None:
+            logger.warning("No experiment API available; refusing (fail-closed)")
+            return ToolError(
+                error="Cannot verify run namespace: experiment API unavailable",
+                error_code=ErrorCode.PERMISSION_DENIED,
+            )
+        # Use the backend experiment API directly to avoid kfp.Client host-discovery
+        # issues in non-kubeflow namespaces.
+        if hasattr(exp_api, "experiment_service_get_experiment"):
+            exp = exp_api.experiment_service_get_experiment(experiment_id=exp_id)
+        else:
+            exp = exp_api.get_experiment(experiment_id=exp_id)
     except Exception as e:
-        logger.debug("Could not verify experiment %s namespace: %s", exp_id, e)
-        return None
+        logger.warning("Failed to verify experiment %s namespace: %s (fail-closed)", exp_id, e)
+        return ToolError(
+            error=f"Cannot verify namespace for run '{run_id}': experiment lookup failed",
+            error_code=ErrorCode.PERMISSION_DENIED,
+            details=exception_details(e),
+        )
 
     exp_ns = getattr(exp, "namespace", None)
     if exp_ns is None and isinstance(exp, dict):
         exp_ns = exp.get("namespace")
 
-    if isinstance(exp_ns, str) and exp_ns and exp_ns != namespace:
-        run_id = getattr(run, "run_id", None) or (
-            run.get("run_id") if isinstance(run, dict) else None
-        )
+    # When the experiment namespace is empty (standalone single-user KFP), allow the
+    # call only if no namespace allowlist is configured.
+    if not exp_ns:
+        if get_allowed_namespaces() is not None:
+            return ToolError(
+                error=f"Run '{run_id}' has no experiment namespace and a namespace "
+                "allowlist is configured; cannot verify",
+                error_code=ErrorCode.PERMISSION_DENIED,
+            )
+        return None
+
+    if exp_ns != namespace:
         return ToolError(
             error=f"Run '{run_id}' is not in namespace '{namespace}'",
             error_code=ErrorCode.PERMISSION_DENIED,

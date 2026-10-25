@@ -105,6 +105,15 @@ def kfp_client(monkeypatch):
     """
     client = MagicMock(name="PipelinesClient")
     client.namespaces = []
+
+    # Set up _backend.experiment_api and _backend.run_api (preferred over kfp_client).
+    exp_api = client._backend.experiment_api
+    exp_api.experiment_service_get_experiment.return_value = SimpleNamespace(
+        experiment_id="e-1", namespace="team-a"
+    )
+
+    # Keep kfp_client mock for backward compatibility; experiment mock there is unused
+    # now that check_run_namespace prefers _backend.experiment_api.
     client.kfp_client.get_experiment.return_value = SimpleNamespace(
         experiment_id="e-1", namespace="team-a"
     )
@@ -120,4 +129,6 @@ def kfp_client(monkeypatch):
         lambda namespace=None: namespace or "team-a",
     )
     monkeypatch.setattr("kubeflow_mcp.core.policy.get_allowed_namespaces", lambda: None)
+    # The _common module also imports get_allowed_namespaces for fail-closed checks.
+    monkeypatch.setattr("kubeflow_mcp.pipelines.api._common.get_allowed_namespaces", lambda: None)
     return client
