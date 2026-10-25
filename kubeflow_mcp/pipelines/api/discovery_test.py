@@ -135,6 +135,12 @@ class TestGetPipeline:
 
         assert get_pipeline("x")["error_code"] == "SDK_ERROR"
 
+    def test_timeout_error_is_reported_as_timeout(self, kfp_client):
+        kfp_client.get_pipeline.side_effect = TimeoutError("KFP request timed out")
+
+        result = get_pipeline("slow-pipeline")
+        assert result["error_code"] == "TIMEOUT"
+
     @pytest.mark.parametrize(
         "name", ["", "   ", "pipeline.yaml", "/tmp/p.YML", "p.tar.gz", "a\nb", "x" * 257]
     )

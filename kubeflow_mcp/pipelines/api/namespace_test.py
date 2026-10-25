@@ -95,3 +95,21 @@ def test_unresolvable_default_fails_closed(kfp_client, monkeypatch):
 
     assert result["error_code"] == "PERMISSION_DENIED"
     assert kfp_client.namespaces == []
+
+
+RUN_TOOLS = ["get_pipeline_run", "get_pipeline_logs", "stop_pipeline_run", "retry_pipeline_run"]
+
+
+@pytest.mark.parametrize("tool", RUN_TOOLS)
+def test_run_in_different_namespace_is_refused(kfp_client, tool):
+    from types import SimpleNamespace
+
+    kfp_client.get_run.return_value = make_run("FAILED")
+    kfp_client.kfp_client.get_experiment.return_value = SimpleNamespace(
+        experiment_id="e-1", namespace="team-b"
+    )
+
+    result = TOOLS_BY_NAME[tool](namespace="team-a", **CALLS[tool])
+
+    assert result["error_code"] == "PERMISSION_DENIED"
+    assert f"Run '{RUN_ID}' is not in namespace 'team-a'" in result["error"]

@@ -105,6 +105,9 @@ def kfp_client(monkeypatch):
     """
     client = MagicMock(name="PipelinesClient")
     client.namespaces = []
+    client.kfp_client.get_experiment.return_value = SimpleNamespace(
+        experiment_id="e-1", namespace="team-a"
+    )
 
     def factory(namespace):
         client.namespaces.append(namespace)

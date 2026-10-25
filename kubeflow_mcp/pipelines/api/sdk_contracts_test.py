@@ -53,11 +53,13 @@ class TestPipelinesClient:
                 ["self", "pipeline", "experiment", "status", "page_token", "page_size"],
             ),
             ("run", ["self", "pipeline", "params", "name", "experiment", "version"]),
-            ("kfp_client", ["self"]),
         ],
     )
     def test_method_signatures(self, method, params):
         assert _params(getattr(PipelinesClient, method)) == params
+
+    def test_kfp_client_is_a_property(self):
+        assert isinstance(PipelinesClient.kfp_client, property)
 
     def test_kfp_client_can_terminate_and_holds_a_run_api(self):
         # stop_pipeline_run uses Client.terminate_run; retry_pipeline_run goes through

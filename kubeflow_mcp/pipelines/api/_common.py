@@ -115,6 +115,38 @@ def resolve_namespace(namespace: str | None) -> tuple[str | None, ToolError | No
     return effective, None
 
 
+def check_run_namespace(client: Any, run: Any, namespace: str) -> ToolError | None:
+    """Verify that a run belongs to the expected namespace via its experiment."""
+    exp_id = getattr(run, "experiment_id", None)
+    if exp_id is None and isinstance(run, dict):
+        exp_id = run.get("experiment_id")
+    if not exp_id:
+        return None
+
+    try:
+        kfp_c = getattr(client, "kfp_client", None)
+        if kfp_c is None:
+            return None
+        exp = kfp_c.get_experiment(experiment_id=exp_id)
+    except Exception as e:
+        logger.debug("Could not verify experiment %s namespace: %s", exp_id, e)
+        return None
+
+    exp_ns = getattr(exp, "namespace", None)
+    if exp_ns is None and isinstance(exp, dict):
+        exp_ns = exp.get("namespace")
+
+    if isinstance(exp_ns, str) and exp_ns and exp_ns != namespace:
+        run_id = getattr(run, "run_id", None) or (
+            run.get("run_id") if isinstance(run, dict) else None
+        )
+        return ToolError(
+            error=f"Run '{run_id}' is not in namespace '{namespace}'",
+            error_code=ErrorCode.PERMISSION_DENIED,
+        )
+    return None
+
+
 def _http_status(exc: Exception) -> int | None:
     # kfp_server_api and kubernetes both raise an ``ApiException`` with an int status.
     # Matched by class name, including base classes, so this works without importing
