@@ -134,6 +134,20 @@ def list_tools(prefix: str = "") -> dict[str, Any]:
     }
 
 
+def _tool_parameters(name: str) -> dict[str, Any]:
+    """Parameter names, types and defaults of a registered tool."""
+    sig = inspect.signature(TOOL_REGISTRY[name]["func"])
+    params: dict[str, Any] = {}
+    for param_name, param in sig.parameters.items():
+        param_info: dict[str, Any] = {"type": "any"}
+        if param.annotation != inspect.Parameter.empty:
+            param_info["type"] = str(param.annotation)
+        if param.default != inspect.Parameter.empty:
+            param_info["default"] = param.default
+        params[param_name] = param_info
+    return params
+
+
 def describe_tools(tool_names: list[str]) -> dict[str, Any]:
     """Get detailed schema for specific tools.
 
@@ -155,22 +169,12 @@ def describe_tools(tool_names: list[str]) -> dict[str, Any]:
             continue
 
         tool = TOOL_REGISTRY[name]
-        sig = inspect.signature(tool["func"])
-        params: dict[str, Any] = {}
-        for param_name, param in sig.parameters.items():
-            param_info: dict[str, Any] = {"type": "any"}
-            if param.annotation != inspect.Parameter.empty:
-                param_info["type"] = str(param.annotation)
-            if param.default != inspect.Parameter.empty:
-                param_info["default"] = param.default
-            params[param_name] = param_info
-
         results.append(
             {
                 "name": name,
                 "category": tool["category"],
                 "description": tool["full_doc"],
-                "parameters": params,
+                "parameters": _tool_parameters(name),
             }
         )
 
@@ -180,7 +184,8 @@ def describe_tools(tool_names: list[str]) -> dict[str, Any]:
 def execute_tool(tool_name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
     """Execute a discovered tool by name.
 
-    Call after list_tools() and describe_tools() to run the actual tool.
+    Look up the tool's parameters first: describe_tools() in progressive mode,
+    or the find_tools() results in semantic mode.
 
     Args:
         tool_name: Name of the tool to execute.
@@ -365,7 +370,10 @@ def find_tools(query: str, top_k: int = 5) -> dict[str, Any]:
                 {"name": name, "description": info["description"], "category": info["category"]}
                 for name, info in TOOL_REGISTRY.items()
             ],
-            "hint": "Use execute_tool(tool_name, {args}) to run a tool",
+            "hint": (
+                "Search for a tool by name or task to see its parameters, "
+                "then use execute_tool(tool_name, {args}) to run it"
+            ),
         }
 
     embeddings, model = _embedding_cache.get()
@@ -398,6 +406,7 @@ def find_tools(query: str, top_k: int = 5) -> dict[str, Any]:
                 "description": TOOL_REGISTRY[name]["description"],
                 "category": TOOL_REGISTRY[name]["category"],
                 "relevance": f"{score:.2f}",
+                "parameters": _tool_parameters(name),
             }
             for name, score in sorted_tools
         ],
@@ -426,6 +435,7 @@ def _keyword_search(query: str, top_k: int = 5) -> dict[str, Any]:
                 "name": name,
                 "description": TOOL_REGISTRY[name]["description"],
                 "category": TOOL_REGISTRY[name]["category"],
+                "parameters": _tool_parameters(name),
             }
             for name, _ in sorted_tools
         ],

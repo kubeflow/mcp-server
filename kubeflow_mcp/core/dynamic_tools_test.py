@@ -350,3 +350,45 @@ def test_find_tools_uses_rebuilt_registry_after_reinit(monkeypatch):
 
     assert "mode" not in second  # semantic search, not the keyword fallback
     assert [t["name"] for t in second["tools"]] == ["beta_tool"]
+
+
+# Semantic mode registers only find_tools and execute_tool, so find_tools results are
+# the only place an agent can learn a tool's parameters before calling it.
+
+
+def alpha_sized_tool(size: int = 2) -> dict:
+    """Alpha tool with a size."""
+    return {"size": size}
+
+
+def test_find_tools_keyword_results_include_parameters(offline_model):
+    result = dynamic_tools.find_tools("probe tool")
+
+    assert result["mode"] == "keyword_fallback"
+    top = result["tools"][0]
+    assert top["name"] == "probe_tool"
+    assert (
+        top["parameters"] == dynamic_tools.describe_tools(["probe_tool"])["tools"][0]["parameters"]
+    )
+    assert list(top["parameters"]) == ["name"]
+
+
+def test_find_tools_semantic_results_include_parameters(monkeypatch):
+    fake_module = types.SimpleNamespace(SentenceTransformer=lambda _name: _FakeEmbeddingModel())
+    monkeypatch.setitem(sys.modules, "sentence_transformers", fake_module)
+    monkeypatch.setitem(sys.modules, "numpy", _FAKE_NUMPY)
+    dynamic_tools.init_dynamic_tools([alpha_sized_tool, probe_tool], {})
+
+    result = dynamic_tools.find_tools("alpha")
+
+    assert "mode" not in result  # semantic search, not the keyword fallback
+    top = result["tools"][0]
+    assert top["name"] == "alpha_sized_tool"
+    assert top["parameters"] == {"size": {"type": str(int), "default": 2}}
+
+
+def test_find_tools_listing_all_points_to_parameter_lookup():
+    result = dynamic_tools.find_tools("all")
+
+    assert all("parameters" not in t for t in result["tools"])
+    assert "parameters" in result["hint"]
