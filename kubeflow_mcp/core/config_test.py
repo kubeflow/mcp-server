@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import sys
 from unittest.mock import patch
 
 import pytest
@@ -27,6 +28,8 @@ from kubeflow_mcp.core.config import (
     ResilienceConfig,
     ServerConfig,
     _find_config_file,
+    _load_yaml_config,
+    get_config_path,
     load_config,
 )
 
@@ -172,11 +175,6 @@ def test_load_config_rejects_invalid_yaml_and_non_mapping_roots(tmp_path, conten
         load_config(config_path=config_file)
 
 
-# TODO(test): test config_path that doesn't exist falls back to default search
-# TODO(test): test auth config env overrides (KUBEFLOW_MCP_AUTH_TOKEN, KUBEFLOW_MCP_JWKS_URI)
-# TODO(test): test OTEL env, controller namespace, and multiple clients
-
-
 def test_load_config_rejects_missing_explicit_config_file(tmp_path):
     config_file = tmp_path / "missing.yaml"
 
@@ -202,3 +200,64 @@ def test_find_config_file_prefers_project_local_config(tmp_path):
         patch("kubeflow_mcp.core.config.Path.cwd", return_value=tmp_path),
     ):
         assert _find_config_file() == local_config
+
+
+def test_find_config_file_returns_none_when_no_files_exist(tmp_path):
+    with patch("kubeflow_mcp.core.config._get_config_paths", return_value=[tmp_path / "none.yaml"]):
+        assert _find_config_file() is None
+
+
+def test_get_config_path(tmp_path):
+    cfg_file = tmp_path / "cfg.yaml"
+    cfg_file.write_text("server:\n  persona: readonly\n")
+    with patch("kubeflow_mcp.core.config._find_config_file", return_value=cfg_file):
+        assert get_config_path() == cfg_file
+
+
+def test_load_yaml_config_empty_file_returns_empty_dict(tmp_path):
+    empty_file = tmp_path / "empty.yaml"
+    empty_file.write_text("")
+    assert _load_yaml_config(empty_file) == {}
+
+
+def test_load_yaml_config_missing_pyyaml(tmp_path, monkeypatch):
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text("server:\n  persona: readonly\n")
+    monkeypatch.setitem(sys.modules, "yaml", None)
+    with pytest.raises(RuntimeError, match="PyYAML is required"):
+        _load_yaml_config(cfg_file)
+
+
+def test_load_config_loads_discovered_default_file(tmp_path):
+    default_cfg = tmp_path / ".kubeflow-mcp.yaml"
+    default_cfg.write_text("server:\n  persona: data-scientist\n")
+    with patch("kubeflow_mcp.core.config._find_config_file", return_value=default_cfg):
+        cfg = load_config()
+    assert cfg.server.persona == "data-scientist"
+
+
+def test_load_config_auth_and_observability_env_overrides():
+    with (
+        patch("kubeflow_mcp.core.config._find_config_file", return_value=None),
+        patch.dict(
+            "os.environ",
+            {
+                "KUBEFLOW_MCP_AUTH_TOKEN": "secret-token",
+                "KUBEFLOW_MCP_JWKS_URI": "https://auth.example.com/jwks",
+                "KUBEFLOW_MCP_JWT_ISSUER": "https://auth.example.com",
+                "KUBEFLOW_MCP_JWT_AUDIENCE": "kf-audience",
+                "OTEL_EXPORTER_OTLP_ENDPOINT": "http://otel:4318",
+                "KUBEFLOW_MCP_CONTROLLER_NAMESPACE": "kubeflow-system",
+                "KUBEFLOW_MCP_CLIENTS": "trainer,optimizer,hub",
+            },
+        ),
+    ):
+        cfg = load_config()
+
+    assert cfg.auth.auth_token == "secret-token"
+    assert cfg.auth.jwks_uri == "https://auth.example.com/jwks"
+    assert cfg.auth.issuer == "https://auth.example.com"
+    assert cfg.auth.audience == "kf-audience"
+    assert cfg.observability.otel_endpoint == "http://otel:4318"
+    assert cfg.trainer.controller_namespace == "kubeflow-system"
+    assert cfg.server.clients == ["trainer", "optimizer", "hub"]

@@ -350,3 +350,171 @@ def test_find_tools_uses_rebuilt_registry_after_reinit(monkeypatch):
 
     assert "mode" not in second  # semantic search, not the keyword fallback
     assert [t["name"] for t in second["tools"]] == ["beta_tool"]
+
+
+def annotated_tool(raw, count: int = 5, active: bool = True, tag=None) -> str:
+    """An annotated test tool with defaults.
+
+    Args:
+        raw: Untyped parameter without default.
+        count: Number of items.
+        active: Flag.
+        tag: Optional untyped tag.
+    """
+    return f"count={count}"
+
+
+def test_list_tools_no_prefix():
+    res = dynamic_tools.list_tools()
+    assert "categories" in res
+    assert "category_tools" in res
+    assert "hint" in res
+    assert res["category_tools"]["other"] == 2
+
+
+def test_list_tools_category_prefix():
+    res = dynamic_tools.list_tools("other")
+    assert res["category"] == "other"
+    names = [t["name"] for t in res["tools"]]
+    assert "probe_tool" in names
+    assert "failing_tool" in names
+    assert res["hint"] == "Use describe_tools(['tool_name']) to get full schema"
+
+
+def test_list_tools_prefix_and_substring_match():
+    res = dynamic_tools.list_tools("probe")
+    assert res["prefix"] == "probe"
+    assert len(res["matching_tools"]) == 1
+    assert res["matching_tools"][0]["name"] == "probe_tool"
+
+
+def test_list_tools_unmatched_prefix():
+    res = dynamic_tools.list_tools("nonexistent")
+    assert res["prefix"] == "nonexistent"
+    assert res["matching_tools"] == []
+
+
+def test_describe_tools_exceeds_max_tools():
+    res = dynamic_tools.describe_tools(["t1", "t2", "t3", "t4", "t5", "t6"])
+    assert res == {"error": "Max 5 tools at a time to conserve tokens"}
+
+
+def test_describe_tools_tool_not_found():
+    res = dynamic_tools.describe_tools(["nonexistent_tool"])
+    assert res["tools"][0] == {"name": "nonexistent_tool", "error": "Tool not found"}
+
+
+def test_describe_tools_with_annotations_and_defaults():
+    dynamic_tools.init_dynamic_tools([annotated_tool], {})
+    res = dynamic_tools.describe_tools(["annotated_tool"])
+    t = res["tools"][0]
+    assert t["name"] == "annotated_tool"
+    assert t["category"] == "other"
+    assert "An annotated test tool" in t["description"]
+    params = t["parameters"]
+    assert params["raw"]["type"] == "any"
+    assert "default" not in params["raw"]
+    assert params["count"]["default"] == 5
+    assert "int" in params["count"]["type"]
+    assert params["active"]["default"] is True
+    assert params["tag"]["default"] is None
+
+
+def test_execute_tool_not_found():
+    res = dynamic_tools.execute_tool("nonexistent_tool")
+    assert "Tool 'nonexistent_tool' not found" in res["error"]
+    assert "available" in res
+
+
+def test_execute_tool_circuit_breaker_open():
+    breaker = get_breaker("probe_tool")
+    breaker.state = CircuitState.OPEN
+    breaker.last_failure_time = 1e12
+    res = dynamic_tools.execute_tool("probe_tool", {"name": "test"})
+    assert res["error_code"] == ErrorCode.CIRCUIT_OPEN
+    assert "Circuit breaker open for 'probe_tool'" in res["error"]
+    breaker.state = CircuitState.CLOSED
+    breaker.failure_count = 0
+
+
+def test_execute_tool_wraps_non_dict_return():
+    dynamic_tools.init_dynamic_tools([annotated_tool], {})
+    res = dynamic_tools.execute_tool("annotated_tool", {"raw": "hello"})
+    assert res == {"result": "count=5"}
+
+
+def test_get_mode_tools():
+    assert dynamic_tools.get_mode_tools("semantic") == dynamic_tools.SEMANTIC_TOOLS
+    assert dynamic_tools.get_mode_tools("progressive") == dynamic_tools.PROGRESSIVE_TOOLS
+    with pytest.raises(ValueError, match="Unknown dynamic mode: invalid"):
+        dynamic_tools.get_mode_tools("invalid")
+
+
+def test_embedding_cache_hit_and_reset():
+    cache = dynamic_tools._EmbeddingCache()
+    cache._embeddings = {"probe_tool": [1.0, 0.0]}
+    cache._model = "dummy_model"
+    embs, model = cache.get()
+    assert embs == {"probe_tool": [1.0, 0.0]}
+    assert model == "dummy_model"
+
+    cache.reset()
+    assert cache._embeddings is None
+    assert cache._model is None
+    assert cache._unavailable is False
+
+
+def test_find_tools_query_too_long():
+    long_q = "a" * 501
+    res = dynamic_tools.find_tools(long_q)
+    assert res == {"error": "Query too long (501 chars, max 500)"}
+
+
+@pytest.mark.parametrize(
+    "query", ["all", "*", "list all", "available tools", "show all", "everything"]
+)
+def test_find_tools_list_all_triggers(query):
+    res = dynamic_tools.find_tools(query)
+    assert res["total"] == 2
+    assert len(res["tools"]) == 2
+    assert res["hint"] == "Use execute_tool(tool_name, {args}) to run a tool"
+
+
+def test_find_tools_semantic_zero_norm_and_exception(monkeypatch):
+    class _Vector(list):
+        def tolist(self):
+            return list(self)
+
+    class _ZeroModel:
+        def encode(self, texts):
+            return [_Vector([0.0, 0.0]) for _ in texts]
+
+    fake_module = types.SimpleNamespace(SentenceTransformer=lambda _name: _ZeroModel())
+    monkeypatch.setitem(sys.modules, "sentence_transformers", fake_module)
+
+    def _dot(a, b):
+        return sum(x * y for x, y in zip(a, b, strict=True))
+
+    fake_numpy = types.SimpleNamespace(
+        dot=_dot, linalg=types.SimpleNamespace(norm=lambda v: math.sqrt(_dot(v, v)))
+    )
+    monkeypatch.setitem(sys.modules, "numpy", fake_numpy)
+
+    dynamic_tools._embedding_cache.reset()
+    res = dynamic_tools.find_tools("probe")
+    assert "tools" in res
+    assert res["tools"][0]["relevance"] == "0.00"
+
+    def bad_norm(*_a, **_k):
+        raise RuntimeError("norm calculation error")
+
+    fake_numpy.linalg.norm = bad_norm
+    res_fallback = dynamic_tools.find_tools("probe")
+    assert res_fallback["mode"] == "keyword_fallback"
+
+
+def test_find_tools_import_error_falls_back(monkeypatch):
+    monkeypatch.setitem(sys.modules, "sentence_transformers", None)
+    dynamic_tools._embedding_cache.reset()
+    res = dynamic_tools.find_tools("probe")
+    assert res["mode"] == "keyword_fallback"
