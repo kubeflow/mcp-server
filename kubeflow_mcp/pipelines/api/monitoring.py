@@ -23,6 +23,7 @@ from kubeflow_mcp.common.utils import K8S_TIMEOUT, get_core_v1_api, get_pipeline
 from kubeflow_mcp.core.security import truncate_log_output, validate_k8s_name
 from kubeflow_mcp.pipelines.api._common import (
     RUN_STATES,
+    check_run_namespace,
     page_fields,
     pipelines_error,
     resolve_namespace,
@@ -126,7 +127,11 @@ def get_pipeline_run(run_id: str, namespace: str | None = None) -> dict[str, Any
         return ns_err.model_dump()
 
     try:
-        run = get_pipelines_client(ns).get_run(run_id)
+        client = get_pipelines_client(ns)
+        run = client.get_run(run_id)
+        run_ns_err = check_run_namespace(client, run, ns)
+        if run_ns_err is not None:
+            return run_ns_err.model_dump()
         data = run_to_dict(run, include_details=True)
         state = data.get("state")
         if state == "failed":
@@ -209,7 +214,11 @@ def get_pipeline_logs(
         return ns_err.model_dump()
 
     try:
-        run = get_pipelines_client(ns).get_run(run_id)
+        client = get_pipelines_client(ns)
+        run = client.get_run(run_id)
+        run_ns_err = check_run_namespace(client, run, ns)
+        if run_ns_err is not None:
+            return run_ns_err.model_dump()
     except Exception as e:
         return pipelines_error(e, f"get pipeline run '{run_id}'").model_dump()
 

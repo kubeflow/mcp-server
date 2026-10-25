@@ -161,18 +161,33 @@ _pipelines_client_cache: dict[str, Any] = {}
 _pipelines_client_lock = threading.Lock()
 
 
+def get_default_kubeconfig_namespace() -> str:
+    """Return the active context namespace from kubeconfig without loading TrainerClient."""
+    try:
+        from kubernetes import config
+
+        _, active_context = config.list_kube_config_contexts()
+        if active_context and "context" in active_context:
+            ns = active_context["context"].get("namespace")
+            if ns:
+                return str(ns)
+    except Exception:
+        pass
+    return "default"
+
+
 def get_pipelines_effective_namespace(namespace: str | None = None) -> str:
     """Namespace for Kubeflow Pipelines calls.
 
-    Explicit argument first, then ``KUBEFLOW_MCP_PIPELINES_NAMESPACE``, then the same
-    kubeconfig default the trainer tools use.
+    Explicit argument first, then ``KUBEFLOW_MCP_PIPELINES_NAMESPACE``, then the active
+    kubeconfig default namespace (or ``default``).
     """
     if namespace:
         return namespace
     configured = os.environ.get(PIPELINES_NAMESPACE_ENV, "").strip()
     if configured:
         return configured
-    return get_trainer_effective_namespace(None)
+    return get_default_kubeconfig_namespace()
 
 
 def get_pipelines_client(namespace: str) -> Any:

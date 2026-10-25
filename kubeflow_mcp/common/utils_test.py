@@ -315,9 +315,21 @@ class TestPipelinesClient:
     def test_effective_namespace_order(self, monkeypatch):
         monkeypatch.delenv(PIPELINES_NAMESPACE_ENV, raising=False)
         with patch(
-            "kubeflow_mcp.common.utils.get_trainer_effective_namespace", return_value="kube-default"
+            "kubeflow_mcp.common.utils.get_default_kubeconfig_namespace",
+            return_value="kube-default",
         ):
             assert get_pipelines_effective_namespace("explicit") == "explicit"
             assert get_pipelines_effective_namespace(None) == "kube-default"
             monkeypatch.setenv(PIPELINES_NAMESPACE_ENV, " pipelines-ns ")
             assert get_pipelines_effective_namespace(None) == "pipelines-ns"
+
+    def test_cache_evicts_oldest_when_full(self, fake_sdk):
+        from kubeflow_mcp.common.utils import _NS_CLIENT_CACHE_MAX, _pipelines_client_cache
+
+        reset_clients()
+        for i in range(_NS_CLIENT_CACHE_MAX + 1):
+            get_pipelines_client(f"ns-{i}")
+
+        assert len(_pipelines_client_cache) == _NS_CLIENT_CACHE_MAX
+        assert "ns-0" not in _pipelines_client_cache
+        assert f"ns-{_NS_CLIENT_CACHE_MAX}" in _pipelines_client_cache

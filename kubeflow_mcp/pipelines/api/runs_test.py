@@ -124,7 +124,7 @@ class TestStopPipelineRun:
         assert result["status"] == "preview"
         assert result["config"]["run"]["state"] == "running"
         assert "no MCP ownership label" in result["message"]
-        kfp_client.kfp_client.assert_not_called()
+        kfp_client.kfp_client.terminate_run.assert_not_called()
 
     def test_confirmed_terminates(self, kfp_client):
         kfp_client.get_run.return_value = make_run("RUNNING")
@@ -132,7 +132,7 @@ class TestStopPipelineRun:
         result = stop_pipeline_run(RUN_ID, confirmed=True)
 
         assert result["data"]["stopped"] is True
-        kfp_client.kfp_client.return_value.terminate_run.assert_called_once_with(RUN_ID)
+        kfp_client.kfp_client.terminate_run.assert_called_once_with(RUN_ID)
 
     @pytest.mark.parametrize("state", ["SUCCEEDED", "FAILED", "CANCELED", "SKIPPED"])
     def test_finished_run_is_refused(self, kfp_client, state):
@@ -141,7 +141,7 @@ class TestStopPipelineRun:
         result = stop_pipeline_run(RUN_ID, confirmed=True)
 
         assert result["error_code"] == "VALIDATION_ERROR"
-        kfp_client.kfp_client.assert_not_called()
+        kfp_client.kfp_client.terminate_run.assert_not_called()
 
     def test_missing_run_is_not_found(self, kfp_client):
         kfp_client.get_run.side_effect = ApiException(404)
@@ -162,7 +162,7 @@ class TestRetryPipelineRun:
 
         assert result["status"] == "preview"
         assert result["config"]["action"] == "retry"
-        kfp_client.kfp_client.assert_not_called()
+        kfp_client.kfp_client._run_api.run_service_retry_run.assert_not_called()
 
     def test_confirmed_calls_the_run_api(self, kfp_client):
         kfp_client.get_run.return_value = make_run("FAILED")
@@ -170,7 +170,7 @@ class TestRetryPipelineRun:
         result = retry_pipeline_run(RUN_ID, confirmed=True)
 
         assert result["data"]["retried"] is True
-        run_api = kfp_client.kfp_client.return_value._run_api
+        run_api = kfp_client.kfp_client._run_api
         run_api.run_service_retry_run.assert_called_once_with(run_id=RUN_ID)
 
     @pytest.mark.parametrize("state", ["RUNNING", "PENDING", "SUCCEEDED"])
@@ -180,12 +180,10 @@ class TestRetryPipelineRun:
         result = retry_pipeline_run(RUN_ID, confirmed=True)
 
         assert result["error_code"] == "VALIDATION_ERROR"
-        kfp_client.kfp_client.assert_not_called()
+        kfp_client.kfp_client._run_api.run_service_retry_run.assert_not_called()
 
     def test_permission_denied_on_retry(self, kfp_client):
         kfp_client.get_run.return_value = make_run("FAILED")
-        kfp_client.kfp_client.return_value._run_api.run_service_retry_run.side_effect = (
-            ApiException(403)
-        )
+        kfp_client.kfp_client._run_api.run_service_retry_run.side_effect = ApiException(403)
 
         assert retry_pipeline_run(RUN_ID, confirmed=True)["error_code"] == "PERMISSION_DENIED"

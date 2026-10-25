@@ -411,7 +411,7 @@ def create_server(  # noqa: C901
 
     Args:
         clients: List of client modules to load (default: ["trainer"])
-                 Options: "trainer", "optimizer", "hub"
+                 Options: "trainer", "pipelines", "optimizer", "hub"
         persona: User role for tool filtering
         mode: Tool loading mode:
               - "full": register all tools directly (default)

@@ -23,6 +23,7 @@ from kubeflow_mcp.common.types import PreviewResponse, ToolError, ToolResponse
 from kubeflow_mcp.common.utils import get_pipelines_client
 from kubeflow_mcp.pipelines.api._common import (
     TERMINAL_RUN_STATES,
+    check_run_namespace,
     pipelines_error,
     resolve_namespace,
     validate_display_name,
@@ -184,7 +185,11 @@ def stop_pipeline_run(
 
     try:
         client = get_pipelines_client(ns)
-        run = run_to_dict(client.get_run(run_id))
+        raw_run = client.get_run(run_id)
+        run_ns_err = check_run_namespace(client, raw_run, ns)
+        if run_ns_err is not None:
+            return run_ns_err.model_dump()
+        run = run_to_dict(raw_run)
     except Exception as e:
         return pipelines_error(e, f"get pipeline run '{run_id}'").model_dump()
 
@@ -204,7 +209,7 @@ def stop_pipeline_run(
         ).model_dump()
 
     try:
-        client.kfp_client().terminate_run(run_id)
+        client.kfp_client.terminate_run(run_id)
     except Exception as e:
         return pipelines_error(e, f"stop pipeline run '{run_id}'").model_dump()
 
@@ -245,7 +250,11 @@ def retry_pipeline_run(
 
     try:
         client = get_pipelines_client(ns)
-        run = run_to_dict(client.get_run(run_id))
+        raw_run = client.get_run(run_id)
+        run_ns_err = check_run_namespace(client, raw_run, ns)
+        if run_ns_err is not None:
+            return run_ns_err.model_dump()
+        run = run_to_dict(raw_run)
     except Exception as e:
         return pipelines_error(e, f"get pipeline run '{run_id}'").model_dump()
 
@@ -267,7 +276,7 @@ def retry_pipeline_run(
     try:
         # PipelinesClient has no retry method; kfp.Client's run API does. This is the
         # only call through a private attribute, pinned by sdk_contracts_test.py.
-        client.kfp_client()._run_api.run_service_retry_run(run_id=run_id)
+        client.kfp_client._run_api.run_service_retry_run(run_id=run_id)
     except Exception as e:
         return pipelines_error(e, f"retry pipeline run '{run_id}'").model_dump()
 
