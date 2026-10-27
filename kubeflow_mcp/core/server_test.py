@@ -20,14 +20,20 @@ Prevents silent drift in tool descriptions across releases.
 See also: kubeflow_mcp/trainer/api/architecture_test.py for full metadata consistency tests.
 """
 
+import contextlib
 import hashlib
+from typing import Any
+from unittest import mock
 
+import pytest
 from fastmcp import Client
 
 from kubeflow_mcp import __version__
+from kubeflow_mcp.common import utils as mcp_utils
 from kubeflow_mcp.common.constants import TOOL_NEXT_HINTS, TOOL_TO_PHASE
 from kubeflow_mcp.common.types import PreviewResponse, ToolResponse
 from kubeflow_mcp.core.policy import get_effective_persona, set_effective_persona
+from kubeflow_mcp.core.resilience import reset_breakers
 from kubeflow_mcp.core.server import _inject_meta, create_server
 from kubeflow_mcp.trainer import CLIENT_TOOL_ANNOTATIONS, CLIENT_TOOL_DESCRIPTIONS
 
@@ -333,3 +339,124 @@ async def test_progressive_mode_e2e_meta_and_breaker():
             assert "next" in res.structured_content["_meta"]
     finally:
         set_effective_persona(previous)
+
+
+_WRITE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+
+# Minimal valid arguments that get each mutating tool to its confirm gate. Mirrors
+# GATE_ARGS in tests/eval/conftest.py from #346, so this can move onto that fixture
+# once it lands.
+GATE_ARGS: dict[str, dict[str, Any]] = {
+    "create_runtime": {"name": "rt-a", "spec": {"template": {}}},
+    "delete_runtime": {"name": "rt-a"},
+    "delete_training_job": {"name": "job-a"},
+    "fine_tune": {"model": "hf://google/gemma-2b", "dataset": "hf://tatsu-lab/alpaca"},
+    "patch_runtime": {"name": "rt-a", "patch": {"metadata": {"labels": {"a": "b"}}}},
+    "run_container_training": {"image": "busybox:1.36"},
+    "run_custom_training": {"script": "print('hi')"},
+    "update_training_job": {"name": "job-a", "action": "suspend"},
+}
+
+_FALSE_LIKE = [False, 0, "false", "False", "0", "no", "off", "f", "n"]
+_TRUE_LIKE = [True, 1, "true", "True", "1", "yes", "on", "t", "y"]
+# Values full mode rejects. "false " is the trailing-space typo of a preview request.
+_NOT_BOOLEAN = ["maybe", "", "false ", None, []]
+
+
+@pytest.fixture
+def k8s_writes():
+    """Fake the Kubernetes API at ApiClient.call_api and record every write.
+
+    Both the Kubeflow SDK and the raw Kubernetes clients send every request
+    through this method, so a write is seen whichever client a tool uses.
+    """
+    writes: list[tuple[str, str]] = []
+
+    def fake_call_api(self, resource_path, method, *args, **kwargs):
+        if method in _WRITE_METHODS:
+            writes.append((method, resource_path))
+        # An empty object, as the API returns for custom resources. A MagicMock would end
+        # up in tool responses and take FastMCP ~0.3s per call to fail to serialize.
+        return {}
+
+    with (
+        mock.patch("kubernetes.config.load_kube_config"),
+        mock.patch("kubernetes.config.load_incluster_config"),
+        mock.patch("kubernetes.client.ApiClient.call_api", fake_call_api),
+        # No GPUs exist behind the fake API, and the Hub check would reach the network.
+        mock.patch("kubeflow_mcp.trainer.api.training._check_gpu_available", return_value=None),
+        mock.patch("kubeflow_mcp.trainer.api.training._check_hf_repos_exist", return_value=None),
+    ):
+        mcp_utils.reset_clients()
+        yield writes
+    mcp_utils.reset_clients()
+
+
+def _gate_outcome(result: Any) -> str:
+    """Classify a tool call as a confirm-gate preview, an error, or a success."""
+    body = result.structured_content or {}
+    data = body.get("data")
+    if body.get("status") == "preview" or (
+        isinstance(data, dict) and data.get("action") == "preview"
+    ):
+        return "preview"
+    return "error" if result.is_error else "success"
+
+
+def test_every_mutating_tool_has_gate_arguments():
+    """A new mutating tool fails here until it is in GATE_ARGS, so it cannot skip the gate test."""
+    mutating = {
+        name
+        for name, annotations in CLIENT_TOOL_ANNOTATIONS.items()
+        if not annotations.get("readOnlyHint")
+    }
+
+    assert mutating == set(GATE_ARGS)
+
+
+async def _call_in_mode(client: Client, mode: str, tool: str, arguments: dict) -> Any:
+    if mode == "full":
+        return await client.call_tool(tool, arguments, raise_on_error=False)
+    return await client.call_tool(
+        "execute_tool", {"tool_name": tool, "arguments": arguments}, raise_on_error=False
+    )
+
+
+@pytest.mark.parametrize("tool", sorted(GATE_ARGS))
+async def test_confirm_gate_matches_full_mode_in_dynamic_modes(k8s_writes, tool):
+    """Progressive and semantic modes preview, write or reject exactly as full mode does.
+
+    Each confirmed value is tried in all three modes; the outcome and the writes that
+    reached the Kubernetes API must match full mode. One server per mode is reused across
+    values, which keeps this fast enough for the unit suite.
+    """
+    modes = ("full", "progressive", "semantic")
+    previous = get_effective_persona()
+    try:
+        servers = {mode: create_server(persona="platform-admin", mode=mode) for mode in modes}
+        mismatches: dict[str, dict[str, tuple[str, list[tuple[str, str]]]]] = {}
+        async with contextlib.AsyncExitStack() as stack:
+            clients = {
+                mode: await stack.enter_async_context(Client(servers[mode])) for mode in modes
+            }
+            for confirmed in _FALSE_LIKE + _TRUE_LIKE + _NOT_BOOLEAN:
+                arguments = {**GATE_ARGS[tool], "confirmed": confirmed}
+                outcomes = {}
+                for mode in modes:
+                    reset_breakers()
+                    k8s_writes.clear()
+                    result = await _call_in_mode(clients[mode], mode, tool, arguments)
+                    outcomes[mode] = (_gate_outcome(result), list(k8s_writes))
+
+                # Parity alone would pass if every mode were wrong the same way.
+                expected = outcomes["full"]
+                if confirmed in _FALSE_LIKE:
+                    expected = ("preview", [])
+                elif confirmed in _NOT_BOOLEAN:
+                    expected = ("error", [])
+                if any(outcome != expected for outcome in outcomes.values()):
+                    mismatches[repr(confirmed)] = outcomes
+    finally:
+        set_effective_persona(previous)
+
+    assert mismatches == {}
