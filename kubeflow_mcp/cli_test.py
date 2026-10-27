@@ -602,3 +602,9 @@ def test_serve_reports_invalid_clients_environment_cleanly(monkeypatch):
     assert result.exit_code == 1
     assert "at least one client must be specified" in result.output
     assert "Traceback" not in result.output
+
+
+def test_clients_help_lists_pipelines_with_spacing():
+    result = CliRunner().invoke(cli, ["serve", "--help"], terminal_width=200)
+
+    assert "(trainer, optimizer, hub, pipelines). Falls back" in result.output
