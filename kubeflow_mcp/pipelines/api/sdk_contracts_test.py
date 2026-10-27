@@ -26,7 +26,6 @@ import pytest
 pytest.importorskip("kfp")
 kfp_server_api = pytest.importorskip("kfp_server_api")
 
-from kfp.client import Client  # noqa: E402
 from kubeflow.pipelines import KubernetesBackendConfig, PipelinesClient  # noqa: E402
 
 
@@ -61,12 +60,13 @@ class TestPipelinesClient:
     def test_kfp_client_is_a_property(self):
         assert isinstance(PipelinesClient.kfp_client, property)
 
-    def test_kfp_client_can_terminate_and_holds_a_run_api(self):
-        # stop_pipeline_run uses Client.terminate_run; retry_pipeline_run goes through
-        # Client._run_api because PipelinesClient has no retry method.
-        assert _params(Client.terminate_run) == ["self", "run_id"]
-        assert "self._run_api = " in inspect.getsource(Client.__init__)
+    def test_backend_service_api_methods(self):
+        # Lifecycle and namespace checks call the backend service APIs directly.
+        assert "run_id" in _params(kfp_server_api.RunServiceApi.run_service_terminate_run)
         assert "run_id" in _params(kfp_server_api.RunServiceApi.run_service_retry_run)
+        assert "experiment_id" in _params(
+            kfp_server_api.ExperimentServiceApi.experiment_service_get_experiment
+        )
 
 
 class TestModels:

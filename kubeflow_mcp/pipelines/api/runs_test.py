@@ -22,12 +22,22 @@ from kubeflow_mcp.pipelines.api.runs import (
     retry_pipeline_run,
     stop_pipeline_run,
 )
-from kubeflow_mcp.pipelines.conftest import RUN_ID, ApiException, make_pipeline, make_run
+from kubeflow_mcp.pipelines.conftest import (
+    RUN_ID,
+    ApiException,
+    make_page,
+    make_pipeline,
+    make_run,
+    make_version,
+)
 
 
 class TestCreatePipelineRun:
     def test_preview_resolves_pipeline_and_does_not_run(self, kfp_client):
         kfp_client.get_pipeline.return_value = make_pipeline()
+        kfp_client.list_pipeline_versions.return_value = make_page(
+            "pipeline_versions", [make_version()]
+        )
 
         result = create_pipeline_run("churn-prediction", params={"lr": 0.1})
 
@@ -37,6 +47,17 @@ class TestCreatePipelineRun:
         assert config["params"] == {"lr": 0.1}
         assert config["version"] == "latest"
         assert config["namespace"] == "team-a"
+        kfp_client.list_pipeline_versions.assert_called_once_with("churn-prediction", page_size=1)
+        kfp_client.run.assert_not_called()
+
+    def test_preview_rejects_pipeline_without_versions(self, kfp_client):
+        kfp_client.get_pipeline.return_value = make_pipeline()
+        kfp_client.list_pipeline_versions.return_value = make_page("pipeline_versions", [])
+
+        result = create_pipeline_run("churn-prediction")
+
+        assert result["error_code"] == "RESOURCE_NOT_FOUND"
+        assert "no registered versions" in result["error"]
         kfp_client.run.assert_not_called()
 
     def test_confirmed_runs_the_pipeline_object_not_the_name(self, kfp_client):

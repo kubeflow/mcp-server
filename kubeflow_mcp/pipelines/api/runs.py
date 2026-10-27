@@ -124,6 +124,16 @@ def create_pipeline_run(
         pipeline_obj = client.get_pipeline(pipeline)
         if version is not None:
             client.get_pipeline_version(pipeline, version)
+        else:
+            versions = client.list_pipeline_versions(pipeline, page_size=1)
+            available_versions = getattr(versions, "pipeline_versions", None)
+            if isinstance(versions, dict):
+                available_versions = versions.get("pipeline_versions")
+            if not available_versions:
+                return ToolError(
+                    error=f"Pipeline '{pipeline}' has no registered versions",
+                    error_code=ErrorCode.RESOURCE_NOT_FOUND,
+                ).model_dump()
         if experiment is not None:
             client.get_experiment(experiment)
     except Exception as e:

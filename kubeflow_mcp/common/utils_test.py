@@ -35,6 +35,7 @@ from kubeflow_mcp.common.utils import (
     _get_api_client,
     get_core_v1_api,
     get_custom_objects_api,
+    get_default_kubeconfig_namespace,
     get_pipelines_client,
     get_pipelines_effective_namespace,
     get_trainer_client_for_namespace,
@@ -184,6 +185,23 @@ class TestGetApiClientConfigLoading:
         mock_incluster.assert_called_once()
         assert capsys.readouterr().out == ""
         reset_clients()
+
+
+class TestGetDefaultKubeconfigNamespace:
+    def test_corrupt_kubeconfig_fails_when_not_running_in_cluster(self, monkeypatch, tmp_path):
+        kubeconfig = tmp_path / "corrupt-config"
+        kubeconfig.touch()
+        monkeypatch.setenv("KUBECONFIG", str(kubeconfig))
+        monkeypatch.setattr(
+            "kubeflow_mcp.common.utils._SA_NAMESPACE_PATH",
+            str(tmp_path / "missing-service-account-namespace"),
+        )
+        with patch(
+            "kubernetes.config.list_kube_config_contexts",
+            side_effect=ValueError("invalid kubeconfig"),
+        ):
+            with pytest.raises(RuntimeError, match="kubeconfig is invalid"):
+                get_default_kubeconfig_namespace()
 
 
 class TestGetCoreV1Api:
