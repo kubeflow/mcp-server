@@ -61,11 +61,11 @@ def record_tool_result(
     result: Any,
     generation: int | None = None,
 ) -> bool:
-    """Record a tool execution outcome on the circuit breaker.
+    """Record an outcome against the breaker generation that executed the tool.
 
-    Only real successes reset the breaker. Real infrastructure errors record
-    a failure. Neutral errors (validation, not found) release the reserved slot.
-    Returns True if the result was a success, False otherwise.
+    Successes reset that generation. Infrastructure errors record a failure;
+    neutral errors (validation, not found) release its reserved slot. Returns
+    True for success and False otherwise.
     """
     is_success = (
         ("error_code" not in result and "error" not in result) if isinstance(result, dict) else True

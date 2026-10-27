@@ -27,6 +27,7 @@ from kubeflow_mcp.core.policy import (
     _load_policy_file,
     _matches_pattern,
     apply_policy_filters,
+    effective_persona_context,
     get_allowed_namespaces,
     get_allowed_tools,
     get_effective_persona,
@@ -39,7 +40,6 @@ from kubeflow_mcp.core.policy import (
 
 
 def test_default_persona_is_readonly():
-    set_effective_persona("readonly")
     assert get_effective_persona() == "readonly"
 
 
@@ -47,6 +47,28 @@ def test_set_and_get_persona():
     set_effective_persona("platform-admin")
     assert get_effective_persona() == "platform-admin"
     set_effective_persona("readonly")
+
+
+def test_effective_persona_context_restores_previous_value():
+    with effective_persona_context("ml-engineer"):
+        assert get_effective_persona() == "ml-engineer"
+    assert get_effective_persona() == "readonly"
+
+
+def test_nested_effective_persona_context_restores_enclosing_value():
+    with effective_persona_context("data-scientist"):
+        with effective_persona_context("platform-admin"):
+            assert get_effective_persona() == "platform-admin"
+        assert get_effective_persona() == "data-scientist"
+    assert get_effective_persona() == "readonly"
+
+
+def test_effective_persona_context_restores_after_exception():
+    with pytest.raises(RuntimeError, match="boom"):
+        with effective_persona_context("platform-admin"):
+            assert get_effective_persona() == "platform-admin"
+            raise RuntimeError("boom")
+    assert get_effective_persona() == "readonly"
 
 
 # ─── expand / matches helpers ────────────────────────────────────────────────
@@ -244,6 +266,55 @@ def test_valid_policy_file_is_loaded(tmp_policy_file):
     policy = {"policy": {"read_only": True, "namespaces": ["team-a"]}}
     tmp_policy_file(policy)
     assert _load_policy_file() == policy
+
+
+@pytest.mark.parametrize("document", ["invalid", ["invalid", "document"]])
+def test_non_mapping_policy_document_fails_closed(tmp_policy_file, document):
+    tmp_policy_file(document)
+
+    with pytest.raises(PolicyFileError, match="top level must be a mapping"):
+        _load_policy_file()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("allow", "fine_tune"),
+        ("allow", {"tool": "fine_tune"}),
+        ("allow", ["fine_tune", 1]),
+        ("deny", "delete_*"),
+        ("deny", {"tool": "delete_*"}),
+        ("deny", ["delete_*", 1]),
+    ],
+)
+def test_policy_allow_and_deny_types_fail_closed(tmp_policy_file, field, value):
+    tmp_policy_file({"policy": {field: value}})
+
+    with pytest.raises(PolicyFileError, match=rf"policy\.{field}"):
+        _load_policy_file()
+
+
+def test_non_mapping_custom_persona_fails_closed(tmp_policy_file):
+    tmp_policy_file({"personas": {"custom": "readonly"}})
+
+    with pytest.raises(PolicyFileError, match=r"personas\.custom.*mapping"):
+        _load_policy_file()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("inherit", 123),
+        ("tools", "not-a-wildcard"),
+        ("tools", {"name": "fine_tune"}),
+        ("tools", ["fine_tune", 1]),
+    ],
+)
+def test_custom_persona_field_types_fail_closed(tmp_policy_file, field, value):
+    tmp_policy_file({"personas": {"custom": {field: value}}})
+
+    with pytest.raises(PolicyFileError, match=rf"personas\.custom\.{field}"):
+        _load_policy_file()
 
 
 def test_malformed_policy_file_fails_closed(tmp_policy_file):

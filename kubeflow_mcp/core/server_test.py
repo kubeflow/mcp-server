@@ -22,13 +22,14 @@ See also: kubeflow_mcp/trainer/api/architecture_test.py for full metadata consis
 
 import hashlib
 
+import pytest
 from fastmcp import Client
 
-from kubeflow_mcp import __version__
+from kubeflow_mcp import __version__, trainer
 from kubeflow_mcp.common.constants import TOOL_NEXT_HINTS, TOOL_TO_PHASE
 from kubeflow_mcp.common.types import PreviewResponse, ToolResponse
 from kubeflow_mcp.core.policy import get_effective_persona, set_effective_persona
-from kubeflow_mcp.core.server import _inject_meta, create_server
+from kubeflow_mcp.core.server import _audit_wrap, _inject_meta, create_server
 from kubeflow_mcp.trainer import CLIENT_TOOL_ANNOTATIONS, CLIENT_TOOL_DESCRIPTIONS
 
 
@@ -225,15 +226,11 @@ class TestInjectMetaPreviewResponses:
 
     async def test_preview_over_mcp_has_no_next_hint(self):
         """End to end: patch_runtime previews without touching the cluster."""
-        previous = get_effective_persona()
-        try:
-            async with Client(create_server(persona="platform-admin")) as client:
-                result = await client.call_tool(
-                    "patch_runtime",
-                    {"name": "rt-a", "patch": {"metadata": {"labels": {"a": "b"}}}},
-                )
-        finally:
-            set_effective_persona(previous)
+        async with Client(create_server(persona="platform-admin")) as client:
+            result = await client.call_tool(
+                "patch_runtime",
+                {"name": "rt-a", "patch": {"metadata": {"labels": {"a": "b"}}}},
+            )
         body = result.structured_content
         assert body["data"]["action"] == "preview"
         assert body["_meta"] == {"phase": TOOL_TO_PHASE["patch_runtime"]}
@@ -308,7 +305,6 @@ def test_audit_wrap_execute_tool_circuit_breaker_isolation(monkeypatch):
 def test_audit_wrap_preserves_dynamic_tool_meta(monkeypatch):
     from kubeflow_mcp.common.constants import TOOL_NEXT_HINTS, TOOL_TO_PHASE
     from kubeflow_mcp.core.dynamic_tools import execute_tool, init_dynamic_tools
-    from kubeflow_mcp.core.server import _audit_wrap
 
     def meta_worker():
         return {"status": "ok"}
@@ -333,3 +329,69 @@ async def test_progressive_mode_e2e_meta_and_breaker():
             assert "next" in res.structured_content["_meta"]
     finally:
         set_effective_persona(previous)
+
+
+@pytest.mark.parametrize("mode", ["progressive", "semantic"])
+async def test_dynamic_server_registries_are_isolated(mode: str, monkeypatch: pytest.MonkeyPatch):
+    calls: list[str] = []
+
+    def harmless_delete_training_job(name: str, confirmed: bool = False) -> dict:
+        """Harmless stand-in for the admin-only delete tool."""
+        calls.append(name)
+        return {"success": True, "data": {"name": name, "confirmed": confirmed}}
+
+    harmless_delete_training_job.__name__ = "delete_training_job"
+    monkeypatch.setattr(
+        trainer,
+        "TOOLS",
+        [
+            harmless_delete_training_job if tool.__name__ == "delete_training_job" else tool
+            for tool in trainer.TOOLS
+        ],
+    )
+
+    server_a = create_server(persona="readonly", mode=mode)
+    server_b = create_server(persona="platform-admin", mode=mode)
+
+    async def list_dynamic_tool_names(client: Client) -> set[str]:
+        if mode == "progressive":
+            categories = (await client.call_tool("list_tools", {})).structured_content["categories"]
+            names = set()
+            for category in categories:
+                tools = (
+                    await client.call_tool("list_tools", {"prefix": category})
+                ).structured_content["tools"]
+                names.update(tool["name"] for tool in tools)
+            return names
+
+        tools = (await client.call_tool("find_tools", {"query": "all"})).structured_content["tools"]
+        return {tool["name"] for tool in tools}
+
+    async with Client(server_a) as client_a, Client(server_b) as client_b:
+        tools_a_before = await list_dynamic_tool_names(client_a)
+        tools_b = await list_dynamic_tool_names(client_b)
+
+        assert "delete_training_job" not in tools_a_before
+        assert "delete_training_job" in tools_b
+
+        result_b = await client_b.call_tool(
+            "execute_tool",
+            {
+                "tool_name": "delete_training_job",
+                "arguments": {"name": "stub-job", "confirmed": False},
+            },
+        )
+        assert result_b.structured_content["data"]["name"] == "stub-job"
+        assert calls == ["stub-job"]
+
+        result_a = await client_a.call_tool_mcp(
+            "execute_tool",
+            {
+                "tool_name": "delete_training_job",
+                "arguments": {"name": "stub-job", "confirmed": False},
+            },
+        )
+        assert result_a.is_error is True
+        assert result_a.structured_content["error"] == "Tool 'delete_training_job' not found"
+        assert calls == ["stub-job"]
+        assert await list_dynamic_tool_names(client_a) == tools_a_before
