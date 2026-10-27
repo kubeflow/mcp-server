@@ -49,7 +49,8 @@ namespace. Always show the preview and confirm the run with the user first.
 ## Run states
 
 `pending` → `running` → `succeeded` | `failed` | `skipped`.
-A stopped run goes `canceling` → `canceled`. `paused` runs wait for an action.
+A stopped run goes `canceling` → a terminal state (`canceled` or `failed`). `paused` runs wait
+for an action.
 
 ## Paging
 

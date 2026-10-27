@@ -21,6 +21,9 @@ from types import SimpleNamespace
 
 from kubeflow_mcp.pipelines.conftest import RUN_ID, make_pipeline, make_run, make_task
 from kubeflow_mcp.pipelines.types import (
+    MAX_CHILD_PODS,
+    MAX_PARAMETER_CHARS,
+    MAX_PARAMETERS,
     MAX_TASKS,
     pipeline_to_dict,
     run_pod_names,
@@ -76,11 +79,36 @@ def test_run_details_cap_the_task_list():
     assert data["tasks_truncated"] is True
 
 
+def test_run_details_bound_child_pods_and_parameters():
+    children = [f"child-{i}" for i in range(MAX_CHILD_PODS + 5)]
+    params = {f"p{i}": i for i in range(MAX_PARAMETERS + 5)}
+    data = run_to_dict(
+        make_run(tasks=[make_task("fanout", children=children)], params=params),
+        include_details=True,
+    )
+
+    assert len(data["tasks"][0]["child_pods"]) == MAX_CHILD_PODS
+    assert data["tasks"][0]["child_pods_truncated"] is True
+    assert len(data["parameters"]) == MAX_PARAMETERS
+    assert data["parameters_truncated"] is True
+
+
+def test_run_details_skip_parameter_values_over_response_budget():
+    data = run_to_dict(
+        make_run(params={"too_large": "x" * MAX_PARAMETER_CHARS}),
+        include_details=True,
+    )
+
+    assert data["parameters"] == {}
+    assert data["parameters_truncated"] is True
+
+
 def test_missing_fields_do_not_raise():
     data = run_to_dict(SimpleNamespace(), include_details=True)
 
     assert data["run_id"] is None
     assert data["tasks"] == [] and data["parameters"] == {}
+    assert data["parameters_truncated"] is False
 
 
 def test_pod_names_include_children_once():

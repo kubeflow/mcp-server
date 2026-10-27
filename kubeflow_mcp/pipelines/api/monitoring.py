@@ -48,7 +48,7 @@ _LAUNCHER_ROLE = "launcher"
 _ROLE_ANNOTATION = "pipelines.kubeflow.org/runtime-role"
 
 
-def _resolve_run_pods(run: Any, namespace: str) -> list[tuple[str | None, str]]:
+def _resolve_run_pods(run_id: str, run: Any, namespace: str) -> list[tuple[str | None, str]]:
     """Map a run's Argo node IDs to real K8s pod names.
 
     KFP v2 / Argo 3.4+ uses ``POD_NAMES=v2``, where the pod names include the
@@ -65,17 +65,14 @@ def _resolve_run_pods(run: Any, namespace: str) -> list[tuple[str | None, str]]:
 
     try:
         api = get_core_v1_api()
-        run_id = getattr(run, "run_id", None)
         pod_list = api.list_namespaced_pod(
             namespace=namespace,
             label_selector=f"{RUN_ID_LABEL}={run_id}",
             _request_timeout=K8S_TIMEOUT,
         )
     except Exception as e:
-        logger.warning("Could not list pods for run %s: %s", getattr(run, "run_id", "?"), e)
-        # Fall back to the raw node IDs (may 404 on real clusters, but
-        # preserves existing behavior for unit tests and when RBAC fails).
-        return node_entries
+        logger.warning("Could not list pods for run %s: %s", run_id, e)
+        raise
 
     # Index live pods by their Argo node ID annotation.
     # A single node ID can map to multiple pods (driver + launcher); prefer
@@ -288,7 +285,10 @@ def get_pipeline_logs(
     except Exception as e:
         return pipelines_error(e, f"get pipeline run '{run_id}'").model_dump()
 
-    all_pods = _resolve_run_pods(run, ns)
+    try:
+        all_pods = _resolve_run_pods(run_id, run, ns)
+    except Exception as e:
+        return pipelines_error(e, f"resolve pods for run '{run_id}'").model_dump()
     task_names = sorted({name for name, _ in all_pods if name})
     pods = [(name, pod) for name, pod in all_pods if task is None or name == task]
     if task is not None and not pods:

@@ -195,7 +195,9 @@ TOOL_NEXT_HINTS: dict[str, str] = {
     "get_pipeline_run": "If it failed, read get_pipeline_logs(run_id) for the failing task",
     "get_pipeline_logs": "Fix the cause, then preview retry_pipeline_run(run_id)",
     "create_pipeline_run": "Follow the run with get_pipeline_run(run_id)",
-    "stop_pipeline_run": "Confirm with get_pipeline_run(run_id) that it is canceled",
+    "stop_pipeline_run": (
+        "Confirm with get_pipeline_run(run_id) that it stopped ('canceled' or 'failed')"
+    ),
     "retry_pipeline_run": "Follow the retried run with get_pipeline_run(run_id)",
 }
 
@@ -253,7 +255,9 @@ SDK_COMPATIBILITY: dict[str, object] = {
                 "get_run",
                 "run",
                 "get_experiment",
-                "kfp_client().terminate_run",
+                "_backend.run_api.run_service_terminate_run",
+                "_backend.run_api.run_service_retry_run",
+                "_backend.experiment_api.experiment_service_get_experiment",
             ],
             "uncovered_methods": [
                 "upload_pipeline",  # reads local files and takes code; register outside MCP

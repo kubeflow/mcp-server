@@ -19,10 +19,14 @@ nested models. These helpers read them with ``getattr`` so this module loads wit
 ``kfp`` installed, and return plain, MCP-safe dicts.
 """
 
+import json
 from typing import Any
 
 # A run can carry many tasks; the agent needs their states, not an unbounded list.
 MAX_TASKS = 50
+MAX_CHILD_PODS = 20
+MAX_PARAMETERS = 50
+MAX_PARAMETER_CHARS = 10_000
 
 
 def _iso(value: Any) -> Any:
@@ -64,17 +68,47 @@ def pipeline_version_to_dict(version: Any) -> dict[str, Any]:
 
 
 def _task_to_dict(task: Any) -> dict[str, Any]:
-    child_pods = [
-        getattr(child, "pod_name", None) for child in getattr(task, "child_tasks", None) or []
-    ]
+    child_pods = []
+    child_pods_truncated = False
+    for child in getattr(task, "child_tasks", None) or []:
+        pod = getattr(child, "pod_name", None)
+        if not pod:
+            continue
+        if len(child_pods) == MAX_CHILD_PODS:
+            child_pods_truncated = True
+            break
+        child_pods.append(pod)
     return {
         "task_id": getattr(task, "task_id", None),
         "name": getattr(task, "display_name", None),
         "state": _state(getattr(task, "state", None)),
         "pod_name": getattr(task, "pod_name", None),
-        "child_pods": [pod for pod in child_pods if pod],
+        "child_pods": child_pods,
+        "child_pods_truncated": child_pods_truncated,
         "error": _error_message(task),
     }
+
+
+def _bounded_parameters(parameters: Any) -> tuple[dict[str, Any], bool]:
+    """Keep run parameters within a predictable response budget."""
+    parameters = dict(parameters or {})
+    bounded: dict[str, Any] = {}
+    truncated = len(parameters) > MAX_PARAMETERS
+    parameter_chars = 2
+
+    for index, (name, value) in enumerate(parameters.items()):
+        if index >= MAX_PARAMETERS:
+            truncated = True
+            break
+        encoded_entry = json.dumps({name: value}, ensure_ascii=False, separators=(",", ":"))
+        candidate_chars = parameter_chars + len(encoded_entry) - 2 + (1 if bounded else 0)
+        if candidate_chars > MAX_PARAMETER_CHARS:
+            truncated = True
+            continue
+        bounded[name] = value
+        parameter_chars = candidate_chars
+
+    return bounded, truncated
 
 
 def run_to_dict(run: Any, *, include_details: bool = False) -> dict[str, Any]:
@@ -98,7 +132,9 @@ def run_to_dict(run: Any, *, include_details: bool = False) -> dict[str, Any]:
     }
     if include_details:
         runtime_config = getattr(run, "runtime_config", None)
-        data["parameters"] = dict(getattr(runtime_config, "parameters", None) or {})
+        data["parameters"], data["parameters_truncated"] = _bounded_parameters(
+            getattr(runtime_config, "parameters", None)
+        )
         tasks = getattr(getattr(run, "run_details", None), "task_details", None) or []
         data["tasks"] = [_task_to_dict(task) for task in tasks[:MAX_TASKS]]
         data["tasks_truncated"] = len(tasks) > MAX_TASKS
@@ -131,6 +167,9 @@ run_pod_names = run_node_ids
 
 
 __all__ = [
+    "MAX_CHILD_PODS",
+    "MAX_PARAMETER_CHARS",
+    "MAX_PARAMETERS",
     "MAX_TASKS",
     "pipeline_to_dict",
     "pipeline_version_to_dict",

@@ -72,7 +72,7 @@ def _strip_doc_text(node: Any) -> Any:
 
 async def _build_snapshot() -> dict[str, Any]:
     """Capture the structural tools/list surface via an in-memory MCP client."""
-    mcp = create_server(persona=SNAPSHOT_PERSONA)
+    mcp = create_server(persona=SNAPSHOT_PERSONA, clients=["trainer", "pipelines"])
     async with Client(mcp) as client:
         tools = await client.list_tools()
 

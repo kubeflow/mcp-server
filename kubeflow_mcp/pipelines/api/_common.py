@@ -78,7 +78,7 @@ def validate_display_name(value: str | None, field: str) -> ToolError | None:
 
 def validate_run_id(run_id: str | None) -> ToolError | None:
     """Check that *run_id* is a KFP run ID (a UUID)."""
-    if not isinstance(run_id, str) or not _RUN_ID_RE.match(run_id):
+    if not isinstance(run_id, str) or not _RUN_ID_RE.fullmatch(run_id):
         return ToolError(
             error=f"Invalid run_id {run_id!r}: expected a run UUID",
             error_code=ErrorCode.VALIDATION_ERROR,

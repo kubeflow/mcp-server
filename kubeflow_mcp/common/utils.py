@@ -208,8 +208,9 @@ def get_default_kubeconfig_namespace() -> str:
             pass
 
     if kubeconfig_found:
-        # Had kubeconfig but it was corrupt, and not in-cluster either.
-        return "default"
+        raise RuntimeError(
+            "Cannot determine default namespace: kubeconfig is invalid and not running in-cluster"
+        )
 
     # No kubeconfig, not in-cluster → let resolve_namespace() fail closed.
     raise RuntimeError(

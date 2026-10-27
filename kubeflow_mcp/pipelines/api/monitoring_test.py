@@ -14,6 +14,7 @@
 
 """Tests for list_pipeline_runs, get_pipeline_run and get_pipeline_logs."""
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -100,7 +101,7 @@ class TestGetPipelineRun:
 
         assert get_pipeline_run(RUN_ID)["error_code"] == "RESOURCE_NOT_FOUND"
 
-    @pytest.mark.parametrize("run_id", ["", "abc", "../etc", RUN_ID + "x", None])
+    @pytest.mark.parametrize("run_id", ["", "abc", "../etc", RUN_ID + "x", RUN_ID + "\n", None])
     def test_rejects_malformed_run_id(self, kfp_client, run_id):
         result = get_pipeline_run(run_id)
 
@@ -136,6 +137,70 @@ class TestGetPipelineLogs:
         assert call["namespace"] == "team-a"
         assert call["container"] == "main"
         assert call["tail_lines"] == 50
+
+    def test_resolves_argo_node_ids_and_prefers_launcher_pods(self, kfp_client, core_api):
+        run = make_run(
+            tasks=[
+                make_task("prep", pod="node-prep"),
+                make_task("train", pod="node-train"),
+            ]
+        )
+        run.run_id = None
+        kfp_client.get_run.return_value = run
+        core_api.list_namespaced_pod.return_value = SimpleNamespace(
+            items=[
+                SimpleNamespace(
+                    metadata=SimpleNamespace(
+                        name="prep-system-container-impl-hash",
+                        annotations={
+                            monitoring.ARGO_NODE_ID_ANNOTATION: "node-prep",
+                            monitoring._ROLE_ANNOTATION: "launcher",
+                        },
+                    )
+                ),
+                SimpleNamespace(
+                    metadata=SimpleNamespace(
+                        name="train-system-container-driver-hash",
+                        annotations={
+                            monitoring.ARGO_NODE_ID_ANNOTATION: "node-train",
+                            monitoring._ROLE_ANNOTATION: "driver",
+                        },
+                    )
+                ),
+                SimpleNamespace(
+                    metadata=SimpleNamespace(
+                        name="train-system-container-impl-hash",
+                        annotations={
+                            monitoring.ARGO_NODE_ID_ANNOTATION: "node-train",
+                            monitoring._ROLE_ANNOTATION: "launcher",
+                        },
+                    )
+                ),
+            ]
+        )
+        core_api.read_namespaced_pod_log.side_effect = lambda name, **kwargs: name
+
+        data = get_pipeline_logs(RUN_ID)["data"]
+
+        assert [pod["pod"] for pod in data["pods"]] == [
+            "prep-system-container-impl-hash",
+            "train-system-container-impl-hash",
+        ]
+        core_api.list_namespaced_pod.assert_called_once_with(
+            namespace="team-a",
+            label_selector=f"{monitoring.RUN_ID_LABEL}={RUN_ID}",
+            _request_timeout=monitoring.K8S_TIMEOUT,
+        )
+
+    def test_pod_listing_failure_is_reported(self, kfp_client, core_api):
+        kfp_client.get_run.return_value = self._run()
+        core_api.list_namespaced_pod.side_effect = ApiException(403, "Forbidden")
+
+        result = get_pipeline_logs(RUN_ID)
+
+        assert result["error_code"] == "PERMISSION_DENIED"
+        assert "resolve pods" in result["error"]
+        core_api.read_namespaced_pod_log.assert_not_called()
 
     def test_task_filter(self, kfp_client, core_api):
         kfp_client.get_run.return_value = self._run()
