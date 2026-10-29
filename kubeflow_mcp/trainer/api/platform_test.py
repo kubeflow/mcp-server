@@ -314,6 +314,48 @@ def test_patch_runtime_pins_resource_version_and_reports_conflict(mock_k8s_apis)
     assert "changed while patching" in error["error"]
 
 
+def test_patch_runtime_merges_volume_mounts_by_mount_path(mock_k8s_apis):
+    api = mock_k8s_apis["custom"]
+    current = _runtime_with_jobs()
+    current["spec"]["template"]["spec"]["replicatedJobs"][1]["containers"][0]["volumeMounts"] = [
+        {"name": "data", "mountPath": "/data/train"}
+    ]
+    api.get_cluster_custom_object.return_value = current
+    api.patch_cluster_custom_object.return_value = {"metadata": {}}
+    patch_body = _patch_jobs(
+        [
+            {
+                "name": "node",
+                "containers": [
+                    {"name": "node", "volumeMounts": [{"name": "data", "mountPath": "/data/eval"}]}
+                ],
+            }
+        ]
+    )
+
+    verify_tool_success(patch_runtime("torchtune-llama", patch=patch_body, confirmed=True))
+
+    mounts = _sent_jobs(api)[1]["containers"][0]["volumeMounts"]
+    assert [m["mountPath"] for m in mounts] == ["/data/train", "/data/eval"]
+
+
+def test_patch_runtime_keeps_caller_resource_version(mock_k8s_apis):
+    api = mock_k8s_apis["custom"]
+    current = _runtime_with_jobs()
+    current["metadata"] = {"resourceVersion": "7"}
+    api.get_cluster_custom_object.return_value = current
+    api.patch_cluster_custom_object.return_value = {"metadata": {}}
+
+    verify_tool_success(
+        patch_runtime(
+            "torchtune-llama", patch={"metadata": {"resourceVersion": "5"}}, confirmed=True
+        )
+    )
+
+    body = api.patch_cluster_custom_object.call_args.kwargs["body"]
+    assert body["metadata"]["resourceVersion"] == "5"
+
+
 def test_patch_runtime_missing_runtime_is_not_patched(mock_k8s_apis):
     api = mock_k8s_apis["custom"]
     api.get_cluster_custom_object.side_effect = ApiException(status=404, reason="Not Found")

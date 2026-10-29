@@ -305,24 +305,30 @@ def inspect_controller(
         ).model_dump()
 
 
-_MERGED_LIST_KEYS = frozenset(
-    {"replicatedJobs", "containers", "initContainers", "env", "volumes", "volumeMounts"}
-)
+# Merged list key -> field that identifies an entry (a volume can be mounted at several paths).
+_MERGED_LIST_KEYS = {
+    "replicatedJobs": "name",
+    "containers": "name",
+    "initContainers": "name",
+    "env": "name",
+    "volumes": "name",
+    "volumeMounts": "mountPath",
+}
 
 
 _MERGE_SEMANTICS = (
-    "Name-keyed lists (replicatedJobs, containers, initContainers, env, volumes, "
-    "volumeMounts) merge by name: unmentioned entries are kept and a partial list cannot "
+    "Keyed lists (replicatedJobs, containers, initContainers, env, volumes by name; "
+    "volumeMounts by mountPath) merge by key: unmentioned entries are kept and a partial list cannot "
     "remove one. Listing every current entry applies the supplied order. An empty list [] "
     "replaces the list and clears all entries. Other lists are replaced; null deletes a key."
 )
 
 
-def _is_named_list(value: Any) -> bool:
+def _is_keyed_list(value: Any, id_field: str) -> bool:
     return (
         isinstance(value, list)
         and bool(value)
-        and all(isinstance(i, dict) and "name" in i for i in value)
+        and all(isinstance(i, dict) and id_field in i for i in value)
     )
 
 
@@ -336,14 +342,15 @@ def _merge(current: Any, patch: Any, key: str | None = None) -> Any:
             else:
                 merged[k] = _merge(current.get(k), value, k)
         return merged
-    if key in _MERGED_LIST_KEYS and _is_named_list(patch) and _is_named_list(current):
-        patch_by_name = {item["name"]: item for item in patch}
-        current_by_name = {c["name"]: c for c in current}
-        if current_by_name.keys() <= patch_by_name.keys():
+    id_field = _MERGED_LIST_KEYS.get(key)
+    if id_field and _is_keyed_list(patch, id_field) and _is_keyed_list(current, id_field):
+        patch_by_id = {item[id_field]: item for item in patch}
+        current_by_id = {c[id_field]: c for c in current}
+        if current_by_id.keys() <= patch_by_id.keys():
             # Every current entry is listed: honour the supplied order (initContainers run in sequence).
-            return [_merge(current_by_name.get(p["name"], {}), p) for p in patch]
-        merged_list = [_merge(c, patch_by_name.pop(c["name"], {})) for c in current]
-        return merged_list + list(patch_by_name.values())
+            return [_merge(current_by_id.get(p[id_field], {}), p) for p in patch]
+        merged_list = [_merge(c, patch_by_id.pop(c[id_field], {})) for c in current]
+        return merged_list + list(patch_by_id.values())
     return patch
 
 
@@ -357,7 +364,8 @@ def _expand_named_lists(current: Any, patch: Any, key: str | None = None) -> Any
     if isinstance(patch, dict):
         cur = current if isinstance(current, dict) else {}
         return {k: _expand_named_lists(cur.get(k), v, k) for k, v in patch.items()}
-    if key in _MERGED_LIST_KEYS and _is_named_list(patch) and _is_named_list(current):
+    id_field = _MERGED_LIST_KEYS.get(key)
+    if id_field and _is_keyed_list(patch, id_field) and _is_keyed_list(current, id_field):
         return _merge(current, patch, key)
     return patch
 
@@ -370,14 +378,15 @@ def patch_runtime(
     """JSON merge patch on a ClusterTrainingRuntime.
 
     Use to update images, add volumes, change defaults without full replacement.
-    Lists under these keys whose entries all carry a ``name`` (``replicatedJobs``,
-    ``containers``, ``initContainers``, ``env``, ``volumes``, ``volumeMounts``) are
-    merged by name: entries the patch does not mention are kept, so removing one entry
+    Lists under these keys whose entries all carry their key (``name`` for
+    ``replicatedJobs``, ``containers``, ``initContainers``, ``env``, ``volumes``;
+    ``mountPath`` for ``volumeMounts``) are merged by that key: entries the patch does not mention are kept, so removing one entry
     is not possible here. If the patch lists every current entry, its order is applied
     (reordering); otherwise current order is kept and new entries are appended. An empty
     list (``[]``) is not merged: it replaces the list and clears every entry. Other
     lists are replaced. The patch is rejected with a conflict if the runtime changes
-    between the read and the write; re-run it to retry. Top-level keys are restricted to ``spec`` and ``metadata``;
+    between the read and the write; re-run it to retry. Pass ``metadata.resourceVersion``
+    (from the preview) to also reject changes made since that version. Top-level keys are restricted to ``spec`` and ``metadata``;
     deep structure is validated by the K8s API. Intended for platform-admin
     persona only.
 
@@ -430,8 +439,9 @@ def patch_runtime(
         body = _expand_named_lists(current, patch)
         resource_version = current.get("metadata", {}).get("resourceVersion")
         if resource_version:
-            # Makes the API server answer 409 if the runtime changed since the read above.
-            body.setdefault("metadata", {})["resourceVersion"] = resource_version
+            # 409 if the runtime changed since the read above; a caller-supplied version is kept
+            # so a change since the caller's own read is rejected too.
+            body.setdefault("metadata", {}).setdefault("resourceVersion", resource_version)
         result = api.patch_cluster_custom_object(
             group=trainer_constants.GROUP,
             version=trainer_constants.VERSION,

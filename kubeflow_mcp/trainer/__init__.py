@@ -127,8 +127,8 @@ CLIENT_TOOL_DESCRIPTIONS: dict[str, str] = {
     "inspect_crd": "List Trainer CRDs or get details for a specific one. Pass name= for details.",
     "inspect_controller": "Inspect controller pod. Pass view='logs' or 'events'. Auto-discovers namespace.",
     "patch_runtime": (
-        "Merge patch on a ClusterTrainingRuntime. Name-keyed lists (replicatedJobs, containers, "
-        "initContainers, env, volumes, volumeMounts) merge by name: unmentioned entries are kept, "
+        "Merge patch on a ClusterTrainingRuntime. Keyed lists (replicatedJobs, containers, "
+        "initContainers, env, volumes by name; volumeMounts by mountPath) merge by key: unmentioned entries are kept, "
         "a partial list cannot remove one, listing all entries applies their order, and [] clears the list. "
         "Set confirmed=True to apply."
     ),
@@ -402,7 +402,7 @@ PLATFORM ADMINISTRATION:
 - inspect_crd() -> list all Trainer CRDs; inspect_crd(name) -> get schema, versions, conditions
 - inspect_controller(view="logs") -> read trainer-controller-manager pod logs (auto-discovers namespace; override via KUBEFLOW_MCP_CONTROLLER_NAMESPACE)
 - inspect_controller(view="events") -> K8s events for controller pod
-- patch_runtime(name, patch, confirmed=True) -> merge patch on ClusterTrainingRuntime; lists of named entries (replicatedJobs, containers, env, volumes) merge by name (update images, add volumes, change defaults)
+- patch_runtime(name, patch, confirmed=True) -> merge patch on ClusterTrainingRuntime; lists of keyed entries (replicatedJobs, containers, env, volumes by name; volumeMounts by mountPath) merge by key (update images, add volumes, change defaults)
 - create_runtime(name, spec, confirmed=True) -> create new ClusterTrainingRuntime
 - delete_runtime(name, confirmed=True) -> delete runtime; lists dependent TrainJobs as warning before deletion""",
     },
