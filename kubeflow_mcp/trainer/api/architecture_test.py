@@ -126,6 +126,27 @@ def test_malformed_namespace_is_rejected_before_any_api_request(tool):
     call_api.assert_not_called()
 
 
+def test_no_tool_name_is_exported_by_two_clients():
+    """Every client shares one flat MCP tool namespace.
+
+    FastMCP's default on a duplicate name is to log a warning and replace the
+    earlier tool, so a clash (a pipelines client's ``list_experiments`` next to
+    the optimizer's, say) would silently shadow a tool instead of failing.
+    """
+    import importlib
+    from collections import defaultdict
+
+    from kubeflow_mcp.core.server import CLIENT_MODULES
+
+    owners: dict[str, list[str]] = defaultdict(list)
+    for client, path in CLIENT_MODULES.items():
+        for tool in getattr(importlib.import_module(path), "TOOLS", []):
+            owners[tool.__name__].append(client)
+
+    clashes = {name: clients for name, clients in owners.items() if len(clients) > 1}
+    assert not clashes, f"tool names exported by more than one client: {clashes}"
+
+
 # ─── Persona gating ────────────────────────────────────────────────────────
 
 
@@ -443,9 +464,34 @@ class TestResourceLoading:
 
 
 class TestPhaseToSection:
-    def test_all_phases_mapped(self):
-        for phase in TOOL_PHASES:
-            assert phase in PHASE_TO_SECTION, f"Phase '{phase}' not in PHASE_TO_SECTION"
+    def test_all_trainer_phases_mapped(self):
+        """Each client maps only its own phases.
+
+        TOOL_PHASES is global and also carries other clients' phases (e.g. the
+        optimizer's), so assert against the phases this client actually owns
+        rather than every key in the registry.
+        """
+        trainer_phases = {TOOL_TO_PHASE[t.__name__] for t in TOOLS if t.__name__ in TOOL_TO_PHASE}
+        unmapped = trainer_phases - set(PHASE_TO_SECTION)
+        assert not unmapped, f"Trainer phases missing from PHASE_TO_SECTION: {unmapped}"
+
+    def test_every_phase_belongs_to_some_client(self):
+        """No phase may be orphaned: every entry in the global registry must be
+        claimed by a loaded client's PHASE_TO_SECTION."""
+        import importlib
+
+        from kubeflow_mcp.core.server import CLIENT_MODULES
+
+        claimed: set[str] = set()
+        for path in CLIENT_MODULES.values():
+            try:
+                mod = importlib.import_module(path)
+            except ImportError:
+                continue
+            claimed |= set(getattr(mod, "PHASE_TO_SECTION", {}))
+
+        orphaned = set(TOOL_PHASES) - claimed - {"health"}
+        assert not orphaned, f"Phases not claimed by any client: {orphaned}"
 
     def test_discovery_maps_to_none(self):
         assert PHASE_TO_SECTION["discovery"] is None

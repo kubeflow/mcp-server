@@ -1,4 +1,4 @@
-# Copyright The Kubeflow Authors
+# Copyright The Kubeflow Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,50 +12,52 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Optimizer API tools - Ready for contributors.
+"""Optimizer API tools."""
 
-This package will contain MCP tools for Katib hyperparameter optimization.
+from kubeflow_mcp.optimizer.api.discovery import (
+    get_experiment,
+    get_experiment_status,
+    get_successful_trials,
+    get_trial,
+    list_experiments,
+    list_suggestions,
+)
+from kubeflow_mcp.optimizer.api.lifecycle import (
+    delete_experiment,
+    update_experiment,
+)
+from kubeflow_mcp.optimizer.api.monitoring import (
+    get_best_trial,
+    get_experiment_events,
+    get_experiment_trial_logs,
+    get_experiment_trials,
+    get_suggestion,
+    wait_for_experiment,
+)
+from kubeflow_mcp.optimizer.api.optimization import (
+    create_experiment_from_spec,
+    create_hpo_experiment,
+)
+from kubeflow_mcp.optimizer.api.planning import (
+    katib_pre_flight,
+)
 
-Suggested file structure:
-    api/
-    ├── __init__.py         # This file - exports all tools
-    ├── optimization.py     # create_optimization_job
-    ├── discovery.py        # list_optimization_jobs, get_optimization_job
-    ├── monitoring.py       # get_optimization_logs, get_optimization_events, wait_for_optimization
-    └── lifecycle.py        # delete_optimization_job
-
-Example tool implementation:
-
-    def create_optimization_job(
-        objective: str,
-        search_space: dict,
-        algorithm: str = "random",
-        max_trials: int = 10,
-        parallel_trials: int = 2,
-        confirmed: bool = False,
-    ) -> dict:
-        '''Create a hyperparameter optimization experiment.
-
-        Args:
-            objective: Metric to optimize (e.g., "accuracy", "loss")
-            search_space: Parameter ranges to explore
-            algorithm: Search algorithm (random, grid, bayesian, hyperband)
-            max_trials: Maximum number of trials
-            parallel_trials: Trials to run in parallel
-            confirmed: Set True to submit (preview mode by default)
-
-        Returns:
-            Preview config or job creation result
-        '''
-        if not confirmed:
-            return PreviewResponse(
-                status="preview",
-                config={...},
-            ).model_dump()
-
-        client = get_optimizer_client()
-        job_name = client.optimize(...)
-        return ToolResponse(data={"job_id": job_name}).model_dump()
-"""
-
-__all__: list[str] = []
+__all__ = [
+    "katib_pre_flight",
+    "list_experiments",
+    "get_experiment",
+    "get_experiment_status",
+    "get_trial",
+    "get_successful_trials",
+    "list_suggestions",
+    "get_experiment_trials",
+    "get_best_trial",
+    "get_suggestion",
+    "wait_for_experiment",
+    "get_experiment_trial_logs",
+    "get_experiment_events",
+    "create_hpo_experiment",
+    "create_experiment_from_spec",
+    "delete_experiment",
+    "update_experiment",
+]
