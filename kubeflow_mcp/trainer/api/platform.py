@@ -461,6 +461,12 @@ def create_runtime(
 
     except Exception as e:
         logger.warning("create_runtime(%s) failed: %s", name, e, exc_info=True)
+        if getattr(e, "status", None) == 403:
+            return ToolError(
+                error=f"Permission denied while creating ClusterTrainingRuntime '{name}'",
+                error_code=ErrorCode.PERMISSION_DENIED,
+                details=exception_details(e),
+            ).model_dump()
         return ToolError(
             error=str(e),
             error_code=ErrorCode.KUBERNETES_ERROR,

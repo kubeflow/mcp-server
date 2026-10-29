@@ -250,6 +250,22 @@ def test_create_runtime_name_collision_returns_kubernetes_error(mock_k8s_apis):
     assert error["details"]["message"] == str(collision)
 
 
+def test_create_runtime_permission_denied_returns_permission_error(mock_k8s_apis):
+    api = mock_k8s_apis["custom"]
+    api.create_cluster_custom_object.side_effect = ApiException(status=403, reason="Forbidden")
+
+    result = create_runtime(
+        "restricted-runtime",
+        spec={"template": {}},
+        confirmed=True,
+    )
+
+    error = verify_tool_error(result, error_code=PERMISSION_DENIED)
+    assert "Permission denied" in error["error"]
+    assert error["details"]["exception"] == "ApiException"
+    assert "403" in error["details"]["message"]
+
+
 def test_delete_runtime_preview_lists_dependent_trainjobs(mock_k8s_apis):
     api = mock_k8s_apis["custom"]
     api.list_cluster_custom_object.return_value = {
