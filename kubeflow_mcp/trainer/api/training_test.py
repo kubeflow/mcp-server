@@ -1130,3 +1130,99 @@ class TestBuildRuntimePatch:
         assert [type(o).__name__ for o in options] == ["Labels", "Annotations"]
         assert options[0].labels == {"team": "ml"}
         assert options[1].annotations == {"owner": "alice"}
+
+
+# ─── Top-level Hugging Face Dataset Workaround (#32, #494) ───────────────────
+
+
+class TestFineTuneHuggingFaceDatasetWorkaround:
+    """Verify fine_tune handles top-level Hugging Face dataset URIs with SDK 0.5.0."""
+
+    @pytest.fixture
+    def mock_backend(self):
+        from unittest.mock import MagicMock
+
+        from kubeflow.trainer.backends.kubernetes.backend import KubernetesBackend
+        from kubeflow.trainer.types.types import TrainerType
+
+        backend = KubernetesBackend.__new__(KubernetesBackend)
+        backend.namespace = "default"
+        backend.custom_api = MagicMock()
+
+        fake_runtime = MagicMock()
+        fake_runtime.name = "torchtune-llama3.2-1b"
+        fake_runtime.kind.value = "ClusterTrainingRuntime"
+        fake_runtime.trainer.trainer_type = TrainerType.BUILTIN_TRAINER
+        fake_runtime.trainer.command = ["tune", "run"]
+        backend.get_runtime = MagicMock(return_value=fake_runtime)
+        return backend
+
+    @patch("kubeflow_mcp.trainer.api.training._check_hf_repos_exist", return_value=None)
+    @patch("kubeflow_mcp.trainer.api.training.check_namespace_allowed", return_value=None)
+    def test_top_level_hf_dataset_reaches_creation_without_trainer_args_error(
+        self, _ns, _hf, mock_backend
+    ):
+        with patch("kubeflow_mcp.trainer.api.training._get_client", return_value=mock_backend):
+            result = fine_tune(
+                model="hf://meta-llama/Llama-3.2-1B",
+                dataset="hf://tatsu-lab/alpaca",
+                runtime="torchtune-llama3.2-1b",
+                namespace="default",
+                confirmed=True,
+            )
+
+        assert result["success"] is True
+        mock_backend.custom_api.create_namespaced_custom_object.assert_called_once()
+        train_job = mock_backend.custom_api.create_namespaced_custom_object.call_args[0][4]
+        args = train_job["spec"]["trainer"]["args"]
+
+        assert "dataset.source=/workspace/dataset" in args
+        assert "dataset.data_dir=null" in args
+        assert not any(
+            a.startswith("dataset.data_dir=/workspace") and a.endswith("/.") for a in args
+        )
+        assert "batch_size=4" in args
+        assert "epochs=1" in args
+        assert "model.lora_rank=8" in args
+        assert "model.lora_alpha=16" in args
+
+    @patch("kubeflow_mcp.trainer.api.training._check_hf_repos_exist", return_value=None)
+    @patch("kubeflow_mcp.trainer.api.training.check_namespace_allowed", return_value=None)
+    def test_top_level_hf_dataset_preserves_explicit_dataset_source(self, _ns, _hf, mock_backend):
+        with patch("kubeflow_mcp.trainer.api.training._get_client", return_value=mock_backend):
+            result = fine_tune(
+                model="hf://meta-llama/Llama-3.2-1B",
+                dataset="hf://tatsu-lab/alpaca",
+                runtime="torchtune-llama3.2-1b",
+                dataset_source="json",
+                namespace="default",
+                confirmed=True,
+            )
+
+        assert result["success"] is True
+        train_job = mock_backend.custom_api.create_namespaced_custom_object.call_args[0][4]
+        args = train_job["spec"]["trainer"]["args"]
+
+        assert "dataset.source=json" in args
+        assert "dataset.data_dir=/workspace/dataset" in args
+        assert "dataset.data_dir=null" not in args
+        assert "dataset.source=/workspace/dataset" not in args
+
+    @patch("kubeflow_mcp.trainer.api.training._check_hf_repos_exist", return_value=None)
+    @patch("kubeflow_mcp.trainer.api.training.check_namespace_allowed", return_value=None)
+    def test_s3_dataset_does_not_apply_hf_workaround(self, _ns, _hf, mock_backend):
+        with patch("kubeflow_mcp.trainer.api.training._get_client", return_value=mock_backend):
+            result = fine_tune(
+                model="hf://meta-llama/Llama-3.2-1B",
+                dataset="s3://my-bucket/dataset",
+                runtime="torchtune-llama3.2-1b",
+                namespace="default",
+                confirmed=True,
+            )
+
+        assert result["success"] is True
+        train_job = mock_backend.custom_api.create_namespaced_custom_object.call_args[0][4]
+        args = train_job["spec"]["trainer"]["args"]
+
+        assert "dataset.source=/workspace/dataset" not in args
+        assert "dataset.data_dir=null" not in args
