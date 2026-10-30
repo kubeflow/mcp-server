@@ -25,29 +25,6 @@ from kubeflow_mcp.core.policy import get_effective_persona, set_effective_person
 
 WRITE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
-# Minimal valid arguments that get each mutating tool as far as its preview.
-# A new mutating tool fails test_every_mutating_tool_has_gate_arguments until
-# it is added here, so the gate check cannot silently skip it.
-GATE_ARGS: dict[str, dict[str, Any]] = {
-    "create_runtime": {"name": "rt-a", "spec": {"template": {}}},
-    "delete_runtime": {"name": "rt-a"},
-    "delete_training_job": {"name": "job-a"},
-    "fine_tune": {"model": "hf://google/gemma-2b", "dataset": "hf://tatsu-lab/alpaca"},
-    "patch_runtime": {"name": "rt-a", "patch": {"metadata": {"labels": {"a": "b"}}}},
-    "run_container_training": {"image": "busybox:1.36"},
-    "run_custom_training": {"script": "print('hi')"},
-    "update_training_job": {"name": "job-a", "action": "suspend"},
-}
-
-# Valid arguments for each read-only tool that some persona hides, so the persona
-# judges also try hidden tools that only read. A new one fails
-# test_every_hidden_read_only_tool_has_arguments until it is added here.
-READ_ARGS: dict[str, dict[str, Any]] = {
-    "inspect_controller": {},
-    "inspect_crd": {},
-    "wait_for_training": {"name": "job-a", "timeout_seconds": 1, "polling_interval": 1},
-}
-
 
 @dataclass
 class FakeKubernetes:
@@ -94,11 +71,3 @@ def _restore_persona():
     previous = get_effective_persona()
     yield
     set_effective_persona(previous)
-
-
-def payload(result: Any) -> dict[str, Any]:
-    """Return the tool's response dict from an MCP CallToolResult."""
-    body = result.structured_content or {}
-    if set(body) == {"result"}:
-        body = body["result"]
-    return body
