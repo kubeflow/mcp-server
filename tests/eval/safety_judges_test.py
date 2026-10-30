@@ -25,14 +25,16 @@ tool at a time:
   be called, in every tool mode
 """
 
+import importlib
 from typing import Any
 
 import pytest
 from fastmcp import Client
 
+from kubeflow_mcp.core.health import HEALTH_TOOLS
 from kubeflow_mcp.core.policy import get_allowed_tools
 from kubeflow_mcp.core.server import CLIENT_MODULES, create_server
-from tests.eval.conftest import GATE_ARGS, READ_ARGS, payload
+from tests.eval.helpers import GATE_ARGS, READ_ARGS, payload
 
 # Every registered client is loaded, not only the default one, so a new client's
 # tools are judged as soon as it is added to CLIENT_MODULES.
@@ -51,6 +53,15 @@ def is_preview(name: str, body: dict[str, Any]) -> bool:
     if body.get("status") == "preview":
         return True
     return name in LEGACY_PREVIEW_TOOLS and body.get("data", {}).get("action") == "preview"
+
+
+def _registered_tools() -> set[str]:
+    """Names of every tool the loaded clients and the server layer register."""
+    names = {func.__name__ for func in HEALTH_TOOLS}
+    for module_path in CLIENT_MODULES.values():
+        tools = getattr(importlib.import_module(module_path), "TOOLS", [])
+        names |= {func.__name__ for func in tools}
+    return names
 
 
 async def _list_tools(persona: str) -> dict[str, Any]:
@@ -121,8 +132,8 @@ async def test_proxied_unconfirmed_call_previews_without_writing(mode, tool_name
 async def test_persona_exposes_exactly_its_allowlist(persona):
     exposed = set(await _list_tools(persona))
     allowed = get_allowed_tools(persona)
-    if allowed is None:
-        return
+    if allowed is None:  # unrestricted persona: it must see every registered tool
+        allowed = _registered_tools()
     assert exposed == allowed
 
 
