@@ -121,7 +121,10 @@ POST /a2a                           # A2A JSON-RPC delegation, requires auth whe
 ```
 
 The cards carry identity and high-level capabilities only. They never list tools or
-schemas; the concrete tool surface depends on persona and policy and stays behind auth.
+schemas; the concrete tool surface stays behind auth. The Agent Card lists a skill only
+when this server would actually serve it, so a server started with `--persona readonly`
+does not advertise fine-tuning. The persona is fixed per server rather than per caller,
+so this reveals nothing about any individual caller.
 
 Orchestrators delegate with a standard `message/send` request carrying a structured
 `DataPart`, the same `{tool, arguments}` shape as an MCP tool call:

@@ -62,7 +62,7 @@ import inspect
 import json
 import logging
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from typing import Any
 
 from fastmcp import FastMCP
@@ -172,17 +172,25 @@ def _safe_id(body: Any) -> Any:
 
 
 def build_skills(
-    loaded_clients: list[str], loaded_modules: Mapping[str, Any] | None = None
+    loaded_clients: list[str],
+    loaded_modules: Mapping[str, Any] | None = None,
+    available_tools: Collection[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Build the card's skill list from the loaded client modules.
 
     Each client module owns its own ``A2A_SKILLS``, the same way it owns
     ``CLIENT_RESOURCES`` and ``CLIENT_TOOL_DESCRIPTIONS``. Core keeps no
-    defaults, so a client that serves no tools contributes no skills and the
-    public card cannot advertise a capability ``/a2a`` would refuse.
+    defaults, so a client that serves no tools contributes no skills.
 
-    Skills reflect what this deployment loaded, not what the caller's persona
-    may reach — the card is public, so it stays persona-agnostic.
+    A skill is listed only when at least one of the tools behind it survives
+    this server's persona and policy filtering. The persona is fixed for the
+    whole server rather than per caller, so filtering here reveals nothing
+    about any individual caller, and it stops the card advertising a
+    capability that ``/a2a`` would then refuse.
+
+    Each skill's backing tools are declared in a private ``_tools`` key.
+    Every underscore-prefixed key is stripped before the skill reaches the
+    card, so tool names stay off a document served without auth.
     """
     skills: list[dict[str, Any]] = []
     for client in loaded_clients:
@@ -190,7 +198,11 @@ def build_skills(
         if module is None:
             continue
         for skill in getattr(module, "A2A_SKILLS", ()) or ():
-            skills.append(dict(skill))
+            backing = skill.get("_tools") or ()
+            if available_tools is not None and backing:
+                if not any(tool in available_tools for tool in backing):
+                    continue
+            skills.append({k: v for k, v in skill.items() if not k.startswith("_")})
     return skills
 
 
@@ -199,6 +211,7 @@ def build_agent_card(
     url: str,
     loaded_clients: list[str],
     loaded_modules: Mapping[str, Any] | None = None,
+    available_tools: Collection[str] | None = None,
     auth_required: bool = False,
 ) -> dict[str, Any]:
     """Build the A2A Agent Card.
@@ -208,6 +221,8 @@ def build_agent_card(
             call the agent, so it must be absolute rather than a path.
         loaded_clients: Client modules loaded by the server.
         loaded_modules: Imported client modules, consulted for ``A2A_SKILLS``.
+        available_tools: Tool names this server will actually serve, used to
+            drop skills it would refuse. None lists every declared skill.
         auth_required: Whether ``/a2a`` enforces a bearer token, which decides
             if the card advertises a security scheme.
 
@@ -234,7 +249,7 @@ def build_agent_card(
         },
         "defaultInputModes": ["application/json"],
         "defaultOutputModes": ["application/json"],
-        "skills": build_skills(loaded_clients, loaded_modules),
+        "skills": build_skills(loaded_clients, loaded_modules, available_tools),
     }
 
     if auth_required:
@@ -483,6 +498,7 @@ def register_a2a_routes(
             url=f"{base}{A2A_PATH}",
             loaded_clients=clients,
             loaded_modules=loaded_modules,
+            available_tools=set(tool_map),
             auth_required=auth_required,
         )
         return JSONResponse(card, headers=dict(_CARD_HEADERS))

@@ -327,6 +327,11 @@ CLIENT_RESOURCES: dict[str, tuple[str, str]] = {
 # they take. A client module that serves no tools exports nothing here, so the
 # card cannot advertise a capability the delegation endpoint will not serve.
 
+# ``_tools`` names the tools behind each skill so the card can drop a skill
+# this server will not serve. It is private metadata: core strips every
+# underscore-prefixed key before serving, so tool names stay off the public
+# card.
+
 A2A_SKILLS: list[dict[str, Any]] = [
     {
         "id": "fine-tuning",
@@ -336,12 +341,14 @@ A2A_SKILLS: list[dict[str, Any]] = [
             "including LoRA configuration and resource planning."
         ),
         "tags": ["training", "fine-tuning", "llm"],
+        "_tools": ["fine_tune"],
     },
     {
         "id": "distributed-training",
         "name": "Distributed training",
         "description": "Submit and manage multi-node distributed training jobs on Kubernetes.",
         "tags": ["training", "distributed", "kubernetes"],
+        "_tools": ["run_custom_training", "run_container_training"],
     },
     {
         "id": "job-monitoring",
@@ -350,6 +357,12 @@ A2A_SKILLS: list[dict[str, Any]] = [
             "Inspect status, logs, and events for training jobs, and diagnose failures."
         ),
         "tags": ["monitoring", "observability", "logs"],
+        "_tools": [
+            "list_training_jobs",
+            "get_training_job",
+            "get_training_logs",
+            "get_training_events",
+        ],
     },
 ]
 

@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 from typing import Any
 
 import pytest
@@ -170,6 +171,74 @@ def test_agent_card_reflects_loaded_clients() -> None:
     assert "job-monitoring" in skill_ids
 
 
+def test_agent_card_lists_only_skills_this_server_will_serve() -> None:
+    """A readonly server must not advertise fine-tuning and then refuse it."""
+    from kubeflow_mcp.core.policy import get_allowed_tools
+
+    readonly = build_agent_card(
+        url="http://x/a2a",
+        loaded_clients=["trainer"],
+        loaded_modules=_load_modules(["trainer"]),
+        available_tools=get_allowed_tools("readonly"),
+    )
+    scientist = build_agent_card(
+        url="http://x/a2a",
+        loaded_clients=["trainer"],
+        loaded_modules=_load_modules(["trainer"]),
+        available_tools=get_allowed_tools("data-scientist"),
+    )
+
+    readonly_ids = {skill["id"] for skill in readonly["skills"]}
+    scientist_ids = {skill["id"] for skill in scientist["skills"]}
+
+    assert "job-monitoring" in readonly_ids
+    assert "fine-tuning" not in readonly_ids
+    assert "fine-tuning" in scientist_ids
+
+
+def test_agent_card_never_exposes_backing_tool_names() -> None:
+    """``_tools`` is private metadata; the card is served without auth."""
+    card = build_agent_card(
+        url="http://x/a2a",
+        loaded_clients=["trainer"],
+        loaded_modules=_load_modules(["trainer"]),
+        available_tools=None,
+    )
+
+    for skill in card["skills"]:
+        assert not any(key.startswith("_") for key in skill), skill
+    assert "fine_tune" not in json.dumps(card)
+
+
+def test_agent_card_lists_every_skill_when_no_tool_map_is_given() -> None:
+    card = build_agent_card(
+        url="http://x/a2a",
+        loaded_clients=["trainer"],
+        loaded_modules=_load_modules(["trainer"]),
+    )
+
+    assert {skill["id"] for skill in card["skills"]} == {
+        "fine-tuning",
+        "distributed-training",
+        "job-monitoring",
+    }
+
+
+def test_served_card_matches_the_tools_the_endpoint_will_accept() -> None:
+    """The card and the delegation boundary come from the same tool map."""
+    from kubeflow_mcp.core.server import create_server
+
+    mcp = create_server(persona="readonly")
+    with TestClient(mcp.http_app(transport="streamable-http")) as client:
+        card = client.get(AGENT_CARD_PATH).json()
+        refused = client.post(
+            A2A_PATH, json=_send("fine_tune", {"model": "m", "dataset": "d"})
+        ).json()
+
+    assert "fine-tuning" not in {skill["id"] for skill in card["skills"]}
+    assert refused["error"]["code"] == -32004
+
+
 def test_agent_card_skills_come_from_the_client_module() -> None:
     """Core holds no skill defaults; each client module owns its own."""
     from kubeflow_mcp.core import a2a as a2a_module
@@ -184,7 +253,10 @@ def test_agent_card_skills_come_from_the_client_module() -> None:
         loaded_modules={"trainer": trainer_module},
     )
 
-    assert card["skills"] == [dict(skill) for skill in trainer_module.A2A_SKILLS]
+    assert card["skills"] == [
+        {k: v for k, v in skill.items() if not k.startswith("_")}
+        for skill in trainer_module.A2A_SKILLS
+    ]
 
 
 def test_agent_card_advertises_nothing_for_a_client_that_serves_no_tools() -> None:
