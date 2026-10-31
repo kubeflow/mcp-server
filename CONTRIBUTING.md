@@ -130,6 +130,11 @@ We use [Conventional Commits](https://www.conventionalcommits.org/):
 Read [`docs/CONVENTIONS.md`](docs/CONVENTIONS.md) first — reference implementation:
 [`kubeflow_mcp/trainer/`](kubeflow_mcp/trainer/).
 
+## AI Agent Resources
+
+[`.agents/README.md`](.agents/README.md) documents the shared `review-pr` skill and its subagent
+prompts, which run a self-review of local changes before you open a pull request.
+
 ## Areas Open for Contribution
 
 - **OptimizerClient tools** - Hyperparameter optimization integration
