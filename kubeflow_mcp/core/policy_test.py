@@ -345,6 +345,11 @@ def write_policy_yaml(tmp_policy_file):
             id="persona-inherit-empty",
         ),
         pytest.param(
+            "personas:\n  42: {}\n",
+            r"'personas\.42' must be a persona name, got int 42",
+            id="persona-name-non-string",
+        ),
+        pytest.param(
             "- deny\n",
             r"the top level must be a mapping, got list",
             id="top-level-list",
@@ -391,6 +396,56 @@ def test_unknown_policy_category_fails_closed(write_policy_yaml, key):
         PolicyFileError,
         match=r"unknown category 'trainig'.*Valid categories:.*training",
     ) as exc_info:
+        _load_policy_file()
+    assert str(policy_path) in str(exc_info.value)
+
+
+def test_known_persona_inherit_is_accepted(write_policy_yaml):
+    write_policy_yaml(
+        "personas:\n  custom-a:\n    inherit: readonly\n  custom-b:\n    inherit: custom-a\n"
+    )
+
+    loaded = _load_policy_file()
+    assert loaded["personas"]["custom-a"]["inherit"] == "readonly"
+    assert loaded["personas"]["custom-b"]["inherit"] == "custom-a"
+
+
+def test_unknown_persona_inherit_fails_closed(write_policy_yaml):
+    policy_path = write_policy_yaml("personas:\n  auditor:\n    inherit: data-scinetist\n")
+
+    with pytest.raises(
+        PolicyFileError,
+        match=r"unknown persona 'data-scinetist' in 'personas\.auditor\.inherit'.*Valid personas:",
+    ) as exc_info:
+        _load_policy_file()
+    assert str(policy_path) in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    ("yaml_text", "match_pattern"),
+    [
+        (
+            "personas:\n  auditor:\n    inherit: auditor\n",
+            r"inheritance cycle detected in 'personas': auditor -> auditor",
+        ),
+        (
+            "personas:\n  role-a:\n    inherit: role-b\n  role-b:\n    inherit: role-a\n",
+            r"inheritance cycle detected in 'personas': role-a -> role-b -> role-a",
+        ),
+        (
+            "personas:\n  p1:\n    inherit: p2\n  p2:\n    inherit: p3\n  p3:\n    inherit: p1\n",
+            r"inheritance cycle detected in 'personas': p1 -> p2 -> p3 -> p1",
+        ),
+        (
+            "personas:\n  readonly:\n    inherit: data-scientist\n",
+            r"inheritance cycle detected in 'personas': readonly -> data-scientist -> readonly",
+        ),
+    ],
+)
+def test_persona_inheritance_cycle_fails_closed(write_policy_yaml, yaml_text, match_pattern):
+    policy_path = write_policy_yaml(yaml_text)
+
+    with pytest.raises(PolicyFileError, match=match_pattern) as exc_info:
         _load_policy_file()
     assert str(policy_path) in str(exc_info.value)
 
