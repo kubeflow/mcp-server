@@ -239,6 +239,10 @@ def _validate_policy_section(policy: dict[str, Any], path: Path) -> None:
 
 def _validate_personas_section(personas: dict[str, Any], path: Path) -> None:
     """Check each custom persona in place."""
+    for name in personas:
+        if not isinstance(name, str):
+            raise _shape_error(path, f"personas.{name}", "a persona name", name)
+
     valid_personas = ", ".join(sorted(set(PERSONAS) | set(personas)))
 
     for name, body in personas.items():
@@ -264,14 +268,19 @@ def _validate_personas_section(personas: dict[str, Any], path: Path) -> None:
     for name in personas:
         seen = [name]
         curr = personas[name].get("inherit")
-        while curr and curr in personas:
+        while curr:
             if curr in seen:
                 cycle_path = " -> ".join(seen + [curr])
                 raise PolicyFileError(
                     f"Invalid policy file {path}: inheritance cycle detected in 'personas': {cycle_path}"
                 )
             seen.append(curr)
-            curr = personas[curr].get("inherit")
+            if curr in personas:
+                curr = personas[curr].get("inherit")
+            elif curr in PERSONAS:
+                curr = PERSONAS[curr].get("inherit")
+            else:
+                break
 
 
 def _validate_policy_shape(data: Any, path: Path) -> dict[str, Any]:

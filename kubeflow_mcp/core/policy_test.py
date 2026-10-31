@@ -345,6 +345,11 @@ def write_policy_yaml(tmp_policy_file):
             id="persona-inherit-empty",
         ),
         pytest.param(
+            "personas:\n  42: {}\n",
+            r"'personas\.42' must be a persona name, got int 42",
+            id="persona-name-non-string",
+        ),
+        pytest.param(
             "- deny\n",
             r"the top level must be a mapping, got list",
             id="top-level-list",
@@ -430,6 +435,10 @@ def test_unknown_persona_inherit_fails_closed(write_policy_yaml):
         (
             "personas:\n  p1:\n    inherit: p2\n  p2:\n    inherit: p3\n  p3:\n    inherit: p1\n",
             r"inheritance cycle detected in 'personas': p1 -> p2 -> p3 -> p1",
+        ),
+        (
+            "personas:\n  readonly:\n    inherit: data-scientist\n",
+            r"inheritance cycle detected in 'personas': readonly -> data-scientist -> readonly",
         ),
     ],
 )
