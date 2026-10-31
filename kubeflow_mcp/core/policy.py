@@ -239,17 +239,39 @@ def _validate_policy_section(policy: dict[str, Any], path: Path) -> None:
 
 def _validate_personas_section(personas: dict[str, Any], path: Path) -> None:
     """Check each custom persona in place."""
+    valid_personas = ", ".join(sorted(set(PERSONAS) | set(personas)))
+
     for name, body in personas.items():
         key = f"personas.{name}"
         body = _mapping_or_empty(body, key, path)
         personas[name] = body
 
-        if "inherit" in body and not isinstance(body["inherit"], str):
-            raise _shape_error(path, f"{key}.inherit", "a persona name", body["inherit"])
+        if "inherit" in body:
+            inherit_target = body["inherit"]
+            if not isinstance(inherit_target, str):
+                raise _shape_error(path, f"{key}.inherit", "a persona name", inherit_target)
+            if inherit_target not in PERSONAS and inherit_target not in personas:
+                raise PolicyFileError(
+                    f"Invalid policy file {path}: unknown persona {inherit_target!r} in '{key}.inherit'. "
+                    f"Valid personas: {valid_personas}"
+                )
 
         tools = body.get("tools")
         if tools is not None and tools != "*":
             _check_string_list(tools, f"{key}.tools", path)
+
+    # Detect inheritance cycles at load time so invalid policies fail closed
+    for name in personas:
+        seen = [name]
+        curr = personas[name].get("inherit")
+        while curr and curr in personas:
+            if curr in seen:
+                cycle_path = " -> ".join(seen + [curr])
+                raise PolicyFileError(
+                    f"Invalid policy file {path}: inheritance cycle detected in 'personas': {cycle_path}"
+                )
+            seen.append(curr)
+            curr = personas[curr].get("inherit")
 
 
 def _validate_policy_shape(data: Any, path: Path) -> dict[str, Any]:
