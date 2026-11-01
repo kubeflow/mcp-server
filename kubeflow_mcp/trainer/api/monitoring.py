@@ -93,9 +93,17 @@ def _collect_log_lines(
         )
         # Same container the SDK reads for the step: "node-1" -> "node".
         container = re.sub(r"-\d+$", "", step)
-        for pod in pods.items:
-            if not _is_pod_for_step(pod, step):
-                continue
+        # Like the SDK's step discovery, prefer the newest pod when a replaced
+        # pod still has the same JobSet role and completion index.
+        sorted_pods = sorted(
+            (pod for pod in pods.items if _is_pod_for_step(pod, step)),
+            key=lambda p: (
+                getattr(p.metadata, "creation_timestamp", None) is not None,
+                getattr(p.metadata, "creation_timestamp", None),
+            ),
+            reverse=True,
+        )
+        for pod in sorted_pods:
             try:
                 raw = v1.read_namespaced_pod_log(
                     name=pod.metadata.name,
@@ -113,6 +121,9 @@ def _collect_log_lines(
                     pod.metadata.name,
                     e,
                 )
+            # Empty/unavailable previous logs must not resurrect an older pod's
+            # failure and attribute it to the current attempt.
+            break
     except Exception as e:
         logger.debug(
             "Previous-log fallback failed for job %s (namespace=%s): %s",
@@ -201,6 +212,9 @@ def get_training_logs(
     max_lines: int | None = None,
 ) -> dict[str, Any]:
     """Get pod logs from a training job.
+
+    If active logs are empty, try previous-container logs from the newest pod
+    for the requested step, excluding replaced pods from older attempts.
 
     Args:
         name: TrainJob name.

@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -239,6 +240,52 @@ def _make_mock_client(**method_returns):
 
 
 class TestGetTrainingLogs:
+    @pytest.mark.parametrize(
+        "role,step", [("node", "node-0"), ("model-initializer", "model-initializer")]
+    )
+    @pytest.mark.parametrize("newest_first", [False, True])
+    @pytest.mark.parametrize(
+        "current_logs", ["current crash", "", RuntimeError("no previous container")]
+    )
+    def test_fallback_does_not_read_replaced_pod_logs(
+        self, role: str, step: str, newest_first: bool, current_logs: str | Exception
+    ) -> None:
+        old = _trainjob_pod("my-job", role, index=0, name="old-pod")
+        new = _trainjob_pod("my-job", role, index=0, name="new-pod")
+        old.metadata.creation_timestamp = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        new.metadata.creation_timestamp = datetime(2026, 1, 2, tzinfo=timezone.utc)
+        pods = [new, old] if newest_first else [old, new]
+        api = MagicMock()
+        api.list_namespaced_pod.return_value = SimpleNamespace(items=pods)
+
+        def read_log(*, name: str, **kwargs: object) -> str:
+            if name == "old-pod":
+                return "CUDA out of memory: obsolete failure"
+            if isinstance(current_logs, Exception):
+                raise current_logs
+            return current_logs
+
+        api.read_namespaced_pod_log.side_effect = read_log
+        with (
+            patch(PATCH_CLIENT, return_value=_make_mock_client(get_job_logs=[])),
+            patch(PATCH_NS_CHECK, return_value=None),
+            patch(PATCH_EFF_NS, return_value="default"),
+            patch(PATCH_CORE_V1, return_value=api),
+        ):
+            result = get_training_logs("my-job", step=step)
+
+        assert result["success"] is True
+        expected = current_logs if isinstance(current_logs, str) else ""
+        assert result["data"]["logs"] == expected
+        assert "failure_hint" not in result["data"]
+        api.read_namespaced_pod_log.assert_called_once_with(
+            name="new-pod",
+            namespace="default",
+            container=role,
+            previous=True,
+            tail_lines=MAX_LOG_LINES,
+        )
+
     @patch(PATCH_NS_CHECK, return_value=None)
     @patch(PATCH_CLIENT)
     def test_success(self, mock_client_fn, _ns):
