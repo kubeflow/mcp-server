@@ -93,8 +93,8 @@ def _collect_log_lines(
         )
         # Same container the SDK reads for the step: "node-1" -> "node".
         container = re.sub(r"-\d+$", "", step)
-        # Like the SDK's step discovery, prefer the newest pod when a replaced
-        # pod still has the same JobSet role and completion index.
+        # Prefer the newest pod when a replaced pod still has the same
+        # JobSet role and completion index.
         sorted_pods = sorted(
             (pod for pod in pods.items if _is_pod_for_step(pod, step)),
             key=lambda p: (
