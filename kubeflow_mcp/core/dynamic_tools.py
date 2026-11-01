@@ -44,6 +44,7 @@ from kubeflow_mcp.common.constants import (
     ErrorCode,
     record_tool_result,
 )
+from kubeflow_mcp.common.types import ToolError, exception_details
 from kubeflow_mcp.core.resilience import get_breaker
 
 logger = logging.getLogger(__name__)
@@ -51,6 +52,33 @@ logger = logging.getLogger(__name__)
 # Populated by init_dynamic_tools() after server knows which tools are loaded.
 TOOL_REGISTRY: dict[str, dict[str, Any]] = {}
 TOOL_HIERARCHY: dict[str, list[str]] = {}
+
+# The mode the server registered meta-tools for, recorded by init_dynamic_tools().
+# Recovery hints must name a tool the agent can actually call, and the two modes
+# expose different meta-tools: describe_tools and list_tools exist only in
+# progressive, find_tools only in semantic.
+_active_mode: str = "progressive"
+
+
+def _unknown_tool_hint() -> str:
+    """Point the agent at the discovery tool registered in the active mode."""
+    discovery = "find_tools()" if _active_mode == "semantic" else "list_tools()"
+    return f"Call {discovery} to see the tools this server exposes."
+
+
+def _bad_arguments_hint(tool_name: str) -> str:
+    """Suggest a recovery step that is callable in the active mode.
+
+    Semantic mode registers no tool that returns a parameter schema, so the hint
+    points at the field named in the message rather than at describe_tools, which
+    is not registered there.
+    """
+    if _active_mode == "semantic":
+        return "The message names the invalid field. Correct it and retry."
+    return (
+        f"Call describe_tools(['{tool_name}']) for the parameter schema, "
+        "then retry with corrected arguments."
+    )
 
 
 def _build_args_model(func: Callable) -> type[BaseModel]:
@@ -90,12 +118,19 @@ def _format_validation_error(error: ValidationError) -> str:
 def init_dynamic_tools(
     tool_funcs: list[Callable],
     descriptions: dict[str, str],
+    mode: str = "progressive",
 ) -> None:
     """Initialize the dynamic tool registry from loaded tool functions.
 
     Must be called before any meta-tool is invoked. Typically called by
     create_server() after collecting tools from client modules.
+
+    ``mode`` is recorded so recovery hints name a meta-tool that is registered
+    in that mode. It does not select the meta-tools themselves; create_server
+    does that through get_mode_tools().
     """
+    global _active_mode
+    _active_mode = mode
     _embedding_cache.reset()
     TOOL_REGISTRY.clear()
     TOOL_HIERARCHY.clear()
@@ -183,12 +218,18 @@ def describe_tools(tool_names: list[str]) -> dict[str, Any]:
         Tool schemas with parameter types and defaults.
     """
     if len(tool_names) > 5:
-        return {"error": "Max 5 tools at a time to conserve tokens"}
+        return ToolError(
+            error="Max 5 tools at a time to conserve tokens",
+            error_code=ErrorCode.VALIDATION_ERROR,
+            tool="describe_tools",
+        ).model_dump()
 
     results: list[dict[str, Any]] = []
     for name in tool_names:
         if name not in TOOL_REGISTRY:
-            results.append({"name": name, "error": "Tool not found"})
+            results.append(
+                {"name": name, "error": "Tool not found", "error_code": ErrorCode.TOOL_NOT_FOUND}
+            )
             continue
 
         tool = TOOL_REGISTRY[name]
@@ -227,7 +268,13 @@ def execute_tool(tool_name: str, arguments: dict[str, Any] | None = None) -> dic
         Tool execution result.
     """
     if tool_name not in TOOL_REGISTRY:
-        return {"error": f"Tool '{tool_name}' not found", "available": list(TOOL_REGISTRY.keys())}
+        return ToolError(
+            error=f"Tool '{tool_name}' not found",
+            error_code=ErrorCode.TOOL_NOT_FOUND,
+            details={"available": list(TOOL_REGISTRY.keys())},
+            hint=_unknown_tool_hint(),
+            tool=tool_name,
+        ).model_dump()
 
     func = TOOL_REGISTRY[tool_name]["func"]
 
@@ -236,11 +283,12 @@ def execute_tool(tool_name: str, arguments: dict[str, Any] | None = None) -> dic
     try:
         validated = TOOL_REGISTRY[tool_name]["args_model"].model_validate(arguments or {})
     except ValidationError as e:
-        return {
-            "error": f"Invalid arguments for '{tool_name}': {_format_validation_error(e)}",
-            "error_code": ErrorCode.VALIDATION_ERROR,
-            "tool": tool_name,
-        }
+        return ToolError(
+            error=f"Invalid arguments for '{tool_name}': {_format_validation_error(e)}",
+            error_code=ErrorCode.VALIDATION_ERROR,
+            hint=_bad_arguments_hint(tool_name),
+            tool=tool_name,
+        ).model_dump()
     # Pass every field, defaults included, as full mode does: a parameter whose default is
     # a pydantic Field() would otherwise receive the FieldInfo object instead of its value.
     args = {name: getattr(validated, name) for name in type(validated).model_fields}
@@ -248,10 +296,11 @@ def execute_tool(tool_name: str, arguments: dict[str, Any] | None = None) -> dic
     breaker = get_breaker(tool_name)
     generation = breaker.acquire()
     if generation is None:
-        return {
-            "error": f"Circuit breaker open for '{tool_name}' — K8s API may be degraded. Retries automatically after recovery timeout.",
-            "error_code": ErrorCode.CIRCUIT_OPEN,
-        }
+        return ToolError(
+            error=f"Circuit breaker open for '{tool_name}' — K8s API may be degraded. Retries automatically after recovery timeout.",
+            error_code=ErrorCode.CIRCUIT_OPEN,
+            tool=tool_name,
+        ).model_dump()
 
     try:
         with warnings.catch_warnings():
@@ -259,7 +308,13 @@ def execute_tool(tool_name: str, arguments: dict[str, Any] | None = None) -> dic
             result = func(**args)
     except Exception as e:
         breaker.record_failure(generation)
-        return {"error": str(e), "error_code": ErrorCode.SDK_ERROR, "tool": tool_name}
+        logger.warning("execute_tool failed: %s", tool_name, exc_info=True)
+        return ToolError(
+            error=str(e),
+            error_code=ErrorCode.SDK_ERROR,
+            details=exception_details(e),
+            tool=tool_name,
+        ).model_dump()
 
     record_tool_result(breaker, result, generation)
     if isinstance(result, dict):
@@ -377,7 +432,11 @@ def find_tools(query: str, top_k: int = 5) -> dict[str, Any]:
         Matching tools ranked by relevance.
     """
     if len(query) > MAX_QUERY_LENGTH:
-        return {"error": f"Query too long ({len(query)} chars, max {MAX_QUERY_LENGTH})"}
+        return ToolError(
+            error=f"Query too long ({len(query)} chars, max {MAX_QUERY_LENGTH})",
+            error_code=ErrorCode.VALIDATION_ERROR,
+            tool="find_tools",
+        ).model_dump()
     top_k = max(1, min(top_k, MAX_TOP_K))
     query_lower = query.strip().lower()
     _list_all = {
