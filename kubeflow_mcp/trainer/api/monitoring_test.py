@@ -31,7 +31,6 @@ from kubeflow_mcp.trainer.api.monitoring import (
     MAX_CURSOR_CHARS,
     MAX_LINE_CHARS,
     MAX_LOG_LINES,
-    _is_pod_for_step,
     get_training_events,
     get_training_logs,
     wait_for_training,
@@ -192,34 +191,6 @@ def _trainjob_pod(job: str, role: str, index: int | None = None, name: str | Non
     return pod
 
 
-class TestIsPodForStep:
-    def test_matches_node_by_completion_index(self):
-        pods = [_trainjob_pod("job", "node", index=i) for i in range(3)]
-        assert [_is_pod_for_step(pod, "node-1") for pod in pods] == [False, True, False]
-
-    def test_node_0_does_not_match_other_nodes(self):
-        pods = [_trainjob_pod("job", "node", index=i) for i in range(3)]
-        assert [_is_pod_for_step(pod, "node-0") for pod in pods] == [True, False, False]
-
-    def test_matches_launcher_by_completion_index(self):
-        pod = _trainjob_pod("job", "launcher", index=0)
-        assert _is_pod_for_step(pod, "launcher-0") is True
-        assert _is_pod_for_step(pod, "node-0") is False
-
-    def test_matches_initializer_by_role(self):
-        pod = _trainjob_pod("job", "dataset-initializer")
-        assert _is_pod_for_step(pod, "dataset-initializer") is True
-        assert _is_pod_for_step(pod, "model-initializer") is False
-
-    def test_node_without_completion_index(self):
-        pod = _make_pod({trainer_constants.JOBSET_RJOB_NAME_LABEL: "node"})
-        assert _is_pod_for_step(pod, "node-0") is False
-
-    def test_no_labels(self):
-        pod = _make_pod(None)
-        assert _is_pod_for_step(pod, "node-0") is False
-
-
 # ─── get_training_logs (tool-level) ──────────────────────────────────────
 
 PATCH_CLIENT = "kubeflow_mcp.trainer.api.monitoring.get_trainer_client_for_namespace"
@@ -239,16 +210,33 @@ def _make_mock_client(**method_returns):
     return client
 
 
+def _job_for_pods(pods: list[object]) -> SimpleNamespace:
+    steps = []
+    for pod in pods:
+        labels = pod.metadata.labels
+        role = labels[trainer_constants.JOBSET_RJOB_NAME_LABEL]
+        index = labels.get(trainer_constants.JOB_INDEX_LABEL)
+        name = f"{role}-{index}" if role in ("node", "launcher") else role
+        steps.append(SimpleNamespace(name=name, pod_name=pod.metadata.name))
+    return SimpleNamespace(steps=steps)
+
+
 class TestGetTrainingLogs:
     @pytest.mark.parametrize(
         "role,step", [("node", "node-0"), ("model-initializer", "model-initializer")]
     )
     @pytest.mark.parametrize("newest_first", [False, True])
+    @pytest.mark.parametrize("selected_name", ["old-pod", "new-pod"])
     @pytest.mark.parametrize(
         "current_logs", ["current crash", "", RuntimeError("no previous container")]
     )
-    def test_fallback_does_not_read_replaced_pod_logs(
-        self, role: str, step: str, newest_first: bool, current_logs: str | Exception
+    def test_fallback_reads_only_sdk_selected_pod(
+        self,
+        role: str,
+        step: str,
+        newest_first: bool,
+        selected_name: str,
+        current_logs: str | Exception,
     ) -> None:
         old = _trainjob_pod("my-job", role, index=0, name="old-pod")
         new = _trainjob_pod("my-job", role, index=0, name="new-pod")
@@ -259,15 +247,21 @@ class TestGetTrainingLogs:
         api.list_namespaced_pod.return_value = SimpleNamespace(items=pods)
 
         def read_log(*, name: str, **kwargs: object) -> str:
-            if name == "old-pod":
-                return "CUDA out of memory: obsolete failure"
+            if name != selected_name:
+                return "CUDA out of memory: unselected failure"
             if isinstance(current_logs, Exception):
                 raise current_logs
             return current_logs
 
         api.read_namespaced_pod_log.side_effect = read_log
         with (
-            patch(PATCH_CLIENT, return_value=_make_mock_client(get_job_logs=[])),
+            patch(
+                PATCH_CLIENT,
+                return_value=_make_mock_client(
+                    get_job_logs=[],
+                    get_job=_job_for_pods([old if selected_name == "old-pod" else new]),
+                ),
+            ),
             patch(PATCH_NS_CHECK, return_value=None),
             patch(PATCH_EFF_NS, return_value="default"),
             patch(PATCH_CORE_V1, return_value=api),
@@ -279,7 +273,7 @@ class TestGetTrainingLogs:
         assert result["data"]["logs"] == expected
         assert "failure_hint" not in result["data"]
         api.read_namespaced_pod_log.assert_called_once_with(
-            name="new-pod",
+            name=selected_name,
             namespace="default",
             container=role,
             previous=True,
@@ -436,15 +430,13 @@ class TestGetTrainingLogs:
         pod = _trainjob_pod("crash-job", "node", index=0, name="crash-job-node-0-0")
         mock_v1 = MagicMock()
         mock_v1.list_namespaced_pod.return_value = SimpleNamespace(items=[pod])
+        mock_client_fn.return_value.get_job.return_value = _job_for_pods([pod])
         mock_v1.read_namespaced_pod_log.return_value = "previous crash output"
         mock_v1_fn.return_value = mock_v1
         result = get_training_logs("crash-job", step="node-0")
         assert result["success"] is True
         assert "previous crash output" in result["data"]["logs"]
-        mock_v1.list_namespaced_pod.assert_called_once_with(
-            namespace="default",
-            label_selector=trainer_constants.POD_LABEL_SELECTOR.format(trainjob_name="crash-job"),
-        )
+        mock_v1.list_namespaced_pod.assert_not_called()
         mock_v1.read_namespaced_pod_log.assert_called_once_with(
             name="crash-job-node-0-0",
             namespace="default",
@@ -465,6 +457,7 @@ class TestGetTrainingLogs:
         pods = [_trainjob_pod("crash-job", "node", index=i) for i in range(3)]
         mock_v1 = MagicMock()
         mock_v1.list_namespaced_pod.return_value = SimpleNamespace(items=pods)
+        mock_client_fn.return_value.get_job.return_value = _job_for_pods(pods)
         mock_v1.read_namespaced_pod_log.return_value = "node-1 crash output"
         mock_v1_fn.return_value = mock_v1
         result = get_training_logs("crash-job", step="node-1")
@@ -490,6 +483,7 @@ class TestGetTrainingLogs:
         pod = _trainjob_pod("crash-job", "model-initializer", name="crash-job-model-init")
         mock_v1 = MagicMock()
         mock_v1.list_namespaced_pod.return_value = SimpleNamespace(items=[pod])
+        mock_client_fn.return_value.get_job.return_value = _job_for_pods([pod])
         mock_v1.read_namespaced_pod_log.return_value = "download failed"
         mock_v1_fn.return_value = mock_v1
         result = get_training_logs("crash-job", step="model-initializer")
@@ -514,6 +508,7 @@ class TestGetTrainingLogs:
         pod = _trainjob_pod("crash-job", "node", index=0)
         mock_v1 = MagicMock()
         mock_v1.list_namespaced_pod.return_value = SimpleNamespace(items=[pod])
+        mock_client_fn.return_value.get_job.return_value = _job_for_pods([pod])
         mock_v1.read_namespaced_pod_log.side_effect = RuntimeError("container not found")
         mock_v1_fn.return_value = mock_v1
         result = get_training_logs("crash-job", step="node-0")
@@ -540,6 +535,7 @@ class TestGetTrainingLogs:
         matching = _trainjob_pod("my-job", "node", index=0, name="job-node-0-0")
         mock_v1 = MagicMock()
         mock_v1.list_namespaced_pod.return_value = SimpleNamespace(items=[non_matching, matching])
+        mock_client_fn.return_value.get_job.return_value = _job_for_pods([non_matching, matching])
         mock_v1.read_namespaced_pod_log.return_value = "recovered logs"
         mock_v1_fn.return_value = mock_v1
         result = get_training_logs("my-job", step="node-0")
@@ -717,6 +713,7 @@ class TestGetTrainingLogsCursor:
         pod = _trainjob_pod("crash-job", "node", index=0)
         mock_v1 = MagicMock()
         mock_v1.list_namespaced_pod.return_value = SimpleNamespace(items=[pod])
+        mock_client_fn.return_value.get_job.return_value = _job_for_pods([pod])
         mock_v1.read_namespaced_pod_log.return_value = "previous crash output"
         mock_v1_fn.return_value = mock_v1
 
@@ -1134,3 +1131,99 @@ class TestWaitForTraining:
         assert res_clamped["error_code"] == "VALIDATION_ERROR"
         assert "polling_interval must be strictly less than timeout_seconds" in res_clamped["error"]
         mock_client_fn.assert_not_called()
+
+
+@pytest.mark.parametrize("newest_first", [False, True])
+def test_crash_fallback_matches_sdk_replacement_selection(newest_first: bool) -> None:
+    """Run SDK discovery/log reading with real pod models and mocked API I/O."""
+    from kubeflow.trainer.backends.kubernetes.backend import KubernetesBackend
+    from kubernetes.client import (
+        V1Container,
+        V1ObjectMeta,
+        V1Pod,
+        V1PodList,
+        V1PodSpec,
+        V1PodStatus,
+    )
+
+    pods = [
+        V1Pod(
+            metadata=V1ObjectMeta(
+                name=name,
+                creation_timestamp=datetime(2026, 1, day, tzinfo=timezone.utc),
+                labels={
+                    trainer_constants.JOBSET_RJOB_NAME_LABEL: "node",
+                    trainer_constants.JOB_INDEX_LABEL: "0",
+                },
+            ),
+            spec=V1PodSpec(containers=[V1Container(name="node")]),
+            status=V1PodStatus(phase="Running"),
+        )
+        for name, day in [("old-pod", 1), ("new-pod", 2)]
+    ]
+    pod_list = V1PodList(items=list(reversed(pods)) if newest_first else pods)
+    api = MagicMock()
+
+    def list_pods(*args: object, **kwargs: object) -> object:
+        return (
+            SimpleNamespace(get=lambda timeout: pod_list) if kwargs.get("async_req") else pod_list
+        )
+
+    def read_log(*, name: str, previous: bool = False, **kwargs: object) -> str:
+        return f"{name} crash" if previous else ""
+
+    api.list_namespaced_pod.side_effect = list_pods
+    api.read_namespaced_pod_log.side_effect = read_log
+    # Skip kubeconfig and control-plane verification; use real SDK methods below.
+    backend = KubernetesBackend.__new__(KubernetesBackend)
+    backend.namespace = "default"
+    backend.core_api = api
+    backend.custom_api = MagicMock()
+    backend.custom_api.get_namespaced_custom_object.return_value.get.return_value = {
+        "metadata": {
+            "name": "my-job",
+            "namespace": "default",
+            "creationTimestamp": "2026-01-01T00:00:00Z",
+        },
+        "spec": {"runtimeRef": {"name": "runtime"}},
+    }
+    runtime = SimpleNamespace(trainer=SimpleNamespace(command=["torchrun"], num_nodes=1))
+    with (
+        patch.object(backend, "get_runtime", return_value=runtime),
+        patch(PATCH_CLIENT, return_value=backend),
+        patch(PATCH_NS_CHECK, return_value=None),
+        patch(PATCH_EFF_NS, return_value="default"),
+        patch(PATCH_CORE_V1, return_value=api),
+    ):
+        selected = backend.get_job("my-job").steps[0].pod_name
+        result = get_training_logs("my-job")
+
+    assert result["success"] is True
+    assert result["data"]["logs"] == f"{selected} crash"
+    assert "failure_hint" not in result["data"]
+    assert {call.kwargs["name"] for call in api.read_namespaced_pod_log.call_args_list} == {
+        selected
+    }
+
+
+@pytest.mark.parametrize(
+    "job",
+    [
+        SimpleNamespace(steps=[]),
+        SimpleNamespace(steps=[SimpleNamespace(name="node-0", pod_name=None)]),
+        RuntimeError("job discovery unavailable"),
+    ],
+)
+def test_fallback_does_not_guess_a_pod_when_sdk_cannot_resolve_it(job: object) -> None:
+    api = MagicMock()
+    with (
+        patch(PATCH_CLIENT, return_value=_make_mock_client(get_job_logs=[], get_job=job)),
+        patch(PATCH_NS_CHECK, return_value=None),
+        patch(PATCH_EFF_NS, return_value="default"),
+        patch(PATCH_CORE_V1, return_value=api),
+    ):
+        result = get_training_logs("my-job")
+    assert result["success"] is True
+    assert result["data"]["logs"] == ""
+    api.read_namespaced_pod_log.assert_not_called()
+    api.list_namespaced_pod.assert_not_called()

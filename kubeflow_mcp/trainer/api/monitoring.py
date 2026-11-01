@@ -19,8 +19,6 @@ import re
 from collections import deque
 from typing import Any
 
-from kubeflow.trainer.constants import constants as trainer_constants
-
 from kubeflow_mcp.common.constants import ErrorCode
 from kubeflow_mcp.common.failures import extract_failure_hint
 from kubeflow_mcp.common.types import ToolError, ToolResponse, exception_details, is_k8s_not_found
@@ -45,20 +43,6 @@ MAX_WAIT_TIMEOUT = 3600
 MIN_POLLING_INTERVAL = 1
 _TARGET_STATUS_ALIASES = {"Succeeded": "Complete"}
 _VALID_TARGET_STATUSES = frozenset({"Complete", "Failed", "Running", "Created"})
-
-
-def _is_pod_for_step(pod: Any, step: str) -> bool:
-    """Return whether a JobSet pod corresponds to the requested TrainJob step.
-
-    Mirrors how the SDK names steps: launcher and node pods are ``<role>-<completion
-    index>`` (all nodes share one ReplicatedJob), initializer pods are the role alone.
-    """
-    labels = getattr(pod.metadata, "labels", None) or {}
-    role = labels.get(trainer_constants.JOBSET_RJOB_NAME_LABEL)
-    if role in (trainer_constants.LAUNCHER, trainer_constants.NODE):
-        index = labels.get(trainer_constants.JOB_INDEX_LABEL)
-        return index is not None and f"{role}-{index}" == step
-    return role == step
 
 
 def _collect_log_lines(
@@ -87,43 +71,28 @@ def _collect_log_lines(
     try:
         eff_ns = get_trainer_effective_namespace(namespace)
         v1 = get_core_v1_api()
-        pods = v1.list_namespaced_pod(
-            namespace=eff_ns,
-            label_selector=trainer_constants.POD_LABEL_SELECTOR.format(trainjob_name=name),
-        )
-        # Same container the SDK reads for the step: "node-1" -> "node".
+        job = client.get_job(name=name)
+        pod_name = next((s.pod_name for s in job.steps if s.name == step and s.pod_name), None)
+        if pod_name is None:
+            return log_lines, True
         container = re.sub(r"-\d+$", "", step)
-        # Prefer the newest pod when a replaced pod still has the same
-        # JobSet role and completion index.
-        sorted_pods = sorted(
-            (pod for pod in pods.items if _is_pod_for_step(pod, step)),
-            key=lambda p: (
-                getattr(p.metadata, "creation_timestamp", None) is not None,
-                getattr(p.metadata, "creation_timestamp", None),
-            ),
-            reverse=True,
-        )
-        for pod in sorted_pods:
-            try:
-                raw = v1.read_namespaced_pod_log(
-                    name=pod.metadata.name,
-                    namespace=eff_ns,
-                    container=container,
-                    previous=True,
-                    tail_lines=MAX_LOG_LINES,
-                )
-                if raw:
-                    log_lines.extend(raw.splitlines())
-            except Exception as e:
-                logger.debug(
-                    "Failed to read previous pod logs for pod %s/%s: %s",
-                    eff_ns,
-                    pod.metadata.name,
-                    e,
-                )
-            # Empty/unavailable previous logs must not resurrect an older pod's
-            # failure and attribute it to the current attempt.
-            break
+        try:
+            raw = v1.read_namespaced_pod_log(
+                name=pod_name,
+                namespace=eff_ns,
+                container=container,
+                previous=True,
+                tail_lines=MAX_LOG_LINES,
+            )
+            if raw:
+                log_lines.extend(raw.splitlines())
+        except Exception as e:
+            logger.debug(
+                "Failed to read previous pod logs for pod %s/%s: %s",
+                eff_ns,
+                pod_name,
+                e,
+            )
     except Exception as e:
         logger.debug(
             "Previous-log fallback failed for job %s (namespace=%s): %s",
@@ -213,8 +182,8 @@ def get_training_logs(
 ) -> dict[str, Any]:
     """Get pod logs from a training job.
 
-    If active logs are empty, try previous-container logs from the newest pod
-    for the requested step, excluding replaced pods from older attempts.
+    If active logs are empty, try previous-container logs from the SDK-selected pod
+    for the requested step, keeping active and previous logs on the same attempt.
 
     Args:
         name: TrainJob name.

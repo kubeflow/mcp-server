@@ -1113,6 +1113,10 @@ class TestMCPToolSignatures:
 
         mock_client = MagicMock()
         mock_client.get_job_logs.return_value = []
+        step = MagicMock()
+        step.name = "node-0"
+        step.pod_name = "crashed-node-0"
+        mock_client.get_job.return_value.steps = [step]
 
         mock_pod = MagicMock()
         mock_pod.metadata.name = "crashed-node-0"
@@ -1146,11 +1150,8 @@ class TestMCPToolSignatures:
         )
         assert "CUDA out of memory" in resp["data"]["logs"]
         assert resp["data"]["failure_hint"]["category"] == "OOM"
-        # Pods are found with the same selector the SDK uses to build TrainJob steps.
-        mock_v1.list_namespaced_pod.assert_called_once_with(
-            namespace="test-ns",
-            label_selector=trainer_constants.POD_LABEL_SELECTOR.format(trainjob_name="crashed-job"),
-        )
+        # Fallback reuses SDK step discovery, without a separate pod listing.
+        mock_v1.list_namespaced_pod.assert_not_called()
         mock_v1.read_namespaced_pod_log.assert_called_once_with(
             name="crashed-node-0",
             namespace="test-ns",
@@ -1167,6 +1168,10 @@ class TestMCPToolSignatures:
 
         mock_client = MagicMock()
         mock_client.get_job_logs.return_value = []
+        step = MagicMock()
+        step.name = "node-0"
+        step.pod_name = "crashed-node-0"
+        mock_client.get_job.return_value.steps = [step]
 
         node_0 = MagicMock()
         node_0.metadata.name = "crashed-node-0"
