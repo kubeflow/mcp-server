@@ -262,10 +262,154 @@ def test_setup_tracing_falls_back_to_env_var(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(telemetry, "BatchSpanProcessor", _FakeBatchProcessor, raising=False)
     monkeypatch.setattr(telemetry, "OTLPSpanExporter", _FakeExporter, raising=False)
     monkeypatch.setattr(telemetry, "_otel_trace", fake_trace, raising=False)
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", raising=False)
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://env-collector:4318")
 
     assert telemetry.setup_tracing(endpoint=None) is True
     assert calls["endpoint"] == "http://env-collector:4318/v1/traces"
+
+
+@pytest.mark.parametrize(
+    ("env", "expected"),
+    [
+        pytest.param({}, None, id="unset"),
+        pytest.param(
+            {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector:4318"},
+            "http://collector:4318/v1/traces",
+            id="generic base URL",
+        ),
+        pytest.param(
+            {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector:4318/otlp"},
+            "http://collector:4318/otlp/v1/traces",
+            id="generic URL with a path keeps the path",
+        ),
+        pytest.param(
+            {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector:4318/otlp/?tenant=demo"},
+            "http://collector:4318/otlp/v1/traces?tenant=demo",
+            id="generic URL with trailing slash and query",
+        ),
+        pytest.param(
+            {"OTEL_EXPORTER_OTLP_ENDPOINT": "https://collector/otlp;tenant=demo"},
+            "https://collector/otlp;tenant=demo/v1/traces",
+            id="generic URL with semicolon parameters preserves parameters on base path",
+        ),
+        pytest.param(
+            {"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "http://collector:4318/custom"},
+            "http://collector:4318/custom",
+            id="traces URL used as-is",
+        ),
+        pytest.param(
+            {
+                "OTEL_EXPORTER_OTLP_ENDPOINT": "http://generic:4318",
+                "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "http://traces:4318/v1/traces",
+            },
+            "http://traces:4318/v1/traces",
+            id="traces URL takes precedence",
+        ),
+        pytest.param({"OTEL_EXPORTER_OTLP_ENDPOINT": "  "}, None, id="whitespace is unset"),
+    ],
+)
+def test_otlp_endpoint_from_env_follows_otel_spec(
+    monkeypatch: pytest.MonkeyPatch, env: dict[str, str], expected: str | None
+) -> None:
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", raising=False)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+
+    assert telemetry.otlp_endpoint_from_env("traces") == expected
+
+
+@pytest.mark.parametrize(
+    ("traces_env", "expected"),
+    [
+        ("http://collector:4318/custom", "http://collector:4318/custom"),
+        ("http://h:4318", "http://h:4318"),
+        ("http://h:4318/", "http://h:4318/"),
+    ],
+    ids=["custom-path", "root-no-slash", "root-trailing-slash"],
+)
+def test_setup_tracing_enabled_by_traces_endpoint_env_var(
+    monkeypatch: pytest.MonkeyPatch, traces_env: str, expected: str
+) -> None:
+    """Setting only OTEL_EXPORTER_OTLP_TRACES_ENDPOINT must turn tracing on and preserve endpoint as-is."""
+    calls: dict[str, object] = {}
+
+    class _FakeExporter:
+        def __init__(self, endpoint: str, **kwargs) -> None:
+            calls["endpoint"] = endpoint
+
+    class _FakeProvider:
+        def __init__(self, resource: object) -> None:
+            pass
+
+        def add_span_processor(self, processor: object) -> None:
+            pass
+
+        def shutdown(self) -> None:
+            pass
+
+    fake_trace = SimpleNamespace(
+        set_tracer_provider=lambda _p: None,
+        get_tracer_provider=lambda: object(),
+    )
+
+    monkeypatch.setattr(telemetry, "_OTEL_AVAILABLE", True)
+    monkeypatch.setattr(telemetry, "_tracing_initialized", False)
+    monkeypatch.setattr(telemetry, "_configured_endpoint", None, raising=False)
+    monkeypatch.setattr(telemetry, "Resource", SimpleNamespace(create=dict), raising=False)
+    monkeypatch.setattr(telemetry, "TracerProvider", _FakeProvider, raising=False)
+    monkeypatch.setattr(
+        telemetry, "BatchSpanProcessor", lambda exporter, **kw: exporter, raising=False
+    )
+    monkeypatch.setattr(telemetry, "OTLPSpanExporter", _FakeExporter, raising=False)
+    monkeypatch.setattr(telemetry, "_otel_trace", fake_trace, raising=False)
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", traces_env)
+
+    assert telemetry.setup_tracing(endpoint=None) is True
+    assert calls["endpoint"] == expected
+
+
+def test_setup_tracing_explicit_endpoint_normalizes_even_if_traces_env_matches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explicit endpoint retains /v1/traces normalization regardless of environment."""
+    calls: dict[str, object] = {}
+
+    class _FakeExporter:
+        def __init__(self, endpoint: str, **kwargs) -> None:
+            calls["endpoint"] = endpoint
+
+    class _FakeProvider:
+        def __init__(self, resource: object) -> None:
+            pass
+
+        def add_span_processor(self, processor: object) -> None:
+            pass
+
+        def shutdown(self) -> None:
+            pass
+
+    fake_trace = SimpleNamespace(
+        set_tracer_provider=lambda _p: None,
+        get_tracer_provider=lambda: object(),
+    )
+
+    monkeypatch.setattr(telemetry, "_OTEL_AVAILABLE", True)
+    monkeypatch.setattr(telemetry, "_tracing_initialized", False)
+    monkeypatch.setattr(telemetry, "_configured_endpoint", None, raising=False)
+    monkeypatch.setattr(telemetry, "Resource", SimpleNamespace(create=dict), raising=False)
+    monkeypatch.setattr(telemetry, "TracerProvider", _FakeProvider, raising=False)
+    monkeypatch.setattr(
+        telemetry, "BatchSpanProcessor", lambda exporter, **kw: exporter, raising=False
+    )
+    monkeypatch.setattr(telemetry, "OTLPSpanExporter", _FakeExporter, raising=False)
+    monkeypatch.setattr(telemetry, "_otel_trace", fake_trace, raising=False)
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://collector:4318")
+
+    assert telemetry.setup_tracing(endpoint="http://collector:4318") is True
+    assert calls["endpoint"] == "http://collector:4318/v1/traces"
 
 
 def test_setup_tracing_rejects_invalid_endpoint() -> None:

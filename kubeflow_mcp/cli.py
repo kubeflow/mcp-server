@@ -15,6 +15,7 @@
 """Kubeflow MCP Server CLI."""
 
 import warnings
+from typing import Any
 
 import click
 
@@ -99,7 +100,8 @@ def cli() -> None:
     "--otel-endpoint",
     default=None,
     help="OpenTelemetry OTLP HTTP endpoint for tracing. "
-    "Falls back to OTEL_EXPORTER_OTLP_ENDPOINT env var, config file.",
+    "Falls back to OTEL_EXPORTER_OTLP_TRACES_ENDPOINT or OTEL_EXPORTER_OTLP_ENDPOINT "
+    "env vars, config file.",
 )
 def serve(
     clients: str | None,
@@ -153,12 +155,19 @@ def serve(
         cfg.auth.auth_token = auth_token
     if otel_endpoint:
         cfg.observability.otel_endpoint = otel_endpoint
+        cfg.observability.is_traces_env = False
 
     try:
         logger = setup_logging(level=log_level, format=log_format)
     except ValueError as e:
         raise click.ClickException(str(e)) from e
-    tracing_enabled = setup_tracing(endpoint=cfg.observability.otel_endpoint)
+    tracing_kwargs: dict[str, Any] = {"endpoint": cfg.observability.otel_endpoint}
+    if cfg.observability.is_traces_env:
+        tracing_kwargs["append_trace_path"] = False
+    try:
+        tracing_enabled = setup_tracing(**tracing_kwargs)
+    except ValueError as e:
+        raise click.ClickException(str(e)) from e
     logger.info(
         "Starting kubeflow-mcp",
         extra={
