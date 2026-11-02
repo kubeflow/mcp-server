@@ -16,12 +16,14 @@
 
 from __future__ import annotations
 
+from io import BytesIO
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 from kubeflow.trainer.constants import constants as trainer_constants
 from tests.common import TestCase
+from urllib3.response import HTTPResponse
 
 from kubeflow_mcp.common.failures import FAILURE_PATTERNS, extract_failure_hint
 from kubeflow_mcp.core.resilience import CircuitState, get_breaker
@@ -515,12 +517,33 @@ class TestGetTrainingLogs:
 
 
 class TestGetTrainingLogsCursor:
+    @pytest.fixture(autouse=True)
+    def cursor_api(self):
+        with (
+            patch(PATCH_CORE_V1) as core,
+            patch(PATCH_EFF_NS, return_value="default"),
+        ):
+            self.core = core.return_value
+            yield
+
+    def _set_logs(self, mock_client_fn, lines):
+        client = MagicMock()
+        client.get_job.return_value = SimpleNamespace(
+            steps=[SimpleNamespace(name="node-0", pod_name="job-node-0", status="Running")]
+        )
+        client.get_job_logs.side_effect = AssertionError("SDK eagerly loads logs")
+        mock_client_fn.return_value = client
+        self.core.read_namespaced_pod_log.side_effect = lambda **kwargs: HTTPResponse(
+            body=BytesIO("\n".join(lines).encode()), preload_content=False
+        )
+        return client
+
     @patch(PATCH_NS_CHECK, return_value=None)
     @patch(PATCH_CLIENT)
     def test_lines_past_1000_reachable(self, mock_client_fn, _ns):
         total = 1500
         lines = [f"log line {i}" for i in range(total)]
-        mock_client_fn.return_value = _make_mock_client(get_job_logs=lines)
+        self._set_logs(mock_client_fn, lines)
 
         res = get_training_logs("my-job", since_line=1100, max_lines=100)
         assert res["success"] is True
@@ -540,7 +563,7 @@ class TestGetTrainingLogsCursor:
     @patch(PATCH_CLIENT)
     def test_cursor_pagination_multi_step(self, mock_client_fn, _ns):
         lines = [f"line {i}" for i in range(500)]
-        mock_client_fn.return_value = _make_mock_client(get_job_logs=lines)
+        self._set_logs(mock_client_fn, lines)
 
         res1 = get_training_logs("my-job", since_line=0)
         assert res1["success"] is True
@@ -567,7 +590,7 @@ class TestGetTrainingLogsCursor:
     @patch(PATCH_CLIENT)
     def test_cursor_at_eof(self, mock_client_fn, _ns):
         lines = [f"line {i}" for i in range(50)]
-        mock_client_fn.return_value = _make_mock_client(get_job_logs=lines)
+        self._set_logs(mock_client_fn, lines)
 
         res = get_training_logs("my-job", since_line=50)
         assert res["success"] is True
@@ -581,7 +604,7 @@ class TestGetTrainingLogsCursor:
     @patch(PATCH_CLIENT)
     def test_cursor_log_reset(self, mock_client_fn, _ns):
         lines = [f"line {i}" for i in range(50)]
-        mock_client_fn.return_value = _make_mock_client(get_job_logs=lines)
+        self._set_logs(mock_client_fn, lines)
 
         res = get_training_logs("my-job", since_line=100)
         assert res["success"] is True
@@ -595,7 +618,7 @@ class TestGetTrainingLogsCursor:
     @patch(PATCH_CLIENT)
     def test_char_budget_stops_page(self, mock_client_fn, _ns):
         lines = ["x" * 1000 for _ in range(20)]
-        mock_client_fn.return_value = _make_mock_client(get_job_logs=lines)
+        self._set_logs(mock_client_fn, lines)
 
         res = get_training_logs("my-job", since_line=0, max_lines=20)
         assert res["success"] is True
@@ -608,7 +631,7 @@ class TestGetTrainingLogsCursor:
     @patch(PATCH_CLIENT)
     def test_long_line_crosses_budget_boundary_not_appended(self, mock_client_fn, _ns):
         lines = ["a" * 2000] * 4 + ["b" * 1500] + ["c" * 100]
-        mock_client_fn.return_value = _make_mock_client(get_job_logs=lines)
+        self._set_logs(mock_client_fn, lines)
 
         res = get_training_logs("my-job", since_line=0, max_lines=10)
         assert res["success"] is True
@@ -626,7 +649,7 @@ class TestGetTrainingLogsCursor:
     @patch(PATCH_CLIENT)
     def test_line_truncation(self, mock_client_fn, _ns):
         long_line = "a" * (MAX_LINE_CHARS + 500)
-        mock_client_fn.return_value = _make_mock_client(get_job_logs=[long_line])
+        self._set_logs(mock_client_fn, [long_line])
 
         res = get_training_logs("my-job", since_line=0)
         assert res["success"] is True
@@ -645,7 +668,7 @@ class TestGetTrainingLogsCursor:
     @patch(PATCH_CLIENT)
     def test_max_lines_clamping(self, mock_client_fn, _ns):
         lines = [f"line {i}" for i in range(1500)]
-        mock_client_fn.return_value = _make_mock_client(get_job_logs=lines)
+        self._set_logs(mock_client_fn, lines)
 
         res_zero = get_training_logs("my-job", since_line=0, max_lines=0)
         assert res_zero["success"] is True
@@ -667,11 +690,13 @@ class TestGetTrainingLogsCursor:
     def test_fallback_guard_fails_when_crash_logs_recovered(
         self, mock_client_fn, _ns, _eff_ns, mock_v1_fn, _validate
     ):
-        mock_client_fn.return_value = _make_mock_client(get_job_logs=[])
+        mock_client_fn.return_value = _make_mock_client(get_job=SimpleNamespace(steps=[]))
         pod = _trainjob_pod("crash-job", "node", index=0)
         mock_v1 = MagicMock()
         mock_v1.list_namespaced_pod.return_value = SimpleNamespace(items=[pod])
-        mock_v1.read_namespaced_pod_log.return_value = "previous crash output"
+        mock_v1.read_namespaced_pod_log.return_value = HTTPResponse(
+            body=BytesIO(b"previous crash output"), preload_content=False
+        )
         mock_v1_fn.return_value = mock_v1
 
         res = get_training_logs("crash-job", step="node-0", since_line=0)
@@ -684,7 +709,7 @@ class TestGetTrainingLogsCursor:
     @patch(PATCH_NS_CHECK, return_value=None)
     @patch(PATCH_CLIENT)
     def test_fallback_guard_both_empty_returns_normal_empty(self, mock_client_fn, _ns, _eff_ns):
-        mock_client_fn.return_value = _make_mock_client(get_job_logs=[])
+        mock_client_fn.return_value = _make_mock_client(get_job=SimpleNamespace(steps=[]))
 
         res = get_training_logs("empty-job", since_line=0)
         assert res["success"] is True
@@ -698,7 +723,7 @@ class TestGetTrainingLogsCursor:
     def test_failure_hint_extracted_from_last_1000_lines(self, mock_client_fn, _ns):
         lines = [f"line {i}" for i in range(1200)]
         lines[50] = "RuntimeError: CUDA out of memory. Tried to allocate 4.00 GiB"
-        mock_client_fn.return_value = _make_mock_client(get_job_logs=lines)
+        self._set_logs(mock_client_fn, lines)
 
         res = get_training_logs("my-job", since_line=0, max_lines=100)
         assert res["success"] is True
@@ -713,9 +738,7 @@ class TestGetTrainingLogsCursor:
     @patch(PATCH_NS_CHECK, return_value=None)
     @patch(PATCH_CLIENT)
     def test_cursor_mode_stops_at_max_log_buffer_lines_guardrail(self, mock_client_fn, _ns):
-        client = MagicMock()
-        client.get_job_logs.side_effect = lambda **kwargs: (f"line {i}" for i in range(15000))
-        mock_client_fn.return_value = client
+        self._set_logs(mock_client_fn, [f"line {i}" for i in range(15000)])
 
         res = get_training_logs("runaway-job", since_line=0, max_lines=100)
         assert res["success"] is True
@@ -733,6 +756,56 @@ class TestGetTrainingLogsCursor:
         assert res_end["data"]["lines"] == 50
         assert res_end["data"]["next_offset"] == MAX_LOG_BUFFER_LINES
         assert "Log buffer cap reached" in res_end["data"]["next_steps"][0]
+
+    @pytest.mark.parametrize("total", [9999, 10000, 10001])
+    @pytest.mark.parametrize("offset", [9950, 10000, 10001, 20000])
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_cursor_guardrail_boundaries(self, mock_client_fn, _ns, total, offset):
+        self._set_logs(mock_client_fn, ["x"] * total)
+        data = get_training_logs("job", since_line=offset, max_lines=50)["data"]
+        assert data["total_lines"] == min(total, MAX_LOG_BUFFER_LINES)
+        if total > MAX_LOG_BUFFER_LINES:
+            assert data["truncated_by_guardrail"] is True
+            assert data["buffer_limit"] == MAX_LOG_BUFFER_LINES
+            assert "log_reset" not in data
+            assert data["next_offset"] == max(offset, MAX_LOG_BUFFER_LINES)
+            assert data["stop_reason"] == "buffer_limit"
+            assert any("Stop polling this cursor" in hint for hint in data["next_steps"])
+        else:
+            assert "truncated_by_guardrail" not in data
+            assert "stop_reason" not in data
+            assert data.get("log_reset", False) is (offset > total)
+
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_guardrail_survives_growth_and_preserves_failure_hint(self, mock_client_fn, _ns):
+        lines = ["x"] * MAX_LOG_BUFFER_LINES + ["later"]
+        lines[MAX_LOG_BUFFER_LINES - 1] = "RuntimeError: CUDA out of memory"
+        self._set_logs(mock_client_fn, lines)
+        for added in (0, 1000):
+            lines.extend(["new"] * added)
+            data = get_training_logs("job", since_line=MAX_LOG_BUFFER_LINES)["data"]
+            assert data["next_offset"] == MAX_LOG_BUFFER_LINES
+            assert "log_reset" not in data
+            assert data["truncated_by_guardrail"] is True
+            assert data["stop_reason"] == "buffer_limit"
+            assert data["failure_hint"]["category"] == "OOM"
+            assert any("Stop polling this cursor" in hint for hint in data["next_steps"])
+
+    @patch("kubeflow_mcp.trainer.api.monitoring.MAX_LOG_BUFFER_BYTES", 8)
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_byte_guardrail_does_not_trigger_reset_or_crash_fallback(self, mock_client_fn, _ns):
+        self._set_logs(mock_client_fn, ["x" * 100])
+        data = get_training_logs("job", since_line=10)["data"]
+        assert data["lines"] == 0
+        assert data["total_lines"] == 0
+        assert data["next_offset"] == 10
+        assert data["buffer_limit_bytes"] == 8
+        assert data["stop_reason"] == "buffer_limit"
+        assert "log_reset" not in data
+        self.core.list_namespaced_pod.assert_not_called()
 
 
 # ─── get_training_events (tool-level) ────────────────────────────────────

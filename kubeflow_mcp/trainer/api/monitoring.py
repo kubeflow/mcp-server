@@ -14,6 +14,7 @@
 
 """Monitoring tools for training job logs and events."""
 
+import codecs
 import logging
 import re
 from collections import deque
@@ -25,6 +26,7 @@ from kubeflow_mcp.common.constants import ErrorCode
 from kubeflow_mcp.common.failures import extract_failure_hint
 from kubeflow_mcp.common.types import ToolError, ToolResponse, exception_details, is_k8s_not_found
 from kubeflow_mcp.common.utils import (
+    K8S_TIMEOUT,
     get_core_v1_api,
     get_trainer_client_for_namespace,
     get_trainer_effective_namespace,
@@ -40,9 +42,10 @@ logger = logging.getLogger(__name__)
 MAX_LOG_LINES = 1000
 MAX_LINE_CHARS = 2000
 MAX_CURSOR_CHARS = 9000  # Response size cap: max characters per cursor-mode page
-MAX_LOG_BUFFER_LINES = (
-    10000  # Guardrail: hard cap on collected log lines to protect server memory & TSDB/Kubelet
-)
+MAX_LOG_BUFFER_LINES = 10000
+MAX_LOG_BUFFER_BYTES = 8 * 1024 * 1024
+LOG_READ_CHUNK_BYTES = 8192
+_LINE_ENDINGS = ("\n", "\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029")
 MAX_EVENT_LIMIT = 500
 MAX_WAIT_TIMEOUT = 3600
 MIN_POLLING_INTERVAL = 1
@@ -64,32 +67,93 @@ def _is_pod_for_step(pod: Any, step: str) -> bool:
     return role == step
 
 
+def _read_bounded_log_lines(response: Any) -> tuple[list[str], bool]:
+    """Read a bounded prefix, returning (complete lines, more data observed).
+
+    Do not access response.data or use the SDK's follow=False iterator: both
+    preload the entire body. A one-byte probe distinguishes exact limits from
+    truncation. An incomplete line at the byte limit is not a cursor position.
+    Close before releasing an unread response so it cannot poison the pool.
+    """
+    lines: list[str] = []
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    pending = ""
+    consumed = 0
+    try:
+        while True:
+            remaining = MAX_LOG_BUFFER_BYTES - consumed
+            chunk = response.read(amt=min(LOG_READ_CHUNK_BYTES, remaining + 1))
+            eof = not chunk
+            byte_limit_reached = len(chunk) > remaining
+            consumed += min(len(chunk), remaining)
+            parts = (pending + decoder.decode(chunk[:remaining], final=eof)).splitlines(
+                keepends=True
+            )
+            pending = ""
+            for index, part in enumerate(parts):
+                # A CR at a chunk boundary may be the first half of CRLF.
+                incomplete = not part.endswith(_LINE_ENDINGS) or (
+                    part.endswith("\r") and index == len(parts) - 1
+                )
+                if incomplete and not eof:
+                    pending = part
+                    break
+                if len(lines) == MAX_LOG_BUFFER_LINES:
+                    return lines, True
+                lines.append(part.splitlines()[0])
+            if byte_limit_reached:
+                return lines, True
+            if eof:
+                return lines, False
+            if len(lines) == MAX_LOG_BUFFER_LINES:
+                return lines, bool(pending or decoder.getstate()[0] or response.read(amt=1))
+    finally:
+        try:
+            response.close()
+        finally:
+            response.release_conn()
+
+
+def _collect_cursor_log_lines(
+    client: Any, name: str, step: str, namespace: str | None
+) -> tuple[list[str], bool]:
+    """Resolve the same step as the SDK, but stream its pod logs directly."""
+    for job_step in client.get_job(name=name).steps:
+        if job_step.name == step and job_step.status != trainer_constants.POD_PENDING:
+            response = get_core_v1_api().read_namespaced_pod_log(
+                name=job_step.pod_name,
+                namespace=get_trainer_effective_namespace(namespace),
+                container=re.sub(r"-\d+$", "", step),
+                follow=False,
+                _preload_content=False,
+                _request_timeout=K8S_TIMEOUT,
+            )
+            return _read_bounded_log_lines(response)
+    return [], False
+
+
 def _collect_log_lines(
     client: Any,
     name: str,
     step: str,
     namespace: str | None,
     cursor_mode: bool,
-) -> tuple[list[str], bool]:
+) -> tuple[list[str], bool, bool]:
     """Fetch log lines and attempt the previous-container fallback if empty.
 
-    Returns (log_lines, fallback_was_used).
+    Returns (log_lines, fallback_was_used, truncated_by_guardrail).
     """
     if cursor_mode:
-        # Bounded iteration: prevent unbounded memory consumption if the pod has millions of log lines.
-        log_iter = client.get_job_logs(name=name, step=step, follow=False)
-        log_lines: list[str] = []
-        for line in log_iter:
-            log_lines.append(line)
-            if len(log_lines) >= MAX_LOG_BUFFER_LINES:
-                break
+        log_lines, truncated = _collect_cursor_log_lines(client, name, step, namespace)
+        if log_lines or truncated:
+            return log_lines, False, truncated
     else:
         log_lines = list(
             deque(client.get_job_logs(name=name, step=step, follow=False), maxlen=MAX_LOG_LINES)
         )
 
     if log_lines:
-        return log_lines, False
+        return log_lines, False, False
 
     # Primary path empty — try previous-container (crash) logs.
     try:
@@ -105,6 +169,20 @@ def _collect_log_lines(
             if not _is_pod_for_step(pod, step):
                 continue
             try:
+                if cursor_mode:
+                    response = v1.read_namespaced_pod_log(
+                        name=pod.metadata.name,
+                        namespace=eff_ns,
+                        container=container,
+                        previous=True,
+                        tail_lines=MAX_LOG_LINES,
+                        _preload_content=False,
+                        _request_timeout=K8S_TIMEOUT,
+                    )
+                    log_lines, truncated = _read_bounded_log_lines(response)
+                    if log_lines or truncated:
+                        return log_lines, True, truncated
+                    continue
                 raw = v1.read_namespaced_pod_log(
                     name=pod.metadata.name,
                     namespace=eff_ns,
@@ -128,7 +206,7 @@ def _collect_log_lines(
             namespace,
             e,
         )
-    return log_lines, True
+    return log_lines, True, False
 
 
 def _cursor_response(
@@ -137,11 +215,12 @@ def _cursor_response(
     log_lines: list[str],
     since_line: int,
     effective_max: int,
+    truncated_by_buffer: bool = False,
 ) -> dict[str, Any]:
     """Build the cursor-mode response dict. Called only when since_line is set."""
     total = len(log_lines)
 
-    if since_line == total:
+    if since_line == total and not truncated_by_buffer:
         return ToolResponse(
             data={
                 "job": name,
@@ -153,7 +232,7 @@ def _cursor_response(
             }
         ).model_dump()
 
-    if since_line > total:
+    if since_line > total and not truncated_by_buffer:
         return ToolResponse(
             data={
                 "job": name,
@@ -182,7 +261,6 @@ def _cursor_response(
 
     # Skip truncate_log_output: per-line cap + char_budget are the backstop;
     # truncate_log_output would eat lines silently while next_offset already advanced.
-    truncated_by_buffer = total >= MAX_LOG_BUFFER_LINES
     data: dict[str, Any] = {
         "job": name,
         "step": step,
@@ -194,6 +272,7 @@ def _cursor_response(
     if truncated_by_buffer:
         data["truncated_by_guardrail"] = True
         data["buffer_limit"] = MAX_LOG_BUFFER_LINES
+        data["buffer_limit_bytes"] = MAX_LOG_BUFFER_BYTES
     hint = extract_failure_hint("\n".join(log_lines[-MAX_LOG_LINES:]))
     if hint:
         data["failure_hint"] = hint
@@ -201,10 +280,15 @@ def _cursor_response(
             f"Detected {hint['category']}: {hint['suggestion']}",
             "Read trainer://guides/troubleshooting for detailed fixes",
         ]
-    elif truncated_by_buffer and (since_line + len(out_lines) >= total):
-        data["next_steps"] = [
-            f"Log buffer cap reached ({MAX_LOG_BUFFER_LINES} lines). For older logs or live tail, scope by step or container.",
-        ]
+    if truncated_by_buffer and data["next_offset"] >= total:
+        data["stop_reason"] = "buffer_limit"
+        data.setdefault("next_steps", []).append(
+            "Log buffer cap reached. Only a prefix of this step's logs was read; "
+            "total_lines is the number of complete lines collected, not the full log size. "
+            "Stop polling this cursor; do not restart from zero. "
+            "For recent logs, use kubectl logs for the step's pod/container with "
+            "--tail=1000 --limit-bytes=8388608. Live streaming is not supported by this tool."
+        )
     return ToolResponse(data=data).model_dump()
 
 
@@ -229,6 +313,9 @@ def get_training_logs(
             ``since_line`` on the next call to poll incrementally. A page may have
             fewer than ``max_lines`` lines due to the char budget; use ``next_offset``
             to advance, not page length — a short page does not mean end of log.
+            Reads at most 10,000 complete lines or 8 MiB of log content, plus bounded
+            lookahead. When ``stop_reason`` is ``buffer_limit``, stop polling this
+            cursor: later lines are unavailable through this bounded prefix.
         max_lines: Lines per page. Tail mode default: 1000 (unchanged). Cursor mode
             default: 200. Clamped to [1, 1000].
 
@@ -240,9 +327,14 @@ def get_training_logs(
         - ``logs`` (str): Log output
         - ``lines`` (int): Number of log lines in this response
         - ``next_offset`` (int): *Cursor mode only.* Echo as ``since_line`` next call.
-        - ``total_lines`` (int): *Cursor mode only.* Total lines collected.
-        - ``log_reset`` (bool): *Cursor mode only.* True when ``since_line > total_lines``;
-          restart from 0.
+        - ``total_lines`` (int): *Cursor mode only.* Complete lines collected; a lower
+          bound on the full log size when ``truncated_by_guardrail`` is true.
+        - ``log_reset`` (bool): *Cursor mode only.* True when EOF was observed and
+          ``since_line > total_lines``; restart from 0.
+        - ``truncated_by_guardrail`` (bool): *Cursor mode only.* More data was observed
+          beyond the line or byte limit. The limit fields describe both budgets.
+        - ``stop_reason`` (str): *Cursor mode only.* ``buffer_limit`` when this page
+          reaches or starts beyond the bounded prefix. Do not retry or reset the cursor.
 
     Raises:
         ToolError: If job not found (``RESOURCE_NOT_FOUND``) or cursor used with crash
@@ -280,11 +372,11 @@ def get_training_logs(
             ).model_dump()
 
         client = get_trainer_client_for_namespace(namespace)
-        log_lines, _fallback_was_used = _collect_log_lines(
+        log_lines, _fallback_was_used, truncated = _collect_log_lines(
             client, name, step, namespace, cursor_mode=since_line is not None
         )
 
-        if since_line is not None and _fallback_was_used and log_lines:
+        if since_line is not None and _fallback_was_used and (log_lines or truncated):
             return ToolError(
                 error=(
                     "cursor mode unavailable: active container logs empty"
@@ -296,7 +388,7 @@ def get_training_logs(
 
         # ── Cursor mode ──────────────────────────────────────────────────────
         if since_line is not None:
-            return _cursor_response(name, step, log_lines, since_line, _effective_max)
+            return _cursor_response(name, step, log_lines, since_line, _effective_max, truncated)
 
         # ── Tail mode (unchanged) ─────────────────────────────────────────────
         if len(log_lines) > _effective_max:
