@@ -77,7 +77,7 @@ only lets a live experiment change three fields, which is what
 
 | Parameter | Use |
 |---|---|
-| `parallel_trial_count` | Throttle to `1` to free resources, or raise it to go faster |
+| `parallel_trial_count` | Raise it to go faster. Lowering it deletes active trials (see below) |
 | `max_trial_count` | Extend the budget. Must exceed the trials already created |
 | `max_failed_trial_count` | Tolerate more (or fewer) failures before the experiment fails |
 
@@ -88,6 +88,12 @@ only be extended when it stopped at `max_trial_count` and was created with
 `resumePolicy: LongRunning` or `FromVolume` (the default is `Never`), which
 needs `create_experiment_from_spec`. To stop an experiment for good, use
 `delete_experiment`.
+
+**Lowering `parallel_trial_count` is not a gentle throttle.** When it drops
+below the active (pending plus running) trials, Katib deletes the excess
+immediately, newest first, instead of letting them finish. Their work is lost,
+and they do not show up in `trialsKilled`. The preview reports the count as
+`active_trials_deleted`; wait for trials to finish first if their results matter.
 
 ## Cleanup
 

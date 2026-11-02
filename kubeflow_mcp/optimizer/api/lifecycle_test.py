@@ -54,7 +54,16 @@ def cluster(api: MagicMock | None = None, persona="platform-admin", managed=True
         yield api, client
 
 
-def _experiment(parallel=3, max_trials=12, max_failed=None, trials=4, conditions=(), **spec):
+def _experiment(
+    parallel=3,
+    max_trials=12,
+    max_failed=None,
+    trials=4,
+    conditions=(),
+    running=0,
+    pending=0,
+    **spec,
+):
     """An Experiment CR as the API returns it, with Katib's defaults applied."""
     body = {"parallelTrialCount": parallel, "maxTrialCount": max_trials, **spec}
     if max_failed is not None:
@@ -62,7 +71,12 @@ def _experiment(parallel=3, max_trials=12, max_failed=None, trials=4, conditions
     return {
         "metadata": {"name": "demo"},
         "spec": body,
-        "status": {"trials": trials, "conditions": list(conditions)},
+        "status": {
+            "trials": trials,
+            "trialsRunning": running,
+            "trialsPending": pending,
+            "conditions": list(conditions),
+        },
     }
 
 
@@ -171,7 +185,9 @@ def test_update_preview_shows_the_change_and_does_not_patch():
     result = _update(api, parallel_trial_count=1)
     assert result["status"] == "preview"
     assert result["config"]["changes"] == {"parallel_trial_count": {"from": 3, "to": 1}}
+    assert result["config"]["active_trials_deleted"] == 0
     assert "parallel_trial_count 3 -> 1" in result["message"]
+    assert "delete" not in result["message"]
     api.patch_namespaced_custom_object.assert_not_called()
 
 
@@ -207,6 +223,7 @@ def test_zero_parallelism_is_rejected_with_a_pause_hint():
     result = _update(api, parallel_trial_count=0)
     assert result["error_code"] == "VALIDATION_ERROR"
     assert "cannot pause" in result["hint"]
+    assert "deletes any active trials" in result["hint"]
     api.get_namespaced_custom_object.assert_not_called()
 
 
@@ -300,3 +317,47 @@ def test_non_admin_blocked_from_updating_external_experiment():
     assert result["success"] is False
     assert "update experiments created through MCP" in result["hint"]
     api.patch_namespaced_custom_object.assert_not_called()
+
+
+# Katib's experiment controller deletes active trials above a lowered
+# parallelTrialCount at once, newest first, without counting them as killed.
+
+
+def test_preview_warns_how_many_active_trials_katib_will_delete():
+    """The live-cluster case from review: 2 running, parallelism lowered to 1."""
+    api = _api(parallel=2, trials=2, running=2)
+    result = _update(api, parallel_trial_count=1)
+    assert result["status"] == "preview"
+    assert result["config"]["active_trials_deleted"] == 1
+    assert "Katib will delete 1 active trial (newest first)" in result["message"]
+    api.patch_namespaced_custom_object.assert_not_called()
+
+
+def test_pending_trials_count_as_active():
+    api = _api(parallel=4, trials=4, running=2, pending=2)
+    result = _update(api, parallel_trial_count=1)
+    assert result["config"]["active_trials_deleted"] == 3
+    assert "delete 3 active trials" in result["message"]
+
+
+def test_confirmed_response_reports_the_deleted_trials():
+    api = _api(parallel=3, trials=3, running=3)
+    result = _update(api, parallel_trial_count=1, confirmed=True)
+    assert result["data"]["active_trials_deleted"] == 2
+    assert "not counted as killed" in result["data"]["message"]
+    api.patch_namespaced_custom_object.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    ("experiment", "kwargs"),
+    [
+        ({"parallel": 2, "running": 1}, {"parallel_trial_count": 1}),  # active fits
+        ({"parallel": 2, "running": 2}, {"parallel_trial_count": 4}),  # raised
+        ({"parallel": 2, "running": 2}, {"max_trial_count": 20}),  # parallelism untouched
+    ],
+)
+def test_no_deletion_warning_when_active_trials_fit(experiment, kwargs):
+    api = _api(trials=2, **experiment)
+    result = _update(api, **kwargs)
+    assert result["config"]["active_trials_deleted"] == 0
+    assert "delete" not in result["message"]

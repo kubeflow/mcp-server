@@ -79,8 +79,9 @@ def _check_requested(values: dict[str, Any]) -> ToolError | None:
         value = values[param]
         if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
             hint = (
-                "Katib cannot pause an experiment. Use parallel_trial_count=1 to throttle "
-                "it, or delete_experiment() to stop it."
+                "Katib cannot pause an experiment. Lowering parallel_trial_count limits "
+                "how many trials run at once, but Katib deletes any active trials above "
+                "the new value. Use delete_experiment() to stop it."
                 if param == "parallel_trial_count" and value == 0
                 else None
             )
@@ -145,8 +146,38 @@ def _katib_rule_violation(spec: dict[str, Any], status: dict[str, Any]) -> str |
     return None
 
 
+def _active_trials_deleted(patch: dict[str, int], status: dict[str, Any]) -> int:
+    """How many active trials Katib will delete when this patch is applied.
+
+    When ``parallelTrialCount`` drops below the active (pending plus running)
+    trials, Katib's experiment controller deletes the excess straight away,
+    newest first. They are not allowed to finish, and the experiment does not
+    count them as killed, so their work is lost without a trace in its status.
+    """
+    parallel = patch.get("parallelTrialCount")
+    if parallel is None:
+        return 0
+    active = (status.get("trialsPending") or 0) + (status.get("trialsRunning") or 0)
+    return max(active - parallel, 0)
+
+
+def _deletion_warning(deleted: int) -> str:
+    """Sentence appended to update_experiment messages when trials will be lost."""
+    if not deleted:
+        return ""
+    noun = "trial" if deleted == 1 else "trials"
+    return (
+        f" Katib will delete {deleted} active {noun} (newest first) to meet the new "
+        "parallel_trial_count; their work is lost and they are not counted as killed."
+    )
+
+
 def _update_response(
-    name: str, namespace: str, changes: dict[str, dict[str, Any]], outcome: str
+    name: str,
+    namespace: str,
+    changes: dict[str, dict[str, Any]],
+    outcome: str,
+    active_trials_deleted: int = 0,
 ) -> dict[str, Any]:
     """Single response shape for every update_experiment outcome."""
     return ToolResponse(
@@ -154,6 +185,7 @@ def _update_response(
             "experiment": name,
             "namespace": namespace,
             "changes": changes,
+            "active_trials_deleted": active_trials_deleted,
             "message": f"Experiment '{name}' {outcome}",
         }
     ).model_dump()
@@ -234,8 +266,10 @@ def update_experiment(
     """Change a running experiment's concurrency or trial budget.
 
     These are the only fields Katib lets a live experiment change. Katib has no
-    pause, so ``parallel_trial_count=1`` is the way to throttle one; raising
-    ``max_trial_count`` extends it, and restarts a finished experiment whose
+    pause: lowering ``parallel_trial_count`` limits how many trials run at once,
+    but Katib immediately deletes any active trials above the new value instead
+    of letting them finish, and the preview says how many. Raising
+    ``max_trial_count`` extends the experiment, and restarts a finished one whose
     ``resumePolicy`` allows it. Edits Katib would reject are refused up front.
 
     Requires ``confirmed=True``; the first call returns a preview of the change.
@@ -251,8 +285,9 @@ def update_experiment(
         confirmed: Set ``True`` to apply. ``False`` returns a preview.
 
     Returns:
-        dict: Preview, or a response with ``experiment``, ``namespace`` and
-        ``changes`` mapping each changed parameter to ``{"from", "to"}``.
+        dict: Preview, or a response with ``experiment``, ``namespace``,
+        ``changes`` mapping each changed parameter to ``{"from", "to"}``, and
+        ``active_trials_deleted``, the trials Katib deletes to apply it.
 
     Raises:
         ToolError: If the experiment is not found or the edit is invalid.
@@ -304,7 +339,8 @@ def update_experiment(
         if not changes:
             return _update_response(name, ns, changes, "already has the requested settings")
 
-        violation = _katib_rule_violation({**spec, **patch}, current.get("status") or {})
+        status = current.get("status") or {}
+        violation = _katib_rule_violation({**spec, **patch}, status)
         if violation is not None:
             return ToolError(
                 error=f"Katib would reject this update to '{name}': {violation}",
@@ -313,13 +349,20 @@ def update_experiment(
             ).model_dump()
 
         summary = ", ".join(f"{p} {c['from']} -> {c['to']}" for p, c in changes.items())
+        deleted = _active_trials_deleted(patch, status)
+        warning = _deletion_warning(deleted)
         if not confirmed:
             return PreviewResponse(
                 message=(
-                    f"Will update experiment '{name}' in '{ns}': {summary}. "
+                    f"Will update experiment '{name}' in '{ns}': {summary}.{warning} "
                     "Set confirmed=True to proceed."
                 ),
-                config={"experiment": name, "namespace": ns, "changes": changes},
+                config={
+                    "experiment": name,
+                    "namespace": ns,
+                    "changes": changes,
+                    "active_trials_deleted": deleted,
+                },
             ).model_dump()
 
         api.patch_namespaced_custom_object(
@@ -329,7 +372,7 @@ def update_experiment(
             # create, so it gets the write budget rather than the read timeout.
             _request_timeout=mcp_utils.K8S_WRITE_TIMEOUT,
         )
-        return _update_response(name, ns, changes, f"updated ({summary})")
+        return _update_response(name, ns, changes, f"updated ({summary}).{warning}", deleted)
 
     except Exception as e:
         logger.warning("update_experiment(%s) failed: %s", name, e, exc_info=True)

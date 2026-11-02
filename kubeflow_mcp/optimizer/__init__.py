@@ -134,8 +134,9 @@ CLIENT_TOOL_DESCRIPTIONS: dict[str, str] = {
     ),
     "update_experiment": (
         "Change a running experiment's parallel_trial_count, max_trial_count or "
-        "max_failed_trial_count. Katib cannot pause; use parallel_trial_count=1 to "
-        "throttle. Set confirmed=True to apply."
+        "max_failed_trial_count. Katib cannot pause: lowering parallel_trial_count "
+        "deletes active trials above the new value (the preview says how many). "
+        "Set confirmed=True to apply."
     ),
 }
 
@@ -334,8 +335,9 @@ OPTIMIZER MONITORING AND LIFECYCLE:
 - wait_for_experiment(name) → block until Complete/Failed (timeout capped at 3600s)
 - get_suggestion(name) → algorithm status and request/reply counts
 - delete_experiment(name, confirmed=True) → remove permanently (preview first)
-- update_experiment(name, parallel_trial_count=1, confirmed=True) → throttle, or raise
-  max_trial_count to extend (Katib cannot pause; preview first)""",
+- update_experiment(name, max_trial_count=N, confirmed=True) → extend the budget, or
+  change parallel_trial_count. Katib cannot pause, and lowering parallelism deletes
+  active trials above the new value; check active_trials_deleted in the preview""",
     },
     "optimizer_optimization": {
         "full": """\
