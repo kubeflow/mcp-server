@@ -83,7 +83,7 @@ Kubernetes cluster ──►                  ├──► MLflow  (optional —
                                         └──► Langfuse (LLM traces + token cost)
 ```
 
-Enable with `--otel-endpoint <url>` or `OTEL_EXPORTER_OTLP_ENDPOINT`.
+Enable with `--otel-endpoint <url>`, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` or `OTEL_EXPORTER_OTLP_ENDPOINT`.
 
 #### Gateway Layer — Phase 4
 
@@ -184,7 +184,7 @@ Kubernetes API Server (RBAC enforced)
 - **External API hardening** — HuggingFace Hub calls use a 10s timeout and model ID format validation (`org/model` regex) to prevent SSRF; malformed model IDs return suggestions via `huggingface_hub.list_models` (best-effort, degrades gracefully on network failure)
 - **Thread safety** — `RateLimiter` uses `threading.Lock`; policy cache uses `functools.lru_cache` (GIL-safe); policy reload uses a dedicated `threading.Lock`
 - **Audit logging** — every tool call is logged with masked parameters, duration, and correlation ID; log buffer redacts sensitive patterns (tokens, passwords, credentials) before storage
-- **Observability** — opt-in OpenTelemetry tracing via `--otel-endpoint` or `OTEL_EXPORTER_OTLP_ENDPOINT`. Each tool call emits a span with `tool.args_preview` (masked, truncated to 300 chars), persona, correlation ID, MCP session/request IDs, and error status. OTLP exporter uses a 2s timeout to avoid blocking tool calls. Tracing is no-op when OTel packages are not installed
+- **Observability** — opt-in OpenTelemetry tracing via `--otel-endpoint`, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` or `OTEL_EXPORTER_OTLP_ENDPOINT`. Each tool call emits a span with `tool.args_preview` (masked, truncated to 300 chars), persona, correlation ID, MCP session/request IDs, and error status. OTLP exporter uses a 2s timeout to avoid blocking tool calls. Tracing is no-op when OTel packages are not installed
 
 ### What the MCP Server Does NOT Control
 
