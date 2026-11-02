@@ -40,6 +40,9 @@ logger = logging.getLogger(__name__)
 MAX_LOG_LINES = 1000
 MAX_LINE_CHARS = 2000
 MAX_CURSOR_CHARS = 9000  # Response size cap: max characters per cursor-mode page
+MAX_LOG_BUFFER_LINES = (
+    10000  # Guardrail: hard cap on collected log lines to protect server memory & TSDB/Kubelet
+)
 MAX_EVENT_LIMIT = 500
 MAX_WAIT_TIMEOUT = 3600
 MIN_POLLING_INTERVAL = 1
@@ -73,8 +76,13 @@ def _collect_log_lines(
     Returns (log_lines, fallback_was_used).
     """
     if cursor_mode:
-        # No deque cap: cursor mode must be able to address any line index.
-        log_lines: list[str] = list(client.get_job_logs(name=name, step=step, follow=False))
+        # Bounded iteration: prevent unbounded memory consumption if the pod has millions of log lines.
+        log_iter = client.get_job_logs(name=name, step=step, follow=False)
+        log_lines: list[str] = []
+        for line in log_iter:
+            log_lines.append(line)
+            if len(log_lines) >= MAX_LOG_BUFFER_LINES:
+                break
     else:
         log_lines = list(
             deque(client.get_job_logs(name=name, step=step, follow=False), maxlen=MAX_LOG_LINES)
@@ -174,6 +182,7 @@ def _cursor_response(
 
     # Skip truncate_log_output: per-line cap + char_budget are the backstop;
     # truncate_log_output would eat lines silently while next_offset already advanced.
+    truncated_by_buffer = total >= MAX_LOG_BUFFER_LINES
     data: dict[str, Any] = {
         "job": name,
         "step": step,
@@ -182,12 +191,19 @@ def _cursor_response(
         "next_offset": since_line + len(out_lines),
         "total_lines": total,
     }
+    if truncated_by_buffer:
+        data["truncated_by_guardrail"] = True
+        data["buffer_limit"] = MAX_LOG_BUFFER_LINES
     hint = extract_failure_hint("\n".join(log_lines[-MAX_LOG_LINES:]))
     if hint:
         data["failure_hint"] = hint
         data["next_steps"] = [
             f"Detected {hint['category']}: {hint['suggestion']}",
             "Read trainer://guides/troubleshooting for detailed fixes",
+        ]
+    elif truncated_by_buffer and (since_line + len(out_lines) >= total):
+        data["next_steps"] = [
+            f"Log buffer cap reached ({MAX_LOG_BUFFER_LINES} lines). For older logs or live tail, scope by step or container.",
         ]
     return ToolResponse(data=data).model_dump()
 

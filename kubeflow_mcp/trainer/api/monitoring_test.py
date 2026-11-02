@@ -29,6 +29,7 @@ from kubeflow_mcp.core.server import _audit_wrap
 from kubeflow_mcp.trainer.api.monitoring import (
     MAX_CURSOR_CHARS,
     MAX_LINE_CHARS,
+    MAX_LOG_BUFFER_LINES,
     MAX_LOG_LINES,
     _is_pod_for_step,
     get_training_events,
@@ -708,6 +709,30 @@ class TestGetTrainingLogsCursor:
         assert res_with_hint["success"] is True
         assert "failure_hint" in res_with_hint["data"]
         assert res_with_hint["data"]["failure_hint"]["category"] == "OOM"
+
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_cursor_mode_stops_at_max_log_buffer_lines_guardrail(self, mock_client_fn, _ns):
+        client = MagicMock()
+        client.get_job_logs.side_effect = lambda **kwargs: (f"line {i}" for i in range(15000))
+        mock_client_fn.return_value = client
+
+        res = get_training_logs("runaway-job", since_line=0, max_lines=100)
+        assert res["success"] is True
+        assert res["data"]["total_lines"] == MAX_LOG_BUFFER_LINES
+        assert res["data"]["truncated_by_guardrail"] is True
+        assert res["data"]["buffer_limit"] == MAX_LOG_BUFFER_LINES
+
+        # Now test when since_line reaches the end of the buffer
+        res_end = get_training_logs(
+            "runaway-job",
+            since_line=MAX_LOG_BUFFER_LINES - 50,
+            max_lines=50,
+        )
+        assert res_end["success"] is True
+        assert res_end["data"]["lines"] == 50
+        assert res_end["data"]["next_offset"] == MAX_LOG_BUFFER_LINES
+        assert "Log buffer cap reached" in res_end["data"]["next_steps"][0]
 
 
 # ─── get_training_events (tool-level) ────────────────────────────────────
