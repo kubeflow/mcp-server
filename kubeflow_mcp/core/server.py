@@ -305,8 +305,12 @@ IMPORTANT:
 """
 
 
-def _derive_tier(full_text: str, tier: str) -> str:
-    """Derive compact/minimal instruction content from full tier."""
+def _derive_tier(full_text: str, tier: str, allowed: set[str] | None = None) -> str:
+    """Derive compact/minimal instruction content from full tier.
+
+    ``allowed`` limits the minimal tier's tool list to the persona's tools
+    (``None`` means unrestricted).
+    """
     if tier == "full":
         return full_text
     if tier == "compact":
@@ -314,7 +318,9 @@ def _derive_tier(full_text: str, tier: str) -> str:
             line for line in full_text.splitlines() if line.strip() and "trainer://" not in line
         )
     tools = re.findall(r"\b(\w+)\(", full_text)
-    return f"Tools: {', '.join(dict.fromkeys(tools))}"
+    if allowed is not None:
+        tools = [t for t in tools if t in allowed]
+    return f"Tools: {', '.join(dict.fromkeys(tools))}" if tools else ""
 
 
 # Ordering used for a client that maps phases to sections but exports no
@@ -375,6 +381,7 @@ def _build_server_instructions(
 ) -> str:
     """Build server instructions from client module sections, filtered by persona and tier."""
     sections = _sections_for_persona(persona)
+    allowed = get_allowed_tools(persona)
 
     fragments = []
     for module in loaded_modules.values():
@@ -382,8 +389,9 @@ def _build_server_instructions(
         for section_name in sections:
             section = instruction_sections.get(section_name, {})
             full_text = section.get("full", "")
-            if full_text:
-                fragments.append(_derive_tier(full_text, tier))
+            derived = _derive_tier(full_text, tier, allowed) if full_text else ""
+            if derived:
+                fragments.append(derived)
 
     resource_lines = []
     for module in loaded_modules.values():
