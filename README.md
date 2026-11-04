@@ -298,6 +298,9 @@ export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
 kubeflow-mcp serve
 ```
 
+Spans are reported under the service name `kubeflow-mcp-server` unless `OTEL_SERVICE_NAME`
+or `service.name` in `OTEL_RESOURCE_ATTRIBUTES` sets another one.
+
 Each tool invocation emits an `execute_tool <tool>` span with attributes:
 `tool.name`, `tool.args_preview`, `tool.success`, `tool.duration_ms`, `kubeflow.persona`, and `correlation_id`.
 It is a child of the `tools/call <tool>` span that FastMCP creates, which continues the
