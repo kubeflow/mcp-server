@@ -26,6 +26,9 @@ to the collector Service created by the Operator:
 http://otel-collector-collector.observability.svc.cluster.local:4318
 ```
 
+Spans are reported under the service name `kubeflow-mcp-server` unless `OTEL_SERVICE_NAME`
+or `service.name` in `OTEL_RESOURCE_ATTRIBUTES` sets another one.
+
 Verify the collector and MCP deployment:
 
 ```bash
