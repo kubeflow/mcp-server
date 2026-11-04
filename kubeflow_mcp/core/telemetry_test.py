@@ -539,6 +539,79 @@ def test_audit_wrap_circuit_breaker_open(monkeypatch: pytest.MonkeyPatch) -> Non
     assert "tool.duration_ms" in span.attributes
     assert "error" in result
     assert result["error_code"] == "CIRCUIT_OPEN"
+    _assert_tool_error_span(span, result["error"])
+
+
+def _assert_tool_error_span(span: _FakeSpan, description: str) -> None:
+    """The span carries the error status that the isError result reports to the client."""
+    from kubeflow_mcp.core.server import _StatusCode
+
+    assert span.attributes["error.type"] == "tool_error"
+    if _StatusCode is not None:
+        assert span.status_code.status_code == _StatusCode.ERROR
+        assert span.status_code.description == description
+
+
+@pytest.mark.parametrize(
+    "error_code",
+    [ErrorCode.VALIDATION_ERROR, ErrorCode.SDK_ERROR, ErrorCode.KUBERNETES_ERROR],
+)
+def test_audit_wrap_marks_span_error_for_error_result(
+    monkeypatch: pytest.MonkeyPatch, error_code: str
+) -> None:
+    import kubeflow_mcp.core.server as server_mod
+
+    span = _FakeSpan()
+    monkeypatch.setattr(server_mod, "_rate_limiter", None)
+    monkeypatch.setattr(server_mod, "with_correlation_id", lambda: "cid-789")
+    monkeypatch.setattr(server_mod, "get_effective_persona", lambda: "readonly")
+    monkeypatch.setattr(server_mod, "get_tracer", lambda _name: _FakeTracer(span))
+    monkeypatch.setattr(server_mod, "get_breaker", lambda _tool: _FakeBreaker())
+
+    def failing_tool(**_kwargs):
+        return {"success": False, "error": "api down", "error_code": error_code}
+
+    _audit_wrap(failing_tool)()
+
+    assert span.attributes["tool.success"] is False
+    _assert_tool_error_span(span, "api down")
+
+
+def test_audit_wrap_marks_span_error_when_rate_limited(monkeypatch: pytest.MonkeyPatch) -> None:
+    import kubeflow_mcp.core.server as server_mod
+
+    span = _FakeSpan()
+    monkeypatch.setattr(server_mod, "_rate_limiter", SimpleNamespace(acquire=lambda: False))
+    monkeypatch.setattr(server_mod, "with_correlation_id", lambda: "cid-789")
+    monkeypatch.setattr(server_mod, "get_effective_persona", lambda: "readonly")
+    monkeypatch.setattr(server_mod, "get_tracer", lambda _name: _FakeTracer(span))
+
+    def sample_tool(**_kwargs):
+        return {"ok": True}
+
+    result = _audit_wrap(sample_tool)()
+
+    assert result["error_code"] == ErrorCode.RATE_LIMITED
+    _assert_tool_error_span(span, result["error"])
+
+
+def test_audit_wrap_leaves_span_status_unset_on_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    import kubeflow_mcp.core.server as server_mod
+
+    span = _FakeSpan()
+    monkeypatch.setattr(server_mod, "_rate_limiter", None)
+    monkeypatch.setattr(server_mod, "with_correlation_id", lambda: "cid-789")
+    monkeypatch.setattr(server_mod, "get_effective_persona", lambda: "readonly")
+    monkeypatch.setattr(server_mod, "get_tracer", lambda _name: _FakeTracer(span))
+    monkeypatch.setattr(server_mod, "get_breaker", lambda _tool: _FakeBreaker())
+
+    def sample_tool(**_kwargs):
+        return {"ok": True}
+
+    _audit_wrap(sample_tool)()
+
+    assert "error.type" not in span.attributes
+    assert span.status_code is None
 
 
 # ─── Trace context propagation ──────────────────────────────────────────────

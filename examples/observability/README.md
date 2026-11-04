@@ -53,3 +53,7 @@ Export failures do not block tool calls.
 This is an example `tools/list` span emitted by the MCP server, including the
 MCP method, session, and OpenTelemetry attributes. Use the trace backend and
 service names configured for your cluster.
+
+A tool that returns an error result (sent to the client with `isError: true`), is rate
+limited, or hits an open circuit breaker sets the span status to `ERROR` with
+`error.type=tool_error`. A tool that raises sets `error.type` to the exception type.
