@@ -152,6 +152,17 @@ def _inject_meta(result: Any, tool_name: str) -> Any:
     return result
 
 
+def _mark_tool_error(span: Any, description: str | None) -> None:
+    """Mark the span as failed for a tool that returned an error result.
+
+    ToolErrorMiddleware sends these results with ``isError: true``, and the OTel MCP
+    conventions say such a call SHOULD record ``error.type`` as ``tool_error``.
+    """
+    span.set_attribute("error.type", "tool_error")
+    if _StatusCode is not None:
+        span.set_status(_Status(_StatusCode.ERROR, description))
+
+
 def _audit_wrap(tool_func, *, is_dynamic_execute_tool: bool = False):
     """Wrap a tool function with rate limiting, circuit breaking, audit logging, and response metadata."""
     tracer = get_tracer("kubeflow_mcp.tools")
@@ -201,10 +212,12 @@ def _audit_wrap(tool_func, *, is_dynamic_execute_tool: bool = False):
                 span.set_attribute("tool.success", False)
                 span.set_attribute("tool.duration_ms", duration_ms)
                 logger.warning("rate_limited", extra={"tool": tool_name})
-                return {
+                result = {
                     "error": "Rate limit exceeded. Retry after a brief pause.",
                     "error_code": ErrorCode.RATE_LIMITED,
                 }
+                _mark_tool_error(span, result["error"])
+                return result
 
             # In dynamic modes, execute_tool delegates to target tools that manage
             # their own per-tool circuit breakers. Bypass the outer breaker to prevent
@@ -216,10 +229,12 @@ def _audit_wrap(tool_func, *, is_dynamic_execute_tool: bool = False):
                 span.set_attribute("tool.success", False)
                 span.set_attribute("tool.duration_ms", duration_ms)
                 logger.warning("circuit_open", extra={"tool": tool_name})
-                return {
+                result = {
                     "error": f"Circuit breaker open for '{tool_name}' — K8s API may be degraded. Retries automatically after recovery timeout.",
                     "error_code": ErrorCode.CIRCUIT_OPEN,
                 }
+                _mark_tool_error(span, result["error"])
+                return result
 
             try:
                 result = tool_func(**kwargs)
@@ -235,6 +250,9 @@ def _audit_wrap(tool_func, *, is_dynamic_execute_tool: bool = False):
                 )
                 span.set_attribute("tool.success", is_success)
                 span.set_attribute("tool.duration_ms", duration_ms)
+                if not is_success:
+                    error = result.get("error") if isinstance(result, dict) else None
+                    _mark_tool_error(span, str(error) if error is not None else None)
 
                 logger.info(
                     "tool_call",
