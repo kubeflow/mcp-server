@@ -45,7 +45,7 @@ jobs:
       fail-fast: false
       matrix:
         kubernetes-version: ["1.32.3"]
-        trainer-ref: ["v2.3.0"]  # CI baseline; >=2.3.0,<2.4.0 supported at runtime
+        trainer-ref: ["v2.3.0", "v2.4.0-rc.1"]  # minimum and newest supported; >=2.3.0,<2.5.0 at runtime
 
     steps:
       - name: Checkout repository
@@ -96,7 +96,7 @@ jobs:
       fail-fast: false
       matrix:
         kubernetes-version: ["1.32.3"]
-        trainer-ref: ["v2.3.0"]
+        trainer-ref: ["v2.3.0", "v2.4.0-rc.1"]
 
     env:
       IMAGE: kubeflow-mcp:${{ github.sha }}
