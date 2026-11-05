@@ -15,6 +15,7 @@
 from fastmcp import FastMCP
 from starlette.testclient import TestClient
 
+from kubeflow_mcp.core import http_edge
 from kubeflow_mcp.core.http_edge import register_probe_routes
 from kubeflow_mcp.core.server import create_server
 
@@ -86,4 +87,74 @@ def test_probes_remain_available_when_mcp_auth_is_enabled() -> None:
 
     assert health_response.status_code == 200
     assert ready_response.status_code == 200
+    assert mcp_response.status_code == 401
+
+
+def test_metrics_route_reports_unavailable_when_metrics_are_disabled(monkeypatch) -> None:
+    monkeypatch.setattr(http_edge, "prometheus_enabled", lambda: False)
+
+    with _probe_client() as client:
+        response = client.get("/metrics")
+
+    assert response.status_code == 503
+    assert response.json() == {"status": "metrics_disabled"}
+
+
+def test_metrics_route_serves_prometheus_text_when_enabled(monkeypatch) -> None:
+    monkeypatch.setattr(http_edge, "prometheus_enabled", lambda: True)
+    monkeypatch.setattr(
+        http_edge,
+        "_collect_prometheus_metrics",
+        lambda: (b"# HELP up 1\nup 1.0\n", "text/plain; version=0.0.4; charset=utf-8"),
+    )
+
+    with _probe_client() as client:
+        response = client.get("/metrics")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/plain")
+    assert "up 1.0" in response.text
+
+
+def test_metrics_route_reports_unavailable_when_exporter_is_missing(monkeypatch) -> None:
+    def _raise_import_error() -> tuple[bytes, str]:
+        raise ImportError("No module named 'prometheus_client'")
+
+    monkeypatch.setattr(http_edge, "prometheus_enabled", lambda: True)
+    monkeypatch.setattr(http_edge, "_collect_prometheus_metrics", _raise_import_error)
+
+    with _probe_client() as client:
+        response = client.get("/metrics")
+
+    assert response.status_code == 503
+    assert response.json() == {"status": "metrics_unavailable"}
+
+
+def test_metrics_route_reports_unavailable_when_collection_fails(monkeypatch) -> None:
+    def _raise_runtime_error() -> tuple[bytes, str]:
+        raise RuntimeError("collector exploded")
+
+    monkeypatch.setattr(http_edge, "prometheus_enabled", lambda: True)
+    monkeypatch.setattr(http_edge, "_collect_prometheus_metrics", _raise_runtime_error)
+
+    with _probe_client() as client:
+        response = client.get("/metrics")
+
+    assert response.status_code == 503
+    assert response.json() == {"status": "metrics_unavailable"}
+
+
+def test_metrics_route_remains_unauthenticated(monkeypatch) -> None:
+    monkeypatch.setattr(http_edge, "prometheus_enabled", lambda: True)
+    monkeypatch.setattr(
+        http_edge,
+        "_collect_prometheus_metrics",
+        lambda: (b"up 1.0\n", "text/plain; version=0.0.4; charset=utf-8"),
+    )
+
+    with _probe_client(authenticated=True) as client:
+        metrics_response = client.get("/metrics")
+        mcp_response = client.post("/mcp")
+
+    assert metrics_response.status_code == 200
     assert mcp_response.status_code == 401
