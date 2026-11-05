@@ -320,9 +320,7 @@ def test_inspect_crd_lists_trainer_crds(mock_k8s_apis):
     other_crd.metadata.name = "widgets.example.com"
     other_crd.spec.group = "example.com"
 
-    api.list_custom_resource_definition.return_value = MagicMock(
-        items=[trainer_crd, other_crd]
-    )
+    api.list_custom_resource_definition.return_value = MagicMock(items=[trainer_crd, other_crd])
 
     result = inspect_crd()
 
@@ -538,9 +536,7 @@ def test_inspect_controller_auto_discovery_is_exempt_from_policy(
 
 def test_inspect_controller_logs_response(mock_k8s_apis, scan_default_namespaces):
     core = mock_k8s_apis["core_v1"]
-    core.list_namespaced_pod.return_value = MagicMock(
-        items=[_controller_pod("kubeflow-system")]
-    )
+    core.list_namespaced_pod.return_value = MagicMock(items=[_controller_pod("kubeflow-system")])
     core.read_namespaced_pod_log.return_value = "controller started\\nready"
 
     result = inspect_controller(view="logs", tail_lines=50)
@@ -559,4 +555,3 @@ def test_inspect_controller_logs_response(mock_k8s_apis, scan_default_namespaces
         tail_lines=50,
         _request_timeout=mcp_utils.K8S_TIMEOUT,
     )
-\n
