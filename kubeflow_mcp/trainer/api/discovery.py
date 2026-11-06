@@ -226,7 +226,14 @@ def get_training_job(name: str, namespace: str | None = None) -> dict[str, Any]:
         namespace: K8s namespace. Uses default from kubeconfig when omitted.
 
     Returns:
-        dict: Response containing ``name``, ``status``, ``runtime``, and ``created_at``.
+        dict: Response containing:
+
+        - ``name``, ``status``, ``runtime``, and ``created_at``
+          (ISO 8601, or ``null`` when unavailable)
+        - ``num_nodes`` (when available)
+        - ``steps`` (each step's ``name``, pod ``status``, ``pod``, ``device``,
+          and ``device_count``; failed steps first, at most ``MAX_JOB_STEPS``)
+        - ``step_summary`` (step counts by status).
 
     Raises:
         ToolError: If job not found (``RESOURCE_NOT_FOUND``).
