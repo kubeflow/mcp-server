@@ -460,3 +460,56 @@ async def test_confirm_gate_matches_full_mode_in_dynamic_modes(k8s_writes, tool)
         set_effective_persona(previous)
 
     assert mismatches == {}
+
+
+@pytest.mark.parametrize("persona", ["platform-admin", "readonly", "data-scientist", "ml-engineer"])
+async def test_minimal_instruction_tier_includes_all_registered_tools(persona):
+    """The minimal instruction tier must list exactly all registered tools without omissions or extras."""
+    previous = get_effective_persona()
+    try:
+        server_instance = create_server(persona=persona, instruction_tier="minimal")
+        async with Client(server_instance) as client:
+            registered_tools = {tool.name for tool in await client.list_tools()}
+    finally:
+        set_effective_persona(previous)
+
+    listed_tools = {
+        name
+        for line in server_instance.instructions.splitlines()
+        if line.startswith("Tools: ")
+        for name in line.removeprefix("Tools: ").split(", ")
+    }
+
+    assert listed_tools == registered_tools
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [{"read_only": True}, {"deny": ["delete_*"]}],
+    ids=["read_only", "deny"],
+)
+async def test_minimal_instructions_list_only_registered_tools_with_policy(
+    tmp_path, monkeypatch, policy
+):
+    """The minimal tier must not list tools that policy removes."""
+    import yaml
+
+    policy_file = tmp_path / ".kf-mcp-policy.yaml"
+    policy_file.write_text(yaml.safe_dump({"policy": policy}))
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+
+    previous = get_effective_persona()
+    try:
+        server_instance = create_server(persona="platform-admin", instruction_tier="minimal")
+        async with Client(server_instance) as client:
+            registered_tools = {tool.name for tool in await client.list_tools()}
+    finally:
+        set_effective_persona(previous)
+
+    listed_tools = {
+        name
+        for line in server_instance.instructions.splitlines()
+        if line.startswith("Tools: ")
+        for name in line.removeprefix("Tools: ").split(", ")
+    }
+    assert listed_tools == registered_tools

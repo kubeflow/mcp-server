@@ -369,12 +369,44 @@ def _sections_for_persona(persona: str) -> list[str]:
     return ordered + extra
 
 
+def _build_minimal_instructions(
+    loaded_modules: dict[str, Any],
+    persona: str,
+    allowed_tools: set[str] | list[str] | None = None,
+) -> str:
+    """Build minimal instructions listing all allowed registered tools."""
+    if allowed_tools is None:
+        allowed = get_allowed_tools(persona)
+    else:
+        allowed = set(allowed_tools)
+
+    tools_order: list[str] = []
+    for module in loaded_modules.values():
+        for t in getattr(module, "TOOLS", []):
+            if t.__name__ not in tools_order:
+                tools_order.append(t.__name__)
+    for t in HEALTH_TOOLS:
+        if t.__name__ not in tools_order:
+            tools_order.append(t.__name__)
+
+    if allowed is not None:
+        tools = [name for name in tools_order if name in allowed]
+    else:
+        tools = tools_order
+
+    return _GLOBAL_HEADER + f"\nTools: {', '.join(tools)}\n"
+
+
 def _build_server_instructions(
     loaded_modules: dict[str, Any],
     persona: str,
     tier: str,
+    allowed_tools: set[str] | list[str] | None = None,
 ) -> str:
     """Build server instructions from client module sections, filtered by persona and tier."""
+    if tier == "minimal":
+        return _build_minimal_instructions(loaded_modules, persona, allowed_tools)
+
     sections = _sections_for_persona(persona)
 
     fragments = []
@@ -444,20 +476,6 @@ def create_server(  # noqa: C901
             clients_ready = False
             logger.warning(f"Failed to import client '{client_name}': {e}")
 
-    # Build instructions (persona + tier aware)
-    instructions = _build_server_instructions(loaded_modules, persona, instruction_tier)
-    mcp_kwargs: dict[str, Any] = {"instructions": instructions}
-    if auth_provider is not None:
-        mcp_kwargs["auth"] = auth_provider
-        logger.info("HTTP auth provider attached to server")
-    mcp: FastMCP = FastMCP("kubeflow-mcp-server", version=__version__, **mcp_kwargs)
-
-    # Bridge FastMCP async context into sync _audit_wrap via ContextVars
-    from kubeflow_mcp.core.middleware import AuditIdentityMiddleware, ToolErrorMiddleware
-
-    mcp.add_middleware(AuditIdentityMiddleware())
-    mcp.add_middleware(ToolErrorMiddleware())
-
     # Merge tool metadata from client modules
     all_descriptions: dict[str, str] = {}
     all_annotations: dict[str, dict] = {}
@@ -506,6 +524,22 @@ def create_server(  # noqa: C901
     allowed_funcs = [f for f in all_tool_funcs if f.__name__ in final_allowed]
 
     logger.debug(f"Final allowed tools after policy: {len(final_allowed)}")
+
+    # Build instructions (persona + tier aware)
+    instructions = _build_server_instructions(
+        loaded_modules, persona, instruction_tier, allowed_tools=final_allowed
+    )
+    mcp_kwargs: dict[str, Any] = {"instructions": instructions}
+    if auth_provider is not None:
+        mcp_kwargs["auth"] = auth_provider
+        logger.info("HTTP auth provider attached to server")
+    mcp: FastMCP = FastMCP("kubeflow-mcp-server", version=__version__, **mcp_kwargs)
+
+    # Bridge FastMCP async context into sync _audit_wrap via ContextVars
+    from kubeflow_mcp.core.middleware import AuditIdentityMiddleware, ToolErrorMiddleware
+
+    mcp.add_middleware(AuditIdentityMiddleware())
+    mcp.add_middleware(ToolErrorMiddleware())
 
     # --- Mode dispatch ---
     valid_modes = ("full", "progressive", "semantic")
