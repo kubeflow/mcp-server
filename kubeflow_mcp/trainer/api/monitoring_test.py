@@ -240,6 +240,33 @@ def _make_mock_client(**method_returns):
 
 
 class TestGetTrainingLogs:
+    @pytest.mark.parametrize("since_line", [None, 0])
+    @pytest.mark.parametrize("pods_present", [False, True])
+    @patch(PATCH_CORE_V1)
+    @patch(PATCH_EFF_NS, return_value="workloads")
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_missing_pods_are_distinguished_from_empty_output(
+        self, mock_client_fn, _ns, _eff_ns, mock_v1_fn, pods_present, since_line
+    ):
+        mock_client_fn.return_value = _make_mock_client(get_job_logs=[])
+        mock_v1_fn.return_value.list_namespaced_pod.return_value = SimpleNamespace(
+            items=[_trainjob_pod("job", "node", index=0)] if pods_present else []
+        )
+        mock_v1_fn.return_value.read_namespaced_pod_log.return_value = ""
+        result = get_training_logs("job", since_line=since_line)
+        assert result["success"] is True
+        data = result["data"]
+        assert data["logs"] == ""
+        assert data["lines"] == 0
+        if pods_present:
+            assert "next_steps" not in data
+        else:
+            assert "Empty logs do not prove" in data["next_steps"][0]
+        if since_line is not None:
+            assert data["next_offset"] == 0
+            assert data["total_lines"] == 0
+
     @patch(PATCH_NS_CHECK, return_value=None)
     @patch(PATCH_CLIENT)
     def test_success(self, mock_client_fn, _ns):
