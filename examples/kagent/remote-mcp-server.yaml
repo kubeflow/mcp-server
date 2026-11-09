@@ -1,6 +1,7 @@
 apiVersion: kagent.dev/v1alpha2
 kind: RemoteMCPServer
 metadata:
+  namespace: kagent
   name: kubeflow-mcp-http
 spec:
   description: Kubeflow MCP Server over native HTTP

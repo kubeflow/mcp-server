@@ -25,6 +25,8 @@ For the complete KAgent, MCP, Agentgateway, tracing, and Grafana setup:
 1. Install KAgent, Kubeflow Trainer, Agentgateway, OpenTelemetry, and Grafana
    operators with their CRDs.
 2. Follow [`kagent`](kagent/) to create the MCP credentials.
+   Label the trusted KAgent caller pod templates as described there. Workloads
+   run separately in `kubeflow-workloads`, without the control-plane credentials.
 3. Create the Agentgateway upstream Secret and apply [`agentgateway`](agentgateway/):
 
    ```bash

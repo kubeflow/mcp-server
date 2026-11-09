@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Optional image version/tag (e.g. 0.1.0). Defaults to a commit SHA tag.'
+        description: 'Development tag (dev-* or sha-*). Defaults to a commit SHA tag.'
         required: false
         type: string
       publish:
@@ -22,6 +22,17 @@ on:
         type: string
   workflow_call:
     inputs:
+      ref:
+        description: 'Exact source ref to build.'
+        required: true
+        type: string
+      publish:
+        required: true
+        type: boolean
+      release:
+        description: 'Allow release tags; only set by the release workflow.'
+        default: false
+        type: boolean
       version:
         description: 'Release version/tag to build (used for image tags and checkout ref).'
         required: true
@@ -43,13 +54,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
         with:
-          ref: ${{ inputs.ref || (github.event_name == 'workflow_call' && inputs.version) || github.ref }}
+          ref: ${{ inputs.ref || github.ref }}
 
       - name: Parse version
         id: ver
         env:
           REQUESTED_VERSION: ${{ inputs.version }}
           REQUESTED_PUBLISH: ${{ inputs.publish }}
+          RELEASE_BUILD: ${{ inputs.release || false }}
+          SOURCE_REF: ${{ inputs.ref }}
         run: |
           set -euo pipefail
           V="$REQUESTED_VERSION"
@@ -58,6 +71,15 @@ jobs:
           fi
           if [[ ! "$V" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
             echo "Invalid image tag: $V" >&2
+            exit 1
+          fi
+          if [[ "$RELEASE_BUILD" == "true" ]]; then
+            if [[ ! "$V" =~ ^[0-9]+\.[0-9]+\.[0-9]+(rc[0-9]+)?$ || "$SOURCE_REF" != "refs/tags/$V" ]]; then
+              echo "Release builds require a release version and its matching tag ref." >&2
+              exit 1
+            fi
+          elif [[ "$V" != dev-* && "$V" != sha-* ]]; then
+            echo "Manual image tags must start with dev- or sha-." >&2
             exit 1
           fi
           STABLE=false
@@ -74,9 +96,8 @@ jobs:
           echo "major_minor=$MAJOR_MINOR" >> "$GITHUB_OUTPUT"
           echo "major=$MAJOR" >> "$GITHUB_OUTPUT"
           echo "version=$V" >> "$GITHUB_OUTPUT"
-          # Release calls publish; manual runs publish only when explicitly requested.
-          if [[ "$GITHUB_EVENT_NAME" == "workflow_call" ]] \
-            || [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" && "$REQUESTED_PUBLISH" == "true" ]]; then
+          # Reusable workflows inherit the caller's event; publication is an explicit input.
+          if [[ "$REQUESTED_PUBLISH" == "true" && "$GITHUB_EVENT_NAME" != "pull_request" ]]; then
             echo "push=true" >> "$GITHUB_OUTPUT"
           else
             echo "push=false" >> "$GITHUB_OUTPUT"

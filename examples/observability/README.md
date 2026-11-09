@@ -36,7 +36,7 @@ The default collector uses the `debug` exporter so the pipeline can be validated
 before a trace backend is configured. Collector logs should show received spans:
 
 ```bash
-kubectl logs -n observability deployment/otel-collector
+kubectl logs -n observability deployment/otel-collector-collector
 ```
 
 ## Connect a trace backend

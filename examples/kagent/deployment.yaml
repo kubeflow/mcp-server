@@ -1,6 +1,7 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  namespace: kagent
   name: kubeflow-mcp-http
   labels:
     app: kubeflow-mcp-http
@@ -11,11 +12,14 @@ spec:
       app: kubeflow-mcp-http
   template:
     metadata:
+      annotations:
+        kubeflow-mcp/workload-namespace: kubeflow-workloads
       labels:
         app: kubeflow-mcp-http
         app.kubernetes.io/name: kubeflow-mcp-http
     spec:
       serviceAccountName: kubeflow-mcp
+      automountServiceAccountToken: false
       containers:
         - name: mcp-server
           image: ghcr.io/kubeflow/mcp-server:latest
@@ -69,6 +73,9 @@ spec:
               port: http
             periodSeconds: 20
           volumeMounts:
+            - name: api-access
+              mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              readOnly: true
             - name: tmp
               mountPath: /tmp
             - name: home
@@ -77,6 +84,22 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       volumes:
+        # The SDK reads its default workload namespace here; the token still identifies kagent's SA.
+        - name: api-access
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+              - configMap:
+                  name: kube-root-ca.crt
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+              - downwardAPI:
+                  items:
+                    - path: namespace
+                      fieldRef:
+                        fieldPath: metadata.annotations['kubeflow-mcp/workload-namespace']
         - name: tmp
           emptyDir: {}
         - name: home

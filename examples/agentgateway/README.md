@@ -60,8 +60,9 @@ cluster:
 export MCP_TOKEN='<the same token used by kubeflow-mcp-http-auth>'
 
 kubectl create namespace agentgateway-system --dry-run=client -o yaml | kubectl apply -f -
-kubectl -n agentgateway-system create secret generic kubeflow-mcp-upstream-auth \
-  --from-literal=Authorization="Bearer $MCP_TOKEN" \
+printf 'Bearer %s' "$MCP_TOKEN" | kubectl -n agentgateway-system \
+  create secret generic kubeflow-mcp-upstream-auth \
+  --from-file=Authorization=/dev/stdin \
   --dry-run=client -o yaml | kubectl apply -f -
 ```
 
@@ -87,9 +88,10 @@ This creates:
 - Prometheus ServiceMonitor and PodMonitor resources.
 - Gateway ingress isolation with NetworkPolicy.
 
-The NetworkPolicy restricts application traffic to KAgent and permits metrics
-scraping from the `monitoring` namespace. If Prometheus runs elsewhere, update
-the NetworkPolicy before applying the profile.
+The gateway injects the MCP token, so port 80 accepts only trusted caller pods
+in `kagent` labeled `kubeflow-mcp-client: "true"`. Follow the
+[KAgent caller setup](../kagent/README.md); training pods stay in `kubeflow-workloads`.
+Metrics scraping is allowed from `monitoring`; adjust that namespace if needed.
 
 Agentgateway metrics and MCP traces are complementary: use Prometheus for aggregate traffic and latency, and the OpenTelemetry pipeline for an individual request across the stack.
 

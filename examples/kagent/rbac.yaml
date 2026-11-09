@@ -1,6 +1,7 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
+  namespace: kubeflow-workloads
   name: kubeflow-mcp-trainer
 rules:
   - apiGroups: ["trainer.kubeflow.org"]
@@ -25,6 +26,7 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
+  namespace: kubeflow-workloads
   name: kubeflow-mcp-trainer
 roleRef:
   apiGroup: rbac.authorization.k8s.io

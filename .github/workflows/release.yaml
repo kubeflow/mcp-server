@@ -191,10 +191,13 @@ jobs:
     secrets: inherit
     with:
       version: ${{ needs.prepare.outputs.version }}
+      ref: refs/tags/${{ needs.prepare.outputs.version }}
+      publish: true
+      release: true
 
   github-release:
     name: Create GitHub Release
-    needs: [prepare, build, create-tag, publish-pypi]
+    needs: [prepare, build, create-tag, publish-pypi, docker]
     runs-on: ubuntu-latest
     environment:
       name: release
