@@ -165,3 +165,7 @@ update_training_job(name, action="resume", confirmed=True)   # Resume (preview f
 `get_cluster_resources().data.gpu_total` is capacity, not free GPUs. `gpu_allocated` and
 `gpu_available` estimate current requests; they are unknown (`null`) when cluster-wide pod access
 is unavailable. These estimates do not guarantee scheduler placement.
+
+Fine-tuning previews show inherited runtime requests and GPU fit warnings using the SDK's
+resource aliases. A worker requesting two GPUs needs both on one node; separate one-GPU nodes
+cannot satisfy it. Validation and preview share one cluster inspection.
