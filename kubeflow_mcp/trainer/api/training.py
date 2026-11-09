@@ -597,6 +597,43 @@ def _build_initializer(
     return Initializer(model=model_init, dataset=dataset_init)
 
 
+def _get_runtime_node_spec(runtime: str, namespace: str | None) -> dict[str, Any]:
+    """Read node defaults in the same namespace-first order as the Trainer SDK."""
+    from kubeflow.trainer.constants import constants
+
+    from kubeflow_mcp.common.types import is_k8s_not_found
+    from kubeflow_mcp.common.utils import (
+        K8S_TIMEOUT,
+        get_custom_objects_api,
+        get_trainer_effective_namespace,
+    )
+
+    api = get_custom_objects_api()
+    try:
+        raw = api.get_namespaced_custom_object(
+            group=constants.GROUP,
+            version=constants.VERSION,
+            namespace=get_trainer_effective_namespace(namespace),
+            plural=constants.TRAINING_RUNTIME_PLURAL,
+            name=runtime,
+            _request_timeout=K8S_TIMEOUT,
+        )
+    except Exception as e:
+        if not is_k8s_not_found(e):
+            raise
+        raw = api.get_cluster_custom_object(
+            group=constants.GROUP,
+            version=constants.VERSION,
+            plural=constants.CLUSTER_TRAINING_RUNTIME_PLURAL,
+            name=runtime,
+            _request_timeout=K8S_TIMEOUT,
+        )
+    jobs = raw["spec"]["template"]["spec"]["replicatedJobs"]
+    return next(
+        job["template"]["spec"]["template"]["spec"] for job in jobs if job["name"] == "node"
+    )
+
+
 def _build_runtime_patch(
     node_selector: dict[str, str] | None = None,
     tolerations: list[dict[str, Any]] | None = None,

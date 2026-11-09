@@ -1130,3 +1130,37 @@ class TestBuildRuntimePatch:
         assert [type(o).__name__ for o in options] == ["Labels", "Annotations"]
         assert options[0].labels == {"team": "ml"}
         assert options[1].annotations == {"owner": "alice"}
+
+
+@pytest.mark.parametrize("scope", ["namespace", "cluster", "denied"])
+def test_runtime_node_lookup_respects_scope_and_denials(scope: str) -> None:
+    from kubeflow_mcp.trainer.api.training import _get_runtime_node_spec
+
+    pod = {"containers": [{"name": "node"}]}
+    raw = {
+        "spec": {
+            "template": {
+                "spec": {
+                    "replicatedJobs": [
+                        {"name": "node", "template": {"spec": {"template": {"spec": pod}}}}
+                    ]
+                }
+            }
+        }
+    }
+    api = MagicMock()
+    api.get_namespaced_custom_object.return_value = raw
+    api.get_cluster_custom_object.return_value = raw
+    if scope != "namespace":
+        api.get_namespaced_custom_object.side_effect = ApiException(
+            status=404 if scope == "cluster" else 403
+        )
+    with patch("kubeflow_mcp.common.utils.get_custom_objects_api", return_value=api):
+        if scope == "denied":
+            with pytest.raises(ApiException):
+                _get_runtime_node_spec("custom-runtime", "workloads")
+        else:
+            assert _get_runtime_node_spec("custom-runtime", "workloads") == pod
+    assert api.get_namespaced_custom_object.call_args.kwargs["namespace"] == "workloads"
+    assert api.get_namespaced_custom_object.call_args.kwargs["name"] == "custom-runtime"
+    assert api.get_cluster_custom_object.call_count == int(scope == "cluster")
