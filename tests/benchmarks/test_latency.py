@@ -2,6 +2,7 @@
 
 import inspect
 from collections.abc import Callable
+from unittest.mock import patch
 
 import pytest
 
@@ -156,6 +157,9 @@ def test_preview_tools_latency(
     original_gpu_check = training._check_gpu_available
     training._check_gpu_available = lambda: None
     try:
-        record_latency_benchmark(name, benchmark_func)
+        with patch.object(
+            training, "_get_runtime_node_spec", return_value={"containers": [{"name": "node"}]}
+        ):
+            record_latency_benchmark(name, benchmark_func)
     finally:
         training._check_gpu_available = original_gpu_check

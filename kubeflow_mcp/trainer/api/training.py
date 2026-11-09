@@ -28,7 +28,11 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 
-from kubeflow.trainer.constants.constants import DATASET_PATH, DEFAULT_PIP_INDEX_URLS
+from kubeflow.trainer.constants.constants import (
+    DATASET_PATH,
+    DEFAULT_PIP_INDEX_URLS,
+    DEFAULT_TRAINING_RUNTIME,
+)
 
 from kubeflow_mcp.common.constants import ErrorCode
 from kubeflow_mcp.common.types import PreviewResponse, ToolError, ToolResponse
@@ -631,6 +635,34 @@ def _get_runtime_node_spec(runtime: str, namespace: str | None) -> dict[str, Any
     jobs = raw["spec"]["template"]["spec"]["replicatedJobs"]
     return next(
         job["template"]["spec"]["template"]["spec"] for job in jobs if job["name"] == "node"
+    )
+
+
+def _ensure_workspace(
+    volumes: list[dict[str, Any]] | None,
+    volume_mounts: list[dict[str, Any]] | None,
+    *,
+    runtime: str,
+    namespace: str | None,
+) -> tuple[list[dict[str, Any]] | None, list[dict[str, Any]] | None]:
+    """Add fallback storage only when neither caller nor runtime mounts /workspace."""
+    if any(m.get("mountPath") == "/workspace" for m in (volume_mounts or [])):
+        return volumes, volume_mounts
+
+    pod_spec = _get_runtime_node_spec(runtime, namespace)
+    container = next(c for c in pod_spec["containers"] if c["name"] == "node")
+    if any(m.get("mountPath") == "/workspace" for m in container.get("volumeMounts", [])):
+        return volumes, volume_mounts
+
+    volume_names = {v["name"] for v in [*(volumes or []), *pod_spec.get("volumes", [])]}
+    workspace_name = "workspace"
+    suffix = 1
+    while workspace_name in volume_names:
+        workspace_name = f"workspace-{suffix}"
+        suffix += 1
+    return (
+        [*(volumes or []), {"name": workspace_name, "emptyDir": {}}],
+        [*(volume_mounts or []), {"name": workspace_name, "mountPath": "/workspace"}],
     )
 
 
@@ -1380,6 +1412,11 @@ def run_custom_training(
             {"gpu": gpu_per_node} if gpu_per_node > 0 else None
         )
 
+        # The SDK writes its script into /workspace, which may be unwritable for non-root UIDs.
+        volumes, volume_mounts = _ensure_workspace(
+            volumes, volume_mounts, runtime=runtime or DEFAULT_TRAINING_RUNTIME, namespace=namespace
+        )
+
         config: dict[str, Any] = {
             "script": script[:200] + "..." if len(script) > 200 else script,
             "runtime": runtime or "(default: torch-distributed)",
@@ -1435,13 +1472,6 @@ def run_custom_training(
             )
 
         train_func = _make_train_func(script, func_args=func_args)
-
-        if volumes and not any(m.get("mountPath") == "/workspace" for m in (volume_mounts or [])):
-            volumes = [*volumes, {"name": "workspace", "emptyDir": {}}]
-            volume_mounts = [
-                *(volume_mounts or []),
-                {"name": "workspace", "mountPath": "/workspace"},
-            ]
 
         trainer = CustomTrainer(
             func=train_func,

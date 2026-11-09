@@ -35,7 +35,10 @@ ALWAYS pass when `platform=openshift`. Copy-paste ready — pass directly as `vo
 
 **Rules**:
 - `fine_tune()`: Do NOT add workspace emptyDir — `/workspace` comes from the runtime PVC
-- `run_custom_training()`: auto-injects workspace emptyDir at `/workspace`
+- `run_custom_training()`: adds a writable `emptyDir` at `/workspace` only when neither
+  your arguments nor the selected runtime already mount that path. Runtime storage must
+  be readable to choose a safe fallback; a failed lookup stops the request.
+  The preview includes any added fallback mount, whose data lasts only for the pod's lifetime.
 - `run_container_training()`: add workspace emptyDir only if your image writes to `/workspace`
 
 ## HuggingFace Cache Directory (HF_HOME)
