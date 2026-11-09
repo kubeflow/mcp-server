@@ -99,6 +99,8 @@ def _is_blocked(result: dict[str, Any]) -> bool:
     data = result.get("data")
     if not isinstance(data, dict):
         return False
+    if data.get("reached") is False or data.get("packages_error"):
+        return True
     scopes = [data]
     nested = data.get("compatibility")  # pre_flight nests the compatibility report
     if isinstance(nested, dict):

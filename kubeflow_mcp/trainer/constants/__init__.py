@@ -13,3 +13,5 @@
 # limitations under the License.
 
 """Trainer-specific constants."""
+
+MAX_DIAGNOSTIC_PODS = 32
