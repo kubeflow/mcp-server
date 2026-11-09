@@ -20,6 +20,8 @@ import os
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from kubeflow_mcp.common.utils import (
     MCP_MANAGED_LABEL,
     MCP_MANAGED_VALUE,
@@ -32,12 +34,80 @@ from kubeflow_mcp.common.utils import (
     get_trainer_client_for_namespace,
     get_trainer_effective_namespace,
     get_trainer_ownership,
+    get_training_job_status,
     reset_clients,
 )
 
 PATCH_CUSTOM_API = "kubeflow_mcp.common.utils.get_custom_objects_api"
 PATCH_GET_API_CLIENT = "kubeflow_mcp.common.utils._get_api_client"
 PATCH_TRAINER_CLIENT = "kubeflow_mcp.common.utils.get_trainer_client"
+
+
+@pytest.mark.parametrize(
+    "suspended,conditions,expected",
+    [
+        (False, [{"type": "Suspended", "status": "False"}], "Running"),
+        (True, [{"type": "Suspended", "status": "True"}], "Created"),
+        (False, [{"type": "Complete", "status": "True"}], "Complete"),
+        (False, [{"type": "Failed", "status": "True"}], "Failed"),
+    ],
+)
+@patch(PATCH_CUSTOM_API)
+def test_reconcile_created_job_with_active_workers(mock_api_fn, suspended, conditions, expected):
+    job = SimpleNamespace(
+        name="resumed-job",
+        status="Created",
+        num_nodes=2,
+        steps=[
+            SimpleNamespace(name=f"node-{i}", status=status)
+            for i, status in enumerate(["Running", "Succeeded"])
+        ],
+    )
+    mock_api_fn.return_value.get_namespaced_custom_object.return_value = {
+        "spec": {"suspend": suspended},
+        "status": {"conditions": conditions},
+    }
+    assert get_training_job_status(job, "workloads") == expected
+    assert (
+        mock_api_fn.return_value.get_namespaced_custom_object.call_args.kwargs["namespace"]
+        == "workloads"
+    )
+
+
+@pytest.mark.parametrize(
+    "status,workers",
+    [
+        ("Complete", ["Running"]),
+        ("Failed", ["Running"]),
+        ("Created", []),
+        ("Created", ["Pending"]),
+        ("Created", ["Running"]),
+    ],
+)
+@patch(PATCH_CUSTOM_API)
+def test_status_reconciliation_leaves_terminal_or_incomplete_workers_alone(
+    mock_api_fn, status, workers
+):
+    job = SimpleNamespace(
+        name="job",
+        status=status,
+        num_nodes=2,
+        steps=[SimpleNamespace(name=f"node-{i}", status=s) for i, s in enumerate(workers)],
+    )
+    assert get_training_job_status(job, "workloads") == status
+    mock_api_fn.assert_not_called()
+
+
+@patch(PATCH_CUSTOM_API)
+def test_status_reconciliation_preserves_sdk_status_if_api_fails(mock_api_fn):
+    mock_api_fn.return_value.get_namespaced_custom_object.side_effect = RuntimeError("Forbidden")
+    job = SimpleNamespace(
+        name="job",
+        status="Created",
+        num_nodes=1,
+        steps=[SimpleNamespace(name="node-0", status="Running")],
+    )
+    assert get_training_job_status(job, "workloads") == "Created"
 
 
 class TestGetTrainerOwnership:

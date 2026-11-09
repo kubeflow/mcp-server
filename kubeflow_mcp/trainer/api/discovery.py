@@ -30,6 +30,7 @@ from kubeflow_mcp.common.utils import (
     get_trainer_client,
     get_trainer_client_for_namespace,
     get_trainer_effective_namespace,
+    get_training_job_status,
 )
 from kubeflow_mcp.core.security import (
     check_namespace_allowed,
@@ -176,7 +177,7 @@ def list_training_jobs(
             jr = job.runtime if hasattr(job, "runtime") else None
             job_data = {
                 "name": job.name,
-                "status": job.status if hasattr(job, "status") else "Unknown",
+                "status": get_training_job_status(job, namespace),
                 "runtime": _trainjob_runtime_to_mcp(jr),
             }
             job_list.append(job_data)
@@ -231,7 +232,7 @@ def get_training_job(name: str, namespace: str | None = None) -> dict[str, Any]:
         job = client.get_job(name=name)
 
         jr = job.runtime if hasattr(job, "runtime") else None
-        status = job.status if hasattr(job, "status") else "Unknown"
+        status = get_training_job_status(job, namespace)
         steps, step_summary = _trainjob_steps_to_mcp(job)
 
         next_steps: list[str] = []

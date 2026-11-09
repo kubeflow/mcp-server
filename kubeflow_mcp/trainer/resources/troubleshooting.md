@@ -11,6 +11,10 @@ Diagnostic workflows, error-to-fix tables, and known tool limitations.
 3. `get_training_logs(name)` — check container output
 4. Match error in tables below
 
+For SDK 0.5, discovery and wait tools reconcile `Created` with active workers after resume.
+This requires reading the TrainJob to rule out suspension and terminal conditions; if that
+read fails, the SDK status is preserved. A wait response with `reached=false` is not completion.
+
 ## Error-to-Fix Table
 
 | Error / Event | Cause | Fix |

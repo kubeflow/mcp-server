@@ -20,6 +20,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from kubeflow.trainer.backends.kubernetes.backend import KubernetesBackend
 from kubeflow.trainer.constants import constants as trainer_constants
 from tests.common import TestCase
 
@@ -878,6 +879,30 @@ class TestGetTrainingEvents:
 
 
 class TestWaitForTraining:
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    @patch("kubeflow_mcp.common.utils.get_custom_objects_api")
+    def test_wait_recognizes_resumed_running_workers(self, mock_api_fn, mock_client_fn, _ns):
+        job = SimpleNamespace(
+            name="resumed-job",
+            status="Created",
+            num_nodes=2,
+            steps=[SimpleNamespace(name=f"node-{i}", status="Running") for i in range(2)],
+        )
+        mock_api_fn.return_value.get_namespaced_custom_object.return_value = {
+            "spec": {"suspend": False},
+            "status": {"conditions": [{"type": "Suspended", "status": "False"}]},
+        }
+
+        backend = MagicMock()
+        backend.get_job.return_value = job
+        mock_client_fn.return_value.wait_for_job_status.side_effect = lambda **kwargs: (
+            KubernetesBackend.wait_for_job_status(backend, **kwargs)
+        )
+        result = wait_for_training("resumed-job", target_statuses="Running", namespace="workloads")
+        assert result["data"]["status"] == "Running"
+        assert result["data"]["reached"] is True
+
     @patch(PATCH_NS_CHECK, return_value=None)
     @patch(PATCH_CLIENT)
     def test_success(self, mock_client_fn, _ns):

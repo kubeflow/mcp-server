@@ -294,6 +294,7 @@ class TestSDKAPISignatures:
         assert "status" in params
         assert "timeout" in params
         assert "polling_interval" in params
+        assert "callbacks" in params
 
     def test_trainer_client_delete_job_signature(self):
         """Verify delete_job() signature."""

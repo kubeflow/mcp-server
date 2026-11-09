@@ -28,6 +28,7 @@ from kubeflow_mcp.common.utils import (
     get_core_v1_api,
     get_trainer_client_for_namespace,
     get_trainer_effective_namespace,
+    get_training_job_status,
 )
 from kubeflow_mcp.core.security import (
     check_namespace_allowed,
@@ -497,6 +498,7 @@ def wait_for_training(
             status=status_set,
             timeout=timeout_seconds,
             polling_interval=polling_interval,
+            callbacks=[lambda job: setattr(job, "status", get_training_job_status(job, namespace))],
         )
 
         final_status = job.status if hasattr(job, "status") else "Unknown"

@@ -105,6 +105,30 @@ def test_get_training_job_returns_details(mock_trainer_client):
     assert data["status"] == "Running"
 
 
+@patch("kubeflow_mcp.common.utils.get_custom_objects_api")
+@patch("kubeflow_mcp.trainer.api.discovery.get_trainer_client_for_namespace")
+@patch("kubeflow_mcp.trainer.api.discovery.check_namespace_allowed", return_value=None)
+def test_discovery_uses_reconciled_status_for_details_and_filters(_ns, mock_client_fn, mock_api_fn):
+    job = SimpleNamespace(
+        name="resumed-job",
+        status="Created",
+        num_nodes=1,
+        runtime=None,
+        steps=[SimpleNamespace(name="node-0", status="Running")],
+    )
+    mock_client_fn.return_value.get_job.return_value = job
+    mock_client_fn.return_value.list_jobs.return_value = [job]
+    mock_api_fn.return_value.get_namespaced_custom_object.return_value = {
+        "spec": {"suspend": False},
+        "status": {"conditions": [{"type": "Suspended", "status": "False"}]},
+    }
+    details = get_training_job("resumed-job", namespace="workloads")
+    assert details["data"]["status"] == "Running"
+    listing = list_training_jobs(status="Running", namespace="workloads")
+    assert listing["data"]["total"] == 1
+    assert listing["data"]["jobs"][0]["status"] == "Running"
+
+
 def test_get_training_job_not_found(mock_trainer_client):
     result = get_training_job(name=NOT_FOUND_NAME)
     verify_tool_error(result, error_code=RESOURCE_NOT_FOUND)
