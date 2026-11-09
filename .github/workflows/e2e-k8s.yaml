@@ -151,9 +151,14 @@ jobs:
           kubectl create namespace "$MCP_NAMESPACE"
           kubectl -n "$MCP_NAMESPACE" create secret generic kubeflow-mcp-auth             --from-literal=token="${token}"
 
-          # Swap in the image under test and the persona the tests expect.
-          manifest="$(sed             -e "s|image: ghcr.io/kubeflow/mcp-server:latest|image: ${IMAGE}|"             -e "s|value: data-scientist|value: platform-admin|"             examples/kubernetes/manifests.yaml)"
+          # Use the image loaded into Kind, without pulling a registry image.
+          manifest="$(sed \
+            -e "s|image: ghcr.io/kubeflow/mcp-server:latest|image: ${IMAGE}|" \
+            -e "s|imagePullPolicy: Always|imagePullPolicy: Never|" \
+            -e "s|value: data-scientist|value: platform-admin|" \
+            examples/kubernetes/manifests.yaml)"
           grep -q "image: ${IMAGE}" <<< "$manifest"
+          grep -q "imagePullPolicy: Never" <<< "$manifest"
           grep -q "value: platform-admin" <<< "$manifest"
           kubectl apply -f - <<< "$manifest"
           kubectl apply -f tests/e2e/runtime-image-rbac.yaml
