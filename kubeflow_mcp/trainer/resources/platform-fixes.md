@@ -23,14 +23,22 @@ Error-based detection (from `get_training_logs()`):
 
 ## OpenShift emptyDir Volumes
 
-ALWAYS pass when `platform=openshift`. Copy-paste ready — pass directly as `volumes` parameter to any training tool:
+For images that write to `/.local`, `/.cache`, or `/tmp` under OpenShift's restricted
+SCC, pass Kubernetes volume definitions and separate mounts:
 
 ```json
-"volumes": [
-  {"name": "dot-local", "mount_path": "/.local", "empty_dir": {}},
-  {"name": "dot-cache", "mount_path": "/.cache", "empty_dir": {}},
-  {"name": "tmp", "mount_path": "/tmp", "empty_dir": {}}
-]
+{
+  "volumes": [
+    {"name": "dot-local", "emptyDir": {}},
+    {"name": "dot-cache", "emptyDir": {}},
+    {"name": "tmp", "emptyDir": {}}
+  ],
+  "volume_mounts": [
+    {"name": "dot-local", "mountPath": "/.local"},
+    {"name": "dot-cache", "mountPath": "/.cache"},
+    {"name": "tmp", "mountPath": "/tmp"}
+  ]
+}
 ```
 
 **Rules**:
@@ -92,10 +100,16 @@ SCC (Security Context Constraints) cannot be changed via MCP tools. Instead of e
 
 ```json
 "volumes": [
-  {"name": "dot-local", "mount_path": "/.local", "empty_dir": {}},
-  {"name": "dot-cache", "mount_path": "/.cache", "empty_dir": {}},
-  {"name": "tmp", "mount_path": "/tmp", "empty_dir": {}},
-  {"name": "home", "mount_path": "/home", "empty_dir": {}}
+  {"name": "dot-local", "emptyDir": {}},
+  {"name": "dot-cache", "emptyDir": {}},
+  {"name": "tmp", "emptyDir": {}},
+  {"name": "home", "emptyDir": {}}
+],
+"volume_mounts": [
+  {"name": "dot-local", "mountPath": "/.local"},
+  {"name": "dot-cache", "mountPath": "/.cache"},
+  {"name": "tmp", "mountPath": "/tmp"},
+  {"name": "home", "mountPath": "/home"}
 ]
 ```
 

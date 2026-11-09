@@ -33,6 +33,7 @@ from kubeflow.trainer.constants.constants import (
     DEFAULT_PIP_INDEX_URLS,
     DEFAULT_TRAINING_RUNTIME,
 )
+from kubernetes import client as k8s_client
 
 from kubeflow_mcp.common.constants import ErrorCode
 from kubeflow_mcp.common.types import PreviewResponse, ToolError, ToolResponse
@@ -496,6 +497,55 @@ def _validate_service_account_name(name: str | None) -> ToolError | None:
     if name is None:
         return None
     return validate_k8s_subdomain_name(name, "service_account_name")
+
+
+def _validate_k8s_fields(value: Any, model: Any, path: str) -> None:
+    """Reject fields the SDK's Kubernetes deserializer would silently discard."""
+    if not isinstance(value, dict):
+        raise ValueError(f"{path} must be an object")
+    unknown = value.keys() - set(model.attribute_map.values())
+    if unknown:
+        raise ValueError(f"{path}: unknown Kubernetes fields {sorted(unknown)}; use camelCase")
+
+
+def _validate_storage(volumes: Any, volume_mounts: Any) -> ToolError | None:
+    """Validate storage equally for previews and confirmed submissions."""
+    try:
+        for path, values in (("volumes", volumes), ("volume_mounts", volume_mounts)):
+            if values is not None and not isinstance(values, list):
+                raise ValueError(f"{path} must be a list")
+        names = set()
+        for volume in volumes or []:
+            _validate_k8s_fields(volume, k8s_client.V1Volume, "volumes")
+            error = validate_k8s_name(volume.get("name", ""), "volume name")
+            if error:
+                return error
+            if volume["name"] in names:
+                raise ValueError(f"Duplicate volume name: {volume['name']}")
+            names.add(volume["name"])
+            sources = volume.keys() - {"name"}
+            if len(sources) != 1:
+                raise ValueError(
+                    "Each volume must define exactly one source, e.g. persistentVolumeClaim or emptyDir"
+                )
+            source = next(iter(sources))
+            attr = next(k for k, v in k8s_client.V1Volume.attribute_map.items() if v == source)
+            model = getattr(k8s_client, k8s_client.V1Volume.openapi_types[attr])
+            _validate_k8s_fields(volume[source], model, f"volumes.{source}")
+            if source == "persistentVolumeClaim":
+                error = validate_k8s_subdomain_name(
+                    volume[source].get("claimName", ""), "claimName"
+                )
+                if error:
+                    return error
+        for mount in volume_mounts or []:
+            _validate_k8s_fields(mount, k8s_client.V1VolumeMount, "volume_mounts")
+        if volume_mounts:
+            # Reuse SDK validation for required name and absolute mountPath.
+            ContainerPatch(name="node", volume_mounts=volume_mounts)
+    except (ValueError, TypeError) as e:
+        return ToolError(error=str(e), error_code=ErrorCode.VALIDATION_ERROR)
+    return None
 
 
 def _validate_resources_per_node(resources: dict[str, Any] | None) -> ToolError | None:
@@ -1125,9 +1175,11 @@ def fine_tune(
     try:
         # Before _validate_fine_tune_params(): its GPU preflight queries the cluster, and
         # invalid input should never trigger an external call.
-        input_err = _validate_resources_per_node(
-            resources_per_node
-        ) or _validate_service_account_name(service_account_name)
+        input_err = (
+            _validate_resources_per_node(resources_per_node)
+            or _validate_service_account_name(service_account_name)
+            or _validate_storage(volumes, volume_mounts)
+        )
         if input_err:
             return input_err.model_dump()
 
@@ -1382,9 +1434,11 @@ def run_custom_training(
                 error_code=ErrorCode.SDK_ERROR,
             ).model_dump()
 
-        input_err = _validate_resources_per_node(
-            resources_per_node
-        ) or _validate_service_account_name(service_account_name)
+        input_err = (
+            _validate_resources_per_node(resources_per_node)
+            or _validate_service_account_name(service_account_name)
+            or _validate_storage(volumes, volume_mounts)
+        )
         if input_err:
             return input_err.model_dump()
 
@@ -1591,9 +1645,11 @@ def run_container_training(
                 error_code=ErrorCode.SDK_ERROR,
             ).model_dump()
 
-        input_err = _validate_resources_per_node(
-            resources_per_node
-        ) or _validate_service_account_name(service_account_name)
+        input_err = (
+            _validate_resources_per_node(resources_per_node)
+            or _validate_service_account_name(service_account_name)
+            or _validate_storage(volumes, volume_mounts)
+        )
         if input_err:
             return input_err.model_dump()
 

@@ -1353,3 +1353,45 @@ def test_explicit_workspace_does_not_require_runtime_lookup() -> None:
             mounts,
         )
     read.assert_not_called()
+
+
+@pytest.mark.parametrize(("tool", "config"), _TRAINING_TOOLS)
+@pytest.mark.parametrize("confirmed", [False, True])
+@pytest.mark.parametrize(
+    "storage",
+    [
+        {"volumes": [{"name": "data", "persistent_volume_claim": {"claim_name": "data"}}]},
+        {"volumes": [{"name": "data", "persistentVolumeClaim": {"claim_name": "data"}}]},
+        {"volumes": [{"name": "data", "persistentVolumeClaim": {}}]},
+        {"volumes": [{"name": "data"}]},
+        {
+            "volumes": [
+                {"name": "data", "emptyDir": {}, "persistentVolumeClaim": {"claimName": "data"}}
+            ]
+        },
+        {"volume_mounts": [{"name": "data", "mount_path": "/workspace"}]},
+        {"volume_mounts": [{"name": "data", "mountPath": "relative"}]},
+    ],
+)
+def test_storage_rejected_before_preview_or_submission(tool, config, confirmed, storage):
+    with patch(PATCH_CLIENT) as sdk, patch(PATCH_GPU_CHECK) as gpu:
+        result = tool(**config, **storage, confirmed=confirmed)
+    assert result["error_code"] == "VALIDATION_ERROR"
+    sdk.assert_not_called()
+    gpu.assert_not_called()
+
+
+def test_storage_accepts_kubernetes_fields_and_runtime_mounts():
+    from kubeflow_mcp.trainer.api.training import _validate_storage
+
+    assert (
+        _validate_storage(
+            [
+                {"name": "checkpoint", "persistentVolumeClaim": {"claimName": "saved.model"}},
+                {"name": "tmp", "emptyDir": {}},
+            ],
+            [{"name": "checkpoint", "mountPath": "/workspace"}],
+        )
+        is None
+    )
+    assert _validate_storage(None, [{"name": "runtime-volume", "mountPath": "/runtime"}]) is None
