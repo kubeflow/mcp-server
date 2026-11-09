@@ -114,12 +114,14 @@ _original_get_trainer_cr: Callable | None = None
 
 @contextmanager
 def _inject_trainer_hf_home(hf_home_path: str):
-    """Patch SDK to inject HF_HOME into spec.trainer.env for BuiltinTrainer jobs.
+    """Apply SDK 0.5 HF cache and dataset-path fixes for BuiltinTrainer jobs.
 
     The SDK (v0.5.x) does not support env on BuiltinTrainer.  This context
     manager temporarily patches ``get_trainer_cr_from_builtin_trainer`` so the
     returned TrainerV1alpha1Trainer CR includes the HF_HOME env var, which
     lands on ``spec.trainer.env`` instead of ``spec.runtimePatches``.
+    Root HF datasets also need a local source path, without replacing the
+    generated LoRA and dataset arguments via the incompatible TrainerArgs option.
     """
     import kubeflow.trainer.backends.kubernetes.utils as k8s_utils
     from kubeflow_trainer_api.models import IoK8sApiCoreV1EnvVar
@@ -139,6 +141,16 @@ def _inject_trainer_hf_home(hf_home_path: str):
                 if path and not any(e.name == "HF_HOME" for e in (cr.env or [])):
                     hf_env = IoK8sApiCoreV1EnvVar(name="HF_HOME", value=path)
                     cr.env = (cr.env or []) + [hf_env]
+                if (
+                    path
+                    and initializer
+                    and isinstance(initializer.dataset, HuggingFaceDatasetInitializer)
+                    and _should_apply_hf_dataset_workaround(initializer.dataset.storage_uri)
+                    and not any(arg.startswith("dataset.source=") for arg in (cr.args or []))
+                ):
+                    cr.args = [
+                        arg for arg in (cr.args or []) if not arg.startswith("dataset.data_dir=")
+                    ] + [f"dataset.source={DATASET_PATH}", "dataset.data_dir=null"]
                 return cr
 
             k8s_utils.get_trainer_cr_from_builtin_trainer = _patched
@@ -1160,14 +1172,6 @@ def fine_tune(
         )
         if name:
             options.append(Name(name=name))
-
-        # Workaround for SDK bug where top-level HF datasets construct
-        # invalid torchtune dataset.data_dir=/workspace/dataset/.
-        # We override the torchtune CLI args directly via TrainerArgs.
-        if _should_apply_hf_dataset_workaround(dataset):
-            options.append(
-                TrainerArgs(args=[f"dataset.source={DATASET_PATH}", "dataset.data_dir=null"])
-            )
 
         client = _get_client(namespace)
         initializer = _build_initializer(

@@ -93,6 +93,95 @@ def test_fine_tune_validation(test_case):
 
 
 class TestFineTuneConfirmed:
+    @pytest.mark.parametrize(
+        "dataset,dataset_source,expected_dataset_args",
+        [
+            ("hf://org/ds", None, {"dataset.source=/workspace/dataset", "dataset.data_dir=null"}),
+            ("hf://org/ds/", None, {"dataset.source=/workspace/dataset", "dataset.data_dir=null"}),
+            ("hf://org/ds/data", None, {"dataset.data_dir=/workspace/dataset/data"}),
+            (
+                "hf://org/ds",
+                "json",
+                {"dataset.source=json", "dataset.data_dir=/workspace/dataset/."},
+            ),
+            ("s3://bucket/dataset", None, set()),
+        ],
+    )
+    @patch(PATCH_GPU_CHECK, return_value=None)
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_submission_uses_real_sdk_options_and_preserves_builtin_args(
+        self, mock_client_fn, _ns, _gpu, dataset, dataset_source, expected_dataset_args
+    ) -> None:
+        from kubeflow.trainer.backends.kubernetes.backend import KubernetesBackend
+        from kubeflow.trainer.types import types as sdk_types
+
+        # Exercise SDK option validation and spec generation; stub only cluster access.
+        backend = object.__new__(KubernetesBackend)
+        backend.namespace = "workloads"
+        backend.custom_api = MagicMock()
+        runtime_trainer = sdk_types.RuntimeTrainer(
+            trainer_type=sdk_types.TrainerType.BUILTIN_TRAINER,
+            framework="torchtune",
+            image="test:latest",
+        )
+        runtime_trainer.set_command(("tune", "run", "lora_finetune_single_device"))
+        backend.get_runtime = MagicMock(
+            return_value=sdk_types.Runtime(
+                name="torchtune-qwen2.5-1.5b",
+                trainer=runtime_trainer,
+                kind=sdk_types.RuntimeKind.CLUSTER_TRAINING_RUNTIME,
+            )
+        )
+        mock_client_fn.return_value = backend
+
+        result = fine_tune(
+            model="hf://Qwen/Qwen2.5-1.5B-Instruct",
+            dataset=dataset,
+            runtime="torchtune-qwen2.5-1.5b",
+            name="qwen-lora-test",
+            batch_size=1,
+            epochs=1,
+            dtype="fp32",
+            resources_per_node={"gpu": 1},
+            lora_rank=8,
+            lora_alpha=16,
+            dataset_split="train[:8]",
+            dataset_source=dataset_source,
+            volumes=[{"name": "checkpoint", "persistentVolumeClaim": {"claimName": "saved-model"}}],
+            volume_mounts=[{"name": "checkpoint", "mountPath": "/checkpoints"}],
+            confirmed=True,
+        )
+        assert result["success"] is True, result
+        backend.custom_api.create_namespaced_custom_object.assert_called_once()
+        job = backend.custom_api.create_namespaced_custom_object.call_args.args[4]
+        trainer = job["spec"]["trainer"]
+        args = trainer["args"]
+        assert {
+            "batch_size=1",
+            "epochs=1",
+            "dtype=fp32",
+            "model.lora_rank=8",
+            "model.lora_alpha=16",
+            "dataset.split=train[:8]",
+        }.issubset(args)
+        assert {
+            arg for arg in args if arg.startswith(("dataset.source=", "dataset.data_dir="))
+        } == expected_dataset_args
+        assert trainer["resourcesPerNode"]["limits"]["nvidia.com/gpu"] == 1
+        patch_jobs = job["spec"]["runtimePatches"][0]["trainingRuntimeSpec"]["template"]["spec"][
+            "replicatedJobs"
+        ]
+        for patch_job in patch_jobs:
+            spec = patch_job["template"]["spec"]["template"]["spec"]
+            assert {
+                "name": "checkpoint",
+                "persistentVolumeClaim": {"claimName": "saved-model"},
+            } in spec["volumes"]
+            assert "emptyDir" not in spec["volumes"][0]
+        assert {"name": "HF_HOME", "value": "/workspace/.hf"} in trainer["env"]
+        assert job["metadata"]["labels"]["kubeflow-mcp/managed-by"] == "mcp"
+
     @patch(PATCH_GPU_CHECK, return_value=None)
     @patch(PATCH_NS_CHECK, return_value=None)
     @patch(PATCH_CLIENT)
@@ -989,6 +1078,9 @@ def test_inject_trainer_hf_home_concurrent_isolation():
         kind=sdk_types.RuntimeKind.CLUSTER_TRAINING_RUNTIME,
     )
     builtin = sdk_types.BuiltinTrainer(config=sdk_types.TorchTuneConfig(batch_size=4, epochs=1))
+    initializer = sdk_types.Initializer(
+        dataset=sdk_types.HuggingFaceDatasetInitializer(storage_uri="hf://org/ds")
+    )
 
     barrier = threading.Barrier(4)
     errors: list[str] = []
@@ -999,13 +1091,16 @@ def test_inject_trainer_hf_home_concurrent_isolation():
             target_path = f"/workspace/.hf_{worker_id}"
             with _inject_trainer_hf_home(target_path):
                 barrier.wait(timeout=5.0)
-                cr = k8s_utils.get_trainer_cr_from_builtin_trainer(runtime, builtin)
+                cr = k8s_utils.get_trainer_cr_from_builtin_trainer(runtime, builtin, initializer)
                 if cr.env is None:
                     errors.append(f"Worker {worker_id}: cr.env is None")
                     return
                 hf_env = next((e for e in cr.env if e.name == "HF_HOME"), None)
                 if not hf_env or hf_env.value != target_path:
                     errors.append(f"Worker {worker_id}: expected {target_path}, got {hf_env}")
+                    return
+                if "dataset.source=/workspace/dataset" not in cr.args:
+                    errors.append(f"Worker {worker_id}: dataset path was not corrected")
                     return
                 completed.append(worker_id)
         except Exception as exc:
@@ -1014,9 +1109,12 @@ def test_inject_trainer_hf_home_concurrent_isolation():
     def uninjected_worker() -> None:
         try:
             barrier.wait(timeout=5.0)
-            cr = k8s_utils.get_trainer_cr_from_builtin_trainer(runtime, builtin)
+            cr = k8s_utils.get_trainer_cr_from_builtin_trainer(runtime, builtin, initializer)
             if cr.env is not None and any(e.name == "HF_HOME" for e in cr.env):
                 errors.append("Uninjected worker unexpectedly got HF_HOME")
+                return
+            if "dataset.source=/workspace/dataset" in cr.args:
+                errors.append("Uninjected worker unexpectedly got the dataset workaround")
                 return
             completed.append("uninjected")
         except Exception as exc:

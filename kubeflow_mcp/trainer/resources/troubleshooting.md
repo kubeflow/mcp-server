@@ -125,6 +125,11 @@ Scans for dangerous patterns (`os.system()`, `subprocess.run()`, `eval()`, `shut
 
 All torchtune runtimes use NCCL. On CPU-only clusters, use `run_custom_training()` with gloo.
 
+For a short built-in `fine_tune()` test, use `dataset_split="train[:8]"`, `batch_size=1`,
+`epochs=1`, and `resources_per_node={"gpu": 1}` with a matching runtime. Use `dtype="fp32"`
+on GPUs without bf16 support, such as Tesla T4. Root `hf://org/dataset` URIs use the
+downloaded dataset automatically; explicit `dataset_source` formats are preserved.
+
 ### torchtune Runtimes May Enforce num_nodes=1
 
 Some runtimes enforce `num_nodes=1` via webhook. Check `get_runtime()` before requesting multi-node.
