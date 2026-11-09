@@ -167,3 +167,11 @@ update_training_job(name, action="resume", confirmed=True)   # Resume (preview f
 - Volume scope: `fine_tune()` volumes apply to ALL replicated jobs; `run_custom_training()` applies to node only
 - `loss` in `fine_tune` only supports `CEWithChunkedOutputLoss`
 - `dataset_source`/`dataset_split`/`dataset_column_map` configure instruct-format preprocessing
+
+### Training stalls or restarts
+
+Use `get_training_job(name, namespace)` to inspect associated initializer and trainer pods.
+`pods` includes readiness, restarts, container waiting/termination reasons and failed scheduling
+conditions; `blocking_reasons` highlights issues such as insufficient GPUs or CrashLoopBackOff.
+If pod access fails, `pod_diagnostics_error` reports that diagnostics are unavailable.
+A `wait_for_training` timeout preserves the last observed job status and includes the same diagnostics.

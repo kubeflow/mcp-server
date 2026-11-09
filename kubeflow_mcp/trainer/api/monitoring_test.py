@@ -1139,3 +1139,38 @@ class TestWaitForTraining:
         assert res_clamped["error_code"] == "VALIDATION_ERROR"
         assert "polling_interval must be strictly less than timeout_seconds" in res_clamped["error"]
         mock_client_fn.assert_not_called()
+
+
+@pytest.mark.parametrize("status", ["Created", "Running"])
+def test_wait_timeout_keeps_last_status_and_pod_blockers(status):
+    client = MagicMock()
+
+    def timeout(**kwargs):
+        kwargs["callbacks"][0](SimpleNamespace(status=status))
+        raise TimeoutError("not complete")
+
+    client.wait_for_job_status.side_effect = timeout
+    diagnostics = {
+        "pods": [{"name": "node-0", "phase": "Pending"}],
+        "blocking_reasons": ["Insufficient nvidia.com/gpu"],
+    }
+    with (
+        patch(PATCH_NS_CHECK, return_value=None),
+        patch(PATCH_CLIENT, return_value=client),
+        patch("kubeflow_mcp.trainer.api.monitoring.get_training_job_status", return_value=status),
+        patch(
+            "kubeflow_mcp.trainer.api.monitoring.get_training_pod_diagnostics",
+            return_value=diagnostics,
+        ),
+    ):
+        result = wait_for_training("my-job", timeout_seconds=10)
+    assert result["data"]["status"] == status
+    assert result["data"]["reached"] is False
+    assert result["data"]["blocking_reasons"] == diagnostics["blocking_reasons"]
+
+
+@pytest.fixture(autouse=True)
+def _offline_pod_diagnostics():
+    """Pod detail parsing is exercised separately with Kubernetes model fixtures."""
+    with patch("kubeflow_mcp.trainer.api.monitoring.get_training_pod_diagnostics", return_value={}):
+        yield

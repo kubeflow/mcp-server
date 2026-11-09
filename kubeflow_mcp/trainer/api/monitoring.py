@@ -35,6 +35,7 @@ from kubeflow_mcp.core.security import (
     truncate_log_output,
     validate_k8s_name,
 )
+from kubeflow_mcp.trainer.api.pod_diagnostics import get_training_pod_diagnostics
 
 logger = logging.getLogger(__name__)
 
@@ -436,6 +437,7 @@ def wait_for_training(
     """Wait for a job to reach one or more target statuses.
 
     Blocks until the job reaches any of the expected statuses, or times out.
+    Timeouts preserve the last observed status and include best-effort pod diagnostics.
 
     Args:
         name: TrainJob name.
@@ -489,6 +491,13 @@ def wait_for_training(
             error_code=ErrorCode.VALIDATION_ERROR,
         ).model_dump()
 
+    last_status = "Unknown"
+
+    def observe(job: Any) -> None:
+        nonlocal last_status
+        last_status = get_training_job_status(job, namespace)
+        job.status = last_status
+
     try:
         if timeout_seconds < 1:
             return ToolError(
@@ -514,7 +523,7 @@ def wait_for_training(
             status=status_set,
             timeout=timeout_seconds,
             polling_interval=polling_interval,
-            callbacks=[lambda job: setattr(job, "status", get_training_job_status(job, namespace))],
+            callbacks=[observe],
         )
 
         final_status = job.status if hasattr(job, "status") else "Unknown"
@@ -531,10 +540,11 @@ def wait_for_training(
         return ToolResponse(
             data={
                 "job": name,
-                "status": "Unknown",
+                "status": last_status,
                 "reached": False,
                 "message": f"Timeout after {timeout_seconds}s",
                 "hint": "Use get_training_events to check for scheduling issues",
+                **get_training_pod_diagnostics(name, namespace),
             }
         ).model_dump()
     except Exception as e:

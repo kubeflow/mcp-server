@@ -683,3 +683,33 @@ def test_get_training_job_keeps_failed_step_beyond_the_cap():
     assert data["next_steps"][0] == (
         f"get_training_logs(name='job-a', step='{failed_name}') — failed step"
     )
+
+
+@pytest.fixture(autouse=True)
+def _offline_pod_diagnostics():
+    """Pod detail parsing is exercised separately with Kubernetes model fixtures."""
+    with patch("kubeflow_mcp.trainer.api.discovery.get_training_pod_diagnostics", return_value={}):
+        yield
+
+
+def test_job_details_include_pod_diagnostics():
+    client = MagicMock()
+    client.get_job.return_value = _fake_job("job-a", status="Created")
+    diagnostics = {
+        "pods": [{"name": "node-0", "phase": "Pending"}],
+        "blocking_reasons": ["Unschedulable"],
+    }
+    with (
+        patch(
+            "kubeflow_mcp.trainer.api.discovery.get_trainer_client_for_namespace",
+            return_value=client,
+        ),
+        patch(
+            "kubeflow_mcp.trainer.api.discovery.get_training_pod_diagnostics",
+            return_value=diagnostics,
+        ) as read,
+    ):
+        result = get_training_job("job-a", namespace="workloads")
+    assert result["data"]["pods"] == diagnostics["pods"]
+    assert result["data"]["blocking_reasons"] == ["Unschedulable"]
+    read.assert_called_once_with("job-a", "workloads")

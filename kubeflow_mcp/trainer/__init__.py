@@ -97,7 +97,7 @@ CLIENT_TOOL_DESCRIPTIONS: dict[str, str] = {
     "get_cluster_resources": "Check cluster GPU/CPU availability. Use pre_flight() instead for full check.",
     "estimate_resources": "Estimate GPU memory needed for a HuggingFace model. Use pre_flight(model=...) instead.",
     "list_training_jobs": "List training jobs. Filter by runtime, status, or namespace.",
-    "get_training_job": "Get details of a specific training job, including the status of each step (pod). Supports optional namespace.",
+    "get_training_job": "Inspect job and initializer/trainer pods: readiness, restarts, waiting/termination reasons and scheduling blockers. Supports optional namespace.",
     "list_runtimes": "List available ClusterTrainingRuntimes.",
     "get_runtime": "Get runtime config. Pass include_packages=True to fetch pip list (slow: creates a Pod).",
     "fine_tune": (
@@ -354,7 +354,7 @@ DISCOVERY (before training):
     "monitoring": {
         "full": """\
 MONITORING AND LIFECYCLE:
-- get_training_job(name) -> check status (Created/Running/Complete/Failed/Suspended)
+- get_training_job(name) -> check status, pod readiness/restarts and blocking_reasons before waiting again
 - get_training_logs(name) -> view output/errors. Failure patterns auto-detected with hints
 - get_training_logs(name, since_line=N) -> cursor mode: returns lines [N:N+max_lines], adds next_offset and total_lines. Echo next_offset as since_line each poll. A page may have fewer than max_lines lines due to the char budget; use next_offset to advance, not page length — a short page does not mean end of log. since_line==total_lines: nothing new yet. since_line>total_lines: log_reset=true, restart from 0. Returns VALIDATION_ERROR if active logs empty (pod restarted); drop since_line to read crash logs
 - get_training_events(name) -> debug scheduling issues, pending pods, image pull errors
