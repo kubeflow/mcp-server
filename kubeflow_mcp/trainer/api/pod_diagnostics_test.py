@@ -16,6 +16,7 @@
 
 from unittest.mock import MagicMock, patch
 
+import pytest
 from kubernetes import client as k8s
 from kubernetes.client.exceptions import ApiException
 
@@ -111,3 +112,56 @@ def test_pod_diagnostics_bounded_and_errors_explicit():
         denied = get_training_pod_diagnostics("trainer", "workloads")
     assert "pod_diagnostics_error" in denied
     assert "pods" not in denied
+
+
+@pytest.mark.parametrize("failure", ["crashloop", "unschedulable", "failed"])
+def test_blocked_pod_beyond_cap_is_prioritized(failure: str) -> None:
+    blocked = _pod(name="blocked", phase="Running")
+    if failure == "crashloop":
+        blocked.status.container_statuses = [
+            k8s.V1ContainerStatus(
+                name="node",
+                image="trainer",
+                image_id="id",
+                ready=False,
+                restart_count=4,
+                state=k8s.V1ContainerState(
+                    waiting=k8s.V1ContainerStateWaiting(reason="CrashLoopBackOff")
+                ),
+            )
+        ]
+    elif failure == "unschedulable":
+        blocked.status.phase = "Pending"
+        blocked.status.conditions = [
+            k8s.V1PodCondition(
+                type="PodScheduled",
+                status="False",
+                reason="Unschedulable",
+                message="Insufficient nvidia.com/gpu",
+            )
+        ]
+    else:
+        blocked.status.phase = "Failed"
+    api = MagicMock()
+    api.list_namespaced_pod.return_value.items = [
+        _pod(name=f"healthy-{i}", phase="Running") for i in range(MAX_DIAGNOSTIC_PODS)
+    ] + [blocked]
+    with patch("kubeflow_mcp.trainer.api.pod_diagnostics.get_core_v1_api", return_value=api):
+        result = get_training_pod_diagnostics("trainer", "workloads")
+    assert result["pods_truncated"] is True
+    assert len(result["pods"]) == MAX_DIAGNOSTIC_PODS
+    assert result["pods"][0]["name"] == "blocked"
+    assert result["blocking_reasons"]
+    assert "blocked" in result["blocking_reasons"][0]
+
+
+def test_omitted_blockers_are_summarized_without_expanding_response() -> None:
+    api = MagicMock()
+    api.list_namespaced_pod.return_value.items = [
+        _pod(name=f"failed-{i}", phase="Failed") for i in range(MAX_DIAGNOSTIC_PODS + 2)
+    ]
+    with patch("kubeflow_mcp.trainer.api.pod_diagnostics.get_core_v1_api", return_value=api):
+        result = get_training_pod_diagnostics("trainer", "workloads")
+    assert len(result["pods"]) == MAX_DIAGNOSTIC_PODS
+    assert len(result["blocking_reasons"]) == MAX_DIAGNOSTIC_PODS + 1
+    assert result["blocking_reasons"][-1].startswith("2 additional pods have blocking conditions")

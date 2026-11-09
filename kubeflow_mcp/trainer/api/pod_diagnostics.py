@@ -82,6 +82,23 @@ def _pod_details(pod: V1Pod) -> dict[str, Any]:
     }
 
 
+def _pod_blocking_reasons(pod: dict[str, Any]) -> list[str]:
+    reasons = [
+        f"{pod['name']}: {condition['reason']}: {condition['message']}"
+        for condition in pod["conditions"]
+        if condition["type"] == "PodScheduled"
+    ]
+    for container in pod["containers"]:
+        if container.get("state") == "waiting" or container.get("exit_code"):
+            reasons.append(
+                f"{pod['name']}/{container['name']}: {container.get('reason')} "
+                f"{container.get('message', '')}".strip()
+            )
+    if pod["phase"] == "Failed" and not reasons:
+        reasons.append(f"{pod['name']}: pod Failed; use get_training_events for the cause")
+    return reasons
+
+
 def get_training_pod_diagnostics(name: str, namespace: str | None) -> dict[str, Any]:
     """Describe bounded job-associated pods; callers enforce name and namespace policy."""
     try:
@@ -94,22 +111,23 @@ def get_training_pod_diagnostics(name: str, namespace: str | None) -> dict[str, 
             )
             .items
         )
-        # Show active attempts before retained terminal pods.
-        pods = sorted(pods, key=lambda p: p.status.phase in ("Succeeded", "Failed"))
-        details = [_pod_details(pod) for pod in pods[:MAX_DIAGNOSTIC_PODS]]
-        reasons = []
-        for pod in details:
-            for condition in pod["conditions"]:
-                if condition["type"] == "PodScheduled":
-                    reasons.append(f"{pod['name']}: {condition['reason']}: {condition['message']}")
-            for container in pod["containers"]:
-                if container.get("state") == "waiting" or container.get("exit_code"):
-                    reasons.append(
-                        f"{pod['name']}/{container['name']}: {container.get('reason')} "
-                        f"{container.get('message', '')}".strip()
-                    )
+        diagnostics = []
+        for pod in pods:
+            detail = _pod_details(pod)
+            diagnostics.append((detail, _pod_blocking_reasons(detail)))
+        # Keep blockers visible before applying the response cap; prefer active attempts on ties.
+        diagnostics.sort(
+            key=lambda item: (not item[1], item[0]["phase"] in ("Succeeded", "Failed"))
+        )
+        selected = diagnostics[:MAX_DIAGNOSTIC_PODS]
+        reasons = [reason for _, blockers in selected for reason in blockers]
+        omitted = sum(bool(blockers) for _, blockers in diagnostics[MAX_DIAGNOSTIC_PODS:])
+        if omitted:
+            reasons.append(
+                f"{omitted} additional pods have blocking conditions; pod details are truncated"
+            )
         return {
-            "pods": details,
+            "pods": [detail for detail, _ in selected],
             "pods_truncated": len(pods) > MAX_DIAGNOSTIC_PODS,
             "blocking_reasons": reasons,
         }

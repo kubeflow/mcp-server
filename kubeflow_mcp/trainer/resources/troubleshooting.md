@@ -173,5 +173,6 @@ update_training_job(name, action="resume", confirmed=True)   # Resume (preview f
 Use `get_training_job(name, namespace)` to inspect associated initializer and trainer pods.
 `pods` includes readiness, restarts, container waiting/termination reasons and failed scheduling
 conditions; `blocking_reasons` highlights issues such as insufficient GPUs or CrashLoopBackOff.
+Pods with blockers take priority in the bounded response; additional omitted blockers are summarized.
 If pod access fails, `pod_diagnostics_error` reports that diagnostics are unavailable.
 A `wait_for_training` timeout preserves the last observed job status and includes the same diagnostics.
