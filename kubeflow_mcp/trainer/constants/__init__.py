@@ -13,3 +13,9 @@
 # limitations under the License.
 
 """Trainer-specific constants."""
+
+TRAINER_CONTROLLER_LABEL_SELECTORS: tuple[str, ...] = (
+    "app.kubernetes.io/name=kubeflow-trainer,app.kubernetes.io/component=manager",
+    "app.kubernetes.io/name=trainer,app.kubernetes.io/component=manager",
+    "app.kubernetes.io/name=trainer,app.kubernetes.io/part-of=kubeflow",
+)
