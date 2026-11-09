@@ -455,3 +455,76 @@ def test_estimate_resources_returns_sdk_error_for_api_failure():
 
     assert result["success"] is False
     assert result["error_code"] == "SDK_ERROR"
+
+
+@pytest.mark.parametrize("deny_pods", [False, True])
+def test_cluster_gpu_capacity_separate_from_allocations(deny_pods):
+    from kubernetes import client as k8s
+    from kubernetes.client.exceptions import ApiException
+
+    from kubeflow_mcp.trainer.api.planning import get_cluster_resources
+
+    api = MagicMock()
+    api.list_node.return_value.items = [
+        k8s.V1Node(
+            metadata=k8s.V1ObjectMeta(name=name),
+            status=k8s.V1NodeStatus(
+                allocatable={"nvidia.com/gpu": "1", "cpu": "8", "memory": "32Gi"}
+            ),
+        )
+        for name in ("gpu-a", "gpu-b")
+    ]
+
+    def pod(phase, node):
+        return k8s.V1Pod(
+            spec=k8s.V1PodSpec(
+                node_name=node,
+                containers=[
+                    k8s.V1Container(
+                        name="node",
+                        resources=k8s.V1ResourceRequirements(limits={"nvidia.com/gpu": "1"}),
+                    )
+                ],
+            ),
+            status=k8s.V1PodStatus(phase=phase),
+        )
+
+    api.list_pod_for_all_namespaces.return_value.items = [
+        pod("Running", "gpu-a"),
+        pod("Pending", None),
+        pod("Succeeded", "gpu-b"),
+        pod("Failed", "gpu-b"),
+    ]
+    if deny_pods:
+        api.list_pod_for_all_namespaces.side_effect = ApiException(status=403)
+    with patch("kubeflow_mcp.common.utils.get_core_v1_api", return_value=api):
+        result = get_cluster_resources()["data"]
+    assert result["gpu_total"] == 2
+    assert result["gpu_available"] == (None if deny_pods else 1)
+    assert result["gpu_allocated"] == (None if deny_pods else 1)
+    assert result["nodes"][0]["gpu_available"] == (None if deny_pods else 0)
+    assert result["nodes"][1]["gpu_available"] == (None if deny_pods else 1)
+    assert api.list_pod_for_all_namespaces.call_args.kwargs["_request_timeout"] > 0
+
+
+def test_gpu_requests_include_init_peak_and_restartable_sidecars():
+    from kubernetes import client as k8s
+
+    from kubeflow_mcp.trainer.api.planning import _pod_gpu_request
+
+    def container(name, gpus, restart_policy=None):
+        return k8s.V1Container(
+            name=name,
+            restart_policy=restart_policy,
+            resources=k8s.V1ResourceRequirements(requests={"nvidia.com/gpu": str(gpus)}),
+        )
+
+    pod = k8s.V1Pod(
+        spec=k8s.V1PodSpec(
+            containers=[container("trainer", "1e0")],
+            init_containers=[container("sidecar", 1, "Always"), container("initializer", 3)],
+        )
+    )
+    assert _pod_gpu_request(pod) == 4
+    pod.spec.init_containers = [container("sidecar", 2, "Always")]
+    assert _pod_gpu_request(pod) == 3
