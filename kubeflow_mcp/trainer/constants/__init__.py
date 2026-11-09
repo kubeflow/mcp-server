@@ -13,3 +13,7 @@
 # limitations under the License.
 
 """Trainer-specific constants."""
+
+# Bound cluster-wide pod scans used for GPU availability estimates.
+GPU_POD_PAGE_SIZE = 500
+MAX_GPU_POD_PAGES = 20

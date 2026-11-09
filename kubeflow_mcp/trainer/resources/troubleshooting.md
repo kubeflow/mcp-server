@@ -188,3 +188,14 @@ update_training_job(name, action="resume", confirmed=True)   # Resume (preview f
 - Volume scope: `fine_tune()` volumes apply to ALL replicated jobs; `run_custom_training()` applies to node only
 - `loss` in `fine_tune` only supports `CEWithChunkedOutputLoss`
 - `dataset_source`/`dataset_split`/`dataset_column_map` configure instruct-format preprocessing
+
+### GPU capacity and allocations
+
+`get_cluster_resources().data.gpu_total` is capacity, not free GPUs. `gpu_allocated` and
+`gpu_available` estimate current requests; they are unknown (`null`) when cluster-wide pod access
+is unavailable or a paginated scan cannot finish within 20 pages of 500 pods. Partial results
+are discarded. Completed pods are excluded; these estimates do not guarantee scheduler placement.
+
+Fine-tuning previews show inherited runtime requests and GPU fit warnings using the SDK's
+resource aliases. A worker requesting two GPUs needs both on one node; separate one-GPU nodes
+cannot satisfy it. Validation and preview share one cluster inspection.
