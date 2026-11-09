@@ -1228,3 +1228,38 @@ class TestBuildRuntimePatch:
         assert [type(o).__name__ for o in options] == ["Labels", "Annotations"]
         assert options[0].labels == {"team": "ml"}
         assert options[1].annotations == {"owner": "alice"}
+
+
+@pytest.mark.parametrize(
+    "message,expected",
+    [
+        (
+            'admission webhook "validator.trainer" denied the request: spec.runtimeRef.name: Invalid value: "qwen": QLoRA is not supported',
+            "VALIDATION_ERROR",
+        ),
+        (
+            'admission webhook "security-policy" denied the request: service account forbidden',
+            "PERMISSION_DENIED",
+        ),
+        (
+            'admission webhook "security-policy" denied the request: spec.serviceAccountName: Invalid value: "admin"',
+            "PERMISSION_DENIED",
+        ),
+        ("User cannot create trainjobs in namespace workloads", "PERMISSION_DENIED"),
+    ],
+)
+def test_admission_validation_distinguished_from_permissions(message, expected):
+    import json
+
+    from kubeflow_mcp.trainer.api.training import _sdk_error
+
+    api_error = ApiException(status=403)
+    api_error.body = json.dumps({"message": message})
+    try:
+        raise RuntimeError("Failed to create TrainJob") from api_error
+    except RuntimeError as error:
+        result = _sdk_error(error)
+    assert result["error_code"] == expected
+    if expected == "VALIDATION_ERROR":
+        assert result["error"] == message
+        assert "service_account_name" not in result["hint"]

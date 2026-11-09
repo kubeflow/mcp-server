@@ -15,6 +15,7 @@
 """Training submission tools: fine_tune, run_custom_training, run_container_training."""
 
 import ast
+import json
 import logging
 import os
 import re
@@ -471,7 +472,24 @@ def _sdk_error(e: Exception, hint: str | None = None) -> dict[str, Any]:
     # context, for errors raised without ``from``, as is_k8s_not_found does). RBAC or
     # an admission policy (e.g. one restricting service_account_name) denied the
     # request: that is a permission problem to report, not a transient SDK failure.
-    if any(getattr(err, "status", None) == 403 for err in (e, e.__cause__ or e.__context__)):
+    forbidden = next(
+        (err for err in (e, e.__cause__ or e.__context__) if getattr(err, "status", None) == 403),
+        None,
+    )
+    if forbidden is not None:
+        try:
+            message = json.loads(getattr(forbidden, "body", None) or "{}").get("message", "")
+        except (ValueError, AttributeError):
+            message = ""
+        # Configuration rejection is distinct from RBAC and security admission policies.
+        if "admission webhook" in message and re.search(
+            r"spec\.(runtimeRef|trainer|initializer)[. :].*Invalid value:", message
+        ):
+            return ToolError(
+                error=message,
+                error_code=ErrorCode.VALIDATION_ERROR,
+                hint="The admission webhook rejected the training configuration; check model and runtime compatibility.",
+            ).model_dump()
         return ToolError(
             error=str(e),
             error_code=ErrorCode.PERMISSION_DENIED,
