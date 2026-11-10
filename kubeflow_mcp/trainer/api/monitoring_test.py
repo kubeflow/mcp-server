@@ -990,6 +990,97 @@ class TestWaitForTraining:
         assert result["data"]["status"] == "Unknown"
         assert result["data"]["reached"] is True
 
+    @staticmethod
+    def _sdk_like_wait(*statuses_seen, final=None):
+        """Mimic the SDK loop: run the callbacks on each poll, then return ``final``."""
+
+        def wait_for_job_status(name, status, timeout, polling_interval, callbacks=None):
+            for seen in statuses_seen:
+                for callback in callbacks or []:
+                    callback(SimpleNamespace(status=seen))
+            if final is None:
+                raise TimeoutError("timed out")
+            return SimpleNamespace(status=final)
+
+        return wait_for_job_status
+
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_stops_early_when_job_is_already_complete(self, mock_client_fn, _ns):
+        """Waiting for Running on a finished job must not run into the timeout."""
+        client = MagicMock()
+        client.wait_for_job_status.side_effect = self._sdk_like_wait("Complete", final=None)
+        mock_client_fn.return_value = client
+
+        result = wait_for_training("my-job", target_statuses="Running", timeout_seconds=600)
+
+        assert result["success"] is True
+        assert result["data"] == {
+            "job": "my-job",
+            "status": "Complete",
+            "reached": False,
+            "message": "Job is already 'Complete' and will not reach 'Running'",
+            "hint": "Use get_training_logs to read its output",
+        }
+
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_keeps_waiting_through_non_terminal_statuses(self, mock_client_fn, _ns):
+        client = MagicMock()
+        client.wait_for_job_status.side_effect = self._sdk_like_wait(
+            "Created", "Created", final="Running"
+        )
+        mock_client_fn.return_value = client
+
+        result = wait_for_training("my-job", target_statuses="Running")
+
+        assert result["data"]["reached"] is True
+        assert result["data"]["status"] == "Running"
+
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_complete_is_not_an_early_stop_when_it_is_a_target(self, mock_client_fn, _ns):
+        client = MagicMock()
+        client.wait_for_job_status.side_effect = self._sdk_like_wait("Complete", final="Complete")
+        mock_client_fn.return_value = client
+
+        result = wait_for_training("my-job", target_statuses=["Running", "Complete"])
+
+        assert result["data"]["reached"] is True
+        assert result["data"]["status"] == "Complete"
+
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_early_stop_works_with_the_real_sdk_poll_loop(self, mock_client_fn, _ns):
+        """Run the SDK's own wait loop (get_job stubbed) so the callback contract is checked."""
+        from kubeflow.trainer.backends.kubernetes.backend import KubernetesBackend
+
+        backend = SimpleNamespace(get_job=lambda name: SimpleNamespace(status="Complete"))
+        client = MagicMock()
+        client.wait_for_job_status.side_effect = lambda **kwargs: (
+            KubernetesBackend.wait_for_job_status(backend, **kwargs)
+        )
+        mock_client_fn.return_value = client
+
+        with patch("kubeflow.trainer.backends.kubernetes.backend.time.sleep") as sleep:
+            result = wait_for_training("my-job", target_statuses="Running", timeout_seconds=600)
+
+        assert result["data"]["status"] == "Complete"
+        assert result["data"]["reached"] is False
+        sleep.assert_not_called()
+
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_passes_a_status_callback_to_the_sdk(self, mock_client_fn, _ns):
+        client = MagicMock()
+        client.wait_for_job_status.return_value = SimpleNamespace(status="Complete")
+        mock_client_fn.return_value = client
+
+        wait_for_training("my-job")
+
+        callbacks = client.wait_for_job_status.call_args.kwargs["callbacks"]
+        assert len(callbacks) == 1 and callable(callbacks[0])
+
     @patch(PATCH_NS_CHECK)
     def test_namespace_denied(self, mock_ns_check):
         from kubeflow_mcp.common.types import ToolError as ToolErrorModel
