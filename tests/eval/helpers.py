@@ -21,7 +21,9 @@ from typing import Any
 # it is added here, so the gate check cannot silently skip it.
 GATE_ARGS: dict[str, dict[str, Any]] = {
     "create_runtime": {"name": "rt-a", "spec": {"template": {}}},
+    "create_spark_session": {"name": "spark-a"},
     "delete_runtime": {"name": "rt-a"},
+    "delete_spark_session": {"name": "spark-a"},
     "delete_training_job": {"name": "job-a"},
     "fine_tune": {"model": "hf://google/gemma-2b", "dataset": "hf://tatsu-lab/alpaca"},
     "patch_runtime": {"name": "rt-a", "patch": {"metadata": {"labels": {"a": "b"}}}},
