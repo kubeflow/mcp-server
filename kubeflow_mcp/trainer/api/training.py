@@ -31,7 +31,12 @@ from typing import Any
 from kubeflow.trainer.constants.constants import DATASET_PATH, DEFAULT_PIP_INDEX_URLS
 
 from kubeflow_mcp.common.constants import ErrorCode
-from kubeflow_mcp.common.types import PreviewResponse, ToolError, ToolResponse
+from kubeflow_mcp.common.types import (
+    PreviewResponse,
+    ToolError,
+    ToolResponse,
+    k8s_conflict_reason,
+)
 from kubeflow_mcp.common.utils import (
     MCP_MANAGED_LABEL,
     MCP_MANAGED_VALUE,
@@ -467,6 +472,20 @@ def _sdk_error(e: Exception, hint: str | None = None) -> dict[str, Any]:
             hint=(
                 "The cluster denied this request. Check that you may create TrainJobs in "
                 "this namespace and use the requested service_account_name."
+            ),
+        ).model_dump()
+    # Only the create paths (fine_tune, run_custom_training, run_container_training)
+    # reach this, so a 409 means a TrainJob with this name already exists, whatever
+    # reason the API body gives. Report it as a conflict the caller can fix.
+    conflict = k8s_conflict_reason(e)
+    if conflict:
+        return ToolError(
+            error=str(e),
+            error_code=ErrorCode.CONFLICT,
+            details={**(details or {}), "reason": conflict},
+            hint=(
+                "A TrainJob with this name already exists in the namespace. Pick another "
+                "name, or delete the existing job with delete_training_job."
             ),
         ).model_dump()
     return ToolError(

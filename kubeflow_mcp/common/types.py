@@ -14,6 +14,7 @@
 
 """Shared types for kubeflow-mcp tools."""
 
+import json
 import logging
 import traceback
 from typing import Any, Literal
@@ -40,6 +41,28 @@ def is_k8s_not_found(exc: Exception) -> bool:
     if isinstance(cause, ApiException) and cause.status == 404:
         return True
     return False
+
+
+def k8s_conflict_reason(exc: Exception) -> str | None:
+    """Return ``"AlreadyExists"`` or ``"Conflict"`` for a Kubernetes 409, else None.
+
+    A 409 means either the name is taken (create) or the object's resourceVersion
+    changed since it was read (update or patch with a precondition). Like
+    :func:`is_k8s_not_found`, the cause and context are checked because the SDK
+    wraps the ApiException.
+    """
+    try:
+        from kubernetes.client.exceptions import ApiException
+    except ImportError:
+        return None
+    for err in (exc, exc.__cause__ or exc.__context__):
+        if isinstance(err, ApiException) and err.status == 409:
+            try:
+                reason = json.loads(err.body or "{}").get("reason")
+            except (TypeError, ValueError, AttributeError):
+                reason = None
+            return "AlreadyExists" if reason == "AlreadyExists" else "Conflict"
+    return None
 
 
 def exception_details(exc: Exception) -> dict[str, Any]:

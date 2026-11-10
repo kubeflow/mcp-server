@@ -85,6 +85,8 @@ Copy trainer's persona matrix tests (`trainer/api/architecture_test.py`).
   `common/utils.py`). Non-admin may only mutate labeled resources.
 - Missing resource: `RESOURCE_NOT_FOUND`. Exists but not MCP-owned: `VALIDATION_ERROR`.
 - 404s: `is_k8s_not_found()` — never substring-match `"not found"`.
+- 409s: `k8s_conflict_reason()` → `CONFLICT` (`AlreadyExists` on create, `Conflict` on a stale
+  `resourceVersion`). Not an infrastructure error, so it does not trip the circuit breaker.
 - Errors: return `ToolError` at tool boundary; log WARNING + `exc_info`; no stack traces in
   responses (use `exception_details()`).
 
