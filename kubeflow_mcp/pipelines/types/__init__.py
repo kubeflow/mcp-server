@@ -157,8 +157,7 @@ def run_node_ids(run: Any) -> list[tuple[str | None, str]]:
     task_nodes = [
         (getattr(task, "pod_name", None), getattr(task, "display_name", None))
         for task in task_details
-        if getattr(task, "display_name", None) != "executor"
-        and getattr(task, "pod_name", None)
+        if getattr(task, "display_name", None) != "executor" and getattr(task, "pod_name", None)
     ]
     pods: list[tuple[str | None, str]] = []
     for task in task_details:
