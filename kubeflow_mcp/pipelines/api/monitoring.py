@@ -56,8 +56,9 @@ def _resolve_run_pods(run_id: str, run: Any, namespace: str) -> list[tuple[str |
     This function lists live pods by the ``pipeline/runid`` label and maps them back
     to the run's recorded node IDs.
 
-    Returns ``(task_display_name, real_pod_name)`` pairs. Prefers "launcher" pods
-    (user step executors) over "driver" pods (internal KFP orchestration).
+    Returns ``(task_display_name, real_pod_name)`` pairs. Workload (launcher) pods
+    come before internal pods (drivers, cleaned-up IDs), so a DAG's internal entries
+    never exhaust the read budget before the user's steps get read.
     """
     node_entries = run_node_ids(run)
     if not node_entries:
@@ -74,11 +75,11 @@ def _resolve_run_pods(run_id: str, run: Any, namespace: str) -> list[tuple[str |
         logger.warning("Could not list pods for run %s: %s", run_id, e)
         raise
 
-    # Index live pods by their Argo node ID annotation.
-    # A single node ID can map to multiple pods (driver + launcher); prefer
-    # the launcher pod so we read the user's output, not the internal driver.
-    node_to_pod: dict[str, str] = {}
-    node_to_role: dict[str, str] = {}
+    # Index live pods by their Argo node ID annotation. A single node ID can map to
+    # multiple pods (driver + launcher); keep the launcher apart so the user's step
+    # executor wins over the internal driver when a node ID maps to both.
+    launcher_pods: dict[str, str] = {}
+    any_pods: dict[str, str] = {}
     for pod in getattr(pod_list, "items", []) or []:
         meta = getattr(pod, "metadata", None)
         if meta is None:
@@ -89,21 +90,27 @@ def _resolve_run_pods(run_id: str, run: Any, namespace: str) -> list[tuple[str |
         annotations = getattr(meta, "annotations", None) or {}
         node_id = annotations.get(ARGO_NODE_ID_ANNOTATION) or pod_name
         role = annotations.get(_ROLE_ANNOTATION, "")
+        if role == _LAUNCHER_ROLE:
+            launcher_pods.setdefault(node_id, pod_name)
+        any_pods.setdefault(node_id, pod_name)
 
-        existing_role = node_to_role.get(node_id, "")
-        # Prefer launcher over driver; if both are launcher, keep the first.
-        if node_id not in node_to_pod or (
-            role == _LAUNCHER_ROLE and existing_role != _LAUNCHER_ROLE
-        ):
-            node_to_pod[node_id] = pod_name
-            node_to_role[node_id] = role
-
-    # Map each recorded node ID to the resolved pod name.
-    result: list[tuple[str | None, str]] = []
+    workload: list[tuple[str | None, str]] = []
+    unresolved: list[tuple[str | None, str]] = []
+    internal: list[tuple[str | None, str]] = []
     for task_name, node_id in node_entries:
-        real_pod = node_to_pod.get(node_id, node_id)
-        result.append((task_name, real_pod))
-    return result
+        pod = launcher_pods.get(node_id)
+        if pod is not None:
+            workload.append((task_name, pod))
+            continue
+        pod = any_pods.get(node_id)
+        if pod is not None:
+            internal.append((task_name, pod))
+        else:
+            # No live pod carries this node ID (e.g. a cleaned-up driver pod). Keep
+            # the recorded ID so the read is reported as missing instead of being
+            # silently skipped.
+            unresolved.append((task_name, node_id))
+    return [*workload, *unresolved, *internal]
 
 
 def list_pipeline_runs(
@@ -130,7 +137,9 @@ def list_pipeline_runs(
         ``created_at``, ``finished_at``, ``error``, ...), ``next_page_token``,
         ``has_more`` and ``total``. The pipeline filter is applied after the
         server returns a page, so a page can hold fewer runs than ``limit``
-        while ``has_more`` is still true.
+        while ``has_more`` is still true. Runs whose namespace cannot be
+        verified against the requested one are dropped (fail-closed) and the
+        count is reported in ``runs_filtered``.
     """
     for value, field in ((pipeline, "pipeline"), (experiment, "experiment")):
         if value is not None:
@@ -155,17 +164,29 @@ def list_pipeline_runs(
         return ns_err.model_dump()
 
     try:
-        response = get_pipelines_client(ns).list_runs(
+        client = get_pipelines_client(ns)
+        response = client.list_runs(
             pipeline=pipeline,
             experiment=experiment,
             status=normalized_status,
             page_token=page_token or "",
             page_size=limit,
         )
-        runs = [run_to_dict(r) for r in getattr(response, "runs", None) or []]
-        return ToolResponse(
-            data={"runs": runs, "namespace": ns, **page_fields(response)}
-        ).model_dump()
+        # The same fail-closed namespace verification get_pipeline_run applies: the
+        # SDK can return runs whose experiment belongs to another namespace (or carries
+        # none at all on standalone KFP), and listing must not expose what the direct
+        # read would deny. Unverifiable runs are dropped, never reported.
+        runs: list[dict[str, Any]] = []
+        filtered = 0
+        for raw_run in getattr(response, "runs", None) or []:
+            if check_run_namespace(client, raw_run, ns) is not None:
+                filtered += 1
+                continue
+            runs.append(run_to_dict(raw_run))
+        data: dict[str, Any] = {"runs": runs, "namespace": ns, **page_fields(response)}
+        if filtered:
+            data["runs_filtered"] = filtered
+        return ToolResponse(data=data).model_dump()
     except Exception as e:
         return pipelines_error(e, "list pipeline runs").model_dump()
 
@@ -291,6 +312,16 @@ def get_pipeline_logs(
         return pipelines_error(e, f"resolve pods for run '{run_id}'").model_dump()
     task_names = sorted({name for name, _ in all_pods if name})
     pods = [(name, pod) for name, pod in all_pods if task is None or name == task]
+    # The same real pod can be recorded under more than one node entry (a task's own
+    # entry and its parents child list); read each pod once.
+    seen: set[str] = set()
+    deduped: list[tuple[str | None, str]] = []
+    for name, pod in pods:
+        if pod in seen:
+            continue
+        seen.add(pod)
+        deduped.append((name, pod))
+    pods = deduped
     if task is not None and not pods:
         return ToolError(
             error=f"No pods recorded for task '{task}' in run '{run_id}'",

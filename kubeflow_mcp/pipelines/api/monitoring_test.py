@@ -35,6 +35,15 @@ def core_api(monkeypatch):
     return api
 
 
+def make_pod(name: str, node: str | None = None, role: str | None = None) -> SimpleNamespace:
+    annotations: dict[str, str] = {}
+    if node is not None:
+        annotations[monitoring.ARGO_NODE_ID_ANNOTATION] = node
+    if role is not None:
+        annotations[monitoring._ROLE_ANNOTATION] = role
+    return SimpleNamespace(metadata=SimpleNamespace(name=name, annotations=annotations))
+
+
 class TestListPipelineRuns:
     def test_passes_filters_and_lowercases_status(self, kfp_client):
         kfp_client.list_runs.return_value = make_page("runs", [make_run("FAILED")], token="n")
@@ -67,6 +76,81 @@ class TestListPipelineRuns:
         kfp_client.list_runs.side_effect = ValueError("Experiment not found: 'x'.")
 
         assert list_pipeline_runs(experiment="x")["error_code"] == "RESOURCE_NOT_FOUND"
+
+
+class TestListPipelineRunsNamespaceFailClosed:
+    """Listing applies the same fail-closed namespace check as get_pipeline_run.
+
+    On standalone KFP the SDK lists runs across every experiment, including ones the
+    direct read denies (empty experiment namespace with an allowlist configured).
+    Unverifiable runs are dropped, never reported.
+    """
+
+    @staticmethod
+    def _experiment_lookup(namespaces: dict[str, str | None]):
+        return lambda experiment_id, **_: SimpleNamespace(
+            experiment_id=experiment_id, namespace=namespaces.get(experiment_id)
+        )
+
+    def test_allowlist_hides_runs_that_get_pipeline_run_would_deny(self, kfp_client, monkeypatch):
+        # Reviewer's live case: allowlist configured, experiment namespace empty.
+        monkeypatch.setattr(
+            "kubeflow_mcp.pipelines.api._common.get_allowed_namespaces", lambda: {"team-a"}
+        )
+        monkeypatch.setattr("kubeflow_mcp.core.policy.get_allowed_namespaces", lambda: {"team-a"})
+        kfp_client._backend.experiment_api.experiment_service_get_experiment.side_effect = (
+            self._experiment_lookup({"e-1": None})
+        )
+        kfp_client.list_runs.return_value = make_page("runs", [make_run("PENDING")])
+
+        result = list_pipeline_runs(limit=5)
+
+        data = result["data"]
+        assert data["runs"] == []
+        assert data["runs_filtered"] == 1
+        assert data["has_more"] is False
+
+    def test_runs_from_other_experiment_namespaces_are_dropped(self, kfp_client):
+        leak = make_run("PENDING")
+        leak.run_id = "aaaaaaaa-1111-2222-3333-444444444444"
+        leak.experiment_id = "e-2"
+        kfp_client.list_runs.return_value = make_page("runs", [make_run("PENDING"), leak])
+        kfp_client._backend.experiment_api.experiment_service_get_experiment.side_effect = (
+            self._experiment_lookup({"e-1": "team-a", "e-2": "team-b"})
+        )
+
+        result = list_pipeline_runs(limit=10)
+
+        data = result["data"]
+        assert [run["run_id"] for run in data["runs"]] == [RUN_ID]
+        assert data["runs_filtered"] == 1
+        assert data["namespace"] == "team-a"
+
+    def test_standalone_without_allowlist_keeps_unnamespaced_runs(self, kfp_client):
+        # No allowlist configured (conftest default): empty experiment namespace is
+        # the standalone single-user deployment, not an exposure.
+        kfp_client._backend.experiment_api.experiment_service_get_experiment.side_effect = (
+            self._experiment_lookup({"e-1": None})
+        )
+        kfp_client.list_runs.return_value = make_page("runs", [make_run("PENDING")])
+
+        result = list_pipeline_runs()
+
+        data = result["data"]
+        assert [run["run_id"] for run in data["runs"]] == [RUN_ID]
+        assert "runs_filtered" not in data
+
+    def test_experiment_lookup_failure_fails_closed(self, kfp_client):
+        kfp_client._backend.experiment_api.experiment_service_get_experiment.side_effect = (
+            ApiException(403, "Forbidden")
+        )
+        kfp_client.list_runs.return_value = make_page("runs", [make_run("PENDING")])
+
+        result = list_pipeline_runs()
+
+        data = result["data"]
+        assert data["runs"] == []
+        assert data["runs_filtered"] == 1
 
 
 class TestGetPipelineRun:
@@ -260,3 +344,73 @@ class TestGetPipelineLogs:
     def test_rejects_tail_lines_out_of_range(self, kfp_client, tail_lines):
         assert get_pipeline_logs(RUN_ID, tail_lines=tail_lines)["error_code"] == "VALIDATION_ERROR"
         kfp_client.get_run.assert_not_called()
+
+    def test_dag_structure_launcher_pod_is_found_when_driver_pod_is_gone(
+        self, kfp_client, core_api
+    ):
+        # Live-tested failure: task="work" answered 'pod no longer exists' (its
+        # recorded DAG driver pod was cleaned up) while the task's launcher pod still
+        # held the logs.
+        run = make_run(
+            tasks=[
+                make_task("work", "FAILED", pod="work-driver-node", children=["work-launch-node"]),
+            ]
+        )
+        kfp_client.get_run.return_value = run
+        core_api.list_namespaced_pod.return_value = SimpleNamespace(
+            items=[make_pod("work-executor-pod", node="work-launch-node", role="launcher")]
+        )
+
+        def read_log(name, **kwargs):
+            if name == "work-driver-node":
+                raise ApiException(404, "Not Found")
+            return name
+
+        core_api.read_namespaced_pod_log.side_effect = read_log
+
+        data = get_pipeline_logs(RUN_ID, task="work")["data"]
+
+        # The launcher pod is read first; the stale recorded ID is reported after.
+        assert [(p["task"], p["pod"]) for p in data["pods"]] == [
+            ("work", "work-executor-pod"),
+            ("work", "work-driver-node"),
+        ]
+        assert data["pods"][0]["logs"] == "work-executor-pod"
+        assert data["pods"][1]["error"] == "pod no longer exists"
+
+    def test_dag_driver_entries_cannot_exhaust_the_pod_cap(self, kfp_client, core_api):
+        tasks = [make_task(f"driver-step-{i}", "FAILED", pod=f"driver-node-{i}") for i in range(12)]
+        tasks.append(make_task("work", "FAILED", pod="work-own-node"))
+        kfp_client.get_run.return_value = make_run(tasks=tasks)
+        pods = [make_pod(f"driver-pod-{i}", node=f"driver-node-{i}") for i in range(12)]
+        pods.append(make_pod("work-launcher-pod", node="work-own-node", role="launcher"))
+        core_api.list_namespaced_pod.return_value = SimpleNamespace(items=pods)
+        core_api.read_namespaced_pod_log.side_effect = lambda name, **kw: name
+
+        data = get_pipeline_logs(RUN_ID)["data"]
+
+        # The launcher pod wins a read slot even though the run recorded it last.
+        assert data["pods"][0]["task"] == "work"
+        assert data["pods"][0]["pod"] == "work-launcher-pod"
+        assert data["pods"][0]["logs"] == "work-launcher-pod"
+        assert "work" in data["tasks"]
+        assert len(data["pods"]) == monitoring.MAX_LOG_PODS
+        assert data["pods_truncated"] is True
+
+    def test_same_pod_recorded_by_task_and_child_is_read_once(self, kfp_client, core_api):
+        run = make_run(
+            tasks=[
+                make_task("parent", pod=None, children=["shared-node"]),
+                make_task("work", "FAILED", pod="shared-node"),
+            ]
+        )
+        kfp_client.get_run.return_value = run
+        core_api.list_namespaced_pod.return_value = SimpleNamespace(
+            items=[make_pod("shared-executor-pod", node="shared-node", role="launcher")]
+        )
+        core_api.read_namespaced_pod_log.side_effect = lambda name, **kw: name
+
+        data = get_pipeline_logs(RUN_ID)["data"]
+
+        assert [(p["task"], p["pod"]) for p in data["pods"]] == [("parent", "shared-executor-pod")]
+        assert core_api.read_namespaced_pod_log.call_count == 1
