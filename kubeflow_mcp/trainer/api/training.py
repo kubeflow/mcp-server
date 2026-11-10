@@ -15,6 +15,7 @@
 """Training submission tools: fine_tune, run_custom_training, run_container_training."""
 
 import ast
+import json
 import logging
 import os
 import re
@@ -114,12 +115,14 @@ _original_get_trainer_cr: Callable | None = None
 
 @contextmanager
 def _inject_trainer_hf_home(hf_home_path: str):
-    """Patch SDK to inject HF_HOME into spec.trainer.env for BuiltinTrainer jobs.
+    """Apply SDK 0.5 HF cache and dataset-path fixes for BuiltinTrainer jobs.
 
     The SDK (v0.5.x) does not support env on BuiltinTrainer.  This context
     manager temporarily patches ``get_trainer_cr_from_builtin_trainer`` so the
     returned TrainerV1alpha1Trainer CR includes the HF_HOME env var, which
     lands on ``spec.trainer.env`` instead of ``spec.runtimePatches``.
+    Root HF datasets also need a local source path, without replacing the
+    generated LoRA and dataset arguments via the incompatible TrainerArgs option.
     """
     import kubeflow.trainer.backends.kubernetes.utils as k8s_utils
     from kubeflow_trainer_api.models import IoK8sApiCoreV1EnvVar
@@ -139,6 +142,16 @@ def _inject_trainer_hf_home(hf_home_path: str):
                 if path and not any(e.name == "HF_HOME" for e in (cr.env or [])):
                     hf_env = IoK8sApiCoreV1EnvVar(name="HF_HOME", value=path)
                     cr.env = (cr.env or []) + [hf_env]
+                if (
+                    path
+                    and initializer
+                    and isinstance(initializer.dataset, HuggingFaceDatasetInitializer)
+                    and _should_apply_hf_dataset_workaround(initializer.dataset.storage_uri)
+                    and not any(arg.startswith("dataset.source=") for arg in (cr.args or []))
+                ):
+                    cr.args = [
+                        arg for arg in (cr.args or []) if not arg.startswith("dataset.data_dir=")
+                    ] + [f"dataset.source={DATASET_PATH}", "dataset.data_dir=null"]
                 return cr
 
             k8s_utils.get_trainer_cr_from_builtin_trainer = _patched
@@ -459,7 +472,24 @@ def _sdk_error(e: Exception, hint: str | None = None) -> dict[str, Any]:
     # context, for errors raised without ``from``, as is_k8s_not_found does). RBAC or
     # an admission policy (e.g. one restricting service_account_name) denied the
     # request: that is a permission problem to report, not a transient SDK failure.
-    if any(getattr(err, "status", None) == 403 for err in (e, e.__cause__ or e.__context__)):
+    forbidden = next(
+        (err for err in (e, e.__cause__ or e.__context__) if getattr(err, "status", None) == 403),
+        None,
+    )
+    if forbidden is not None:
+        try:
+            message = json.loads(getattr(forbidden, "body", None) or "{}").get("message", "")
+        except (ValueError, AttributeError):
+            message = ""
+        # Configuration rejection is distinct from RBAC and security admission policies.
+        if "admission webhook" in message and re.search(
+            r"spec\.(runtimeRef|trainer|initializer)[. :].*Invalid value:", message
+        ):
+            return ToolError(
+                error=message,
+                error_code=ErrorCode.VALIDATION_ERROR,
+                hint="The admission webhook rejected the training configuration; check model and runtime compatibility.",
+            ).model_dump()
         return ToolError(
             error=str(e),
             error_code=ErrorCode.PERMISSION_DENIED,
@@ -1160,14 +1190,6 @@ def fine_tune(
         )
         if name:
             options.append(Name(name=name))
-
-        # Workaround for SDK bug where top-level HF datasets construct
-        # invalid torchtune dataset.data_dir=/workspace/dataset/.
-        # We override the torchtune CLI args directly via TrainerArgs.
-        if _should_apply_hf_dataset_workaround(dataset):
-            options.append(
-                TrainerArgs(args=[f"dataset.source={DATASET_PATH}", "dataset.data_dir=null"])
-            )
 
         client = _get_client(namespace)
         initializer = _build_initializer(
