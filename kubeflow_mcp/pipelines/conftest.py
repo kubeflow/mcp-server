@@ -59,9 +59,17 @@ def make_version(name: str = "v1", version_id: str = "pv-1") -> SimpleNamespace:
     )
 
 
-def make_task(name: str, state: str = "SUCCEEDED", pod: str | None = None, children=()):
+def make_task(
+    name: str,
+    state: str = "SUCCEEDED",
+    pod: str | None = None,
+    children=(),
+    task_id: str | None = None,
+    parent_task_id: str | None = None,
+):
     return SimpleNamespace(
-        task_id=f"t-{name}",
+        task_id=task_id or f"t-{name}",
+        parent_task_id=parent_task_id,
         display_name=name,
         state=state,
         pod_name=pod,

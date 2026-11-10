@@ -26,6 +26,7 @@ from kubeflow_mcp.pipelines.types import (
     MAX_PARAMETERS,
     MAX_TASKS,
     pipeline_to_dict,
+    run_node_ids,
     run_pod_names,
     run_to_dict,
 )
@@ -121,3 +122,19 @@ def test_pod_names_include_children_once():
     )
 
     assert run_pod_names(run) == [("a", "pod-a"), ("b", "pod-b1"), ("b", "pod-b2")]
+
+
+def test_executor_node_is_attributed_to_its_parent_task():
+    run = make_run(
+        tasks=[
+            make_task("work", pod="work-driver", task_id="work-id"),
+            make_task(
+                "executor",
+                pod="work-executor",
+                task_id="work-executor-id",
+                parent_task_id="work-id",
+            ),
+        ]
+    )
+
+    assert run_node_ids(run) == [("work", "work-driver"), ("work", "work-executor")]

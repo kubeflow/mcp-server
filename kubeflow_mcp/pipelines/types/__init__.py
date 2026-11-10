@@ -148,9 +148,21 @@ def run_node_ids(run: Any) -> list[tuple[str | None, str]]:
     contain Argo Workflow Node IDs, not real Kubernetes Pod names. Use
     ``monitoring._resolve_run_pods()`` to map these to actual pods.
     """
+    task_details = getattr(getattr(run, "run_details", None), "task_details", None) or []
+    task_names_by_id = {
+        task_id: getattr(task, "display_name", None)
+        for task in task_details
+        if (task_id := getattr(task, "task_id", None))
+    }
     pods: list[tuple[str | None, str]] = []
-    for task in getattr(getattr(run, "run_details", None), "task_details", None) or []:
+    for task in task_details:
         name = getattr(task, "display_name", None)
+        # KFP can report the launcher executor as its own task detail. Attribute it
+        # to the user task that owns it so task filters return the user's logs.
+        if name == "executor":
+            parent_name = task_names_by_id.get(getattr(task, "parent_task_id", None))
+            if parent_name:
+                name = parent_name
         pod = getattr(task, "pod_name", None)
         if pod:
             pods.append((name, pod))

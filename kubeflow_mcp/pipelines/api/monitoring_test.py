@@ -378,6 +378,46 @@ class TestGetPipelineLogs:
         assert data["pods"][0]["logs"] == "work-executor-pod"
         assert data["pods"][1]["error"] == "pod no longer exists"
 
+    def test_task_filter_matches_separate_executor_entries_to_their_parent_tasks(
+        self, kfp_client, core_api
+    ):
+        run = make_run(
+            tasks=[
+                make_task("work", "FAILED", pod="work-driver-node", task_id="work-id"),
+                make_task("train", "FAILED", pod="train-driver-node", task_id="train-id"),
+                make_task(
+                    "executor",
+                    pod="work-executor-node",
+                    task_id="work-executor-id",
+                    parent_task_id="work-id",
+                ),
+                make_task(
+                    "executor",
+                    pod="train-executor-node",
+                    task_id="train-executor-id",
+                    parent_task_id="train-id",
+                ),
+            ]
+        )
+        kfp_client.get_run.return_value = run
+        core_api.list_namespaced_pod.return_value = SimpleNamespace(
+            items=[
+                make_pod("work-launcher-pod", node="work-executor-node", role="launcher"),
+                make_pod("train-launcher-pod", node="train-executor-node", role="launcher"),
+            ]
+        )
+        core_api.read_namespaced_pod_log.side_effect = lambda name, **kwargs: f"logs:{name}"
+
+        data = get_pipeline_logs(RUN_ID, task="work")["data"]
+
+        assert [pod["pod"] for pod in data["pods"]] == [
+            "work-launcher-pod",
+            "work-driver-node",
+        ]
+        assert data["pods"][0]["logs"] == "logs:work-launcher-pod"
+        assert "train-launcher-pod" not in [pod["pod"] for pod in data["pods"]]
+        assert data["tasks"] == ["train", "work"]
+
     def test_dag_driver_entries_cannot_exhaust_the_pod_cap(self, kfp_client, core_api):
         tasks = [make_task(f"driver-step-{i}", "FAILED", pod=f"driver-node-{i}") for i in range(12)]
         tasks.append(make_task("work", "FAILED", pod="work-own-node"))
