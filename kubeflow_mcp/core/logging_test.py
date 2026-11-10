@@ -326,6 +326,24 @@ class TestSetupLogging:
         root = setup_logging(level="debug", format="json")
         assert root.level == logging.DEBUG
 
+    @pytest.mark.parametrize(
+        ("level", "expected_level"),
+        [
+            ("WARN", logging.WARNING),
+            ("warn", logging.WARNING),
+            ("FATAL", logging.CRITICAL),
+            ("fatal", logging.CRITICAL),
+        ],
+    )
+    def test_normalizes_legacy_log_level_aliases(self, level, expected_level):
+        root = setup_logging(level=level, format="json")
+        assert root.level == expected_level
+
+    @pytest.mark.parametrize("level", ["TRACE", "NOT_A_LEVEL", ""])
+    def test_rejects_invalid_log_level(self, level):
+        with pytest.raises(ValueError, match="Invalid log level"):
+            setup_logging(level=level, format="json")
+
     def test_calling_twice_does_not_duplicate_handlers(self):
         setup_logging(format="json")
         root = setup_logging(format="json")
