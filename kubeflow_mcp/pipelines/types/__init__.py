@@ -141,6 +141,20 @@ def run_to_dict(run: Any, *, include_details: bool = False) -> dict[str, Any]:
     return data
 
 
+def _task_owners_by_child_id(task_details: list[Any]) -> dict[str, set[str]]:
+    """Map each child task ID to the display name of its parent task."""
+    owners: dict[str, set[str]] = {}
+    for task in task_details:
+        task_name = getattr(task, "display_name", None)
+        if not task_name or task_name == "executor":
+            continue
+        for child in getattr(task, "child_tasks", None) or []:
+            child_id = getattr(child, "task_id", None)
+            if child_id:
+                owners.setdefault(str(child_id), set()).add(task_name)
+    return owners
+
+
 def run_node_ids(run: Any) -> list[tuple[str | None, str]]:
     """Return ``(task name, argo node id)`` for every node KFP recorded for a run's tasks.
 
@@ -154,6 +168,7 @@ def run_node_ids(run: Any) -> list[tuple[str | None, str]]:
         for task in task_details
         if (task_id := getattr(task, "task_id", None))
     }
+    task_names_by_child_id = _task_owners_by_child_id(task_details)
     task_nodes = [
         (getattr(task, "pod_name", None), getattr(task, "display_name", None))
         for task in task_details
@@ -163,11 +178,14 @@ def run_node_ids(run: Any) -> list[tuple[str | None, str]]:
     for task in task_details:
         name = getattr(task, "display_name", None)
         # KFP can report the launcher executor as its own task detail. Attribute it
-        # to the user task that owns it so task filters return the user's logs. Some
-        # KFP responses omit parent_task_id; Argo node IDs still encode the parent as
-        # a dot-delimited prefix (for example, ``run.work.executor``).
+        # to the user task that owns it so task filters return the user's logs.
         if name == "executor":
             parent_name = task_names_by_id.get(getattr(task, "parent_task_id", None))
+            if not parent_name:
+                executor_task_id = getattr(task, "task_id", None)
+                child_owners = task_names_by_child_id.get(str(executor_task_id), set())
+                if len(child_owners) == 1:
+                    parent_name = next(iter(child_owners))
             if not parent_name:
                 node_id = getattr(task, "pod_name", None)
                 matching_parents = [

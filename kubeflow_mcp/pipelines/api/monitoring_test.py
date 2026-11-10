@@ -378,23 +378,29 @@ class TestGetPipelineLogs:
         assert data["pods"][0]["logs"] == "work-executor-pod"
         assert data["pods"][1]["error"] == "pod no longer exists"
 
-    def test_task_filter_matches_executor_entries_when_parent_task_id_is_empty(
+    def test_task_filter_matches_executor_child_when_parent_task_id_and_pod_name_are_empty(
         self, kfp_client, core_api
     ):
+        work = make_task("work", "FAILED", pod="work-driver-node", task_id="task-104")
+        work.child_tasks = [SimpleNamespace(task_id="task-209", pod_name=None)]
+        train = make_task("train", "FAILED", pod="train-driver-node", task_id="task-105")
+        train.child_tasks = [SimpleNamespace(task_id="task-210", pod_name=None)]
         run = make_run(
             tasks=[
-                make_task("work", "FAILED", pod="run.work", task_id="work-id"),
-                make_task("train", "FAILED", pod="run.train", task_id="train-id"),
+                work,
+                train,
                 make_task(
                     "executor",
-                    pod="run.work.executor",
-                    task_id="work-executor-id",
+                    pod=None,
+                    children=["work-launch-node"],
+                    task_id="task-209",
                     parent_task_id="",
                 ),
                 make_task(
                     "executor",
-                    pod="run.train.executor",
-                    task_id="train-executor-id",
+                    pod=None,
+                    children=["train-launch-node"],
+                    task_id="task-210",
                     parent_task_id="",
                 ),
             ]
@@ -402,19 +408,22 @@ class TestGetPipelineLogs:
         kfp_client.get_run.return_value = run
         core_api.list_namespaced_pod.return_value = SimpleNamespace(
             items=[
-                make_pod("work-launcher-pod", node="run.work.executor", role="launcher"),
-                make_pod("train-launcher-pod", node="run.train.executor", role="launcher"),
+                make_pod("work-launcher-pod", node="work-launch-node", role="launcher"),
+                make_pod("train-launcher-pod", node="train-launch-node", role="launcher"),
             ]
         )
         core_api.read_namespaced_pod_log.side_effect = lambda name, **kwargs: f"logs:{name}"
 
+        unfiltered = get_pipeline_logs(RUN_ID)["data"]
         data = get_pipeline_logs(RUN_ID, task="work")["data"]
 
         assert [pod["pod"] for pod in data["pods"]] == [
             "work-launcher-pod",
-            "run.work",
+            "work-driver-node",
         ]
-        assert data["pods"][0]["logs"] == "logs:work-launcher-pod"
+        assert data["pods"][0]["logs"] == next(
+            pod["logs"] for pod in unfiltered["pods"] if pod["pod"] == "work-launcher-pod"
+        )
         assert "train-launcher-pod" not in [pod["pod"] for pod in data["pods"]]
         assert data["tasks"] == ["train", "work"]
 
