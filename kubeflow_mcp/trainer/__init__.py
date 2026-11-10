@@ -94,7 +94,7 @@ CLIENT_TOOL_DESCRIPTIONS: dict[str, str] = {
         "Call FIRST. Pass model= for GPU sizing."
     ),
     "check_compatibility": "Verify K8s version, Trainer CRD, installed packages, and platform. Use pre_flight() for full check.",
-    "get_cluster_resources": "Check cluster GPU/CPU availability. Use pre_flight() instead for full check.",
+    "get_cluster_resources": "Check cluster GPU capacity and estimated unallocated GPUs. Free GPUs are unknown without cluster-wide pod access.",
     "estimate_resources": "Estimate GPU memory needed for a HuggingFace model. Use pre_flight(model=...) instead.",
     "list_training_jobs": "List training jobs. Filter by runtime, status, or namespace.",
     "get_training_job": "Get details of a specific training job, including the status of each step (pod). Supports optional namespace.",

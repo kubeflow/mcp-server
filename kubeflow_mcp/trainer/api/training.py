@@ -597,6 +597,43 @@ def _build_initializer(
     return Initializer(model=model_init, dataset=dataset_init)
 
 
+def _get_runtime_node_spec(runtime: str, namespace: str | None) -> dict[str, Any]:
+    """Read node defaults in the same namespace-first order as the Trainer SDK."""
+    from kubeflow.trainer.constants import constants
+
+    from kubeflow_mcp.common.types import is_k8s_not_found
+    from kubeflow_mcp.common.utils import (
+        K8S_TIMEOUT,
+        get_custom_objects_api,
+        get_trainer_effective_namespace,
+    )
+
+    api = get_custom_objects_api()
+    try:
+        raw = api.get_namespaced_custom_object(
+            group=constants.GROUP,
+            version=constants.VERSION,
+            namespace=get_trainer_effective_namespace(namespace),
+            plural=constants.TRAINING_RUNTIME_PLURAL,
+            name=runtime,
+            _request_timeout=K8S_TIMEOUT,
+        )
+    except Exception as e:
+        if not is_k8s_not_found(e):
+            raise
+        raw = api.get_cluster_custom_object(
+            group=constants.GROUP,
+            version=constants.VERSION,
+            plural=constants.CLUSTER_TRAINING_RUNTIME_PLURAL,
+            name=runtime,
+            _request_timeout=K8S_TIMEOUT,
+        )
+    jobs = raw["spec"]["template"]["spec"]["replicatedJobs"]
+    return next(
+        job["template"]["spec"]["template"]["spec"] for job in jobs if job["name"] == "node"
+    )
+
+
 def _build_runtime_patch(
     node_selector: dict[str, str] | None = None,
     tolerations: list[dict[str, Any]] | None = None,
@@ -778,41 +815,79 @@ def _validate_fine_tune_params(
     if ns_err:
         return ns_err.model_dump()
 
-    if not confirmed:
-        gpu_err = _check_gpu_available()
-        if gpu_err:
-            return gpu_err
-
     # The Hub call runs last, on submission only, after every local check passed.
     return _check_hf_repos_exist(model, dataset) if confirmed else None
 
 
-def _check_gpu_available() -> dict[str, Any] | None:
-    """Return error dict if cluster has zero GPUs, None otherwise."""
-    try:
-        from kubeflow_mcp.trainer.api.planning import get_cluster_resources
-
-        cluster = get_cluster_resources()
-        cluster_data = cluster.get("data", cluster)
-        if cluster_data.get("gpu_total", -1) == 0:
-            return ToolError(
-                error=(
-                    "fine_tune() requires GPUs (torchtune uses NCCL backend). "
-                    "No GPUs detected in cluster. Use run_custom_training() "
-                    "with gloo backend instead."
-                ),
-                error_code=ErrorCode.VALIDATION_ERROR,
-                details={
-                    "tool_selection": {
-                        "recommended": "run_custom_training",
-                        "reason": "CPU-only cluster, torchtune requires GPUs",
-                    },
-                    "resource": "trainer://guides/training-patterns",
+def _check_gpu_available(cluster_data: dict[str, Any]) -> dict[str, Any] | None:
+    """Return an error if the supplied cluster snapshot has zero GPU capacity."""
+    if cluster_data.get("gpu_total", -1) == 0:
+        return ToolError(
+            error=(
+                "fine_tune() requires GPUs (torchtune uses NCCL backend). "
+                "No GPUs detected in cluster. Use run_custom_training() "
+                "with gloo backend instead."
+            ),
+            error_code=ErrorCode.VALIDATION_ERROR,
+            details={
+                "tool_selection": {
+                    "recommended": "run_custom_training",
+                    "reason": "CPU-only cluster, torchtune requires GPUs",
                 },
-            ).model_dump()
-    except Exception:
-        logger.debug("GPU pre-check skipped (cluster query failed)")
+                "resource": "trainer://guides/training-patterns",
+            },
+        ).model_dump()
     return None
+
+
+def _fine_tune_resource_preview(
+    runtime: str,
+    namespace: str | None,
+    resources: dict[str, Any] | None,
+    num_nodes: int,
+    cluster_data: dict[str, Any],
+) -> dict[str, Any]:
+    """Show inherited requests without changing the resources submitted to the SDK."""
+    from kubeflow.trainer.backends.kubernetes.utils import get_resources_per_node
+    from kubernetes.utils.quantity import parse_quantity
+
+    warnings = []
+    effective: dict[str, Any] = {}
+    try:
+        pod_spec = _get_runtime_node_spec(runtime, namespace)
+        container = next(c for c in pod_spec["containers"] if c["name"] == "node")
+        inherited = container.get("resources", {})
+        effective = {**inherited.get("limits", {}), **inherited.get("requests", {})}
+    except Exception:
+        warnings.append(
+            "Runtime resource defaults could not be read; effective requests may be incomplete."
+        )
+    if resources:
+        effective.update(
+            {
+                key: value.actual_instance
+                for key, value in get_resources_per_node(resources).requests.items()
+            }
+        )
+    gpu = int(parse_quantity(effective.get("nvidia.com/gpu", 0)))
+    if gpu:
+        nodes = cluster_data.get("nodes", [])
+        if nodes and gpu > max(n.get("gpus", 0) for n in nodes):
+            warnings.append(
+                f"Each worker requests {gpu} GPUs; no node has that capacity. GPUs on separate nodes cannot satisfy one pod."
+            )
+        elif cluster_data.get("gpu_available") is None:
+            warnings.append(
+                "Free GPUs are unknown; inspect job pod diagnostics if scheduling stalls."
+            )
+        elif sum(n.get("gpu_available", 0) // gpu for n in nodes) < num_nodes:
+            warnings.append(
+                "Current unallocated GPUs cannot fit all requested workers; the job may remain Pending."
+            )
+        warnings.append(
+            "GPU fit is an estimate; CPU, memory, affinity and taints also affect scheduling."
+        )
+    return {"effective_resources_per_node": effective, "resource_warnings": warnings}
 
 
 def _build_fine_tune_config(
@@ -1054,8 +1129,7 @@ def fine_tune(
         For QLoRA set ``quantize_base=True``. For DoRA set ``use_dora=True``.
     """
     try:
-        # Before _validate_fine_tune_params(): its GPU preflight queries the cluster, and
-        # invalid input should never trigger an external call.
+        # Invalid input must not trigger namespace resolution or external calls.
         input_err = _validate_resources_per_node(
             resources_per_node
         ) or _validate_service_account_name(service_account_name)
@@ -1142,6 +1216,22 @@ def fine_tune(
         config["mode"] = "builtin_trainer"
 
         if not confirmed:
+            from kubeflow_mcp.trainer.api.planning import get_cluster_resources
+
+            cluster_data: dict[str, Any] = {}
+            try:
+                cluster = get_cluster_resources()
+                cluster_data = cluster.get("data", cluster)
+            except Exception:
+                logger.debug("GPU pre-check skipped (cluster query failed)")
+            gpu_err = _check_gpu_available(cluster_data)
+            if gpu_err:
+                return gpu_err
+            config.update(
+                _fine_tune_resource_preview(
+                    runtime, namespace, resources_per_node, num_nodes, cluster_data
+                )
+            )
             return PreviewResponse(
                 message="Review config and set confirmed=True to submit job", config=config
             ).model_dump()

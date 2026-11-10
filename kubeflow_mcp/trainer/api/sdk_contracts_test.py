@@ -1001,6 +1001,8 @@ class TestMCPToolSignatures:
             patch("kubeflow_mcp.trainer.api.training._get_client", return_value=mock_client),
             patch("kubeflow_mcp.trainer.api.training.check_namespace_allowed", return_value=None),
             patch("kubeflow_mcp.trainer.api.training._check_gpu_available", return_value=None),
+            patch("kubeflow_mcp.trainer.api.planning.get_cluster_resources", return_value={}),
+            patch("kubeflow_mcp.trainer.api.training._fine_tune_resource_preview", return_value={}),
         ):
             resp = fine_tune(
                 model="hf://google/gemma-2b",

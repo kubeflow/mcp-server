@@ -2,6 +2,7 @@
 
 import inspect
 from collections.abc import Callable
+from unittest.mock import patch
 
 import pytest
 
@@ -153,9 +154,9 @@ def test_preview_tools_latency(
     assert hasattr(training, "_check_gpu_available"), (
         "_check_gpu_available renamed — update benchmark patch"
     )
-    original_gpu_check = training._check_gpu_available
-    training._check_gpu_available = lambda: None
-    try:
+    with (
+        patch.object(training, "_check_gpu_available", return_value=None),
+        patch("kubeflow_mcp.trainer.api.planning.get_cluster_resources", return_value={}),
+        patch.object(training, "_fine_tune_resource_preview", return_value={}),
+    ):
         record_latency_benchmark(name, benchmark_func)
-    finally:
-        training._check_gpu_available = original_gpu_check
