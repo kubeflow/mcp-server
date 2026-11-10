@@ -123,12 +123,72 @@ def _collect_log_lines(
     return log_lines, True
 
 
+def _get_job_steps(client: Any, name: str) -> dict[str, str | None] | None:
+    """Return the TrainJob's steps as ``{step name: pod phase}``.
+
+    The SDK's ``get_job_logs`` yields nothing both for a step that does not exist
+    and for a step whose pod is still Pending, so an empty log needs this lookup
+    to tell the two apart. Best-effort: returns ``None`` when the job cannot be
+    read, in which case the caller keeps its plain empty response.
+    """
+    try:
+        steps = getattr(client.get_job(name), "steps", None) or []
+        return {s.name: getattr(s, "status", None) for s in steps}
+    except Exception as e:
+        logger.debug("Could not read steps for job %s: %s", name, e)
+        return None
+
+
+def _empty_log_context(
+    client: Any, name: str, step: str
+) -> tuple[ToolError | None, dict[str, Any]]:
+    """Explain an empty log for *step*.
+
+    Returns ``(error, extra)``: *error* is a ``RESOURCE_NOT_FOUND`` ``ToolError``
+    when the job has no such step (a typo, or ``node-1`` on a single-node job),
+    otherwise ``None``. *extra* holds response fields describing why the log is
+    empty: the step's pod phase and, for a pod that has not started, a next step.
+    """
+    steps = _get_job_steps(client, name)
+    if steps is None:
+        return None, {}
+    if not steps:
+        # No pods at all: the job was just created or is suspended, so the
+        # requested step cannot be checked yet, let alone read.
+        return None, {
+            "step_status": "Unknown",
+            "next_steps": [
+                f"Training job '{name}' has no pods yet (newly created or suspended) — no logs yet",
+                "Use get_training_job to check the job status",
+            ],
+        }
+    if step not in steps:
+        return (
+            ToolError(
+                error=f"Step '{step}' not found for training job '{name}'",
+                error_code=ErrorCode.RESOURCE_NOT_FOUND,
+                hint="Use get_training_job to list the job's steps",
+                details={"job": name, "available_steps": sorted(steps)},
+            ),
+            {},
+        )
+    status = steps[step] or "Unknown"
+    extra: dict[str, Any] = {"step_status": status}
+    if status in (trainer_constants.POD_PENDING, "Unknown"):
+        extra["next_steps"] = [
+            f"Pod for step '{step}' has not started (status: {status}) — no logs yet",
+            "Use get_training_events to check for scheduling or image-pull problems",
+        ]
+    return None, extra
+
+
 def _cursor_response(
     name: str,
     step: str,
     log_lines: list[str],
     since_line: int,
     effective_max: int,
+    extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the cursor-mode response dict. Called only when since_line is set."""
     total = len(log_lines)
@@ -142,6 +202,7 @@ def _cursor_response(
                 "lines": 0,
                 "next_offset": since_line,
                 "total_lines": total,
+                **(extra or {}),
             }
         ).model_dump()
 
@@ -155,6 +216,7 @@ def _cursor_response(
                 "next_offset": 0,
                 "total_lines": total,
                 "log_reset": True,
+                **(extra or {}),
             }
         ).model_dump()
 
@@ -227,10 +289,13 @@ def get_training_logs(
         - ``total_lines`` (int): *Cursor mode only.* Total lines collected.
         - ``log_reset`` (bool): *Cursor mode only.* True when ``since_line > total_lines``;
           restart from 0.
+        - ``step_status`` (str): *Empty log only.* Phase of the step's pod, so an empty
+          log can be told apart from a pod that has not started.
+        - ``next_steps`` (list): *Empty log only.* Present when the pod is Pending.
 
     Raises:
-        ToolError: If job not found (``RESOURCE_NOT_FOUND``) or cursor used with crash
-            logs (``VALIDATION_ERROR``).
+        ToolError: If job or step not found (``RESOURCE_NOT_FOUND``) or cursor used
+            with crash logs (``VALIDATION_ERROR``).
     """
     name_err = validate_k8s_name(name)
     if name_err is not None:
@@ -278,9 +343,20 @@ def get_training_logs(
                 error_code=ErrorCode.VALIDATION_ERROR,
             ).model_dump()
 
+        # An empty log is ambiguous: the step may not exist, or its pod may not
+        # have started. Say which, so an agent does not poll a step that will
+        # never produce output.
+        empty_extra: dict[str, Any] = {}
+        if not log_lines:
+            step_err, empty_extra = _empty_log_context(client, name, step)
+            if step_err is not None:
+                return step_err.model_dump()
+
         # ── Cursor mode ──────────────────────────────────────────────────────
         if since_line is not None:
-            return _cursor_response(name, step, log_lines, since_line, _effective_max)
+            return _cursor_response(
+                name, step, log_lines, since_line, _effective_max, extra=empty_extra
+            )
 
         # ── Tail mode (unchanged) ─────────────────────────────────────────────
         if len(log_lines) > _effective_max:
@@ -294,6 +370,7 @@ def get_training_logs(
             "step": step,
             "logs": sanitized,
             "lines": len(sanitized.splitlines()) if sanitized else 0,
+            **empty_extra,
         }
 
         hint = extract_failure_hint(logs)
