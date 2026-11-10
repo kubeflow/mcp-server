@@ -332,3 +332,16 @@ class TestSetupLogging:
 
         assert len(root.handlers) == 2
         assert sum(isinstance(h, BufferingHandler) for h in root.handlers) == 1
+
+    @pytest.mark.parametrize("fmt", ["invalid", "jsno", "", "JSON"])
+    def test_rejects_unsupported_format(self, fmt):
+        root = setup_logging(format="json")
+        existing_handlers = root.handlers[:]
+
+        with pytest.raises(
+            ValueError, match="Unsupported log format .* expected 'json' or 'console'"
+        ):
+            setup_logging(format=fmt)
+
+        assert root.handlers == existing_handlers
+        assert isinstance(self._stream_formatter(root), StructuredFormatter)

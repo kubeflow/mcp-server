@@ -24,6 +24,7 @@ from pydantic import ValidationError
 from tests.common import TestCase
 
 from kubeflow_mcp.core.config import (
+    LoggingConfig,
     ResilienceConfig,
     ServerConfig,
     _find_config_file,
@@ -78,6 +79,29 @@ def test_resilience_config_rejects_invalid_circuit_breaker_values(field, value):
 def test_resilience_config_allows_zero_recovery_timeout():
     cfg = ResilienceConfig(cb_recovery_timeout=0.0)
     assert cfg.cb_recovery_timeout == 0.0
+
+
+def test_logging_config_defaults():
+    cfg = LoggingConfig()
+    assert cfg.level == "INFO"
+    assert cfg.format is None
+
+
+@pytest.mark.parametrize("format_value", ["json", "console", None])
+def test_logging_config_accepts_supported_formats(format_value):
+    cfg = LoggingConfig(format=format_value)
+    assert cfg.format == format_value
+
+
+@pytest.mark.parametrize("format_value", ["invalid", "jsno", "", "JSON"])
+def test_logging_config_rejects_unsupported_formats(format_value):
+    with pytest.raises(ValidationError) as exc_info:
+        LoggingConfig(format=format_value)
+
+    message = str(exc_info.value)
+    assert "format" in message
+    assert "'json'" in message
+    assert "'console'" in message
 
 
 @pytest.mark.parametrize(
@@ -153,6 +177,56 @@ def test_load_config_env_overrides_file(tmp_path):
     with patch.dict("os.environ", {"KUBEFLOW_MCP_PERSONA": "platform-admin"}):
         cfg = load_config(config_path=config_file)
     assert cfg.server.persona == "platform-admin"
+
+
+@pytest.mark.parametrize("format_value", ["json", "console"])
+def test_load_config_accepts_valid_logging_format_from_yaml(tmp_path, monkeypatch, format_value):
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(f"logging:\n  format: {format_value}\n")
+    monkeypatch.delenv("LOG_FORMAT", raising=False)
+
+    cfg = load_config(config_path=config_file)
+    assert cfg.logging.format == format_value
+
+
+def test_load_config_logging_format_env_overrides_yaml(tmp_path, monkeypatch):
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("logging:\n  format: invalid\n")
+    monkeypatch.setenv("LOG_FORMAT", "json")
+
+    cfg = load_config(config_path=config_file)
+    assert cfg.logging.format == "json"
+
+
+def test_load_config_rejects_invalid_logging_format_from_yaml(tmp_path, monkeypatch):
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("logging:\n  format: invalid\n")
+    monkeypatch.delenv("LOG_FORMAT", raising=False)
+
+    with pytest.raises(ValidationError) as exc_info:
+        load_config(config_path=config_file)
+
+    message = str(exc_info.value)
+    assert "format" in message
+    assert "invalid" in message
+    assert "'json'" in message
+    assert "'console'" in message
+
+
+def test_load_config_rejects_invalid_logging_format_from_environment(monkeypatch):
+    monkeypatch.setenv("LOG_FORMAT", "jsno")
+
+    with (
+        patch("kubeflow_mcp.core.config._find_config_file", return_value=None),
+        pytest.raises(ValidationError) as exc_info,
+    ):
+        load_config()
+
+    message = str(exc_info.value)
+    assert "format" in message
+    assert "jsno" in message
+    assert "'json'" in message
+    assert "'console'" in message
 
 
 @pytest.mark.parametrize(

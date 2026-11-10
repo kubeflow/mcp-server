@@ -156,7 +156,7 @@ class LoggingConfig(BaseModel):
     """Logging configuration."""
 
     level: str = Field(default="INFO")
-    format: str | None = Field(default=None)
+    format: Literal["json", "console"] | None = Field(default=None)
 
 
 class ObservabilityConfig(BaseModel):
