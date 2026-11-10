@@ -60,8 +60,48 @@ class TestConfirmationType:
 
     @pytest.mark.parametrize("mode", ["progressive", "semantic"])
     @pytest.mark.parametrize("tool_name", ["create_spark_session", "delete_spark_session"])
-    async def test_string_false_is_refused_over_mcp(
+    async def test_string_false_previews_without_writing_over_mcp(
         self, mock_spark_client, spark_persona, mode, tool_name
+    ):
+        from fastmcp import Client
+
+        from kubeflow_mcp.core.server import create_server
+
+        spark_persona("data-scientist")
+        patcher = None
+        if tool_name == "delete_spark_session":
+            # #484 coercion means the string form now reaches the tool as False, so
+            # the delete flow actually runs its ownership guard before previewing.
+            # The test environment has no cluster; model an MCP-owned session.
+            patcher = patch(
+                "kubeflow_mcp.spark.api.sessions.get_spark_session_ownership",
+                return_value="managed",
+            )
+            patcher.start()
+        try:
+            async with Client(
+                create_server(clients=["spark"], persona="data-scientist", mode=mode)
+            ) as client:
+                out = await client.call_tool(
+                    "execute_tool",
+                    {
+                        "tool_name": tool_name,
+                        "arguments": {"name": "etl", "namespace": "default", "confirmed": "false"},
+                    },
+                    raise_on_error=False,
+                )
+        finally:
+            if patcher is not None:
+                patcher.stop()
+        # execute_tool validates arguments like full mode (#484): the string "false"
+        # coerces to False, so the mutation previews instead of erroring.
+        assert out.structured_content["status"] == "preview"
+        mock_spark_client.connect.assert_not_called()
+        mock_spark_client.delete_session.assert_not_called()
+
+    @pytest.mark.parametrize("mode", ["progressive", "semantic"])
+    async def test_uncoercible_confirmed_is_refused_over_mcp(
+        self, mock_spark_client, spark_persona, mode
     ):
         from fastmcp import Client
 
@@ -74,12 +114,13 @@ class TestConfirmationType:
             out = await client.call_tool(
                 "execute_tool",
                 {
-                    "tool_name": tool_name,
-                    "arguments": {"name": "etl", "namespace": "default", "confirmed": "false"},
+                    "tool_name": "create_spark_session",
+                    "arguments": {"name": "etl", "namespace": "default", "confirmed": "maybe"},
                 },
                 raise_on_error=False,
             )
         assert out.structured_content["error_code"] == "VALIDATION_ERROR"
+        assert "confirmed" in out.structured_content["error"]
         mock_spark_client.connect.assert_not_called()
         mock_spark_client.delete_session.assert_not_called()
 

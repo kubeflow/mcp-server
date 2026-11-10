@@ -173,11 +173,12 @@ class TestCreatePipelineRun:
 
 
 class TestConfirmGateThroughDynamicModes:
-    """The confirm flag must stay a real bool through progressive/semantic dispatch.
+    """The confirm gate holds through progressive/semantic dispatch.
 
-    ``execute_tool`` binds JSON arguments directly onto the function (no pydantic
-    coercion), so a string ``"false"`` used to land as a truthy Python string, skip
-    the preview and start the run.
+    ``execute_tool`` validates arguments like full mode (upstream #484): false-like
+    strings such as ``"false"`` coerce to ``False`` and preview, junk values that
+    pydantic cannot coerce are refused. Either way the tool must never act without
+    confirmation.
     """
 
     @pytest.mark.parametrize(
@@ -188,16 +189,39 @@ class TestConfirmGateThroughDynamicModes:
             ("retry_pipeline_run", {"run_id": RUN_ID, "confirmed": "false"}),
         ],
     )
-    def test_string_confirmed_through_execute_tool_is_refused(
+    def test_false_string_through_execute_tool_previews_without_writing(
         self, kfp_client, lifecycle_dynamic_registry, tool, arguments
     ):
+        if tool == "create_pipeline_run":
+            kfp_client.get_pipeline.return_value = make_pipeline()
+            kfp_client.list_pipeline_versions.return_value = make_page(
+                "pipeline_versions", [make_version()]
+            )
+        kfp_client.get_run.return_value = make_run(
+            "RUNNING" if tool == "stop_pipeline_run" else "FAILED"
+        )
+
         result = lifecycle_dynamic_registry.execute_tool(tool, arguments)
 
-        assert result["error_code"] == "VALIDATION_ERROR"
-        assert "boolean" in result["error"]
+        assert result["status"] == "preview"
         kfp_client.run.assert_not_called()
         kfp_client._backend.run_api.run_service_terminate_run.assert_not_called()
         kfp_client._backend.run_api.run_service_retry_run.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "junk",
+        ["maybe", "", " ", "yes ", {}],
+    )
+    def test_uncoercible_confirmed_through_execute_tool_is_refused(
+        self, kfp_client, lifecycle_dynamic_registry, junk
+    ):
+        result = lifecycle_dynamic_registry.execute_tool(
+            "create_pipeline_run", {"pipeline": "churn-prediction", "confirmed": junk}
+        )
+
+        assert result["error_code"] == "VALIDATION_ERROR"
+        assert "confirmed" in result["error"]
+        kfp_client.run.assert_not_called()
 
     def test_real_boolean_true_still_executes_through_execute_tool(
         self, kfp_client, lifecycle_dynamic_registry
