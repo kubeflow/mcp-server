@@ -146,6 +146,8 @@ SPARK SESSION LIFECYCLE:
 - The MCP server provisions the session and returns connect info; the data plane attaches with PySpark
   (the server does NOT proxy Spark RPCs). Requires the kubeflow[spark] extra on the server host
 - Size with num_executors + executor_resources={"cpu": "1", "memory": "2Gi"}; driver_resources for the driver
+- Only cpu/memory resource keys are supported; GPU and other extended resource keys are rejected
+- Select an existing driver identity with service_account_name; its namespace RBAC must allow executor management
 - delete_spark_session(name) -> ALWAYS preview first (confirmed=False), then confirmed=True to tear down permanently
 - Read spark://guides/session-patterns for end-to-end create -> attach -> delete examples""",
     },

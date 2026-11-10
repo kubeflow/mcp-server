@@ -203,6 +203,35 @@ _SPARK_CONNECT_PLURAL = "sparkconnects"
 
 
 SparkOwnership = Literal["managed", "unmanaged", "not_found", "unknown"]
+SPARK_CREATION_LABEL = "kubeflow-mcp/creation-id"
+
+
+def get_spark_session_created_by(
+    name: str, namespace: str, creation_id: str
+) -> dict[str, Any] | None:
+    """Return the checked CR snapshot for this attempt; lookup failures propagate.
+
+    Using this snapshot avoids a second read returning a different incarnation
+    of the same session name after the ownership/provenance check.
+    """
+    obj = get_custom_objects_api().get_namespaced_custom_object(
+        group=_SPARK_CONNECT_GROUP,
+        version=_SPARK_CONNECT_VERSION,
+        namespace=namespace,
+        plural=_SPARK_CONNECT_PLURAL,
+        name=name,
+        _request_timeout=K8S_TIMEOUT,
+    )
+    metadata = (obj or {}).get("metadata", {})
+    labels = metadata.get("labels", {}) or {}
+    if (
+        metadata.get("name") == name
+        and metadata.get("namespace") == namespace
+        and labels.get(MCP_MANAGED_LABEL) == MCP_MANAGED_VALUE
+        and labels.get(SPARK_CREATION_LABEL) == creation_id
+    ):
+        return obj
+    return None
 
 
 def get_spark_session_ownership(name: str, namespace: str) -> SparkOwnership:

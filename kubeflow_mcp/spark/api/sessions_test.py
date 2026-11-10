@@ -23,7 +23,65 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from kubeflow_mcp.common.utils import MCP_MANAGED_LABEL, MCP_MANAGED_VALUE
+from kubeflow_mcp.conftest import make_spark_session_info
 from kubeflow_mcp.spark.api import sessions
+
+
+@pytest.fixture
+def provisioned_session(mock_spark_client):
+    """Model a real CR carrying the labels passed by this invocation."""
+    mock_spark_client.get_session.return_value = make_spark_session_info("etl")
+
+    def read_cr(**kwargs):
+        from kubeflow.spark.backends.kubernetes.utils import build_spark_connect_cr
+
+        assert kwargs["name"] == "etl"
+        assert kwargs["namespace"] == "default"
+        options = mock_spark_client.connect.call_args.kwargs["options"]
+        labels = next(option.labels for option in options if hasattr(option, "labels"))
+        cr = build_spark_connect_cr(name="etl", namespace="default").to_dict()
+        cr["metadata"]["labels"] = dict(labels)
+        cr["status"] = {"state": "Ready"}
+        return cr
+
+    with patch("kubeflow_mcp.common.utils.get_custom_objects_api") as api:
+        api.return_value.get_namespaced_custom_object.side_effect = read_cr
+        yield mock_spark_client
+
+
+class TestConfirmationType:
+    @pytest.mark.parametrize("tool", [sessions.create_spark_session, sessions.delete_spark_session])
+    @pytest.mark.parametrize("value", ["false", "true", 0, 1, None, [], {}])
+    def test_non_boolean_confirmation_cannot_write(self, mock_spark_client, tool, value):
+        out = tool(name="etl", namespace="default", confirmed=value)
+        assert out["error_code"] == "VALIDATION_ERROR"
+        mock_spark_client.connect.assert_not_called()
+        mock_spark_client.delete_session.assert_not_called()
+
+    @pytest.mark.parametrize("mode", ["progressive", "semantic"])
+    @pytest.mark.parametrize("tool_name", ["create_spark_session", "delete_spark_session"])
+    async def test_string_false_is_refused_over_mcp(
+        self, mock_spark_client, spark_persona, mode, tool_name
+    ):
+        from fastmcp import Client
+
+        from kubeflow_mcp.core.server import create_server
+
+        spark_persona("data-scientist")
+        async with Client(
+            create_server(clients=["spark"], persona="data-scientist", mode=mode)
+        ) as client:
+            out = await client.call_tool(
+                "execute_tool",
+                {
+                    "tool_name": tool_name,
+                    "arguments": {"name": "etl", "namespace": "default", "confirmed": "false"},
+                },
+                raise_on_error=False,
+            )
+        assert out.structured_content["error_code"] == "VALIDATION_ERROR"
+        mock_spark_client.connect.assert_not_called()
+        mock_spark_client.delete_session.assert_not_called()
 
 
 class TestCreateSession:
@@ -193,19 +251,19 @@ class TestCreateFailsAfterProvisioning:
     """``connect()`` can fail after the CR exists. Reporting only the error would
     leave a running, MCP-labelled session the caller never hears about."""
 
-    def test_import_error_after_create_reports_the_live_session(self, mock_spark_client):
+    def test_import_error_after_create_reports_the_live_session(self, provisioned_session):
         # pyspark imports pandas only when building the SparkSession, so a missing
         # or incompatible dependency surfaces *after* the CR has been created.
-        mock_spark_client.connect.side_effect = ImportError(
+        provisioned_session.connect.side_effect = ImportError(
             "[PACKAGE_NOT_INSTALLED] Pandas >= 2.2.0 must be installed"
         )
         out = sessions.create_spark_session(name="etl", namespace="default", confirmed=True)
         assert out["success"] is True
         assert "warning" in out["data"]
-        assert out["data"]["name"] == "spark-connect-ab12"
+        assert out["data"]["name"] == "etl"
 
-    def test_generic_failure_after_create_reports_the_live_session(self, mock_spark_client):
-        mock_spark_client.connect.side_effect = RuntimeError("driver unreachable")
+    def test_generic_failure_after_create_reports_the_live_session(self, provisioned_session):
+        provisioned_session.connect.side_effect = RuntimeError("driver unreachable")
         out = sessions.create_spark_session(name="etl", namespace="default", confirmed=True)
         assert out["success"] is True
         assert "warning" in out["data"]
@@ -218,6 +276,199 @@ class TestCreateFailsAfterProvisioning:
         assert out["success"] is False
         assert out["error_code"] == "SDK_ERROR"
         assert "Spark extra" in out["error"]
+
+
+class TestCreateConflictRecovery:
+    @pytest.mark.parametrize("managed", [False, True])
+    @pytest.mark.parametrize("wrapped", [False, True])
+    def test_existing_name_preserves_conflict(self, mock_spark_client, managed, wrapped):
+        from kubernetes.client.exceptions import ApiException
+
+        conflict = ApiException(status=409, reason="AlreadyExists")
+        error = RuntimeError("Failed to create SparkConnect") if wrapped else conflict
+        if wrapped:
+            error.__cause__ = conflict
+        mock_spark_client.connect.side_effect = error
+        labels = {MCP_MANAGED_LABEL: MCP_MANAGED_VALUE} if managed else {}
+        with patch("kubeflow_mcp.common.utils.get_custom_objects_api") as api:
+            api.return_value.get_namespaced_custom_object.return_value = {
+                "metadata": {"labels": labels}
+            }
+            out = sessions.create_spark_session("etl", namespace="default", confirmed=True)
+            api.assert_not_called()
+        assert out["success"] is False
+        assert out["error_code"] == "SDK_ERROR"
+        assert out["hint"]
+        assert "409" in str(out["details"])
+        mock_spark_client.get_session.assert_not_called()
+        mock_spark_client.delete_session.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "labels",
+        [
+            {},
+            {MCP_MANAGED_LABEL: MCP_MANAGED_VALUE},
+            {MCP_MANAGED_LABEL: MCP_MANAGED_VALUE, sessions.SPARK_CREATION_LABEL: "old-attempt"},
+            {sessions.SPARK_CREATION_LABEL: "same-attempt"},
+        ],
+    )
+    def test_unrelated_existing_session_does_not_mask_failure(self, mock_spark_client, labels):
+        mock_spark_client.connect.side_effect = RuntimeError("driver unreachable")
+        with (
+            patch("kubeflow_mcp.common.utils.get_custom_objects_api") as api,
+            patch.object(sessions.uuid, "uuid4", return_value=MagicMock(hex="same-attempt")),
+        ):
+            api.return_value.get_namespaced_custom_object.return_value = {
+                "metadata": {"labels": labels}
+            }
+            out = sessions.create_spark_session("etl", namespace="default", confirmed=True)
+        assert out["success"] is False
+        mock_spark_client.get_session.assert_not_called()
+
+    def test_failed_recovery_lookup_keeps_original_error(self, mock_spark_client):
+        mock_spark_client.connect.side_effect = RuntimeError("original create failure")
+        with patch(
+            "kubeflow_mcp.common.utils.get_custom_objects_api", side_effect=OSError("offline")
+        ):
+            out = sessions.create_spark_session("etl", namespace="default", confirmed=True)
+        assert out["error"] == "original create failure"
+
+    def test_recovery_uses_checked_snapshot_without_second_lookup(self, provisioned_session):
+        provisioned_session.connect.side_effect = RuntimeError("driver unreachable")
+        provisioned_session.get_session.side_effect = AssertionError("second lookup could race")
+        out = sessions.create_spark_session("etl", namespace="default", confirmed=True)
+        assert out["success"] is True
+        assert out["data"]["name"] == "etl"
+        provisioned_session.get_session.assert_not_called()
+
+    @pytest.mark.parametrize("field,value", [("name", "another"), ("namespace", "other")])
+    def test_wrong_snapshot_metadata_cannot_be_recovered(self, provisioned_session, field, value):
+        from kubeflow.spark.backends.kubernetes.utils import build_spark_connect_cr
+
+        provisioned_session.connect.side_effect = RuntimeError("driver unreachable")
+        snapshot = build_spark_connect_cr(name="etl", namespace="default").to_dict()
+        snapshot["metadata"][field] = value
+        snapshot["metadata"]["labels"] = {
+            MCP_MANAGED_LABEL: MCP_MANAGED_VALUE,
+            sessions.SPARK_CREATION_LABEL: "attempt",
+        }
+        with (
+            patch.object(sessions.uuid, "uuid4", return_value=MagicMock(hex="attempt")),
+            patch("kubeflow_mcp.common.utils.get_custom_objects_api") as api,
+        ):
+            api.return_value.get_namespaced_custom_object.return_value = snapshot
+            out = sessions.create_spark_session("etl", namespace="default", confirmed=True)
+        assert out["success"] is False
+
+
+class TestResourceKeys:
+    @pytest.mark.parametrize("field", ["driver_resources", "executor_resources"])
+    @pytest.mark.parametrize(
+        "key,value",
+        [
+            ("cpu", "-1"),
+            ("cpu", "0"),
+            ("cpu", "nan"),
+            ("cpu", "inf"),
+            ("cpu", "1025"),
+            ("cpu", "1.5m"),
+            ("cpu", "bad"),
+            ("cpu", ""),
+            ("memory", "0Gi"),
+            ("memory", "-1Gi"),
+            ("memory", "nonsense"),
+            ("memory", "\u0660\u0661Gi"),
+            ("memory", "\uff11Gi"),
+            ("memory", "nan"),
+            ("memory", "1.5"),
+            ("memory", ""),
+        ],
+    )
+    @pytest.mark.parametrize("confirmed", [False, True])
+    def test_invalid_quantities_rejected_before_namespace(self, field, key, value, confirmed):
+        with patch.object(sessions, "check_namespace_allowed") as check:
+            out = sessions.create_spark_session(**{field: {key: value}}, confirmed=confirmed)
+        assert out["error_code"] == "VALIDATION_ERROR"
+        assert f"{field}.{key}" in out["error"]
+        check.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "cpu,expected", [("100m", "1"), ("1500m", "2"), ("1.2", "2"), ("1024", "1024")]
+    )
+    def test_preview_shows_sdk_cpu_rounding_without_mutating_input(self, cpu, expected):
+        resources = {"cpu": cpu, "memory": "1Gi"}
+        out = sessions.create_spark_session(driver_resources=resources)
+        assert out["config"]["driver_resources"]["cpu"] == expected
+        assert resources["cpu"] == cpu
+
+    @pytest.mark.parametrize("memory", ["512Mi", "2Gi", "1.5Gi", "1g", "1GB", "1024", "1Ei"])
+    def test_supported_memory_values_still_preview(self, memory):
+        assert (
+            sessions.create_spark_session(driver_resources={"memory": memory})["status"]
+            == "preview"
+        )
+
+    def test_empty_name_is_not_silently_replaced(self):
+        with patch.object(sessions, "check_namespace_allowed") as check:
+            out = sessions.create_spark_session(name="")
+        assert out["error_code"] == "VALIDATION_ERROR"
+        check.assert_not_called()
+
+    @pytest.mark.parametrize("field", ["driver_resources", "executor_resources"])
+    @pytest.mark.parametrize("key", ["nvidia.com/gpu", "amd.com/gpu", "ephemeral-storage", "typo"])
+    @pytest.mark.parametrize("confirmed", [False, True])
+    def test_unsupported_keys_rejected_before_sdk(self, mock_spark_client, field, key, confirmed):
+        out = sessions.create_spark_session(**{field: {key: "1"}}, confirmed=confirmed)
+        assert out["error_code"] == "VALIDATION_ERROR"
+        assert field in out["error"] and key in out["error"]
+        mock_spark_client.connect.assert_not_called()
+
+
+class TestDriverServiceAccount:
+    @pytest.mark.parametrize("name", ["spark", "spark.driver", ("a" * 63 + ".") * 3 + "a" * 61])
+    def test_preview_shows_valid_account_without_writes(self, mock_spark_client, name):
+        out = sessions.create_spark_session(service_account_name=name)
+        assert out["status"] == "preview"
+        assert out["config"]["service_account_name"] == name
+        mock_spark_client.connect.assert_not_called()
+
+    @pytest.mark.parametrize("name", ["", "Bad_Name", "spark/driver", "a" * 64, "a" * 254])
+    def test_invalid_account_rejected_before_namespace_lookup(self, name):
+        with patch.object(sessions, "check_namespace_allowed") as check:
+            out = sessions.create_spark_session(service_account_name=name)
+        assert out["error_code"] == "VALIDATION_ERROR"
+        check.assert_not_called()
+
+    @pytest.mark.parametrize("resources", [None, {"cpu": "2", "memory": "2Gi"}])
+    def test_account_reaches_generated_spec(self, mock_spark_client, resources):
+        pytest.importorskip("kubeflow.spark")
+        from kubeflow.spark.backends.kubernetes.utils import build_spark_connect_cr
+
+        out = sessions.create_spark_session(
+            "etl", service_account_name="spark.driver", driver_resources=resources, confirmed=True
+        )
+        assert out["success"] is True
+        driver = mock_spark_client.connect.call_args.kwargs["driver"]
+        cr = build_spark_connect_cr(name="etl", namespace="default", driver=driver)
+        assert cr.spec.server.template.spec.service_account_name == "spark.driver"
+        assert cr.spec.server.cores == (2 if resources else 1)
+
+    def test_omitted_account_keeps_sdk_default(self, mock_spark_client):
+        sessions.create_spark_session("etl", confirmed=True)
+        assert mock_spark_client.connect.call_args.kwargs["driver"] is None
+
+    def test_admission_denial_is_permission_error(self, mock_spark_client):
+        from kubernetes.client.exceptions import ApiException
+
+        error = RuntimeError("create denied")
+        error.__cause__ = ApiException(status=403)
+        mock_spark_client.connect.side_effect = error
+        out = sessions.create_spark_session(
+            "etl", service_account_name="spark", namespace="default", confirmed=True
+        )
+        assert out["error_code"] == "PERMISSION_DENIED"
+        assert "ServiceAccount" in out["hint"]
+        mock_spark_client.get_session.assert_not_called()
 
 
 class TestDeleteOwnershipGuard:

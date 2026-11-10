@@ -94,6 +94,50 @@ class TestSerialization:
 
 
 class TestSDKSurface:
+    def test_every_public_method_is_accounted_for(self):
+        public = {
+            name
+            for name, method in inspect.getmembers(sdk_spark.SparkClient, callable)
+            if not name.startswith("_")
+        }
+        declared = {
+            entry.split("(", 1)[0]
+            for group in ("covered_methods", "uncovered_methods")
+            for entry in SPARK_COMPAT[group]
+        }
+        assert public == declared
+
+    def test_cpu_memory_reach_the_generated_specification(self):
+        from kubeflow.spark.backends.kubernetes.utils import build_spark_connect_cr
+
+        cr = build_spark_connect_cr(
+            name="etl",
+            namespace="default",
+            driver=sdk_spark.Driver(resources={"cpu": "2", "memory": "2Gi"}),
+            executor=sdk_spark.Executor(
+                num_instances=3, resources_per_executor={"cpu": "4", "memory": "8Gi"}
+            ),
+        )
+        assert (cr.spec.server.cores, cr.spec.server.memory) == (2, "2g")
+        assert (cr.spec.executor.instances, cr.spec.executor.cores, cr.spec.executor.memory) == (
+            3,
+            4,
+            "8g",
+        )
+
+    def test_sdk_drops_gpu_keys_so_mcp_must_reject_them(self):
+        from kubeflow.spark.backends.kubernetes.utils import build_spark_connect_cr
+
+        baseline = build_spark_connect_cr(name="etl", namespace="default")
+        gpu = build_spark_connect_cr(
+            name="etl",
+            namespace="default",
+            driver=sdk_spark.Driver(resources={"nvidia.com/gpu": "1"}),
+            executor=sdk_spark.Executor(resources_per_executor={"nvidia.com/gpu": "1"}),
+        )
+        assert gpu.spec.server == baseline.spec.server
+        assert gpu.spec.executor == baseline.spec.executor
+
     def test_declared_client_is_importable(self):
         assert SPARK_COMPAT["sdk_client"] == "kubeflow.spark.SparkClient"
         assert hasattr(sdk_spark, "SparkClient")

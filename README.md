@@ -225,6 +225,14 @@ Sessions created through MCP are labelled `kubeflow-mcp/managed-by=mcp`. Non-adm
 personas may only delete sessions carrying that label; use the `platform-admin`
 persona to manage sessions created outside MCP.
 
+Creation supports CPU/memory resources and an optional `service_account_name` for
+the driver. The selected account must already exist and have namespace-scoped
+Spark workload RBAC; see `spark://guides/session-patterns`. GPU resource keys are
+rejected because SDK 0.5.0's SparkConnect builder does not preserve them.
+SDK 0.5.0 batch jobs (`FileJob`/`FuncJob`) are separate MCP follow-up scope in
+[#331](https://github.com/kubeflow/mcp-server/issues/331); this session module is
+only part of [#5](https://github.com/kubeflow/mcp-server/issues/5).
+
 
 ### Requirements
 

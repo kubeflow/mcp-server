@@ -15,6 +15,7 @@
 """Lifecycle tools for SparkConnect sessions (create / delete)."""
 
 import logging
+import math
 import re
 import uuid
 from typing import Any
@@ -30,12 +31,18 @@ from kubeflow_mcp.common.types import (
 from kubeflow_mcp.common.utils import (
     MCP_MANAGED_LABEL,
     MCP_MANAGED_VALUE,
+    SPARK_CREATION_LABEL,
     get_spark_client_for_namespace,
     get_spark_effective_namespace,
+    get_spark_session_created_by,
     get_spark_session_ownership,
 )
 from kubeflow_mcp.core.policy import get_effective_persona
-from kubeflow_mcp.core.security import check_namespace_allowed, validate_k8s_name
+from kubeflow_mcp.core.security import (
+    check_namespace_allowed,
+    validate_k8s_name,
+    validate_k8s_subdomain_name,
+)
 from kubeflow_mcp.spark.types import session_info_to_dict
 
 logger = logging.getLogger(__name__)
@@ -90,7 +97,7 @@ def _validate_spark_conf(spark_conf: dict[str, str] | None) -> str | None:
         "spark_conf may not set server-managed keys: "
         + ", ".join(denied)
         + ". These control the image, service account, namespace, pod template, "
-        "volumes or secrets. Use the namespace, driver_resources and "
+        "volumes or secrets. Use the service_account_name, namespace, driver_resources and "
         "executor_resources parameters instead."
     )
 
@@ -121,8 +128,23 @@ def _validate_session_name(name: str) -> str | None:
     return None
 
 
+def _has_api_status(exc: Exception, status: int) -> bool:
+    """Recognize API status codes wrapped by the SDK, without matching text."""
+    pending = [exc]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if getattr(current, "status", None) == status:
+            return True
+        pending.extend(e for e in (current.__cause__, current.__context__) if e is not None)
+    return False
+
+
 def _provisioned_session_or_none(
-    exc: Exception, session_name: str, namespace: str | None
+    exc: Exception, session_name: str, namespace: str | None, creation_id: str
 ) -> dict[str, Any] | None:
     """Return the session's metadata if it exists despite *exc*, else ``None``.
 
@@ -132,9 +154,17 @@ def _provisioned_session_or_none(
     Reporting only the error would leave a running, MCP-labelled session that the
     caller does not know about.
     """
+    if _has_api_status(exc, 409) or _has_api_status(exc, 403):
+        return None
     try:
-        client = get_spark_client_for_namespace(namespace)
-        info = client.get_session(session_name)
+        effective_ns = get_spark_effective_namespace(namespace)
+        snapshot = get_spark_session_created_by(session_name, effective_ns, creation_id)
+        if snapshot is None:
+            return None
+        from kubeflow.spark.backends.kubernetes.utils import get_spark_connect_info_from_cr
+        from kubeflow_spark_api import models
+
+        info = get_spark_connect_info_from_cr(models.SparkV1alpha1SparkConnect.from_dict(snapshot))
     except Exception:
         return None
 
@@ -176,6 +206,74 @@ def _validate_create_inputs(
     return None
 
 
+def _validate_resources(resources: dict[str, str] | None, field: str) -> ToolError | None:
+    """SDK 0.5.0 only writes CPU and memory into SparkConnect specifications."""
+    if resources is not None and not isinstance(resources, dict):
+        return ToolError(
+            error=f"{field} must be a resource dictionary", error_code=ErrorCode.VALIDATION_ERROR
+        )
+    unsupported = sorted(set(resources or {}) - {"cpu", "memory"})
+    if unsupported:
+        return ToolError(
+            error=f"{field} supports only cpu and memory on SDK 0.5.0; "
+            f"unsupported keys: {', '.join(unsupported)}",
+            error_code=ErrorCode.VALIDATION_ERROR,
+        )
+    for key, value in (resources or {}).items():
+        valid = False
+        try:
+            if not isinstance(value, str):
+                raise ValueError("resource quantities must be strings")
+            if key == "cpu":
+                normalized = value.strip()
+                cores = (
+                    int(normalized[:-1]) / 1000 if normalized.endswith("m") else float(normalized)
+                )
+                valid = math.isfinite(cores) and 0 < cores <= 1024
+            else:
+                match = re.fullmatch(
+                    r"(\d+(?:\.\d+)?)([kmgtp](?:i|b)?|ei)?", value, re.IGNORECASE | re.ASCII
+                )
+                if match:
+                    amount = float(match[1])
+                    valid = (
+                        math.isfinite(amount)
+                        and amount > 0
+                        and (match[2] is not None or "." not in match[1])
+                    )
+        except (ValueError, OverflowError):
+            pass
+        if not valid:
+            return ToolError(
+                error=f"Invalid {field}.{key}: {value!r}. "
+                "Use positive CPU (at most 1024 cores) and memory such as '512Mi' or '2Gi'.",
+                error_code=ErrorCode.VALIDATION_ERROR,
+            )
+    return None
+
+
+def _normalize_cpu(resources: dict[str, str] | None) -> dict[str, str] | None:
+    """Expose SDK whole-core rounding in the preview, without mutating caller input."""
+    if resources is None:
+        return None
+    normalized = dict(resources)
+    if "cpu" in normalized:
+        value = normalized["cpu"].strip()
+        cores = int(value[:-1]) / 1000 if value.endswith("m") else float(value)
+        normalized["cpu"] = str(math.ceil(cores))
+    return normalized
+
+
+def _validate_confirmation(confirmed: bool) -> ToolError | None:
+    """Generic execute_tool arguments are not coerced by the tool's MCP schema."""
+    if not isinstance(confirmed, bool):
+        return ToolError(
+            error="confirmed must be a boolean (false to preview, true to execute)",
+            error_code=ErrorCode.VALIDATION_ERROR,
+        )
+    return None
+
+
 def create_spark_session(
     name: str | None = None,
     num_executors: int | None = None,
@@ -186,6 +284,8 @@ def create_spark_session(
     connect_timeout: int = 120,
     namespace: str | None = None,
     confirmed: bool = False,
+    *,
+    service_account_name: str | None = None,
 ) -> dict[str, Any]:
     """Create a SparkConnect session on the cluster (two-phase confirm).
 
@@ -203,31 +303,46 @@ def create_spark_session(
         name: Session name (RFC 1123). Auto-generated when omitted.
         num_executors: Number of executor pods.
         executor_resources: Per-executor resources, e.g.
-            ``{"cpu": "1", "memory": "2Gi"}``. Supports arbitrary K8s resources
-            such as ``nvidia.com/gpu``.
+            ``{"cpu": "1", "memory": "2Gi"}``. Only cpu and memory are supported.
         driver_resources: Driver pod resources, e.g. ``{"cpu": "1", "memory": "2Gi"}``.
         spark_conf: Extra Spark configuration properties.
         timeout: Seconds to wait for the session to become Ready.
         connect_timeout: Seconds to wait for the driver connection.
         namespace: K8s namespace. Uses default from kubeconfig when omitted.
         confirmed: Set True to actually create the session.
+        service_account_name: Existing driver ServiceAccount in the target namespace.
+            Omit to use the cluster default. Its RBAC must permit executor management.
 
     Returns:
         dict: Preview config (``confirmed=False``) or the created session's
         metadata (``confirmed=True``).
     """
-    ns_err = check_namespace_allowed(namespace)
-    if ns_err is not None:
-        return ns_err.model_dump()
-
+    input_err = (
+        _validate_confirmation(confirmed)
+        or _validate_resources(executor_resources, "executor_resources")
+        or _validate_resources(driver_resources, "driver_resources")
+        or (
+            validate_k8s_subdomain_name(service_account_name, "service_account_name")
+            if service_account_name is not None
+            else None
+        )
+    )
+    if input_err is not None:
+        return input_err.model_dump()
     sizing_err = _validate_create_inputs(num_executors, timeout, connect_timeout, spark_conf)
     if sizing_err is not None:
         return sizing_err.model_dump()
 
-    session_name = name or _generate_session_name()
+    session_name = _generate_session_name() if name is None else name
     name_err = _validate_session_name(session_name)
     if name_err is not None:
         return ToolError(error=name_err, error_code=ErrorCode.VALIDATION_ERROR).model_dump()
+
+    ns_err = check_namespace_allowed(namespace)
+    if ns_err is not None:
+        return ns_err.model_dump()
+    driver_resources = _normalize_cpu(driver_resources)
+    executor_resources = _normalize_cpu(executor_resources)
 
     # Show the namespace the session will actually land in, not the bare None the
     # caller passed: the user is confirming a mutation and should see its target.
@@ -247,6 +362,7 @@ def create_spark_session(
         "spark_conf": spark_conf,
         "timeout": timeout,
         "connect_timeout": connect_timeout,
+        "service_account_name": service_account_name,
     }
 
     if not confirmed:
@@ -259,6 +375,7 @@ def create_spark_session(
             ),
         ).model_dump()
 
+    creation_id = uuid.uuid4().hex
     try:
         from kubeflow.spark import Driver, Executor, Labels, Name
 
@@ -270,7 +387,11 @@ def create_spark_session(
                 num_instances=num_executors,
                 resources_per_executor=executor_resources,
             )
-        driver = Driver(resources=driver_resources) if driver_resources else None
+        driver = (
+            Driver(resources=driver_resources, service_account=service_account_name)
+            if driver_resources or service_account_name is not None
+            else None
+        )
 
         session = client.connect(
             spark_conf=spark_conf,
@@ -278,7 +399,10 @@ def create_spark_session(
             executor=executor,
             # Labels marks the SparkConnect CR as MCP-owned so non-admin personas
             # may later mutate it (see delete_spark_session's ownership guard).
-            options=[Name(session_name), Labels({MCP_MANAGED_LABEL: MCP_MANAGED_VALUE})],
+            options=[
+                Name(session_name),
+                Labels({MCP_MANAGED_LABEL: MCP_MANAGED_VALUE, SPARK_CREATION_LABEL: creation_id}),
+            ],
             timeout=timeout,
             connect_timeout=connect_timeout,
         )
@@ -303,20 +427,30 @@ def create_spark_session(
         # created the CR (pyspark imports pandas only when building the session), so
         # this path needs the same provisioned-session check as any other failure —
         # otherwise a running session is reported as a pure failure and leaks.
-        logger.warning("create_spark_session(%s) missing SDK extra: %s", session_name, e)
-        provisioned = _provisioned_session_or_none(e, session_name, namespace)
+        logger.warning(
+            "create_spark_session(%s) missing SDK extra: %s", session_name, e, exc_info=True
+        )
+        provisioned = _provisioned_session_or_none(e, session_name, namespace, creation_id)
         if provisioned is not None:
             return provisioned
         return ToolError(error=str(e), error_code=ErrorCode.SDK_ERROR).model_dump()
     except Exception as e:
         logger.warning("create_spark_session(%s) failed: %s", session_name, e, exc_info=True)
-        provisioned = _provisioned_session_or_none(e, session_name, namespace)
+        provisioned = _provisioned_session_or_none(e, session_name, namespace, creation_id)
         if provisioned is not None:
             return provisioned
+        denied = _has_api_status(e, 403)
         return ToolError(
             error=str(e),
-            error_code=ErrorCode.SDK_ERROR,
+            error_code=ErrorCode.PERMISSION_DENIED if denied else ErrorCode.SDK_ERROR,
             details=exception_details(e),
+            hint=(
+                "Check namespace RBAC and admission permission to use the selected ServiceAccount."
+                if denied
+                else "Choose another name or inspect the existing session."
+                if _has_api_status(e, 409)
+                else None
+            ),
         ).model_dump()
 
 
@@ -341,6 +475,9 @@ def delete_spark_session(
     Raises:
         ToolError: If the session is not found (``RESOURCE_NOT_FOUND``).
     """
+    confirmation_err = _validate_confirmation(confirmed)
+    if confirmation_err is not None:
+        return confirmation_err.model_dump()
     name_err = validate_k8s_name(name)
     if name_err is not None:
         return name_err.model_dump()

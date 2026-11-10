@@ -260,6 +260,13 @@ SDK_COMPATIBILITY: dict[str, object] = {
                 # pyspark SparkSession, which is not serializable over MCP; the data plane
                 # attaches directly using the connect info returned by create_spark_session.
                 "get_session_logs(follow=True)",  # streaming not exposed
+                # SparkApplication batch lifecycle is deferred to issue #331.
+                "submit_job",
+                "get_job",
+                "list_jobs",
+                "delete_job",
+                "wait_for_job_status",
+                "get_job_logs",
             ],
         },
         "feast": {
