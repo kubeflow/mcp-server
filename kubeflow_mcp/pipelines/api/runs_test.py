@@ -32,6 +32,31 @@ from kubeflow_mcp.pipelines.conftest import (
 )
 
 
+@pytest.fixture
+def lifecycle_dynamic_registry():
+    """Register the lifecycle tools in the dynamic-tools registry, then restore it.
+
+    This wires the tools through the exact code path progressive and semantic modes
+    use (``execute_tool`` passes JSON arguments straight to the function, without
+    pydantic's schema coercion), so the confirm-gate regression covers what agents
+    actually reach in those modes.
+    """
+    from kubeflow_mcp.core import dynamic_tools
+
+    saved_registry = dict(dynamic_tools.TOOL_REGISTRY)
+    saved_hierarchy = {key: list(value) for key, value in dynamic_tools.TOOL_HIERARCHY.items()}
+
+    dynamic_tools.init_dynamic_tools(
+        [create_pipeline_run, stop_pipeline_run, retry_pipeline_run], {}
+    )
+    yield dynamic_tools
+
+    dynamic_tools.TOOL_REGISTRY.clear()
+    dynamic_tools.TOOL_REGISTRY.update(saved_registry)
+    dynamic_tools.TOOL_HIERARCHY.clear()
+    dynamic_tools.TOOL_HIERARCHY.update(saved_hierarchy)
+
+
 class TestCreatePipelineRun:
     def test_preview_resolves_pipeline_and_does_not_run(self, kfp_client):
         kfp_client.get_pipeline.return_value = make_pipeline()
@@ -135,6 +160,62 @@ class TestCreatePipelineRun:
 
         assert result["error_code"] == "SDK_ERROR"
 
+    @pytest.mark.parametrize(
+        "confirmed", ["false", "true", "0", "1", 0, 1, None, {"confirmed": True}]
+    )
+    def test_rejects_non_boolean_confirmed(self, kfp_client, confirmed):
+        result = create_pipeline_run("churn-prediction", confirmed=confirmed)
+
+        assert result["error_code"] == "VALIDATION_ERROR"
+        assert "boolean" in result["error"]
+        kfp_client.get_pipeline.assert_not_called()
+        kfp_client.run.assert_not_called()
+
+
+class TestConfirmGateThroughDynamicModes:
+    """The confirm flag must stay a real bool through progressive/semantic dispatch.
+
+    ``execute_tool`` binds JSON arguments directly onto the function (no pydantic
+    coercion), so a string ``"false"`` used to land as a truthy Python string, skip
+    the preview and start the run.
+    """
+
+    @pytest.mark.parametrize(
+        ("tool", "arguments"),
+        [
+            ("create_pipeline_run", {"pipeline": "churn-prediction", "confirmed": "false"}),
+            ("stop_pipeline_run", {"run_id": RUN_ID, "confirmed": "false"}),
+            ("retry_pipeline_run", {"run_id": RUN_ID, "confirmed": "false"}),
+        ],
+    )
+    def test_string_confirmed_through_execute_tool_is_refused(
+        self, kfp_client, lifecycle_dynamic_registry, tool, arguments
+    ):
+        result = lifecycle_dynamic_registry.execute_tool(tool, arguments)
+
+        assert result["error_code"] == "VALIDATION_ERROR"
+        assert "boolean" in result["error"]
+        kfp_client.run.assert_not_called()
+        kfp_client._backend.run_api.run_service_terminate_run.assert_not_called()
+        kfp_client._backend.run_api.run_service_retry_run.assert_not_called()
+
+    def test_real_boolean_true_still_executes_through_execute_tool(
+        self, kfp_client, lifecycle_dynamic_registry
+    ):
+        kfp_client.get_pipeline.return_value = make_pipeline()
+        kfp_client.list_pipeline_versions.return_value = make_page(
+            "pipeline_versions", [make_version()]
+        )
+        kfp_client.run.return_value = make_run("PENDING")
+
+        result = lifecycle_dynamic_registry.execute_tool(
+            "create_pipeline_run", {"pipeline": "churn-prediction", "confirmed": True}
+        )
+
+        assert result["success"] is True
+        assert result["data"]["run_id"] == RUN_ID
+        kfp_client.run.assert_called_once()
+
 
 class TestStopPipelineRun:
     def test_preview_shows_run_and_ownership_note(self, kfp_client):
@@ -173,6 +254,17 @@ class TestStopPipelineRun:
         assert stop_pipeline_run("not-a-uuid", confirmed=True)["error_code"] == "VALIDATION_ERROR"
         kfp_client.get_run.assert_not_called()
 
+    @pytest.mark.parametrize("confirmed", ["false", "true", 1, None])
+    def test_rejects_non_boolean_confirmed(self, kfp_client, confirmed):
+        kfp_client.get_run.assert_not_called()
+
+        result = stop_pipeline_run(RUN_ID, confirmed=confirmed)
+
+        assert result["error_code"] == "VALIDATION_ERROR"
+        assert "boolean" in result["error"]
+        kfp_client.get_run.assert_not_called()
+        kfp_client._backend.run_api.run_service_terminate_run.assert_not_called()
+
 
 class TestRetryPipelineRun:
     @pytest.mark.parametrize("state", ["FAILED", "CANCELED"])
@@ -207,3 +299,12 @@ class TestRetryPipelineRun:
         kfp_client._backend.run_api.run_service_retry_run.side_effect = ApiException(403)
 
         assert retry_pipeline_run(RUN_ID, confirmed=True)["error_code"] == "PERMISSION_DENIED"
+
+    @pytest.mark.parametrize("confirmed", ["false", "true", 1, None])
+    def test_rejects_non_boolean_confirmed(self, kfp_client, confirmed):
+        result = retry_pipeline_run(RUN_ID, confirmed=confirmed)
+
+        assert result["error_code"] == "VALIDATION_ERROR"
+        assert "boolean" in result["error"]
+        kfp_client.get_run.assert_not_called()
+        kfp_client._backend.run_api.run_service_retry_run.assert_not_called()

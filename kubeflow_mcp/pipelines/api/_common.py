@@ -96,6 +96,24 @@ def validate_limit(limit: int) -> ToolError | None:
     return None
 
 
+def validate_confirmed(confirmed: Any) -> ToolError | None:
+    """Require the two-phase confirm flag to be a real boolean.
+
+    In progressive and semantic modes arguments reach the tool function without
+    pydantic's schema coercion, so a JSON string like ``"confirmed": "false"``
+    arrives as a truthy Python string and would silently skip the preview.
+    Anything that is not a real bool is refused.
+    """
+    if isinstance(confirmed, bool):
+        return None
+    return ToolError(
+        error=f"confirmed must be a boolean true or false, got {confirmed!r}",
+        error_code=ErrorCode.VALIDATION_ERROR,
+        hint="Call with confirmed=False (or omit it) for the preview, then repeat "
+        "the call with confirmed=True to execute",
+    )
+
+
 def resolve_namespace(namespace: str | None) -> tuple[str | None, ToolError | None]:
     """Resolve the namespace a call will run in, then check it against policy.
 

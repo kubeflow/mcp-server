@@ -27,6 +27,7 @@ from kubeflow_mcp.pipelines.api._common import (
     check_run_namespace,
     pipelines_error,
     resolve_namespace,
+    validate_confirmed,
     validate_display_name,
     validate_run_id,
 )
@@ -101,6 +102,10 @@ def create_pipeline_run(
     Returns:
         dict: Preview of the run, or the created run (``run_id``, ``state``, ...).
     """
+    confirm_err = validate_confirmed(confirmed)
+    if confirm_err is not None:
+        return confirm_err.model_dump()
+
     for value, field in ((version, "version"), (experiment, "experiment"), (run_name, "run_name")):
         if value is not None:
             err = validate_display_name(value, field)
@@ -186,6 +191,10 @@ def stop_pipeline_run(
     Returns:
         dict: Preview, or a confirmation that termination was requested.
     """
+    confirm_err = validate_confirmed(confirmed)
+    if confirm_err is not None:
+        return confirm_err.model_dump()
+
     id_err = validate_run_id(run_id)
     if id_err is not None:
         return id_err.model_dump()
@@ -259,6 +268,10 @@ def retry_pipeline_run(
     Returns:
         dict: Preview, or a confirmation that the retry was requested.
     """
+    confirm_err = validate_confirmed(confirmed)
+    if confirm_err is not None:
+        return confirm_err.model_dump()
+
     id_err = validate_run_id(run_id)
     if id_err is not None:
         return id_err.model_dump()
