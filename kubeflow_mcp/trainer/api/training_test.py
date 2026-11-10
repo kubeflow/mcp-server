@@ -54,6 +54,36 @@ def _offline_hub(monkeypatch):
     monkeypatch.setattr("huggingface_hub.model_info", MagicMock())
     monkeypatch.setattr("huggingface_hub.dataset_info", MagicMock())
     monkeypatch.setattr("huggingface_hub.list_models", MagicMock(return_value=[]))
+    api = MagicMock()
+    api.get_namespaced_custom_object.return_value = {
+        "spec": {
+            "template": {
+                "spec": {
+                    "replicatedJobs": [
+                        {
+                            "name": "node",
+                            "template": {
+                                "spec": {
+                                    "template": {
+                                        "spec": {
+                                            "containers": [{"name": "node"}],
+                                        }
+                                    }
+                                }
+                            },
+                        }
+                    ],
+                }
+            }
+        }
+    }
+    monkeypatch.setattr(
+        "kubeflow_mcp.common.utils.get_custom_objects_api", MagicMock(return_value=api)
+    )
+    monkeypatch.setattr(
+        "kubeflow_mcp.common.utils.get_trainer_effective_namespace",
+        lambda namespace=None: namespace or "default",
+    )
 
 
 # ─── fine_tune validation ───────────────────────────────────────────────────
@@ -675,6 +705,59 @@ def test_run_custom_training_accepts_valid_or_missing_image(image):
 
 
 class TestRunCustomTrainingConfirmed:
+    @pytest.mark.parametrize(
+        ("volumes", "mounts"),
+        [
+            (None, None),
+            ([], []),
+            ([{"name": "data", "emptyDir": {}}], [{"name": "data", "mountPath": "/data"}]),
+            (
+                [{"name": "workspace", "persistentVolumeClaim": {"claimName": "data"}}],
+                [{"name": "workspace", "mountPath": "/data"}],
+            ),
+            (
+                [{"name": "data", "persistentVolumeClaim": {"claimName": "data"}}],
+                [{"name": "data", "mountPath": "/workspace"}],
+            ),
+        ],
+        ids=["omitted", "empty", "other-volume", "name-collision", "existing-workspace"],
+    )
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_workspace_matches_preview_and_preserves_inputs(
+        self,
+        mock_client_fn: MagicMock,
+        _ns: MagicMock,
+        volumes: list[dict] | None,
+        mounts: list[dict] | None,
+    ) -> None:
+        original_volumes = [dict(v) for v in volumes] if volumes is not None else None
+        original_mounts = [dict(m) for m in mounts] if mounts is not None else None
+        kwargs = {"script": "print('hello')", "volumes": volumes, "volume_mounts": mounts}
+        preview = run_custom_training(**kwargs)
+        mock_client_fn.assert_not_called()
+        mock_client_fn.return_value.train.return_value = "workspace-test"
+        result = run_custom_training(**kwargs, confirmed=True)
+
+        assert result["success"] is True
+        node = _pod_specs(mock_client_fn.return_value.train.call_args.kwargs["options"])["node"]
+        actual_mounts = node.containers[0].volume_mounts
+        assert node.volumes == preview["config"]["volumes"]
+        assert actual_mounts == preview["config"]["volume_mounts"]
+        assert len({v["name"] for v in node.volumes}) == len(node.volumes)
+        workspace_mounts = [m for m in actual_mounts if m["mountPath"] == "/workspace"]
+        assert len(workspace_mounts) == 1
+        workspace = next(v for v in node.volumes if v["name"] == workspace_mounts[0]["name"])
+        if any(m["mountPath"] == "/workspace" for m in (mounts or [])):
+            assert node.volumes == volumes
+            assert actual_mounts == mounts
+        else:
+            assert workspace["emptyDir"] == {}
+        assert node.volumes[: len(volumes or [])] == (volumes or [])
+        assert actual_mounts[: len(mounts or [])] == (mounts or [])
+        assert volumes == original_volumes
+        assert mounts == original_mounts
+
     @patch(PATCH_NS_CHECK, return_value=None)
     @patch(PATCH_CLIENT)
     def test_confirmed_creates_job(self, mock_client_fn, _ns):
@@ -1130,3 +1213,185 @@ class TestBuildRuntimePatch:
         assert [type(o).__name__ for o in options] == ["Labels", "Annotations"]
         assert options[0].labels == {"team": "ml"}
         assert options[1].annotations == {"owner": "alice"}
+
+
+@pytest.mark.parametrize("scope", ["namespace", "cluster", "denied"])
+def test_runtime_node_lookup_respects_scope_and_denials(scope: str) -> None:
+    from kubeflow_mcp.trainer.api.training import _get_runtime_node_spec
+
+    pod = {"containers": [{"name": "node"}]}
+    raw = {
+        "spec": {
+            "template": {
+                "spec": {
+                    "replicatedJobs": [
+                        {"name": "node", "template": {"spec": {"template": {"spec": pod}}}}
+                    ]
+                }
+            }
+        }
+    }
+    api = MagicMock()
+    api.get_namespaced_custom_object.return_value = raw
+    api.get_cluster_custom_object.return_value = raw
+    if scope != "namespace":
+        api.get_namespaced_custom_object.side_effect = ApiException(
+            status=404 if scope == "cluster" else 403
+        )
+    with patch("kubeflow_mcp.common.utils.get_custom_objects_api", return_value=api):
+        if scope == "denied":
+            with pytest.raises(ApiException):
+                _get_runtime_node_spec("custom-runtime", "workloads")
+        else:
+            assert _get_runtime_node_spec("custom-runtime", "workloads") == pod
+    assert api.get_namespaced_custom_object.call_args.kwargs["namespace"] == "workloads"
+    assert api.get_namespaced_custom_object.call_args.kwargs["name"] == "custom-runtime"
+    assert api.get_cluster_custom_object.call_count == int(scope == "cluster")
+
+
+@pytest.mark.parametrize("confirmed", [False, True])
+@pytest.mark.parametrize("cluster_scoped", [False, True])
+def test_custom_training_preserves_inherited_workspace(
+    confirmed: bool, cluster_scoped: bool
+) -> None:
+    pod_spec = {
+        "volumes": [{"name": "saved", "persistentVolumeClaim": {"claimName": "checkpoints"}}],
+        "containers": [
+            {"name": "node", "volumeMounts": [{"name": "saved", "mountPath": "/workspace"}]}
+        ],
+    }
+    raw = {
+        "spec": {
+            "template": {
+                "spec": {
+                    "replicatedJobs": [
+                        {"name": "node", "template": {"spec": {"template": {"spec": pod_spec}}}},
+                    ]
+                }
+            }
+        }
+    }
+    api = MagicMock()
+    api.get_namespaced_custom_object.return_value = raw
+    api.get_cluster_custom_object.return_value = raw
+    if cluster_scoped:
+        api.get_namespaced_custom_object.side_effect = ApiException(status=404)
+    with (
+        patch(PATCH_NS_CHECK, return_value=None),
+        patch(PATCH_CLIENT) as client,
+        patch("kubeflow_mcp.common.utils.get_custom_objects_api", return_value=api),
+    ):
+        client.return_value.train.return_value = "workspace-test"
+        result = run_custom_training(
+            script="print('hello')",
+            runtime="pvc-runtime",
+            namespace="workloads",
+            confirmed=confirmed,
+        )
+    if confirmed:
+        assert result["success"] is True
+        assert not any(
+            type(option).__name__ == "RuntimePatch"
+            for option in client.return_value.train.call_args.kwargs["options"]
+        )
+    else:
+        assert result["status"] == "preview"
+        assert "volumes" not in result["config"]
+        assert "volume_mounts" not in result["config"]
+        client.assert_not_called()
+    assert api.get_namespaced_custom_object.call_args.kwargs["namespace"] == "workloads"
+    assert api.get_namespaced_custom_object.call_args.kwargs["name"] == "pvc-runtime"
+    assert api.get_cluster_custom_object.call_count == int(cluster_scoped)
+    assert pod_spec["volumes"][0]["persistentVolumeClaim"]["claimName"] == "checkpoints"
+
+
+def test_workspace_fallback_avoids_runtime_volume_name_collision() -> None:
+    from kubeflow_mcp.trainer.api.training import _ensure_workspace
+
+    node = {
+        "containers": [{"name": "node"}],
+        "volumes": [
+            {"name": "workspace", "persistentVolumeClaim": {"claimName": "data"}},
+        ],
+    }
+    with patch("kubeflow_mcp.trainer.api.training._get_runtime_node_spec", return_value=node):
+        volumes, mounts = _ensure_workspace(None, None, runtime="custom", namespace="workloads")
+    assert volumes == [{"name": "workspace-1", "emptyDir": {}}]
+    assert mounts == [{"name": "workspace-1", "mountPath": "/workspace"}]
+
+
+@pytest.mark.parametrize("confirmed", [False, True])
+def test_custom_training_does_not_replace_unknown_runtime_storage(confirmed: bool) -> None:
+    api = MagicMock()
+    api.get_namespaced_custom_object.side_effect = ApiException(
+        status=403, reason="Cannot read runtime"
+    )
+    with (
+        patch(PATCH_NS_CHECK, return_value=None),
+        patch(PATCH_CLIENT) as client,
+        patch("kubeflow_mcp.common.utils.get_custom_objects_api", return_value=api),
+    ):
+        result = run_custom_training(
+            script="print('hello')",
+            runtime="private-runtime",
+            namespace="workloads",
+            confirmed=confirmed,
+        )
+    assert result["error_code"] == "PERMISSION_DENIED"
+    client.assert_not_called()
+    api.get_cluster_custom_object.assert_not_called()
+
+
+def test_explicit_workspace_does_not_require_runtime_lookup() -> None:
+    from kubeflow_mcp.trainer.api.training import _ensure_workspace
+
+    volumes = [{"name": "data", "persistentVolumeClaim": {"claimName": "checkpoints"}}]
+    mounts = [{"name": "data", "mountPath": "/workspace"}]
+    with patch("kubeflow_mcp.trainer.api.training._get_runtime_node_spec") as read:
+        assert _ensure_workspace(volumes, mounts, runtime="custom", namespace="workloads") == (
+            volumes,
+            mounts,
+        )
+    read.assert_not_called()
+
+
+@pytest.mark.parametrize(("tool", "config"), _TRAINING_TOOLS)
+@pytest.mark.parametrize("confirmed", [False, True])
+@pytest.mark.parametrize(
+    "storage",
+    [
+        {"volumes": [{"name": "data", "persistent_volume_claim": {"claim_name": "data"}}]},
+        {"volumes": [{"name": "data", "persistentVolumeClaim": {"claim_name": "data"}}]},
+        {"volumes": [{"name": "data", "persistentVolumeClaim": {}}]},
+        {"volumes": [{"name": "data"}]},
+        {
+            "volumes": [
+                {"name": "data", "emptyDir": {}, "persistentVolumeClaim": {"claimName": "data"}}
+            ]
+        },
+        {"volume_mounts": [{"name": "data", "mount_path": "/workspace"}]},
+        {"volume_mounts": [{"name": "data", "mountPath": "relative"}]},
+    ],
+)
+def test_storage_rejected_before_preview_or_submission(tool, config, confirmed, storage):
+    with patch(PATCH_CLIENT) as sdk, patch(PATCH_GPU_CHECK) as gpu:
+        result = tool(**config, **storage, confirmed=confirmed)
+    assert result["error_code"] == "VALIDATION_ERROR"
+    sdk.assert_not_called()
+    gpu.assert_not_called()
+
+
+def test_storage_accepts_kubernetes_fields_and_runtime_mounts():
+    from kubeflow_mcp.trainer.api.training import _validate_storage
+
+    assert (
+        _validate_storage(
+            [
+                {"name": "checkpoint", "persistentVolumeClaim": {"claimName": "saved.model"}},
+                {"name": "tmp", "emptyDir": {}},
+            ],
+            [{"name": "checkpoint", "mountPath": "/workspace"}],
+        )
+        is None
+    )
+    assert _validate_storage(None, [{"name": "runtime-volume", "mountPath": "/runtime"}]) is None

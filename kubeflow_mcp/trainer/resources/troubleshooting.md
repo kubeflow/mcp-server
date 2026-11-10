@@ -79,9 +79,14 @@ All three training tools (`fine_tune`, `run_custom_training`, `run_container_tra
 **Add OpenShift emptyDir volumes:**
 ```json
 "volumes": [
-  {"name": "dot-local", "mount_path": "/.local", "empty_dir": {}},
-  {"name": "dot-cache", "mount_path": "/.cache", "empty_dir": {}},
-  {"name": "tmp", "mount_path": "/tmp", "empty_dir": {}}
+  {"name": "dot-local", "emptyDir": {}},
+  {"name": "dot-cache", "emptyDir": {}},
+  {"name": "tmp", "emptyDir": {}}
+],
+"volume_mounts": [
+  {"name": "dot-local", "mountPath": "/.local"},
+  {"name": "dot-cache", "mountPath": "/.cache"},
+  {"name": "tmp", "mountPath": "/tmp"}
 ]
 ```
 
@@ -159,3 +164,10 @@ update_training_job(name, action="resume", confirmed=True)   # Resume (preview f
 - Volume scope: `fine_tune()` volumes apply to ALL replicated jobs; `run_custom_training()` applies to node only
 - `loss` in `fine_tune` only supports `CEWithChunkedOutputLoss`
 - `dataset_source`/`dataset_split`/`dataset_column_map` configure instruct-format preprocessing
+
+### Persistent training storage
+
+Use Kubernetes camelCase inside storage dictionaries: `persistentVolumeClaim`, `claimName`,
+`emptyDir` and `mountPath`. Invalid fields are rejected before preview and submission.
+For persistent checkpoints, mount a PVC; `emptyDir` is temporary and cannot carry checkpoints
+between jobs.
