@@ -64,6 +64,24 @@ def test_serve_rejects_invalid_transport():
     assert "invalid value" in result.output.lower()
 
 
+def test_serve_reports_invalid_configuration():
+    from kubeflow_mcp.core.config import LoggingConfig
+
+    _, mock_create_server, modules_patch = _make_serve_mocks()
+    modules_patch["kubeflow_mcp.core.config"].load_config.side_effect = lambda: LoggingConfig(
+        format="invalid"
+    )
+
+    with patch.dict(sys.modules, modules_patch):
+        result = CliRunner().invoke(cli, ["serve"])
+
+    assert result.exit_code == 1
+    assert "Invalid configuration" in result.output
+    assert "json" in result.output
+    assert "console" in result.output
+    mock_create_server.assert_not_called()
+
+
 # --- serve: wiring — create_server receives correct args, server.run is called ---
 
 

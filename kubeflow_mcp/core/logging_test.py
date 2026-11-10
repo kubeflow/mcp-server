@@ -285,7 +285,7 @@ class TestLogPathsRedactConsistently:
 
 
 class TestSetupLogging:
-    """Tests for setup_logging handler and level configuration."""
+    """Test format selection and validation, handler setup, and log levels."""
 
     @pytest.fixture(autouse=True)
     def _restore_logger(self):
@@ -329,6 +329,9 @@ class TestSetupLogging:
     def test_calling_twice_does_not_duplicate_handlers(self):
         setup_logging(format="json")
         root = setup_logging(format="json")
-
         assert len(root.handlers) == 2
         assert sum(isinstance(h, BufferingHandler) for h in root.handlers) == 1
+
+    def test_rejects_unsupported_format(self):
+        with pytest.raises(ValueError, match="invalid.*json.*console"):
+            setup_logging(format="invalid")
