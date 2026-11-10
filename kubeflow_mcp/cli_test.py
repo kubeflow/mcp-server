@@ -607,4 +607,4 @@ def test_serve_reports_invalid_clients_environment_cleanly(monkeypatch):
 def test_clients_help_lists_pipelines_with_spacing():
     result = CliRunner().invoke(cli, ["serve", "--help"], terminal_width=200)
 
-    assert "(trainer, optimizer, hub, pipelines). Falls back" in result.output
+    assert "(trainer, spark, pipelines, optimizer, hub). Falls back" in result.output
