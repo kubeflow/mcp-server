@@ -64,6 +64,22 @@ class TestInjectMetaBlockedResponses:
     than the envelope alone.
     """
 
+    def test_next_withheld_after_unmet_wait_or_package_error(self):
+        for tool, data in (
+            ("wait_for_training", {"status": "Unknown", "reached": False}),
+            ("get_runtime", {"packages_error": "Forbidden"}),
+        ):
+            result = _inject_meta({"success": True, "data": data}, tool)
+            assert "next" not in result["_meta"]
+            assert result["_meta"]["phase"] == TOOL_TO_PHASE[tool]
+
+    def test_next_present_after_wait_target_reached(self):
+        result = _inject_meta(
+            {"success": True, "data": {"status": "Complete", "reached": True}},
+            "wait_for_training",
+        )
+        assert result["_meta"]["next"] == TOOL_NEXT_HINTS["wait_for_training"]
+
     def test_next_withheld_when_blockers_present(self):
         result = _inject_meta(
             {"success": True, "data": {"compatible": False, "blockers": ["K8s too old"]}},

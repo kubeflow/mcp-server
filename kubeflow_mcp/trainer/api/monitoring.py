@@ -28,12 +28,14 @@ from kubeflow_mcp.common.utils import (
     get_core_v1_api,
     get_trainer_client_for_namespace,
     get_trainer_effective_namespace,
+    get_training_job_status,
 )
 from kubeflow_mcp.core.security import (
     check_namespace_allowed,
     truncate_log_output,
     validate_k8s_name,
 )
+from kubeflow_mcp.trainer.api.pod_diagnostics import get_training_pod_diagnostics
 
 logger = logging.getLogger(__name__)
 
@@ -67,10 +69,10 @@ def _collect_log_lines(
     step: str,
     namespace: str | None,
     cursor_mode: bool,
-) -> tuple[list[str], bool]:
+) -> tuple[list[str], bool, str | None]:
     """Fetch log lines and attempt the previous-container fallback if empty.
 
-    Returns (log_lines, fallback_was_used).
+    Returns (log_lines, fallback_was_used, availability_hint).
     """
     if cursor_mode:
         # No deque cap: cursor mode must be able to address any line index.
@@ -81,9 +83,10 @@ def _collect_log_lines(
         )
 
     if log_lines:
-        return log_lines, False
+        return log_lines, False, None
 
     # Primary path empty — try previous-container (crash) logs.
+    availability_hint = None
     try:
         eff_ns = get_trainer_effective_namespace(namespace)
         v1 = get_core_v1_api()
@@ -93,9 +96,15 @@ def _collect_log_lines(
         )
         # Same container the SDK reads for the step: "node-1" -> "node".
         container = re.sub(r"-\d+$", "", step)
-        for pod in pods.items:
-            if not _is_pod_for_step(pod, step):
-                continue
+        matching_pods = [pod for pod in pods.items if _is_pod_for_step(pod, step)]
+        if not matching_pods:
+            availability_hint = (
+                "No pods remain for the requested step; they may not have been created yet "
+                "or may have been deleted. Empty logs do not prove the job produced no output. "
+                "Check get_training_job and get_training_events; use retained cluster logs "
+                "for deleted pods."
+            )
+        for pod in matching_pods:
             try:
                 raw = v1.read_namespaced_pod_log(
                     name=pod.metadata.name,
@@ -114,13 +123,17 @@ def _collect_log_lines(
                     e,
                 )
     except Exception as e:
+        availability_hint = (
+            "No logs were retrieved and pod log availability could not be verified. "
+            "Check namespace permissions and get_training_events before inferring a cause."
+        )
         logger.debug(
             "Previous-log fallback failed for job %s (namespace=%s): %s",
             name,
             namespace,
             e,
         )
-    return log_lines, True
+    return log_lines, True, availability_hint
 
 
 def _cursor_response(
@@ -264,7 +277,7 @@ def get_training_logs(
             ).model_dump()
 
         client = get_trainer_client_for_namespace(namespace)
-        log_lines, _fallback_was_used = _collect_log_lines(
+        log_lines, _fallback_was_used, availability_hint = _collect_log_lines(
             client, name, step, namespace, cursor_mode=since_line is not None
         )
 
@@ -280,7 +293,10 @@ def get_training_logs(
 
         # ── Cursor mode ──────────────────────────────────────────────────────
         if since_line is not None:
-            return _cursor_response(name, step, log_lines, since_line, _effective_max)
+            result = _cursor_response(name, step, log_lines, since_line, _effective_max)
+            if availability_hint:
+                result["data"]["next_steps"] = [availability_hint]
+            return result
 
         # ── Tail mode (unchanged) ─────────────────────────────────────────────
         if len(log_lines) > _effective_max:
@@ -295,6 +311,8 @@ def get_training_logs(
             "logs": sanitized,
             "lines": len(sanitized.splitlines()) if sanitized else 0,
         }
+        if availability_hint:
+            data["next_steps"] = [availability_hint]
 
         hint = extract_failure_hint(logs)
         if hint:
@@ -419,6 +437,7 @@ def wait_for_training(
     """Wait for a job to reach one or more target statuses.
 
     Blocks until the job reaches any of the expected statuses, or times out.
+    Timeouts preserve the last observed status and include best-effort pod diagnostics.
 
     Args:
         name: TrainJob name.
@@ -472,6 +491,13 @@ def wait_for_training(
             error_code=ErrorCode.VALIDATION_ERROR,
         ).model_dump()
 
+    last_status = "Unknown"
+
+    def observe(job: Any) -> None:
+        nonlocal last_status
+        last_status = get_training_job_status(job, namespace)
+        job.status = last_status
+
     try:
         if timeout_seconds < 1:
             return ToolError(
@@ -497,6 +523,7 @@ def wait_for_training(
             status=status_set,
             timeout=timeout_seconds,
             polling_interval=polling_interval,
+            callbacks=[observe],
         )
 
         final_status = job.status if hasattr(job, "status") else "Unknown"
@@ -513,10 +540,11 @@ def wait_for_training(
         return ToolResponse(
             data={
                 "job": name,
-                "status": "Unknown",
+                "status": last_status,
                 "reached": False,
                 "message": f"Timeout after {timeout_seconds}s",
                 "hint": "Use get_training_events to check for scheduling issues",
+                **get_training_pod_diagnostics(name, namespace),
             }
         ).model_dump()
     except Exception as e:

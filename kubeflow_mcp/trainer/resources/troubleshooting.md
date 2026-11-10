@@ -11,6 +11,14 @@ Diagnostic workflows, error-to-fix tables, and known tool limitations.
 3. `get_training_logs(name)` — check container output
 4. Match error in tables below
 
+Empty logs do not establish a failure cause. If pods were deleted, use retained cluster logs;
+events may also have expired. `get_training_logs` reports when no matching pods remain or
+log availability cannot be verified. An existing pod can legitimately have empty output.
+
+For SDK 0.5, discovery and wait tools reconcile `Created` with active workers after resume.
+This requires reading the TrainJob to rule out suspension and terminal conditions; if that
+read fails, the SDK status is preserved. A wait response with `reached=false` is not completion.
+
 ## Error-to-Fix Table
 
 | Error / Event | Cause | Fix |
@@ -159,3 +167,12 @@ update_training_job(name, action="resume", confirmed=True)   # Resume (preview f
 - Volume scope: `fine_tune()` volumes apply to ALL replicated jobs; `run_custom_training()` applies to node only
 - `loss` in `fine_tune` only supports `CEWithChunkedOutputLoss`
 - `dataset_source`/`dataset_split`/`dataset_column_map` configure instruct-format preprocessing
+
+### Training stalls or restarts
+
+Use `get_training_job(name, namespace)` to inspect associated initializer and trainer pods.
+`pods` includes readiness, restarts, container waiting/termination reasons and failed scheduling
+conditions; `blocking_reasons` highlights issues such as insufficient GPUs or CrashLoopBackOff.
+Pods with blockers take priority in the bounded response; additional omitted blockers are summarized.
+If pod access fails, `pod_diagnostics_error` reports that diagnostics are unavailable.
+A `wait_for_training` timeout preserves the last observed job status and includes the same diagnostics.

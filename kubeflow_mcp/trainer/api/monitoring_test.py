@@ -20,6 +20,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from kubeflow.trainer.backends.kubernetes.backend import KubernetesBackend
 from kubeflow.trainer.constants import constants as trainer_constants
 from tests.common import TestCase
 
@@ -239,6 +240,33 @@ def _make_mock_client(**method_returns):
 
 
 class TestGetTrainingLogs:
+    @pytest.mark.parametrize("since_line", [None, 0])
+    @pytest.mark.parametrize("pods_present", [False, True])
+    @patch(PATCH_CORE_V1)
+    @patch(PATCH_EFF_NS, return_value="workloads")
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_missing_pods_are_distinguished_from_empty_output(
+        self, mock_client_fn, _ns, _eff_ns, mock_v1_fn, pods_present, since_line
+    ):
+        mock_client_fn.return_value = _make_mock_client(get_job_logs=[])
+        mock_v1_fn.return_value.list_namespaced_pod.return_value = SimpleNamespace(
+            items=[_trainjob_pod("job", "node", index=0)] if pods_present else []
+        )
+        mock_v1_fn.return_value.read_namespaced_pod_log.return_value = ""
+        result = get_training_logs("job", since_line=since_line)
+        assert result["success"] is True
+        data = result["data"]
+        assert data["logs"] == ""
+        assert data["lines"] == 0
+        if pods_present:
+            assert "next_steps" not in data
+        else:
+            assert "Empty logs do not prove" in data["next_steps"][0]
+        if since_line is not None:
+            assert data["next_offset"] == 0
+            assert data["total_lines"] == 0
+
     @patch(PATCH_NS_CHECK, return_value=None)
     @patch(PATCH_CLIENT)
     def test_success(self, mock_client_fn, _ns):
@@ -880,6 +908,30 @@ class TestGetTrainingEvents:
 class TestWaitForTraining:
     @patch(PATCH_NS_CHECK, return_value=None)
     @patch(PATCH_CLIENT)
+    @patch("kubeflow_mcp.common.utils.get_custom_objects_api")
+    def test_wait_recognizes_resumed_running_workers(self, mock_api_fn, mock_client_fn, _ns):
+        job = SimpleNamespace(
+            name="resumed-job",
+            status="Created",
+            num_nodes=2,
+            steps=[SimpleNamespace(name=f"node-{i}", status="Running") for i in range(2)],
+        )
+        mock_api_fn.return_value.get_namespaced_custom_object.return_value = {
+            "spec": {"suspend": False},
+            "status": {"conditions": [{"type": "Suspended", "status": "False"}]},
+        }
+
+        backend = MagicMock()
+        backend.get_job.return_value = job
+        mock_client_fn.return_value.wait_for_job_status.side_effect = lambda **kwargs: (
+            KubernetesBackend.wait_for_job_status(backend, **kwargs)
+        )
+        result = wait_for_training("resumed-job", target_statuses="Running", namespace="workloads")
+        assert result["data"]["status"] == "Running"
+        assert result["data"]["reached"] is True
+
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
     def test_success(self, mock_client_fn, _ns):
         job = SimpleNamespace(status="Complete")
         mock_client_fn.return_value = _make_mock_client(wait_for_job_status=job)
@@ -1087,3 +1139,38 @@ class TestWaitForTraining:
         assert res_clamped["error_code"] == "VALIDATION_ERROR"
         assert "polling_interval must be strictly less than timeout_seconds" in res_clamped["error"]
         mock_client_fn.assert_not_called()
+
+
+@pytest.mark.parametrize("status", ["Created", "Running"])
+def test_wait_timeout_keeps_last_status_and_pod_blockers(status):
+    client = MagicMock()
+
+    def timeout(**kwargs):
+        kwargs["callbacks"][0](SimpleNamespace(status=status))
+        raise TimeoutError("not complete")
+
+    client.wait_for_job_status.side_effect = timeout
+    diagnostics = {
+        "pods": [{"name": "node-0", "phase": "Pending"}],
+        "blocking_reasons": ["Insufficient nvidia.com/gpu"],
+    }
+    with (
+        patch(PATCH_NS_CHECK, return_value=None),
+        patch(PATCH_CLIENT, return_value=client),
+        patch("kubeflow_mcp.trainer.api.monitoring.get_training_job_status", return_value=status),
+        patch(
+            "kubeflow_mcp.trainer.api.monitoring.get_training_pod_diagnostics",
+            return_value=diagnostics,
+        ),
+    ):
+        result = wait_for_training("my-job", timeout_seconds=10)
+    assert result["data"]["status"] == status
+    assert result["data"]["reached"] is False
+    assert result["data"]["blocking_reasons"] == diagnostics["blocking_reasons"]
+
+
+@pytest.fixture(autouse=True)
+def _offline_pod_diagnostics():
+    """Pod detail parsing is exercised separately with Kubernetes model fixtures."""
+    with patch("kubeflow_mcp.trainer.api.monitoring.get_training_pod_diagnostics", return_value={}):
+        yield
