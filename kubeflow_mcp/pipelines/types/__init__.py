@@ -154,13 +154,37 @@ def run_node_ids(run: Any) -> list[tuple[str | None, str]]:
         for task in task_details
         if (task_id := getattr(task, "task_id", None))
     }
+    task_nodes = [
+        (getattr(task, "pod_name", None), getattr(task, "display_name", None))
+        for task in task_details
+        if getattr(task, "display_name", None) != "executor"
+        and getattr(task, "pod_name", None)
+    ]
     pods: list[tuple[str | None, str]] = []
     for task in task_details:
         name = getattr(task, "display_name", None)
         # KFP can report the launcher executor as its own task detail. Attribute it
-        # to the user task that owns it so task filters return the user's logs.
+        # to the user task that owns it so task filters return the user's logs. Some
+        # KFP responses omit parent_task_id; Argo node IDs still encode the parent as
+        # a dot-delimited prefix (for example, ``run.work.executor``).
         if name == "executor":
             parent_name = task_names_by_id.get(getattr(task, "parent_task_id", None))
+            if not parent_name:
+                node_id = getattr(task, "pod_name", None)
+                matching_parents = [
+                    (parent_node, parent_task_name)
+                    for parent_node, parent_task_name in task_nodes
+                    if node_id and node_id.startswith(f"{parent_node}.")
+                ]
+                if matching_parents:
+                    longest_parent = max(len(parent_node) for parent_node, _ in matching_parents)
+                    parent_names = {
+                        parent_task_name
+                        for parent_node, parent_task_name in matching_parents
+                        if len(parent_node) == longest_parent
+                    }
+                    if len(parent_names) == 1:
+                        parent_name = parent_names.pop()
             if parent_name:
                 name = parent_name
         pod = getattr(task, "pod_name", None)
