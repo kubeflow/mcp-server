@@ -305,20 +305,94 @@ def inspect_controller(
         ).model_dump()
 
 
+# Merged list key -> field that identifies an entry (a volume can be mounted at several paths).
+_MERGED_LIST_KEYS = {
+    "replicatedJobs": "name",
+    "containers": "name",
+    "initContainers": "name",
+    "env": "name",
+    "volumes": "name",
+    "volumeMounts": "mountPath",
+}
+
+
+_MERGE_SEMANTICS = (
+    "Keyed lists (replicatedJobs, containers, initContainers, env, volumes by name; "
+    "volumeMounts by mountPath) merge by key: unmentioned entries are kept and a partial list cannot "
+    "remove one. Listing every current entry applies the supplied order. An empty list [] "
+    "replaces the list and clears all entries. Other lists are replaced; null deletes a key."
+)
+
+
+def _is_keyed_list(value: Any, id_field: str) -> bool:
+    return (
+        isinstance(value, list)
+        and bool(value)
+        and all(isinstance(i, dict) and id_field in i for i in value)
+    )
+
+
+def _merge(current: Any, patch: Any, key: str | None = None) -> Any:
+    """Overlay ``patch`` on ``current``, merging name-keyed lists entry by entry."""
+    if isinstance(patch, dict) and isinstance(current, dict):
+        merged = dict(current)
+        for k, value in patch.items():
+            if value is None:
+                merged.pop(k, None)
+            else:
+                merged[k] = _merge(current.get(k), value, k)
+        return merged
+    id_field = _MERGED_LIST_KEYS.get(key)
+    if id_field and _is_keyed_list(patch, id_field) and _is_keyed_list(current, id_field):
+        patch_by_id = {item[id_field]: item for item in patch}
+        current_by_id = {c[id_field]: c for c in current}
+        if current_by_id.keys() <= patch_by_id.keys():
+            # Every current entry is listed: honour the supplied order (initContainers run in sequence).
+            return [_merge(current_by_id.get(p[id_field], {}), p) for p in patch]
+        merged_list = [_merge(c, patch_by_id.pop(c[id_field], {})) for c in current]
+        return merged_list + list(patch_by_id.values())
+    return patch
+
+
+def _expand_named_lists(current: Any, patch: Any, key: str | None = None) -> Any:
+    """Keep the shape of ``patch`` but carry the sibling entries of its name-keyed lists.
+
+    The API server applies a ClusterTrainingRuntime patch as a JSON merge patch
+    (RFC 7386), which replaces a list wholesale. Sending a patch that names one
+    replicated job or container as-is would delete every other entry.
+    """
+    if isinstance(patch, dict):
+        cur = current if isinstance(current, dict) else {}
+        return {k: _expand_named_lists(cur.get(k), v, k) for k, v in patch.items()}
+    id_field = _MERGED_LIST_KEYS.get(key)
+    if id_field and _is_keyed_list(patch, id_field) and _is_keyed_list(current, id_field):
+        return _merge(current, patch, key)
+    return patch
+
+
 def patch_runtime(
     name: str,
     patch: dict[str, Any] | None = None,
     confirmed: bool = False,
 ) -> dict[str, Any]:
-    """Strategic merge patch on a ClusterTrainingRuntime.
+    """JSON merge patch on a ClusterTrainingRuntime.
 
     Use to update images, add volumes, change defaults without full replacement.
-    Top-level keys are restricted to ``spec`` and ``metadata``; deep structure
-    is validated by the K8s API. Intended for platform-admin persona only.
+    Lists under these keys whose entries all carry their key (``name`` for
+    ``replicatedJobs``, ``containers``, ``initContainers``, ``env``, ``volumes``;
+    ``mountPath`` for ``volumeMounts``) are merged by that key: entries the patch does not mention are kept, so removing one entry
+    is not possible here. If the patch lists every current entry, its order is applied
+    (reordering); otherwise current order is kept and new entries are appended. An empty
+    list (``[]``) is not merged: it replaces the list and clears every entry. Other
+    lists are replaced. The patch is rejected with a conflict if the runtime changes
+    between the read and the write; re-run it to retry. Pass ``metadata.resourceVersion``
+    (from the preview) to also reject changes made since that version. Top-level keys are restricted to ``spec`` and ``metadata``;
+    deep structure is validated by the K8s API. Intended for platform-admin
+    persona only.
 
     Args:
         name: ClusterTrainingRuntime name.
-        patch: Strategic merge patch dict. Allowed top-level keys: spec, metadata.
+        patch: Merge patch dict. Allowed top-level keys: spec, metadata.
         confirmed: Must be True to apply. False returns a preview.
 
     Returns:
@@ -349,17 +423,31 @@ def patch_runtime(
                 "runtime": name,
                 "patch": patch,
                 "message": "Set confirmed=True to apply this patch.",
+                "merge_semantics": _MERGE_SEMANTICS,
             }
         ).model_dump()
 
     try:
         api = mcp_utils.get_custom_objects_api()
+        current = api.get_cluster_custom_object(
+            group=trainer_constants.GROUP,
+            version=trainer_constants.VERSION,
+            plural="clustertrainingruntimes",
+            name=name,
+            _request_timeout=mcp_utils.K8S_TIMEOUT,
+        )
+        body = _expand_named_lists(current, patch)
+        resource_version = current.get("metadata", {}).get("resourceVersion")
+        if resource_version:
+            # 409 if the runtime changed since the read above; a caller-supplied version is kept
+            # so a change since the caller's own read is rejected too.
+            body.setdefault("metadata", {}).setdefault("resourceVersion", resource_version)
         result = api.patch_cluster_custom_object(
             group=trainer_constants.GROUP,
             version=trainer_constants.VERSION,
             plural="clustertrainingruntimes",
             name=name,
-            body=patch,
+            body=body,
             _request_timeout=mcp_utils.K8S_TIMEOUT,
         )
 
@@ -378,6 +466,16 @@ def patch_runtime(
             return ToolError(
                 error=f"ClusterTrainingRuntime '{name}' not found",
                 error_code=ErrorCode.RESOURCE_NOT_FOUND,
+            ).model_dump()
+        if getattr(e, "status", None) == 409:
+            return ToolError(
+                error=f"ClusterTrainingRuntime '{name}' changed while patching",
+                error_code=ErrorCode.KUBERNETES_ERROR,
+                details={
+                    **exception_details(e),
+                    "hint": "Another update landed after the runtime was read; "
+                    "re-run patch_runtime to merge against the latest version",
+                },
             ).model_dump()
         return ToolError(
             error=str(e),
