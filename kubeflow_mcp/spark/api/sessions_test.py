@@ -58,9 +58,11 @@ class TestConfirmationType:
         mock_spark_client.connect.assert_not_called()
         mock_spark_client.delete_session.assert_not_called()
 
+    # Under #484, execute_tool coerces "false" to False in lax mode (previewing without
+    # writing). Non-boolean strings such as "maybe" are rejected with VALIDATION_ERROR.
     @pytest.mark.parametrize("mode", ["progressive", "semantic"])
     @pytest.mark.parametrize("tool_name", ["create_spark_session", "delete_spark_session"])
-    async def test_string_false_is_refused_over_mcp(
+    async def test_non_boolean_confirmation_is_refused_over_mcp(
         self, mock_spark_client, spark_persona, mode, tool_name
     ):
         from fastmcp import Client
@@ -75,7 +77,7 @@ class TestConfirmationType:
                 "execute_tool",
                 {
                     "tool_name": tool_name,
-                    "arguments": {"name": "etl", "namespace": "default", "confirmed": "false"},
+                    "arguments": {"name": "etl", "namespace": "default", "confirmed": "maybe"},
                 },
                 raise_on_error=False,
             )
