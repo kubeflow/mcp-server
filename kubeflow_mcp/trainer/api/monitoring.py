@@ -368,7 +368,25 @@ def get_training_events(
         event_list = []
         # Events come oldest first; keep the most recent ones, which explain failures.
         for event in events[-limit:]:
-            et = getattr(event, "event_time", None)
+            # Prefer the Kubernetes Event v1 timestamp, then fall back to legacy
+            # fields and finally the object's creation timestamp.
+            et = next(
+                (
+                    value
+                    for value in (
+                        getattr(event, "event_time", None),
+                        getattr(event, "last_timestamp", None),
+                        getattr(event, "first_timestamp", None),
+                        getattr(
+                            getattr(event, "metadata", None),
+                            "creation_timestamp",
+                            None,
+                        ),
+                    )
+                    if value is not None
+                ),
+                None,
+            )
             if et is not None and hasattr(et, "isoformat"):
                 event_time_str = et.isoformat()
             else:
