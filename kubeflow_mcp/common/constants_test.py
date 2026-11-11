@@ -123,6 +123,11 @@ class TestToolPhases:
             "spark_discovery",
             "spark_sessions",
             "spark_monitoring",
+            # Pipelines client phases
+            "pipelines_discovery",
+            "pipelines_monitoring",
+            "pipelines_runs",
+            "pipelines_lifecycle",
         }
         assert set(TOOL_PHASES.keys()) == expected
 

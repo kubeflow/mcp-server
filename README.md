@@ -18,7 +18,7 @@ The Kubeflow MCP Server exposes Kubeflow Training operations as [Model Context P
 - **Security-First**: Persona gating, namespace enforcement, input validation, bearer/JWT auth
 - **Multi-Platform**: Auto-detects OpenShift, EKS, GKE with platform-specific guidance
 - **Token-Efficient**: Progressive/semantic modes compress 23 tools into 2-3 meta-tools
-- **Extensible**: Plugin architecture for additional Kubeflow clients (trainer, spark; TODO: optimizer, hub)
+- **Extensible**: Plugin architecture for additional Kubeflow clients (trainer, spark, pipelines; TODO: optimizer, hub)
 
 ## Demo
 
@@ -233,6 +233,49 @@ SDK 0.5.0 batch jobs (`FileJob`/`FuncJob`) are separate MCP follow-up scope in
 [#331](https://github.com/kubeflow/mcp-server/issues/331); this session module is
 only part of [#5](https://github.com/kubeflow/mcp-server/issues/5).
 
+### Pipelines client
+
+Enable with `--clients trainer,pipelines`. Wraps `kubeflow.pipelines.PipelinesClient`.
+
+| Phase | Tools | Description |
+|-------|-------|-------------|
+| Discovery | `list_pipelines`, `get_pipeline` | Browse registered pipelines and their versions |
+| Monitoring | `list_pipeline_runs`, `get_pipeline_run`, `get_pipeline_logs` | Follow runs, read task pod logs |
+| Runs | `create_pipeline_run`, `stop_pipeline_run`, `retry_pipeline_run` | Start, stop or retry runs (preview first) |
+
+Requires `kfp` on the server host. Upstream `kfp` 2.x pins `kubernetes<31`
+([kubeflow/pipelines#13390](https://github.com/kubeflow/pipelines/issues/13390)), which
+cannot coexist with the `kubernetes>=35` client this repository's own development and
+test environments resolve, so `kfp` is not installed by default and not part of the
+`all` extra. Use a pip environment for the server host and install the Kubeflow SDK's
+`pipelines` extra in the same resolution as the MCP server:
+
+```bash
+pip install kubeflow-mcp 'kubeflow[pipelines]'
+# or from a checkout of this repository:
+pip install . 'kubeflow[pipelines]'
+```
+
+pip then resolves the `kubernetes` python client to a `kfp`-compatible release (`<31`);
+the Kubeflow SDK itself accepts any `>=27.2,<36`. If pip prints a warning that a
+`kubeflow` release "does not provide the extra 'pipelines'", the resolution picked an
+older `kubeflow-mcp` (the `0.1.x` releases pin `kubeflow==0.4.0`, which has no
+`pipelines` extra) and `kfp` was skipped: upgrade `kubeflow-mcp` to `>=0.2.x` and
+re-install.
+
+Validate the real SDK contracts in the environment where `kfp` is installed,
+from a checkout of this repository:
+
+```bash
+pip install pytest
+python -m pytest kubeflow_mcp/pipelines/api/sdk_contracts_test.py
+```
+
+Set `KUBEFLOW_MCP_PIPELINES_URL`, `KUBEFLOW_MCP_PIPELINES_TOKEN` or
+`KUBEFLOW_MCP_PIPELINES_NAMESPACE` when the defaults do not fit. Only registered pipelines
+can be run, by name. Stop and retry need the `ml-engineer` persona because KFP runs carry
+no MCP ownership label.
+
 
 ### Requirements
 
@@ -246,7 +289,7 @@ only part of [#5](https://github.com/kubeflow/mcp-server/issues/5).
 ### `kubeflow-mcp serve`
 
 ```bash
-# Modules: trainer, spark, optimizer (stub), hub (stub)
+# Modules: trainer, spark, pipelines, optimizer (stub), hub (stub)
 # Persona: readonly | data-scientist | ml-engineer | platform-admin
 # Mode: full | progressive | semantic
 # Instruction tier: full | compact | minimal
