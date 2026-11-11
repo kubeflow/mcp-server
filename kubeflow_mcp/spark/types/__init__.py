@@ -66,4 +66,33 @@ def session_info_to_dict(info: Any) -> dict[str, Any]:
     }
 
 
-__all__ = ["session_info_to_dict"]
+def job_to_dict(job: Any) -> dict[str, Any]:
+    """Convert a ``SparkJob`` (a SparkApplication batch job) into a JSON-safe dict.
+
+    Duck-typed like :func:`session_info_to_dict`, for the same reasons.
+
+    Args:
+        job: A ``kubeflow.spark.types.types.SparkJob`` instance.
+
+    Returns:
+        dict with ``name``, ``namespace``, ``status``, ``num_executors``,
+        ``driver_pod_name`` and ``creation_timestamp`` (ISO 8601).
+    """
+    status = getattr(job, "status", None)
+    # SparkJobStatus is a ``str`` Enum; fall back to ``str()`` for a plain string.
+    status_str = getattr(status, "value", None) or (str(status) if status is not None else None)
+
+    created = getattr(job, "creation_timestamp", None)
+    created_str = created.isoformat() if hasattr(created, "isoformat") else created
+
+    return {
+        "name": getattr(job, "name", None),
+        "namespace": getattr(job, "namespace", None),
+        "status": status_str,
+        "num_executors": getattr(job, "num_executors", None),
+        "driver_pod_name": getattr(job, "driver_pod_name", None),
+        "creation_timestamp": created_str,
+    }
+
+
+__all__ = ["job_to_dict", "session_info_to_dict"]

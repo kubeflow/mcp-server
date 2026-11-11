@@ -12,11 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Monitoring tools for SparkConnect sessions."""
+"""Monitoring tools for SparkConnect sessions and Spark batch jobs."""
 
 import logging
 import re
 from collections import deque
+from collections.abc import Iterable
 from typing import Any
 
 from kubeflow_mcp.common.constants import ErrorCode
@@ -46,6 +47,62 @@ def _is_missing_server_pod(exc: Exception) -> bool:
         for e in (exc, exc.__cause__, exc.__context__)
         if e is not None
     )
+
+
+def _bounded_tail(log_iter: Iterable[str], tail_lines: int) -> dict[str, Any]:
+    """Keep the last *tail_lines* lines of *log_iter*, capped at ``MAX_LOG_CHARS``.
+
+    The SDK returns an iterator, so a bounded deque keeps memory flat however
+    chatty the driver is, while every source line is counted to report truncation.
+
+    Returns:
+        dict with ``logs`` (str), ``lines`` (int) and ``truncated`` (bool).
+    """
+    window: deque[str] = deque()
+    window_chars = 0
+    total = 0
+    truncated = False
+    for line in log_iter:
+        # Keep memory bounded even if the SDK yields a single enormous line.
+        if len(line) > MAX_LOG_CHARS:
+            line = line[-MAX_LOG_CHARS:]
+            truncated = True
+        window.append(line)
+        window_chars += len(line)
+        if len(window) > tail_lines:
+            window_chars -= len(window.popleft())
+            truncated = True
+        while window and window_chars + max(0, len(window) - 1) > MAX_LOG_CHARS:
+            window_chars -= len(window.popleft())
+            truncated = True
+        # Count each source line, including lines dropped to enforce either bound.
+        total += 1
+    lines = list(window)
+    truncated = truncated or total > len(lines)
+    logs = "\n".join(lines)
+    if truncated:
+        budget = MAX_LOG_CHARS - len(_TRUNCATION_MARKER)
+        logs = _TRUNCATION_MARKER + logs[-budget:]
+        # The character trim can cut further than the line window did (and
+        # can split the oldest surviving line), so recount from the final
+        # payload instead of reporting the pre-trim window size.
+        lines = logs.splitlines()[1:]
+    return {"logs": logs, "lines": len(lines), "truncated": truncated}
+
+
+def _has_k8s_not_found(exc: BaseException | None) -> bool:
+    """Return True when a Kubernetes 404 appears anywhere in *exc*'s cause chain.
+
+    The SDK wraps a failed pod log read twice (``RuntimeError`` from
+    ``RuntimeError`` from ``ApiException``), deeper than ``is_k8s_not_found`` looks.
+    """
+    seen: set[int] = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        if is_k8s_not_found(exc):
+            return True
+        exc = exc.__cause__ or exc.__context__
+    return False
 
 
 def get_spark_session_logs(
@@ -93,48 +150,8 @@ def get_spark_session_logs(
 
     try:
         client = get_spark_client_for_namespace(namespace)
-        # get_session_logs returns an Iterator[str]. Keep only the last
-        # ``tail_lines`` via a bounded deque so a chatty driver can't exhaust
-        # memory, while counting the total to report truncation.
         log_iter = client.get_session_logs(name, follow=False)
-        window: deque[str] = deque()
-        window_chars = 0
-        total = 0
-        truncated = False
-        for line in log_iter:
-            # Keep memory bounded even if the SDK yields a single enormous line.
-            if len(line) > MAX_LOG_CHARS:
-                line = line[-MAX_LOG_CHARS:]
-                truncated = True
-            window.append(line)
-            window_chars += len(line)
-            if len(window) > tail_lines:
-                window_chars -= len(window.popleft())
-                truncated = True
-            while window and window_chars + max(0, len(window) - 1) > MAX_LOG_CHARS:
-                window_chars -= len(window.popleft())
-                truncated = True
-            # Count each source line, including lines dropped to enforce either bound.
-            total += 1
-        lines = list(window)
-        truncated = truncated or total > len(lines)
-        logs = "\n".join(lines)
-        if truncated:
-            budget = MAX_LOG_CHARS - len(_TRUNCATION_MARKER)
-            logs = _TRUNCATION_MARKER + logs[-budget:]
-            # The character trim can cut further than the line window did (and
-            # can split the oldest surviving line), so recount from the final
-            # payload instead of reporting the pre-trim window size.
-            lines = logs.splitlines()[1:]
-
-        return ToolResponse(
-            data={
-                "name": name,
-                "logs": logs,
-                "lines": len(lines),
-                "truncated": truncated,
-            }
-        ).model_dump()
+        return ToolResponse(data={"name": name, **_bounded_tail(log_iter, tail_lines)}).model_dump()
 
     except ImportError as e:
         return ToolError(error=str(e), error_code=ErrorCode.SDK_ERROR).model_dump()
@@ -159,4 +176,86 @@ def get_spark_session_logs(
             error=str(e),
             error_code=ErrorCode.SDK_ERROR,
             details=exception_details(e),
+        ).model_dump()
+
+
+def get_spark_job_logs(
+    name: str,
+    tail_lines: int = DEFAULT_TAIL_LINES,
+    namespace: str | None = None,
+) -> dict[str, Any]:
+    """Get driver-pod logs from a Spark batch job (SparkApplication).
+
+    Returns a bounded snapshot, like ``get_spark_session_logs``: streaming is not
+    exposed, ``tail_lines`` controls volume and output is capped at
+    ``MAX_LOG_CHARS`` characters.
+
+    Args:
+        name: The Spark job (SparkApplication) name.
+        tail_lines: Number of trailing log lines to return (default 200, max 2000).
+        namespace: K8s namespace. Uses default from kubeconfig when omitted.
+
+    Returns:
+        dict: Response containing ``name``, ``logs`` (str), ``lines`` (int) and
+        ``truncated`` (bool).
+
+    Raises:
+        ToolError: ``RESOURCE_NOT_FOUND`` if the job does not exist, or
+        ``VALIDATION_ERROR`` if its driver pod has not started yet or no longer exists.
+    """
+    ns_err = check_namespace_allowed(namespace)
+    if ns_err is not None:
+        return ns_err.model_dump()
+
+    name_err = validate_k8s_name(name, "job name")
+    if name_err is not None:
+        return name_err.model_dump()
+
+    if tail_lines < 1:
+        return ToolError(
+            error=f"tail_lines must be >= 1, got {tail_lines}",
+            error_code=ErrorCode.VALIDATION_ERROR,
+        ).model_dump()
+    tail_lines = min(tail_lines, MAX_TAIL_LINES)
+
+    try:
+        client = get_spark_client_for_namespace(namespace)
+        # The SDK looks the job up here, so a 404 at this point means the job is missing.
+        log_iter = client.get_job_logs(name, follow=False)
+    except ImportError as e:
+        return ToolError(error=str(e), error_code=ErrorCode.SDK_ERROR).model_dump()
+    except Exception as e:
+        logger.warning("get_spark_job_logs(%s) failed: %s", name, e, exc_info=True)
+        if is_k8s_not_found(e):
+            return ToolError(
+                error=f"Spark job '{name}' not found",
+                error_code=ErrorCode.RESOURCE_NOT_FOUND,
+                hint="Find jobs with list_spark_jobs()",
+            ).model_dump()
+        if _is_missing_server_pod(e):
+            return ToolError(
+                error=(
+                    f"Spark job '{name}' has no driver pod yet; it has likely not started. "
+                    f"Check get_spark_job(name='{name}')."
+                ),
+                error_code=ErrorCode.VALIDATION_ERROR,
+            ).model_dump()
+        return ToolError(
+            error=str(e), error_code=ErrorCode.SDK_ERROR, details=exception_details(e)
+        ).model_dump()
+
+    try:
+        return ToolResponse(data={"name": name, **_bounded_tail(log_iter, tail_lines)}).model_dump()
+    except Exception as e:
+        logger.warning("get_spark_job_logs(%s) failed reading logs: %s", name, e, exc_info=True)
+        # The job exists, so a 404 while reading means its driver pod is gone,
+        # which happens once a finished job's pods are cleaned up.
+        if _has_k8s_not_found(e):
+            return ToolError(
+                error=f"The driver pod of Spark job '{name}' no longer exists, so its logs are gone",
+                error_code=ErrorCode.VALIDATION_ERROR,
+                hint=f"Check the final state with get_spark_job(name='{name}')",
+            ).model_dump()
+        return ToolError(
+            error=str(e), error_code=ErrorCode.SDK_ERROR, details=exception_details(e)
         ).model_dump()

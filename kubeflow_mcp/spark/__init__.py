@@ -26,8 +26,13 @@ optional ``kubeflow[spark]`` extra; every SDK import in this module is lazy so
 the module — and its metadata — load even when the extra is absent.
 """
 
-from kubeflow_mcp.spark.api.discovery import get_spark_session, list_spark_sessions
-from kubeflow_mcp.spark.api.monitoring import get_spark_session_logs
+from kubeflow_mcp.spark.api.discovery import (
+    get_spark_job,
+    get_spark_session,
+    list_spark_jobs,
+    list_spark_sessions,
+)
+from kubeflow_mcp.spark.api.monitoring import get_spark_job_logs, get_spark_session_logs
 from kubeflow_mcp.spark.api.sessions import create_spark_session, delete_spark_session
 
 MODULE_INFO = {
@@ -45,6 +50,9 @@ TOOLS = [
     get_spark_session_logs,
     create_spark_session,
     delete_spark_session,
+    list_spark_jobs,
+    get_spark_job,
+    get_spark_job_logs,
 ]
 
 # ─── Tool metadata (owned by this client module) ───────────────────────────
@@ -60,6 +68,9 @@ CLIENT_TOOL_DESCRIPTIONS: dict[str, str] = {
     "delete_spark_session": (
         "[DESTRUCTIVE] Delete a SparkConnect session permanently. Set confirmed=True to execute."
     ),
+    "list_spark_jobs": "List Spark batch jobs (SparkApplications). Filter by status or namespace.",
+    "get_spark_job": "Get details of a Spark batch job (status, executors, driver pod).",
+    "get_spark_job_logs": "Get driver-pod logs from a Spark batch job. Pass tail_lines to bound output.",
 }
 
 CLIENT_TOOL_ANNOTATIONS: dict[str, dict] = {
@@ -103,6 +114,30 @@ CLIENT_TOOL_ANNOTATIONS: dict[str, dict] = {
         "openWorldHint": True,
         "tags": ["spark", "sessions", "lifecycle", "cleanup"],
     },
+    "list_spark_jobs": {
+        "title": "List Spark Batch Jobs",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+        "tags": ["discovery", "spark", "jobs"],
+    },
+    "get_spark_job": {
+        "title": "Get Spark Batch Job",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+        "tags": ["discovery", "spark", "jobs"],
+    },
+    "get_spark_job_logs": {
+        "title": "Get Spark Batch Job Logs",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+        "tags": ["monitoring", "spark", "jobs", "logs", "debug"],
+    },
 }
 
 # ─── Resources (owned by this client module) ───────────────────────────────
@@ -137,6 +172,9 @@ SPARK SESSIONS (SparkConnect):
 - get_spark_session(name) -> state, driver pod, service name, connect info
 - get_spark_session_logs(name) -> driver-pod logs (bounded; pass tail_lines). Streaming is not exposed
 - A session with no driver pod is still provisioning — poll get_spark_session(name) until state=Ready
+- list_spark_jobs(status=...) / get_spark_job(name) -> Spark batch jobs (SparkApplications):
+  Created, Running, Completed or Failed
+- get_spark_job_logs(name) -> batch job driver logs (bounded). Logs are gone once the driver pod is cleaned up
 - Read spark://guides/troubleshooting for SparkConnect error-to-fix tables""",
     },
     "training": {
