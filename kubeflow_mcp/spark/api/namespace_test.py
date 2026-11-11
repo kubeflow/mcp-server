@@ -33,6 +33,9 @@ SPARK_TOOL_CASES = [
     (discovery.list_spark_sessions, discovery, {}),
     (discovery.get_spark_session, discovery, {"name": "x"}),
     (monitoring.get_spark_session_logs, monitoring, {"name": "x"}),
+    (discovery.list_spark_jobs, discovery, {}),
+    (discovery.get_spark_job, discovery, {"name": "x"}),
+    (monitoring.get_spark_job_logs, monitoring, {"name": "x"}),
     (sessions.create_spark_session, sessions, {"name": "x", "confirmed": True}),
     (sessions.delete_spark_session, sessions, {"name": "x", "confirmed": True}),
 ]

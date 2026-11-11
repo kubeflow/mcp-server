@@ -86,10 +86,13 @@ PERSONAS: dict[str, dict[str, Any]] = {
             "get_training_events",
             "health_check",
             "get_server_logs",
-            # Spark (read-only session inspection)
+            # Spark (read-only session and batch job inspection)
             "list_spark_sessions",
             "get_spark_session",
             "get_spark_session_logs",
+            "list_spark_jobs",
+            "get_spark_job",
+            "get_spark_job_logs",
             # Pipelines
             "list_pipelines",
             "get_pipeline",

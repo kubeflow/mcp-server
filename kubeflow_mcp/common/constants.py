@@ -124,10 +124,15 @@ TOOL_PHASES: dict[str, list[str]] = {
         "delete_runtime",
     ],
     "health": ["health_check", "get_server_logs"],
-    # Spark client (kubeflow.spark.SparkClient) — SparkConnect session management.
-    "spark_discovery": ["list_spark_sessions", "get_spark_session"],
+    # Spark client (kubeflow.spark.SparkClient): SparkConnect sessions and batch jobs.
+    "spark_discovery": [
+        "list_spark_sessions",
+        "get_spark_session",
+        "list_spark_jobs",
+        "get_spark_job",
+    ],
     "spark_sessions": ["create_spark_session", "delete_spark_session"],
-    "spark_monitoring": ["get_spark_session_logs"],
+    "spark_monitoring": ["get_spark_session_logs", "get_spark_job_logs"],
     # Pipelines client (kubeflow.pipelines.PipelinesClient). Prefixed so the phases
     # never merge into the trainer's instruction sections.
     "pipelines_discovery": ["list_pipelines", "get_pipeline"],
@@ -198,6 +203,9 @@ TOOL_NEXT_HINTS: dict[str, str] = {
         "Use get_spark_session_logs(name) for driver output, or delete_spark_session(name) to tear down"
     ),
     "get_spark_session_logs": "If errors found, check the session state with get_spark_session(name)",
+    "list_spark_jobs": "Call get_spark_job(name) for details on a specific job",
+    "get_spark_job": "If it failed, read the driver output with get_spark_job_logs(name)",
+    "get_spark_job_logs": "Check the job status with get_spark_job(name)",
     "create_spark_session": (
         "Monitor with get_spark_session(name); attach with pyspark using the returned connect info"
     ),
@@ -296,19 +304,20 @@ SDK_COMPATIBILITY: dict[str, object] = {
                 "get_session",
                 "delete_session",
                 "get_session_logs",
+                "list_jobs",
+                "get_job",
+                "get_job_logs",
             ],
             "uncovered_methods": [
                 "connect(base_url=...)",  # attaching to an existing server returns a live
                 # pyspark SparkSession, which is not serializable over MCP; the data plane
                 # attaches directly using the connect info returned by create_spark_session.
                 "get_session_logs(follow=True)",  # streaming not exposed
-                # SparkApplication batch lifecycle is deferred to issue #331.
+                "get_job_logs(follow=True)",  # streaming not exposed
+                # The rest of the SparkApplication batch lifecycle is tracked in issue #331.
                 "submit_job",
-                "get_job",
-                "list_jobs",
                 "delete_job",
                 "wait_for_job_status",
-                "get_job_logs",
             ],
         },
         "feast": {

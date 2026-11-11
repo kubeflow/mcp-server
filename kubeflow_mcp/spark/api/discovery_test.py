@@ -20,7 +20,9 @@ The spark module imports the SDK lazily, so these run without the
 
 from unittest.mock import MagicMock, patch
 
-from kubeflow_mcp.conftest import make_spark_session_info
+import pytest
+
+from kubeflow_mcp.conftest import make_spark_job, make_spark_session_info
 from kubeflow_mcp.spark.api import discovery
 
 
@@ -123,3 +125,90 @@ class TestGetSession:
         mock_spark_client.get_session.return_value = make_spark_session_info("x", state="Failed")
         out = discovery.get_spark_session("x")
         assert "next_steps" in out["data"]
+
+
+class TestListJobs:
+    def test_list_serializes_jobs(self, mock_spark_client):
+        mock_spark_client.list_jobs.return_value = [
+            make_spark_job("a"),
+            make_spark_job("b", status="Failed"),
+        ]
+        out = discovery.list_spark_jobs()
+        assert out["success"] is True
+        assert out["data"]["total"] == 2
+        assert out["data"]["jobs"][0] == {
+            "name": "a",
+            "namespace": "default",
+            "status": "Running",
+            "num_executors": 2,
+            "driver_pod_name": "etl-nightly-driver",
+            "creation_timestamp": "2026-07-09T12:00:00",
+        }
+
+    def test_status_filter_is_case_insensitive(self, mock_spark_client):
+        mock_spark_client.list_jobs.return_value = [
+            make_spark_job("a"),
+            make_spark_job("b", status="Failed"),
+        ]
+        out = discovery.list_spark_jobs(status="failed")
+        assert [j["name"] for j in out["data"]["jobs"]] == ["b"]
+
+    def test_unknown_status_is_refused_before_sdk_call(self, mock_spark_client):
+        """A status the SDK never reports would silently return no jobs."""
+        out = discovery.list_spark_jobs(status="Succeeded")
+        assert out["error_code"] == "VALIDATION_ERROR"
+        assert "Completed" in out["error"]
+        mock_spark_client.list_jobs.assert_not_called()
+
+    def test_truncated_flag_set_when_limit_cuts(self, mock_spark_client):
+        mock_spark_client.list_jobs.return_value = [make_spark_job(f"j{i}") for i in range(5)]
+        out = discovery.list_spark_jobs(limit=2)
+        assert len(out["data"]["jobs"]) == 2
+        assert out["data"]["total"] == 5
+        assert out["data"]["truncated"] is True
+
+    def test_invalid_limit(self):
+        out = discovery.list_spark_jobs(limit=0)
+        assert out["error_code"] == "VALIDATION_ERROR"
+
+
+class TestGetJob:
+    def test_get_ok(self, mock_spark_client):
+        mock_spark_client.get_job.return_value = make_spark_job("x", status="Completed")
+        out = discovery.get_spark_job("x")
+        assert out["success"] is True
+        assert out["data"]["status"] == "Completed"
+        assert "next_steps" not in out["data"]
+
+    @pytest.mark.parametrize(
+        ("status", "tool"),
+        [
+            ("Failed", "get_spark_job_logs"),
+            ("Running", "get_spark_job"),
+            ("Created", "get_spark_job"),
+        ],
+    )
+    def test_next_steps_point_to_existing_read_tools(self, mock_spark_client, status, tool):
+        mock_spark_client.get_job.return_value = make_spark_job("x", status=status)
+        out = discovery.get_spark_job("x")
+        assert out["data"]["next_steps"][0].startswith(f"{tool}(name='x')")
+
+    def test_invalid_name_is_rejected_before_sdk_call(self, mock_spark_client):
+        out = discovery.get_spark_job("Not a valid/name")
+        assert out["error_code"] == "VALIDATION_ERROR"
+        mock_spark_client.get_job.assert_not_called()
+
+    def test_not_found_maps_to_resource_not_found(self, mock_spark_client):
+        from kubernetes.client.exceptions import ApiException
+
+        exc = RuntimeError("Spark job not found: default/missing")
+        exc.__cause__ = ApiException(status=404)
+        mock_spark_client.get_job.side_effect = exc
+        out = discovery.get_spark_job("missing")
+        assert out["error_code"] == "RESOURCE_NOT_FOUND"
+        assert "list_spark_jobs" in out["hint"]
+
+    def test_other_failure_stays_sdk_error(self, mock_spark_client):
+        mock_spark_client.get_job.side_effect = RuntimeError("Failed to get Spark job")
+        out = discovery.get_spark_job("x")
+        assert out["error_code"] == "SDK_ERROR"

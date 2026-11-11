@@ -220,6 +220,7 @@ Enabled with `--clients trainer,spark` (requires the `kubeflow[spark]` extra):
 | Discovery | `list_spark_sessions`, `get_spark_session` | Browse SparkConnect sessions |
 | Sessions | `create_spark_session`, `delete_spark_session` | Provision and tear down SparkConnect sessions (ownership-guarded) |
 | Monitoring | `get_spark_session_logs` | Read driver logs |
+| Batch jobs | `list_spark_jobs`, `get_spark_job`, `get_spark_job_logs` | Browse Spark batch jobs (SparkApplications) and read their driver logs |
 
 Sessions created through MCP are labelled `kubeflow-mcp/managed-by=mcp`. Non-admin
 personas may only delete sessions carrying that label; use the `platform-admin`
