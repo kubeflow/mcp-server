@@ -436,22 +436,58 @@ def check_compatibility() -> dict[str, Any]:
         ).model_dump()
 
 
+def _gpu_resources(allocatable: dict[str, Any]) -> dict[str, int]:
+    """Allocatable GPU extended resources on a node, by resource name.
+
+    Any ``<vendor>/gpu`` key counts (``nvidia.com/gpu``, ``amd.com/gpu``,
+    ``intel.com/gpu``), as do Intel's ``gpu.intel.com/*`` device-plugin names.
+    Quantities that are not whole numbers are ignored rather than failing the call.
+    """
+    found: dict[str, int] = {}
+    for name, quantity in allocatable.items():
+        if not (name.endswith("/gpu") or name.startswith("gpu.intel.com/")):
+            continue
+        try:
+            count = int(quantity)
+        except (TypeError, ValueError):
+            continue
+        if count > 0:
+            found[name] = count
+    return found
+
+
+def _node_is_ready(node: Any) -> bool:
+    """Whether the node reports a ``Ready=True`` condition."""
+    conditions = getattr(getattr(node, "status", None), "conditions", None) or []
+    return any(
+        getattr(c, "type", None) == "Ready" and getattr(c, "status", None) == "True"
+        for c in conditions
+    )
+
+
 def get_cluster_resources() -> dict[str, Any]:
     """Check cluster GPU and compute availability.
 
     Call this before submitting training jobs to verify resources exist.
 
+    Only GPUs a pod could be scheduled onto are counted: nodes that are not
+    Ready or are cordoned are listed, but their GPUs go to ``gpu_unavailable``.
+    Any ``<vendor>/gpu`` extended resource counts (``nvidia.com/gpu``,
+    ``amd.com/gpu``, ``intel.com/gpu``), as do Intel's ``gpu.intel.com/*`` ones.
+
     Returns:
         dict: Response containing:
 
-        - ``gpu_total`` (int): Total GPUs across all nodes
-        - ``nodes_with_gpu`` (int): Number of nodes with GPUs
+        - ``gpu_total`` (int): Schedulable GPUs across Ready, uncordoned nodes
+        - ``gpu_unavailable`` (int): GPUs on NotReady or cordoned nodes
+        - ``gpu_by_resource`` (dict): Schedulable GPUs per resource name
+        - ``nodes_with_gpu`` (int): Number of nodes with schedulable GPUs
         - ``node_count`` (int): Total node count
-        - ``nodes`` (list): Per-node details (name, memory, cpu, gpus)
+        - ``nodes`` (list): Per-node details (name, memory, cpu, ready, cordoned, gpus)
 
     Example:
         >>> get_cluster_resources()
-        {"data": {"gpu_total": 4, "nodes_with_gpu": 2, ...}}
+        {"data": {"gpu_total": 4, "gpu_by_resource": {"nvidia.com/gpu": 4}, ...}}
 
     Note:
         Returns ``gpu_total=0`` if no GPUs available - LLM fine-tuning requires GPUs.
@@ -462,32 +498,54 @@ def get_cluster_resources() -> dict[str, Any]:
         v1 = get_core_v1_api()
         nodes = v1.list_node(_request_timeout=K8S_TIMEOUT)
         gpu_total = 0
+        gpu_unavailable = 0
+        gpu_by_resource: dict[str, int] = {}
         node_info = []
 
         for node in nodes.items:
             alloc = node.status.allocatable or {}
-            gpu = int(alloc.get("nvidia.com/gpu", 0))
-            gpu_total += gpu
+            gpus = _gpu_resources(alloc)
+            gpu = sum(gpus.values())
+            ready = _node_is_ready(node)
+            cordoned = bool(getattr(node.spec, "unschedulable", False))
 
-            node_data = {
+            node_data: dict[str, Any] = {
                 "name": node.metadata.name,
                 "memory": alloc.get("memory"),
                 "cpu": alloc.get("cpu"),
+                "ready": ready,
+                "cordoned": cordoned,
             }
 
             if gpu > 0:
                 node_data["gpus"] = gpu
+                node_data["gpu_resources"] = gpus
+                if ready and not cordoned:
+                    gpu_total += gpu
+                    for resource, count in gpus.items():
+                        gpu_by_resource[resource] = gpu_by_resource.get(resource, 0) + count
+                else:
+                    gpu_unavailable += gpu
 
             node_info.append(node_data)
 
-        return ToolResponse(
-            data={
-                "gpu_total": gpu_total,
-                "nodes_with_gpu": sum(1 for n in node_info if n.get("gpus", 0) > 0),
-                "node_count": len(node_info),
-                "nodes": node_info,
-            }
-        ).model_dump()
+        data: dict[str, Any] = {
+            "gpu_total": gpu_total,
+            "gpu_unavailable": gpu_unavailable,
+            "gpu_by_resource": gpu_by_resource,
+            "nodes_with_gpu": sum(
+                1 for n in node_info if n.get("gpus", 0) > 0 and n["ready"] and not n["cordoned"]
+            ),
+            "node_count": len(node_info),
+            "nodes": node_info,
+        }
+        if gpu_total == 0 and gpu_unavailable > 0:
+            data["hint"] = (
+                f"{gpu_unavailable} GPU(s) exist but are on NotReady or cordoned nodes, "
+                "so no training pod can be scheduled on them right now"
+            )
+
+        return ToolResponse(data=data).model_dump()
 
     except Exception as e:
         return ToolError(
