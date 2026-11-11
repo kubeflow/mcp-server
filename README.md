@@ -414,3 +414,11 @@ make inspector TRANSPORT=sse      # Inspector + SSE (deprecated; start server se
 ## License
 
 Apache License 2.0 — see [LICENSE](LICENSE).
+
+## ✨ Contributors
+
+We couldn't have done it without these incredible people:
+
+<a href="https://github.com/kubeflow/mcp-server/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=kubeflow/mcp-server" />
+</a>
