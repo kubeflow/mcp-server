@@ -99,6 +99,35 @@ All three training tools (`fine_tune`, `run_custom_training`, `run_container_tra
 `get_training_logs(follow=True)` returns a static message. MCP is request/response — no streaming.
 **Workaround**: Poll with `get_training_logs(follow=False)` at intervals.
 
+### Cursor Log Read Limit
+
+`get_training_logs(name, since_line=0)` reads a bounded prefix of the requested
+step's active container logs: up to 10,000 complete lines or 8 MiB of content.
+The reader uses a non-preloaded Kubernetes response and closes it on completion,
+limit, or read failure. It may read ahead by one chunk (8 KiB) to detect the line
+limit, or one byte to detect the byte limit. This bounds client consumption; it
+does not impose a server-side limit on all Kubelet/proxy buffering or work.
+
+Echo `next_offset` as `since_line` to page through that prefix. A short page can
+reflect the response character budget and does not by itself mean EOF.
+When `truncated_by_guardrail=true`, `total_lines` counts only complete lines
+collected, not the full log size. `buffer_limit` and `buffer_limit_bytes` describe
+the two read budgets. An unfinished line at the byte limit is not returned or
+counted, so the available prefix can be shorter than 10,000 lines, even empty.
+
+When `stop_reason="buffer_limit"`, **stop polling this cursor and do not reset it
+to zero**. Later logs cannot be reached through this cursor window. This applies
+even when the supplied offset is at or beyond the available prefix. A limit is
+not a container restart; `log_reset` is returned only after observing EOF below
+the supplied offset. Exact-size logs that reach EOF do not report truncation.
+
+For recent output, identify the requested step's pod and container and use
+`kubectl logs -n <namespace> <pod> -c <container> --tail=1000 --limit-bytes=8388608`.
+For continuous output use an external streaming client. Changing `step` reads a
+different worker; it does not bypass the cap for the original worker. The MCP
+tool has no `container` argument. Non-cursor tail mode retains its existing SDK
+read path and should not be used as a bounded-download workaround.
+
 ### Suspended Jobs Show "Created" Status
 
 After `update_training_job(name, action="suspend", confirmed=True)`, status becomes "Created" not "Suspended". This is controller behavior.

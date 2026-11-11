@@ -17,12 +17,14 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from io import BytesIO
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 from kubeflow.trainer.constants import constants as trainer_constants
 from tests.common import TestCase
+from urllib3.response import HTTPResponse
 
 from kubeflow_mcp.common.failures import FAILURE_PATTERNS, extract_failure_hint
 from kubeflow_mcp.core.resilience import CircuitState, get_breaker
@@ -30,6 +32,7 @@ from kubeflow_mcp.core.server import _audit_wrap
 from kubeflow_mcp.trainer.api.monitoring import (
     MAX_CURSOR_CHARS,
     MAX_LINE_CHARS,
+    MAX_LOG_BUFFER_LINES,
     MAX_LOG_LINES,
     get_training_events,
     get_training_logs,
@@ -557,12 +560,84 @@ class TestGetTrainingLogs:
 
 
 class TestGetTrainingLogsCursor:
+    @pytest.fixture(autouse=True)
+    def cursor_api(self):
+        with (
+            patch(PATCH_CORE_V1) as core,
+            patch(PATCH_EFF_NS, return_value="default"),
+        ):
+            self.core = core.return_value
+            yield
+
+    def _set_logs(self, mock_client_fn, lines):
+        client = MagicMock()
+        client.get_job.return_value = SimpleNamespace(
+            steps=[SimpleNamespace(name="node-0", pod_name="job-node-0", status="Running")]
+        )
+        client.get_job_logs.side_effect = AssertionError("SDK eagerly loads logs")
+        mock_client_fn.return_value = client
+        self.core.read_namespaced_pod_log.side_effect = lambda **kwargs: HTTPResponse(
+            body=BytesIO("\n".join(lines).encode()), preload_content=False
+        )
+        return client
+
+    @pytest.mark.parametrize(
+        ("selected_pod", "previous_body", "expect_error"),
+        [
+            ("old-pod", b"", False),
+            ("new-pod", b"crash\n", True),
+            ("new-pod", b"x" * 9, True),
+        ],
+    )
+    @patch("kubeflow_mcp.trainer.api.monitoring.MAX_LOG_BUFFER_BYTES", 8)
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_cursor_fallback_reads_only_sdk_selected_pod(
+        self,
+        mock_client_fn: MagicMock,
+        _ns: MagicMock,
+        selected_pod: str,
+        previous_body: bytes,
+        expect_error: bool,
+    ) -> None:
+        step = SimpleNamespace(name="node-0", pod_name=selected_pod, status="Running")
+        mock_client_fn.return_value = _make_mock_client(get_job=SimpleNamespace(steps=[step]))
+        old = _trainjob_pod("my-job", "node", index=0, name="old-pod")
+        new = _trainjob_pod("my-job", "node", index=0, name="new-pod")
+        self.core.list_namespaced_pod.return_value = SimpleNamespace(items=[old, new])
+
+        def read_log(**kwargs: object) -> HTTPResponse:
+            body = (
+                (previous_body if kwargs["name"] == selected_pod else b"other pod")
+                if kwargs.get("previous")
+                else b""
+            )
+            return HTTPResponse(body=BytesIO(body), preload_content=False)
+
+        self.core.read_namespaced_pod_log.side_effect = read_log
+        result = get_training_logs("my-job", step="node-0", since_line=0)
+
+        assert result["success"] == (not expect_error)
+        if expect_error:
+            assert result["error_code"] == "VALIDATION_ERROR"
+            assert "cursor mode unavailable" in result["error"]
+        else:
+            assert result["data"]["logs"] == ""
+        previous = [
+            call.kwargs
+            for call in self.core.read_namespaced_pod_log.call_args_list
+            if call.kwargs.get("previous")
+        ]
+        assert len(previous) == 1
+        assert previous[0]["name"] == selected_pod
+        assert previous[0]["_preload_content"] is False
+
     @patch(PATCH_NS_CHECK, return_value=None)
     @patch(PATCH_CLIENT)
     def test_lines_past_1000_reachable(self, mock_client_fn, _ns):
         total = 1500
         lines = [f"log line {i}" for i in range(total)]
-        mock_client_fn.return_value = _make_mock_client(get_job_logs=lines)
+        self._set_logs(mock_client_fn, lines)
 
         res = get_training_logs("my-job", since_line=1100, max_lines=100)
         assert res["success"] is True
@@ -582,7 +657,7 @@ class TestGetTrainingLogsCursor:
     @patch(PATCH_CLIENT)
     def test_cursor_pagination_multi_step(self, mock_client_fn, _ns):
         lines = [f"line {i}" for i in range(500)]
-        mock_client_fn.return_value = _make_mock_client(get_job_logs=lines)
+        self._set_logs(mock_client_fn, lines)
 
         res1 = get_training_logs("my-job", since_line=0)
         assert res1["success"] is True
@@ -609,7 +684,7 @@ class TestGetTrainingLogsCursor:
     @patch(PATCH_CLIENT)
     def test_cursor_at_eof(self, mock_client_fn, _ns):
         lines = [f"line {i}" for i in range(50)]
-        mock_client_fn.return_value = _make_mock_client(get_job_logs=lines)
+        self._set_logs(mock_client_fn, lines)
 
         res = get_training_logs("my-job", since_line=50)
         assert res["success"] is True
@@ -623,7 +698,7 @@ class TestGetTrainingLogsCursor:
     @patch(PATCH_CLIENT)
     def test_cursor_log_reset(self, mock_client_fn, _ns):
         lines = [f"line {i}" for i in range(50)]
-        mock_client_fn.return_value = _make_mock_client(get_job_logs=lines)
+        self._set_logs(mock_client_fn, lines)
 
         res = get_training_logs("my-job", since_line=100)
         assert res["success"] is True
@@ -637,7 +712,7 @@ class TestGetTrainingLogsCursor:
     @patch(PATCH_CLIENT)
     def test_char_budget_stops_page(self, mock_client_fn, _ns):
         lines = ["x" * 1000 for _ in range(20)]
-        mock_client_fn.return_value = _make_mock_client(get_job_logs=lines)
+        self._set_logs(mock_client_fn, lines)
 
         res = get_training_logs("my-job", since_line=0, max_lines=20)
         assert res["success"] is True
@@ -650,7 +725,7 @@ class TestGetTrainingLogsCursor:
     @patch(PATCH_CLIENT)
     def test_long_line_crosses_budget_boundary_not_appended(self, mock_client_fn, _ns):
         lines = ["a" * 2000] * 4 + ["b" * 1500] + ["c" * 100]
-        mock_client_fn.return_value = _make_mock_client(get_job_logs=lines)
+        self._set_logs(mock_client_fn, lines)
 
         res = get_training_logs("my-job", since_line=0, max_lines=10)
         assert res["success"] is True
@@ -668,7 +743,7 @@ class TestGetTrainingLogsCursor:
     @patch(PATCH_CLIENT)
     def test_line_truncation(self, mock_client_fn, _ns):
         long_line = "a" * (MAX_LINE_CHARS + 500)
-        mock_client_fn.return_value = _make_mock_client(get_job_logs=[long_line])
+        self._set_logs(mock_client_fn, [long_line])
 
         res = get_training_logs("my-job", since_line=0)
         assert res["success"] is True
@@ -687,7 +762,7 @@ class TestGetTrainingLogsCursor:
     @patch(PATCH_CLIENT)
     def test_max_lines_clamping(self, mock_client_fn, _ns):
         lines = [f"line {i}" for i in range(1500)]
-        mock_client_fn.return_value = _make_mock_client(get_job_logs=lines)
+        self._set_logs(mock_client_fn, lines)
 
         res_zero = get_training_logs("my-job", since_line=0, max_lines=0)
         assert res_zero["success"] is True
@@ -709,12 +784,17 @@ class TestGetTrainingLogsCursor:
     def test_fallback_guard_fails_when_crash_logs_recovered(
         self, mock_client_fn, _ns, _eff_ns, mock_v1_fn, _validate
     ):
-        mock_client_fn.return_value = _make_mock_client(get_job_logs=[])
+        mock_client_fn.return_value = _make_mock_client(get_job=SimpleNamespace(steps=[]))
         pod = _trainjob_pod("crash-job", "node", index=0)
         mock_v1 = MagicMock()
         mock_v1.list_namespaced_pod.return_value = SimpleNamespace(items=[pod])
-        mock_client_fn.return_value.get_job.return_value = _job_for_pods([pod])
-        mock_v1.read_namespaced_pod_log.return_value = "previous crash output"
+        mock_client_fn.return_value.get_job.side_effect = [
+            SimpleNamespace(steps=[]),
+            _job_for_pods([pod]),
+        ]
+        mock_v1.read_namespaced_pod_log.return_value = HTTPResponse(
+            body=BytesIO(b"previous crash output"), preload_content=False
+        )
         mock_v1_fn.return_value = mock_v1
 
         res = get_training_logs("crash-job", step="node-0", since_line=0)
@@ -727,7 +807,7 @@ class TestGetTrainingLogsCursor:
     @patch(PATCH_NS_CHECK, return_value=None)
     @patch(PATCH_CLIENT)
     def test_fallback_guard_both_empty_returns_normal_empty(self, mock_client_fn, _ns, _eff_ns):
-        mock_client_fn.return_value = _make_mock_client(get_job_logs=[])
+        mock_client_fn.return_value = _make_mock_client(get_job=SimpleNamespace(steps=[]))
 
         res = get_training_logs("empty-job", since_line=0)
         assert res["success"] is True
@@ -741,7 +821,7 @@ class TestGetTrainingLogsCursor:
     def test_failure_hint_extracted_from_last_1000_lines(self, mock_client_fn, _ns):
         lines = [f"line {i}" for i in range(1200)]
         lines[50] = "RuntimeError: CUDA out of memory. Tried to allocate 4.00 GiB"
-        mock_client_fn.return_value = _make_mock_client(get_job_logs=lines)
+        self._set_logs(mock_client_fn, lines)
 
         res = get_training_logs("my-job", since_line=0, max_lines=100)
         assert res["success"] is True
@@ -752,6 +832,78 @@ class TestGetTrainingLogsCursor:
         assert res_with_hint["success"] is True
         assert "failure_hint" in res_with_hint["data"]
         assert res_with_hint["data"]["failure_hint"]["category"] == "OOM"
+
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_cursor_mode_stops_at_max_log_buffer_lines_guardrail(self, mock_client_fn, _ns):
+        self._set_logs(mock_client_fn, [f"line {i}" for i in range(15000)])
+
+        res = get_training_logs("runaway-job", since_line=0, max_lines=100)
+        assert res["success"] is True
+        assert res["data"]["total_lines"] == MAX_LOG_BUFFER_LINES
+        assert res["data"]["truncated_by_guardrail"] is True
+        assert res["data"]["buffer_limit"] == MAX_LOG_BUFFER_LINES
+
+        # Now test when since_line reaches the end of the buffer
+        res_end = get_training_logs(
+            "runaway-job",
+            since_line=MAX_LOG_BUFFER_LINES - 50,
+            max_lines=50,
+        )
+        assert res_end["success"] is True
+        assert res_end["data"]["lines"] == 50
+        assert res_end["data"]["next_offset"] == MAX_LOG_BUFFER_LINES
+        assert "Log buffer cap reached" in res_end["data"]["next_steps"][0]
+
+    @pytest.mark.parametrize("total", [9999, 10000, 10001])
+    @pytest.mark.parametrize("offset", [9950, 10000, 10001, 20000])
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_cursor_guardrail_boundaries(self, mock_client_fn, _ns, total, offset):
+        self._set_logs(mock_client_fn, ["x"] * total)
+        data = get_training_logs("job", since_line=offset, max_lines=50)["data"]
+        assert data["total_lines"] == min(total, MAX_LOG_BUFFER_LINES)
+        if total > MAX_LOG_BUFFER_LINES:
+            assert data["truncated_by_guardrail"] is True
+            assert data["buffer_limit"] == MAX_LOG_BUFFER_LINES
+            assert "log_reset" not in data
+            assert data["next_offset"] == max(offset, MAX_LOG_BUFFER_LINES)
+            assert data["stop_reason"] == "buffer_limit"
+            assert any("Stop polling this cursor" in hint for hint in data["next_steps"])
+        else:
+            assert "truncated_by_guardrail" not in data
+            assert "stop_reason" not in data
+            assert data.get("log_reset", False) is (offset > total)
+
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_guardrail_survives_growth_and_preserves_failure_hint(self, mock_client_fn, _ns):
+        lines = ["x"] * MAX_LOG_BUFFER_LINES + ["later"]
+        lines[MAX_LOG_BUFFER_LINES - 1] = "RuntimeError: CUDA out of memory"
+        self._set_logs(mock_client_fn, lines)
+        for added in (0, 1000):
+            lines.extend(["new"] * added)
+            data = get_training_logs("job", since_line=MAX_LOG_BUFFER_LINES)["data"]
+            assert data["next_offset"] == MAX_LOG_BUFFER_LINES
+            assert "log_reset" not in data
+            assert data["truncated_by_guardrail"] is True
+            assert data["stop_reason"] == "buffer_limit"
+            assert data["failure_hint"]["category"] == "OOM"
+            assert any("Stop polling this cursor" in hint for hint in data["next_steps"])
+
+    @patch("kubeflow_mcp.trainer.api.monitoring.MAX_LOG_BUFFER_BYTES", 8)
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_byte_guardrail_does_not_trigger_reset_or_crash_fallback(self, mock_client_fn, _ns):
+        self._set_logs(mock_client_fn, ["x" * 100])
+        data = get_training_logs("job", since_line=10)["data"]
+        assert data["lines"] == 0
+        assert data["total_lines"] == 0
+        assert data["next_offset"] == 10
+        assert data["buffer_limit_bytes"] == 8
+        assert data["stop_reason"] == "buffer_limit"
+        assert "log_reset" not in data
+        self.core.list_namespaced_pod.assert_not_called()
 
 
 # ─── get_training_events (tool-level) ────────────────────────────────────
@@ -1033,6 +1185,97 @@ class TestWaitForTraining:
         assert result["success"] is True
         assert result["data"]["status"] == "Unknown"
         assert result["data"]["reached"] is True
+
+    @staticmethod
+    def _sdk_like_wait(*statuses_seen, final=None):
+        """Mimic the SDK loop: run the callbacks on each poll, then return ``final``."""
+
+        def wait_for_job_status(name, status, timeout, polling_interval, callbacks=None):
+            for seen in statuses_seen:
+                for callback in callbacks or []:
+                    callback(SimpleNamespace(status=seen))
+            if final is None:
+                raise TimeoutError("timed out")
+            return SimpleNamespace(status=final)
+
+        return wait_for_job_status
+
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_stops_early_when_job_is_already_complete(self, mock_client_fn, _ns):
+        """Waiting for Running on a finished job must not run into the timeout."""
+        client = MagicMock()
+        client.wait_for_job_status.side_effect = self._sdk_like_wait("Complete", final=None)
+        mock_client_fn.return_value = client
+
+        result = wait_for_training("my-job", target_statuses="Running", timeout_seconds=600)
+
+        assert result["success"] is True
+        assert result["data"] == {
+            "job": "my-job",
+            "status": "Complete",
+            "reached": False,
+            "message": "Job is already 'Complete' and will not reach 'Running'",
+            "hint": "Use get_training_logs to read its output",
+        }
+
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_keeps_waiting_through_non_terminal_statuses(self, mock_client_fn, _ns):
+        client = MagicMock()
+        client.wait_for_job_status.side_effect = self._sdk_like_wait(
+            "Created", "Created", final="Running"
+        )
+        mock_client_fn.return_value = client
+
+        result = wait_for_training("my-job", target_statuses="Running")
+
+        assert result["data"]["reached"] is True
+        assert result["data"]["status"] == "Running"
+
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_complete_is_not_an_early_stop_when_it_is_a_target(self, mock_client_fn, _ns):
+        client = MagicMock()
+        client.wait_for_job_status.side_effect = self._sdk_like_wait("Complete", final="Complete")
+        mock_client_fn.return_value = client
+
+        result = wait_for_training("my-job", target_statuses=["Running", "Complete"])
+
+        assert result["data"]["reached"] is True
+        assert result["data"]["status"] == "Complete"
+
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_early_stop_works_with_the_real_sdk_poll_loop(self, mock_client_fn, _ns):
+        """Run the SDK's own wait loop (get_job stubbed) so the callback contract is checked."""
+        from kubeflow.trainer.backends.kubernetes.backend import KubernetesBackend
+
+        backend = SimpleNamespace(get_job=lambda name: SimpleNamespace(status="Complete"))
+        client = MagicMock()
+        client.wait_for_job_status.side_effect = lambda **kwargs: (
+            KubernetesBackend.wait_for_job_status(backend, **kwargs)
+        )
+        mock_client_fn.return_value = client
+
+        with patch("kubeflow.trainer.backends.kubernetes.backend.time.sleep") as sleep:
+            result = wait_for_training("my-job", target_statuses="Running", timeout_seconds=600)
+
+        assert result["data"]["status"] == "Complete"
+        assert result["data"]["reached"] is False
+        sleep.assert_not_called()
+
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_passes_a_status_callback_to_the_sdk(self, mock_client_fn, _ns):
+        client = MagicMock()
+        client.wait_for_job_status.return_value = SimpleNamespace(status="Complete")
+        mock_client_fn.return_value = client
+
+        wait_for_training("my-job")
+
+        callbacks = client.wait_for_job_status.call_args.kwargs["callbacks"]
+        assert len(callbacks) == 1 and callable(callbacks[0])
 
     @patch(PATCH_NS_CHECK)
     def test_namespace_denied(self, mock_ns_check):

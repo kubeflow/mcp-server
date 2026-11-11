@@ -139,6 +139,31 @@ def _inject_trainer_hf_home(hf_home_path: str):
                 if path and not any(e.name == "HF_HOME" for e in (cr.env or [])):
                     hf_env = IoK8sApiCoreV1EnvVar(name="HF_HOME", value=path)
                     cr.env = (cr.env or []) + [hf_env]
+
+                # Fix for top-level Hugging Face datasets (#32, #494):
+                # The SDK generates dataset.data_dir=/workspace/dataset/. (trailing /.)
+                # which causes torchtune dataset loading to fail.
+                # In SDK 0.5.0, TrainerArgs cannot be used with BuiltinTrainer options,
+                # so we adjust the torchtune CLI args directly on the returned CR.
+                if initializer and hasattr(initializer, "dataset") and initializer.dataset:
+                    storage_uri = getattr(initializer.dataset, "storage_uri", "") or ""
+                    if _should_apply_hf_dataset_workaround(storage_uri):
+                        norm_dataset_path = DATASET_PATH.replace("\\", "/")
+                        has_dataset_source = any(
+                            a.startswith("dataset.source=") for a in (cr.args or [])
+                        )
+                        cleaned: list[str] = []
+                        for a in cr.args or []:
+                            if a.startswith("dataset.data_dir="):
+                                if has_dataset_source:
+                                    cleaned.append(f"dataset.data_dir={norm_dataset_path}")
+                            else:
+                                cleaned.append(a)
+                        if not has_dataset_source:
+                            cleaned.append(f"dataset.source={norm_dataset_path}")
+                            cleaned.append("dataset.data_dir=null")
+                        cr.args = cleaned
+
                 return cr
 
             k8s_utils.get_trainer_cr_from_builtin_trainer = _patched
@@ -1161,13 +1186,9 @@ def fine_tune(
         if name:
             options.append(Name(name=name))
 
-        # Workaround for SDK bug where top-level HF datasets construct
-        # invalid torchtune dataset.data_dir=/workspace/dataset/.
-        # We override the torchtune CLI args directly via TrainerArgs.
-        if _should_apply_hf_dataset_workaround(dataset):
-            options.append(
-                TrainerArgs(args=[f"dataset.source={DATASET_PATH}", "dataset.data_dir=null"])
-            )
+        # Note: Top-level HF dataset torchtune CLI args are adjusted directly
+        # on BuiltinTrainer CR in _inject_trainer_hf_home, as SDK 0.5.0
+        # rejects TrainerArgs with BuiltinTrainer (#494).
 
         client = _get_client(namespace)
         initializer = _build_initializer(
