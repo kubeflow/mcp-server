@@ -20,7 +20,7 @@ tool at a time:
 
 - the tool annotations and the confirm gate agree with each other
 - a mutating tool called with ``confirmed=False`` returns a preview and sends
-  no write request to the Kubernetes API, in every tool mode
+  no write request to the Kubernetes or Kubeflow Pipelines API, in every tool mode
 - each persona exposes exactly its allowlist over MCP, and hidden tools cannot
   be called, in every tool mode
 """
@@ -88,7 +88,7 @@ async def test_every_mutating_tool_has_gate_arguments():
 
 
 @pytest.mark.parametrize("tool_name", sorted(GATE_ARGS))
-async def test_unconfirmed_call_previews_without_writing(tool_name, k8s):
+async def test_unconfirmed_call_previews_without_writing(tool_name, k8s, kfp):
     async with Client(create_server(clients=CLIENTS, persona="platform-admin")) as client:
         result = await client.call_tool(
             tool_name, {**GATE_ARGS[tool_name], "confirmed": False}, raise_on_error=False
@@ -96,6 +96,7 @@ async def test_unconfirmed_call_previews_without_writing(tool_name, k8s):
     body = payload(result)
 
     assert k8s.writes == [], f"{tool_name} wrote to the cluster before confirmation"
+    assert kfp.writes == [], f"{tool_name} wrote to Kubeflow Pipelines before confirmation"
     assert is_preview(tool_name, body), f"{tool_name} did not return a preview: {body}"
 
 
@@ -110,9 +111,22 @@ async def test_confirmed_call_does_write(k8s):
     assert any(method == "PATCH" for method, _ in k8s.writes), k8s.calls
 
 
+async def test_confirmed_pipeline_call_does_write(kfp):
+    """Control for the Kubeflow Pipelines fake, as above."""
+    if "stop_pipeline_run" not in GATE_ARGS:
+        pytest.skip("the pipelines client is not registered")
+    async with Client(create_server(clients=CLIENTS, persona="platform-admin")) as client:
+        await client.call_tool(
+            "stop_pipeline_run",
+            {**GATE_ARGS["stop_pipeline_run"], "confirmed": True},
+            raise_on_error=False,
+        )
+    assert any("terminate" in name for name in kfp.writes), kfp.calls
+
+
 @pytest.mark.parametrize("mode", PROXY_MODES)
 @pytest.mark.parametrize("tool_name", sorted(GATE_ARGS))
-async def test_proxied_unconfirmed_call_previews_without_writing(mode, tool_name, k8s):
+async def test_proxied_unconfirmed_call_previews_without_writing(mode, tool_name, k8s, kfp):
     """The gate must hold when a tool is reached through the execute_tool meta-tool."""
     async with Client(
         create_server(clients=CLIENTS, persona="platform-admin", mode=mode)
@@ -125,6 +139,7 @@ async def test_proxied_unconfirmed_call_previews_without_writing(mode, tool_name
     body = payload(result)
 
     assert k8s.writes == [], f"{mode}/{tool_name} wrote before confirmation"
+    assert kfp.writes == [], f"{mode}/{tool_name} wrote to Kubeflow Pipelines before confirmation"
     assert is_preview(tool_name, body), f"{mode}/{tool_name} did not return a preview: {body}"
 
 
@@ -159,18 +174,19 @@ def _hidden_calls(persona: str) -> list[tuple[str, dict[str, Any]]]:
 
 
 @pytest.mark.parametrize("persona", RESTRICTED_PERSONAS)
-async def test_hidden_tools_cannot_be_called(persona, k8s):
+async def test_hidden_tools_cannot_be_called(persona, k8s, kfp):
     async with Client(create_server(clients=CLIENTS, persona=persona)) as client:
         for name, args in _hidden_calls(persona):
             result = await client.call_tool(name, args, raise_on_error=False)
             assert result.is_error, f"{persona} could call hidden tool {name}"
     # No request at all: a hidden read-only tool must not read either.
     assert k8s.calls == []
+    assert kfp.calls == []
 
 
 @pytest.mark.parametrize("mode", PROXY_MODES)
 @pytest.mark.parametrize("persona", RESTRICTED_PERSONAS)
-async def test_proxied_hidden_tools_cannot_be_called(mode, persona, k8s):
+async def test_proxied_hidden_tools_cannot_be_called(mode, persona, k8s, kfp):
     async with Client(create_server(clients=CLIENTS, persona=persona, mode=mode)) as client:
         for name, args in _hidden_calls(persona):
             result = await client.call_tool(
@@ -179,3 +195,4 @@ async def test_proxied_hidden_tools_cannot_be_called(mode, persona, k8s):
             body = payload(result)
             assert result.is_error or "error" in body, f"{mode}/{persona} ran hidden {name}"
     assert k8s.calls == []
+    assert kfp.calls == []

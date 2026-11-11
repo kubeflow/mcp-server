@@ -19,6 +19,11 @@ from typing import Any
 # Minimal valid arguments that get each mutating tool as far as its preview.
 # A new mutating tool fails test_every_mutating_tool_has_gate_arguments until
 # it is added here, so the gate check cannot silently skip it.
+# Pipeline runs the KFP fake in conftest.py knows: one still running, so it can be
+# stopped, and one failed, so it can be retried. Run IDs must be UUIDs.
+RUNNING_RUN_ID = "00000000-0000-4000-8000-000000000001"
+FAILED_RUN_ID = "00000000-0000-4000-8000-000000000002"
+
 GATE_ARGS: dict[str, dict[str, Any]] = {
     "create_runtime": {"name": "rt-a", "spec": {"template": {}}},
     "create_spark_session": {"name": "spark-a"},
