@@ -466,7 +466,7 @@ def _fetch_packages_via_pod(runtime_name: str, runtime_obj: Any = None) -> dict[
         packages = []
         for line in logs.strip().splitlines():
             parts = line.split()
-            if len(parts) >= 2 and parts[0] not in ("Package", "---"):
+            if len(parts) >= 2 and parts[0] != "Package" and parts[0].strip("-"):
                 packages.append({"name": parts[0], "version": parts[1]})
         return {"packages": packages, "total": len(packages)}
 
