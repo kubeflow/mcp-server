@@ -25,6 +25,7 @@ RUNNING_RUN_ID = "00000000-0000-4000-8000-000000000001"
 FAILED_RUN_ID = "00000000-0000-4000-8000-000000000002"
 
 GATE_ARGS: dict[str, dict[str, Any]] = {
+    "create_pipeline_run": {"pipeline": "pipe-a", "namespace": "default"},
     "create_runtime": {"name": "rt-a", "spec": {"template": {}}},
     "create_spark_session": {"name": "spark-a"},
     "delete_runtime": {"name": "rt-a"},
@@ -32,8 +33,10 @@ GATE_ARGS: dict[str, dict[str, Any]] = {
     "delete_training_job": {"name": "job-a"},
     "fine_tune": {"model": "hf://google/gemma-2b", "dataset": "hf://tatsu-lab/alpaca"},
     "patch_runtime": {"name": "rt-a", "patch": {"metadata": {"labels": {"a": "b"}}}},
+    "retry_pipeline_run": {"run_id": FAILED_RUN_ID, "namespace": "default"},
     "run_container_training": {"image": "busybox:1.36"},
     "run_custom_training": {"script": "print('hi')"},
+    "stop_pipeline_run": {"run_id": RUNNING_RUN_ID, "namespace": "default"},
     "update_training_job": {"name": "job-a", "action": "suspend"},
 }
 
