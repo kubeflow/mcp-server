@@ -265,7 +265,10 @@ def _normalize_cpu(resources: dict[str, str] | None) -> dict[str, str] | None:
 
 
 def _validate_confirmation(confirmed: bool) -> ToolError | None:
-    """Generic execute_tool arguments are not coerced by the tool's MCP schema."""
+    """Guard direct Python callers passing non-boolean confirmation values.
+
+    MCP full mode and dynamic execute_tool validate and coerce arguments via Pydantic.
+    """
     if not isinstance(confirmed, bool):
         return ToolError(
             error="confirmed must be a boolean (false to preview, true to execute)",

@@ -49,6 +49,17 @@ def provisioned_session(mock_spark_client):
         yield mock_spark_client
 
 
+async def _call_spark_tool(client, mode: str, tool_name: str, arguments: dict):
+    """Call a Spark tool in either full mode or progressive/semantic execute_tool mode."""
+    if mode == "full":
+        return await client.call_tool(tool_name, arguments, raise_on_error=False)
+    return await client.call_tool(
+        "execute_tool",
+        {"tool_name": tool_name, "arguments": arguments},
+        raise_on_error=False,
+    )
+
+
 class TestConfirmationType:
     @pytest.mark.parametrize("tool", [sessions.create_spark_session, sessions.delete_spark_session])
     @pytest.mark.parametrize("value", ["false", "true", 0, 1, None, [], {}])
@@ -58,9 +69,9 @@ class TestConfirmationType:
         mock_spark_client.connect.assert_not_called()
         mock_spark_client.delete_session.assert_not_called()
 
-    @pytest.mark.parametrize("mode", ["progressive", "semantic"])
+    @pytest.mark.parametrize("mode", ["full", "progressive", "semantic"])
     @pytest.mark.parametrize("tool_name", ["create_spark_session", "delete_spark_session"])
-    async def test_string_false_is_refused_over_mcp(
+    async def test_string_false_previews_without_writing_over_mcp(
         self, mock_spark_client, spark_persona, mode, tool_name
     ):
         from fastmcp import Client
@@ -68,18 +79,38 @@ class TestConfirmationType:
         from kubeflow_mcp.core.server import create_server
 
         spark_persona("data-scientist")
-        async with Client(
-            create_server(clients=["spark"], persona="data-scientist", mode=mode)
-        ) as client:
-            out = await client.call_tool(
-                "execute_tool",
-                {
-                    "tool_name": tool_name,
-                    "arguments": {"name": "etl", "namespace": "default", "confirmed": "false"},
-                },
-                raise_on_error=False,
-            )
-        assert out.structured_content["error_code"] == "VALIDATION_ERROR"
+        args = {"name": "etl", "namespace": "default", "confirmed": "false"}
+        with patch.object(sessions, "get_spark_session_ownership", return_value="managed"):
+            async with Client(
+                create_server(clients=["spark"], persona="data-scientist", mode=mode)
+            ) as client:
+                out = await _call_spark_tool(client, mode, tool_name, args)
+        assert out.structured_content["status"] == "preview"
+        mock_spark_client.connect.assert_not_called()
+        mock_spark_client.delete_session.assert_not_called()
+
+    @pytest.mark.parametrize("mode", ["full", "progressive", "semantic"])
+    @pytest.mark.parametrize("tool_name", ["create_spark_session", "delete_spark_session"])
+    @pytest.mark.parametrize("bad_value", ["maybe", "false ", []])
+    async def test_invalid_confirmation_string_is_refused_over_mcp(
+        self, mock_spark_client, spark_persona, mode, tool_name, bad_value
+    ):
+        from fastmcp import Client
+
+        from kubeflow_mcp.core.server import create_server
+
+        spark_persona("data-scientist")
+        args = {"name": "etl", "namespace": "default", "confirmed": bad_value}
+        with patch.object(sessions, "get_spark_session_ownership") as ownership:
+            async with Client(
+                create_server(clients=["spark"], persona="data-scientist", mode=mode)
+            ) as client:
+                out = await _call_spark_tool(client, mode, tool_name, args)
+        if mode == "full":
+            assert out.is_error is True
+        else:
+            assert out.structured_content["error_code"] == "VALIDATION_ERROR"
+        ownership.assert_not_called()
         mock_spark_client.connect.assert_not_called()
         mock_spark_client.delete_session.assert_not_called()
 
