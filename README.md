@@ -101,14 +101,18 @@ Container and Kubernetes probes are available without MCP authentication:
 
 ```text
 GET /health  # liveness: the server process is accepting HTTP requests
-GET /ready   # readiness: configured clients imported and packaged resources loaded
+GET /ready   # readiness: client modules loaded, packaged resources present, and K8s/CRD/RBAC startup diagnostics pass
 ```
 
-`/ready` returns 200 only when both `clients_ready` and `resources_ready` are true. It does
-not contact Kubernetes or other APIs, so it is not a live dependency check. A missing
-packaged resource Markdown file keeps `/ready` at 503 even though `/health` and registered
-tools remain available; check the server logs and package contents rather than cluster
-dependencies.
+`/ready` returns HTTP 200 `{"status": "ready"}` when configured client modules are loaded,
+packaged resources are present, and readiness diagnostics (Kubernetes API reachability,
+Trainer CRD registration/version, and essential RBAC permissions scoped to the configured persona) succeed.
+The route dynamically refreshes these checks on probe invocations so the pod recovers if cluster dependencies become available after startup.
+
+If diagnostics or resource loading fail, `/ready` returns HTTP 503 `{"status": "not_ready"}`
+and logs failure details (check, resource, verb, namespace, category) to server logs
+to avoid exposing cluster internals over unauthenticated HTTP. For authenticated, on-demand
+re-evaluation by AI agents during runtime, use the `check_compatibility()` tool.
 
 **Environment variables**
 
@@ -152,7 +156,7 @@ Once connected, your AI agent can run a complete training workflow through natur
 ```
 User: "Fine-tune gemma-2b on the alpaca dataset"
 
-Agent calls: check_compatibility()        → ✅ K8s 1.29, Trainer CRD installed
+Agent calls: check_compatibility()        → ✅ K8s 1.29, Trainer CRD installed, RBAC verified
 Agent calls: get_cluster_resources()      → 4x A100 GPUs available
 Agent calls: estimate_resources("google/gemma-2b") → needs ~16GB GPU, 1x A100
 Agent calls: list_runtimes()              → torchtune-llama, torchtune-gemma, ...
