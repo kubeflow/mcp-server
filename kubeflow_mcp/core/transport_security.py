@@ -86,13 +86,15 @@ def build_transport_security_settings(
     )
 
 
-# Paths that are exempt from Host/Origin validation. These probes are
+# Paths that are exempt from Host/Origin validation. These endpoints are
 # unauthenticated by design, return no sensitive data, and must respond
 # regardless of the Host header a caller uses to reach them — notably
 # kubelet, which sends liveness/readiness probes with `Host: <pod-ip>:<port>`
 # rather than a loopback name. Rejecting those probes causes CrashLoopBackOff
-# in any Kubernetes/OpenShift deployment (see issue #91).
-_EXEMPT_PATHS = frozenset({"/health", "/ready"})
+# in any Kubernetes/OpenShift deployment (see issue #91). Prometheus reaches
+# /metrics the same way, by pod IP, so a scrape is rejected with 421 without
+# the same exemption.
+_EXEMPT_PATHS = frozenset({"/health", "/ready", "/metrics"})
 
 
 class DNSRebindingProtectionMiddleware:
