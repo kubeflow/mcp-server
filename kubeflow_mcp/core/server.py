@@ -39,6 +39,7 @@ from kubeflow_mcp.common.constants import (
     ErrorCode,
     record_tool_result,
 )
+from kubeflow_mcp.common.types import ToolError
 from kubeflow_mcp.core.dynamic_tools import get_mode_tools, init_dynamic_tools
 from kubeflow_mcp.core.health import (
     HEALTH_TOOL_ANNOTATIONS,
@@ -201,10 +202,11 @@ def _audit_wrap(tool_func, *, is_dynamic_execute_tool: bool = False):
                 span.set_attribute("tool.success", False)
                 span.set_attribute("tool.duration_ms", duration_ms)
                 logger.warning("rate_limited", extra={"tool": tool_name})
-                return {
-                    "error": "Rate limit exceeded. Retry after a brief pause.",
-                    "error_code": ErrorCode.RATE_LIMITED,
-                }
+                return ToolError(
+                    error="Rate limit exceeded. Retry after a brief pause.",
+                    error_code=ErrorCode.RATE_LIMITED,
+                    tool=tool_name,
+                ).model_dump()
 
             # In dynamic modes, execute_tool delegates to target tools that manage
             # their own per-tool circuit breakers. Bypass the outer breaker to prevent
@@ -216,10 +218,11 @@ def _audit_wrap(tool_func, *, is_dynamic_execute_tool: bool = False):
                 span.set_attribute("tool.success", False)
                 span.set_attribute("tool.duration_ms", duration_ms)
                 logger.warning("circuit_open", extra={"tool": tool_name})
-                return {
-                    "error": f"Circuit breaker open for '{tool_name}' — K8s API may be degraded. Retries automatically after recovery timeout.",
-                    "error_code": ErrorCode.CIRCUIT_OPEN,
-                }
+                return ToolError(
+                    error=f"Circuit breaker open for '{tool_name}' — K8s API may be degraded. Retries automatically after recovery timeout.",
+                    error_code=ErrorCode.CIRCUIT_OPEN,
+                    tool=tool_name,
+                ).model_dump()
 
             try:
                 result = tool_func(**kwargs)
@@ -514,7 +517,7 @@ def create_server(  # noqa: C901
         raise ValueError(f"Invalid mode '{mode}'. Must be one of: {', '.join(valid_modes)}")
 
     if mode in ("progressive", "semantic"):
-        init_dynamic_tools(allowed_funcs, all_descriptions)
+        init_dynamic_tools(allowed_funcs, all_descriptions, mode=mode)
         meta_tools = get_mode_tools(mode)
 
         for meta_func in meta_tools:
