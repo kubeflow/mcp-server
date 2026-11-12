@@ -18,10 +18,17 @@ Each client module declares a ``CLIENT_RESOURCES`` dict mapping MCP URIs to
 ``(relative_path, description)`` tuples.  Resource files live alongside the
 client module (e.g. ``trainer/resources/*.md``).
 
+Client modules may additionally declare ``CLIENT_SKILLS`` (SEP-2640 Agent
+Skills): each skill maps ``skill://`` URIs onto existing ``CLIENT_RESOURCES``
+URIs.  Aliased URIs share the same cached content, and an aggregate
+``skill://index.json`` resource lists every skill the server exposes.
+
 Content is cached at server startup — no repeated disk reads.
 """
 
+import json
 import logging
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -29,6 +36,27 @@ if TYPE_CHECKING:
     from fastmcp import FastMCP
 
 logger = logging.getLogger(__name__)
+
+SKILL_INDEX_URI = "skill://index.json"
+
+
+def _make_handler(cache: dict[str, str], uri: str, description: str, name: str | None = None):
+    def handler() -> str:
+        return cache[uri]
+
+    handler.__doc__ = description
+    handler.__name__ = name or re.sub(r"\W", "_", uri.rsplit("/", 1)[-1])
+    return handler
+
+
+def _alias_name(uri: str) -> str:
+    """Resource name for a skill alias, e.g. ``skill://kubeflow/x`` -> ``kubeflow_x``.
+
+    The source resource is already named after the last path segment, so an
+    alias that reused it would be indistinguishable from the source in a
+    resource list except by URI.
+    """
+    return re.sub(r"\W", "_", uri.split("://", 1)[-1])
 
 
 def register_resources(mcp: "FastMCP", loaded_modules: dict[str, Any]) -> bool:
@@ -39,6 +67,8 @@ def register_resources(mcp: "FastMCP", loaded_modules: dict[str, Any]) -> bool:
     """
     cache: dict[str, str] = {}
     complete = True
+    descriptions: dict[str, str] = {}
+    skills_index: list[dict[str, Any]] = []
 
     for module in loaded_modules.values():
         client_resources = getattr(module, "CLIENT_RESOURCES", {})
@@ -57,17 +87,63 @@ def register_resources(mcp: "FastMCP", loaded_modules: dict[str, Any]) -> bool:
                 continue
 
             cache[uri] = path.read_text(encoding="utf-8")
-
-            def _make_handler(cached_uri: str, desc: str):
-                def handler() -> str:
-                    return cache[cached_uri]
-
-                handler.__doc__ = desc
-                handler.__name__ = cached_uri.rsplit("/", 1)[-1].replace("-", "_")
-                return handler
-
-            mcp.resource(uri)(_make_handler(uri, description))
+            descriptions[uri] = description
+            mcp.resource(uri)(_make_handler(cache, uri, description))
             logger.debug(f"Registered resource: {uri}")
+
+        # Agent Skills (SEP-2640): alias guide content under skill:// URIs.
+        for skill_name, spec in getattr(module, "CLIENT_SKILLS", {}).items():
+            skill_resources: list[dict[str, str]] = []
+            for skill_uri, source_uri in spec.get("aliases", {}).items():
+                if source_uri not in cache:
+                    complete = False
+                    logger.warning(
+                        f"Skill alias {skill_uri} points to unknown or unloaded "
+                        f"resource {source_uri}; skipping"
+                    )
+                    continue
+                if skill_uri in cache:
+                    complete = False
+                    logger.warning(
+                        f"Skill alias {skill_uri} from skill {skill_name!r} is already "
+                        f"registered; skipping duplicate"
+                    )
+                    continue
+                cache[skill_uri] = cache[source_uri]
+                description = descriptions[source_uri]
+                mcp.resource(skill_uri)(
+                    _make_handler(
+                        cache,
+                        skill_uri,
+                        f"{description} (Agent Skill alias of {source_uri})",
+                        name=_alias_name(skill_uri),
+                    )
+                )
+                skill_resources.append({"uri": skill_uri, "description": description})
+                logger.debug(f"Registered skill alias: {skill_uri} -> {source_uri}")
+            if not skill_resources:
+                logger.warning(
+                    f"Skill {skill_name!r} has no resolvable aliases; omitting from index"
+                )
+                continue
+            skills_index.append(
+                {
+                    "name": skill_name,
+                    "description": spec.get("description", ""),
+                    "resources": skill_resources,
+                }
+            )
+
+    if skills_index:
+        cache[SKILL_INDEX_URI] = json.dumps({"version": 1, "skills": skills_index}, indent=2)
+        mcp.resource(SKILL_INDEX_URI, mime_type="application/json")(
+            _make_handler(
+                cache,
+                SKILL_INDEX_URI,
+                "Index of Agent Skills served by this server (SEP-2640).",
+            )
+        )
+        logger.debug(f"Registered skill index: {SKILL_INDEX_URI}")
 
     logger.info(f"Registered {len(cache)} MCP resources")
     return complete

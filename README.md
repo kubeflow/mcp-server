@@ -197,6 +197,53 @@ claude mcp add kubeflow -- kubeflow-mcp serve
 
 </details>
 
+### Agent Skill
+
+The repo ships an [Agent Skill](https://agentskills.io) at
+`skills/kubeflow-training/` that teaches an agent the Plan → Discover → Train →
+Monitor workflow and points it at the guides this server publishes as
+`skill://` resources. Agent hosts discover skills from their own skill
+directories (for example Claude Code reads `.claude/skills/<name>/SKILL.md`),
+so installing the server does not install the skill. Copy or symlink the
+skill directory into your host's skill directory from wherever you got the
+server:
+
+<details>
+<summary>From a source checkout</summary>
+
+```bash
+ln -s "$PWD/skills/kubeflow-training" .claude/skills/kubeflow-training
+```
+
+</details>
+
+<details>
+<summary>From PyPI</summary>
+
+The skill ships inside the package as `kubeflow_mcp/skills/kubeflow-training`.
+Print its location, then copy it:
+
+```bash
+python -c "from importlib.resources import files; print(files('kubeflow_mcp') / 'skills' / 'kubeflow-training')"
+```
+
+</details>
+
+<details>
+<summary>From the container image</summary>
+
+```bash
+docker create --name kubeflow-mcp-skill ghcr.io/kubeflow/mcp-server:latest
+docker cp kubeflow-mcp-skill:/app/.venv/lib/python3.12/site-packages/kubeflow_mcp/skills/kubeflow-training .claude/skills/
+docker rm kubeflow-mcp-skill
+```
+
+</details>
+
+The skill's `mcp.json` starts the server with `--persona data-scientist`,
+which the training tools require; the default `readonly` persona can only plan
+and monitor.
+
 ## Tools
 
 23 tools organized by workflow phase:
