@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""OpenTelemetry tracing tests."""
+"""OpenTelemetry tracing and metrics tests."""
 
 from __future__ import annotations
 
@@ -316,6 +316,259 @@ def test_setup_tracing_reuses_existing_provider(monkeypatch: pytest.MonkeyPatch)
     assert calls["endpoint"] == "http://collector:4318/v1/traces"
     assert "processor" in calls
     assert "set_called" not in calls
+
+
+class _FakeMeterProvider:
+    """Stands in for the SDK MeterProvider in metrics setup tests."""
+
+    def __init__(self, resource: object = None, metric_readers: list | None = None) -> None:
+        self.resource = resource
+        self.metric_readers = list(metric_readers or [])
+
+    def shutdown(self) -> None:
+        pass
+
+
+class _ReaderSpy:
+    """Counts reader construction, which has global side effects in the real SDK."""
+
+    def __init__(self) -> None:
+        self.prometheus_built = 0
+        self.periodic_built = 0
+
+    @property
+    def total(self) -> int:
+        return self.prometheus_built + self.periodic_built
+
+
+def _install_fake_metrics(
+    monkeypatch: pytest.MonkeyPatch,
+    calls: dict[str, object],
+    *,
+    prometheus_available: bool = True,
+    current_provider: object | None = None,
+) -> _ReaderSpy:
+    """Point the metrics setup path at fakes and reset module state."""
+    spy = _ReaderSpy()
+
+    class _FakePrometheusReader:
+        def __init__(self) -> None:
+            spy.prometheus_built += 1
+
+    class _FakePeriodicReader:
+        def __init__(self, exporter: object, **kwargs) -> None:
+            self.exporter = exporter
+            spy.periodic_built += 1
+
+    class _FakeMetricExporter:
+        def __init__(self, endpoint: str, **kwargs) -> None:
+            self.endpoint = endpoint
+            self.timeout = kwargs.get("timeout")
+
+    class _FakeResource:
+        @staticmethod
+        def create(data: dict[str, str]) -> dict[str, str]:
+            return data
+
+    fake_metrics = SimpleNamespace(
+        get_meter_provider=lambda: current_provider if current_provider is not None else object(),
+        set_meter_provider=lambda provider: calls.update({"provider": provider}),
+        get_meter=lambda name: f"meter:{name}",
+    )
+
+    monkeypatch.setattr(telemetry, "_METRICS_AVAILABLE", True)
+    monkeypatch.setattr(telemetry, "_PROMETHEUS_AVAILABLE", prometheus_available)
+    monkeypatch.setattr(telemetry, "_metrics_initialized", False)
+    monkeypatch.setattr(telemetry, "_configured_metrics_endpoint", None, raising=False)
+    monkeypatch.setattr(telemetry, "_prometheus_enabled", False, raising=False)
+    monkeypatch.setattr(telemetry, "Resource", _FakeResource, raising=False)
+    monkeypatch.setattr(telemetry, "MeterProvider", _FakeMeterProvider, raising=False)
+    monkeypatch.setattr(telemetry, "PrometheusMetricReader", _FakePrometheusReader, raising=False)
+    monkeypatch.setattr(
+        telemetry, "PeriodicExportingMetricReader", _FakePeriodicReader, raising=False
+    )
+    monkeypatch.setattr(telemetry, "OTLPMetricExporter", _FakeMetricExporter, raising=False)
+    monkeypatch.setattr(telemetry, "_otel_api_metrics", fake_metrics, raising=False)
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+    return spy
+
+
+def test_get_meter_returns_api_meter() -> None:
+    """get_meter() defers to the OTel API, which no-ops until a provider is set."""
+    meter = telemetry.get_meter("test")
+    counter = meter.create_counter("kubeflow_mcp_unit_test_total")
+    counter.add(1, {"tool": "x"})
+    meter.create_histogram("kubeflow_mcp_unit_test_duration").record(1.5)
+
+
+def test_setup_metrics_noop_when_metrics_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(telemetry, "_METRICS_AVAILABLE", False)
+    monkeypatch.setattr(telemetry, "_metrics_initialized", False)
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+    assert telemetry.setup_metrics() is False
+    assert telemetry.metrics_enabled() is False
+
+
+def test_setup_metrics_logs_install_command_when_metrics_unavailable(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(telemetry, "_METRICS_AVAILABLE", False)
+    monkeypatch.setattr(telemetry, "_metrics_initialized", False)
+
+    with caplog.at_level(logging.WARNING, logger=telemetry.__name__):
+        assert telemetry.setup_metrics("http://collector:4318/v1/metrics") is False
+
+    assert "uv sync --group otel" in caplog.text
+
+
+def test_setup_metrics_returns_false_when_no_readers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No OTLP endpoint and Prometheus disabled means there is nothing to configure."""
+    calls: dict[str, object] = {}
+    spy = _install_fake_metrics(monkeypatch, calls)
+
+    assert telemetry.setup_metrics(enable_prometheus=False) is False
+    assert "provider" not in calls
+    assert spy.total == 0
+    assert telemetry.metrics_enabled() is False
+
+
+def test_setup_metrics_configures_prometheus_reader(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: dict[str, object] = {}
+    spy = _install_fake_metrics(monkeypatch, calls)
+
+    assert telemetry.setup_metrics(service_name="kubeflow-mcp") is True
+
+    provider = calls["provider"]
+    assert isinstance(provider, _FakeMeterProvider)
+    assert provider.resource == {"service.name": "kubeflow-mcp"}
+    assert spy.prometheus_built == 1
+    assert spy.periodic_built == 0
+    assert telemetry.metrics_enabled() is True
+    assert telemetry.prometheus_enabled() is True
+
+
+def test_setup_metrics_adds_otlp_reader_with_metrics_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A base URL gets the OTLP metrics path, not the trace path."""
+    calls: dict[str, object] = {}
+    spy = _install_fake_metrics(monkeypatch, calls)
+
+    assert telemetry.setup_metrics("http://collector:4318") is True
+
+    readers = calls["provider"].metric_readers
+    assert spy.prometheus_built == 1
+    assert spy.periodic_built == 1
+    exporter = readers[1].exporter
+    assert exporter.endpoint == "http://collector:4318/v1/metrics"
+    assert exporter.timeout == 2
+
+
+def test_setup_metrics_falls_back_to_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: dict[str, object] = {}
+    _install_fake_metrics(monkeypatch, calls, prometheus_available=False)
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://env-collector:4318")
+
+    assert telemetry.setup_metrics(endpoint=None) is True
+
+    readers = calls["provider"].metric_readers
+    assert len(readers) == 1
+    assert readers[0].exporter.endpoint == "http://env-collector:4318/v1/metrics"
+    assert telemetry.prometheus_enabled() is False
+
+
+def test_setup_metrics_warns_when_prometheus_exporter_missing(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    calls: dict[str, object] = {}
+    _install_fake_metrics(monkeypatch, calls, prometheus_available=False)
+
+    with caplog.at_level(logging.WARNING, logger=telemetry.__name__):
+        assert telemetry.setup_metrics() is False
+
+    assert "uv sync --group otel" in caplog.text
+
+
+def test_setup_metrics_is_idempotent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A second call does not build a second provider or more readers."""
+    calls: dict[str, object] = {}
+    spy = _install_fake_metrics(monkeypatch, calls)
+
+    assert telemetry.setup_metrics("http://collector:4318") is True
+    first_provider = calls["provider"]
+    built_once = spy.total
+
+    assert telemetry.setup_metrics("http://other-collector:4318") is True
+    assert calls["provider"] is first_provider
+    assert spy.total == built_once
+
+
+def test_setup_metrics_warns_on_conflicting_endpoint(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    calls: dict[str, object] = {}
+    _install_fake_metrics(monkeypatch, calls)
+
+    assert telemetry.setup_metrics("http://collector:4318") is True
+    with caplog.at_level(logging.WARNING, logger=telemetry.__name__):
+        assert telemetry.setup_metrics("http://other-collector:4318") is True
+
+    assert "Metrics already initialized" in caplog.text
+
+
+def test_setup_metrics_keeps_existing_global_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An SDK meter provider installed by the host application is left alone."""
+    calls: dict[str, object] = {}
+    existing = _FakeMeterProvider()
+    _install_fake_metrics(monkeypatch, calls, current_provider=existing)
+
+    assert telemetry.setup_metrics("http://collector:4318") is True
+    assert "provider" not in calls
+    assert telemetry.metrics_enabled() is True
+    assert telemetry.prometheus_enabled() is False
+
+
+def test_setup_metrics_builds_no_readers_when_provider_exists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Readers have global side effects, so none may be built before the bail-out.
+
+    PrometheusMetricReader registers a collector in the default prometheus_client
+    registry and PeriodicExportingMetricReader starts an export thread; building
+    either and then returning early would leak it.
+    """
+    calls: dict[str, object] = {}
+    spy = _install_fake_metrics(monkeypatch, calls, current_provider=_FakeMeterProvider())
+
+    assert telemetry.setup_metrics("http://collector:4318") is True
+    assert spy.total == 0
+
+
+def test_setup_metrics_rejects_invalid_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: dict[str, object] = {}
+    _install_fake_metrics(monkeypatch, calls)
+
+    with pytest.raises(ValueError, match="Invalid OpenTelemetry endpoint"):
+        telemetry.setup_metrics("localhost:4318/v1/metrics")
+
+
+def test_resolve_endpoint_applies_signal_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Both signals share one resolver, differing only in the appended path."""
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+    assert (
+        telemetry._resolve_endpoint("https://collector.example.com", "/v1/metrics")
+        == "https://collector.example.com/v1/metrics"
+    )
+    assert (
+        telemetry._resolve_endpoint("https://collector.example.com", "/v1/traces")
+        == "https://collector.example.com/v1/traces"
+    )
+
+
+def test_resolve_endpoint_reads_env_var_for_either_signal(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://env-collector:4318")
+    assert (
+        telemetry._resolve_endpoint(None, "/v1/metrics") == "http://env-collector:4318/v1/metrics"
+    )
+    assert telemetry._resolve_endpoint("  ", "/v1/traces") == "http://env-collector:4318/v1/traces"
 
 
 def test_audit_wrap_sets_span_attributes_on_success(monkeypatch: pytest.MonkeyPatch) -> None:
