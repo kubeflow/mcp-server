@@ -677,7 +677,9 @@ def pre_flight(
     cluster_data = cluster.get("data", cluster)
     result["cluster"] = cluster_data
 
-    gpu_total = cluster_data.get("gpu_total", 0)
+    # gpu_total is absent when the node list failed (e.g. an RBAC 403), so the
+    # GPU count is unknown rather than zero.
+    gpu_total = cluster_data.get("gpu_total")
     if gpu_total == 0:
         next_steps.append("No GPUs detected — LLM fine-tuning requires GPUs")
 
@@ -705,7 +707,13 @@ def pre_flight(
     tool_selection: dict[str, Any] = {}
     recommendations: list[str] = []
 
-    if has_torchtune and gpu_total > 0:
+    if runtime_names and gpu_total is None:
+        tool_selection["recommended"] = None
+        tool_selection["reason"] = "GPU availability unknown — cluster resources could not be read"
+        next_steps.append(
+            "Could not read cluster resources (see cluster.error) — GPU availability unknown"
+        )
+    elif has_torchtune and gpu_total > 0:
         tool_selection["recommended"] = "fine_tune"
         tool_selection["reason"] = "torchtune runtime + GPUs available"
         next_steps.append("torchtune runtime available — fine_tune() is supported")
