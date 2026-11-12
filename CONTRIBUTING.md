@@ -132,7 +132,7 @@ Read [`docs/CONVENTIONS.md`](docs/CONVENTIONS.md) first — reference implementa
 
 ## AI Agent Resources
 
-[`.agents/README.md`](.agents/README.md) documents the shared `review-pr` skill and its subagent
+[`.agents/README.md`](.agents/README.md) documents the shared `review-changes` skill and its subagent
 prompts, which run a self-review of local changes before you open a pull request.
 
 ## Areas Open for Contribution

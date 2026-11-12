@@ -5,19 +5,19 @@ Shared resources for AI coding agents working on Kubeflow MCP Server.
 ```
 .agents/
 └── skills/     # Agent skills
-    └── review-pr/
+    └── review-changes/
 ```
 
-## review-pr
+## review-changes
 
-Runs a comprehensive review with specialized subagents. It is meant for self-review of local
-changes before you commit and open a pull request: findings come back in the terminal as
-`file:line` plus a `diff` block you apply in your editor. Pointing it at a pull request reviews
-the PR's diff instead and posts the inline comments as a pending GitHub review, which is visible
-only to you until you submit it in the **Files changed** tab.
+Runs a comprehensive review with specialized subagents. It is meant for self-review of your
+branch before you commit and open a pull request: the scope is everything the branch changes
+relative to `main` (`git diff main`), and findings come back where the skill runs — the terminal
+or the agent UI — as `file:line` plus a `diff` block you apply in your editor. Nothing is posted
+anywhere.
 
 ```
-skills/review-pr/
+skills/review-changes/
 ├── SKILL.md                       # Review workflow
 └── agents/                        # Subagent prompts
     ├── code-reviewer.md
@@ -32,18 +32,16 @@ skills/review-pr/
 ### Usage
 
 ```
-/review-pr                      # Self-review local changes: file:line plus a diff block per finding
-/review-pr <PR_LINK>           # Review an existing PR, e.g. /review-pr https://github.com/kubeflow/mcp-server/pull/1234
-/review-pr tests errors        # Review only test coverage and error handling
-/review-pr mcp                 # Review only the MCP contract checks
-/review-pr all parallel        # Launch the review agents in parallel
-/review-pr simplify            # Separate opt-in step that edits code, never part of a review
+/review-changes                 # Review the branch against main: file:line plus a diff block per finding
+/review-changes tests errors    # Review only test coverage and error handling
+/review-changes mcp             # Review only the MCP contract checks
+/review-changes all parallel    # Launch the review agents in parallel
+/review-changes simplify        # Separate opt-in step that edits code, never part of a review
 ```
 
-The local run needs no GitHub access and covers unpushed work. The PR run reviews the PR's
-actual state: the linked issue, the full PR diff (committed work included), existing review
-threads, and CI checks. Overlapping findings from different agents are combined into one
-comment before posting.
+The run stays local: `git diff main` covers committed and uncommitted work, and
+`git status --porcelain` surfaces untracked files for the reviewers to read. Overlapping
+findings from different agents are combined into one finding before they are reported.
 
 Available aspects: `code`, `mcp`, `comments`, `tests`, `errors`, `types`,
 `simplify` (opt-in, separate step), `all`.
@@ -55,8 +53,8 @@ them from the repository root:
 
 ```bash
 mkdir -p .claude/skills .claude/agents
-ln -s ../../.agents/skills/review-pr .claude/skills/review-pr
-for f in .agents/skills/review-pr/agents/*.md; do
+ln -s ../../.agents/skills/review-changes .claude/skills/review-changes
+for f in .agents/skills/review-changes/agents/*.md; do
   ln -s "../../$f" ".claude/agents/$(basename "$f")"
 done
 ```

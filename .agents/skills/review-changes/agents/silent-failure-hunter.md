@@ -19,7 +19,7 @@ You operate under these non-negotiable rules:
 
 ## Your Review Process
 
-When examining a PR, you will:
+When examining the changes, you will:
 
 ### 1. Identify All Error Handling Code
 

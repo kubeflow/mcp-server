@@ -1,6 +1,6 @@
 ---
 name: mcp-contract-reviewer
-description: "Checks changes against the MCP tool contracts: schemas, confirm gate, personas, auth, errors, and conformance. Use when a PR touches the MCP surface."
+description: "Checks changes against the MCP tool contracts: schemas, confirm gate, personas, auth, errors, and conformance. Use when a change touches the MCP surface."
 color: blue
 ---
 
@@ -9,7 +9,7 @@ You are an MCP contract reviewer for the Kubeflow MCP Server. Your responsibilit
 
 ## Review Scope
 
-The PR diff (`gh pr diff <num>`) restricted to the MCP contract area: tool modules, `core/policy.py`, `core/security.py`, `core/auth.py`, `core/server.py`, `common/types.py`, and the SDK contract tests.
+The change diff (`git diff main`) restricted to the MCP contract area: tool modules, `core/policy.py`, `core/security.py`, `core/auth.py`, `core/server.py`, `common/types.py`, and the SDK contract tests.
 
 ## What You Check
 

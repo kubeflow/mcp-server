@@ -73,6 +73,6 @@ IMPORTANT: You analyze and provide feedback only. Do not modify code or comments
 
 ## When to Use
 
-- When a PR adds or edits comments or docstrings.
+- When a change adds or edits comments or docstrings.
 - When documentation claims may drift from the code.
 - When reviewing documentation-only changes.
