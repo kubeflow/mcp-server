@@ -1,0 +1,87 @@
+# Copyright The Kubeflow Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Image Scan
+
+# Reusable pre-push scan of the runtime image. Each published platform is built
+# from the shared build cache into a tarball (a multi-platform build cannot be
+# loaded into the local Docker daemon) and scanned with Trivy. Nothing is pushed.
+#
+# Called by docker-publish.yaml before every build, and by release.yaml before the
+# release tag is created, so a release with fixable CRITICAL CVEs publishes nothing.
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: 'Git ref to build and scan. Defaults to the calling ref.'
+        required: false
+        type: string
+        default: ''
+      version:
+        description: 'Version passed to the image build as VERSION.'
+        required: false
+        type: string
+        default: ''
+      fail-on-findings:
+        description: 'Fail on fixable CRITICAL CVEs. When false, the scan only reports.'
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    name: Scan image (${{ matrix.platform }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            arch: amd64
+          - platform: linux/arm64
+            arch: arm64
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build image for scanning
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          outputs: type=docker,dest=${{ runner.temp }}/scan-${{ matrix.arch }}.tar
+          build-args: VERSION=${{ inputs.version }}
+          cache-from: type=gha
+
+      - name: Scan for critical CVEs (Trivy)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          input: ${{ runner.temp }}/scan-${{ matrix.arch }}.tar
+          format: table
+          exit-code: ${{ inputs.fail-on-findings && '1' || '0' }}
+          severity: CRITICAL
+          ignore-unfixed: true
