@@ -142,6 +142,24 @@ def make_spark_session_info(
     )
 
 
+def make_spark_job(
+    name: str = "etl-nightly",
+    *,
+    status: str = "Running",
+    namespace: str = "default",
+    driver_pod: str | None = "etl-nightly-driver",
+) -> Any:
+    """Build a duck-typed SparkJob (str-enum status, datetime timestamp)."""
+    return SimpleNamespace(
+        name=name,
+        namespace=namespace,
+        status=SimpleNamespace(value=status),
+        creation_timestamp=datetime(2026, 7, 9, 12, 0, 0),
+        num_executors=2,
+        driver_pod_name=driver_pod,
+    )
+
+
 @pytest.fixture
 def spark_session_info():
     """Factory fixture for duck-typed SparkConnectInfo objects."""
@@ -158,6 +176,8 @@ def mock_spark_client():
     client = MagicMock()
     client.get_session.return_value = make_spark_session_info()
     client.list_sessions.return_value = [make_spark_session_info()]
+    client.get_job.return_value = make_spark_job()
+    client.list_jobs.return_value = [make_spark_job()]
     with contextlib.ExitStack() as stack:
         for target in _SPARK_CLIENT_PATCHES:
             stack.enter_context(patch(target, return_value=client))

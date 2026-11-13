@@ -98,3 +98,73 @@ class TestLogs:
         with patch.object(monitoring, "get_spark_client_for_namespace", return_value=client):
             out = monitoring.get_spark_session_logs("x")
         assert out["error_code"] == "SDK_ERROR"
+
+
+def _wrapped_pod_404() -> RuntimeError:
+    """A pod log 404 the way the SDK raises it: RuntimeError from RuntimeError from 404."""
+    from kubernetes.client.exceptions import ApiException
+
+    inner = RuntimeError("Failed to retrieve pod logs.")
+    inner.__cause__ = ApiException(status=404)
+    outer = RuntimeError("Failed to get logs for SparkApplication: default/x")
+    outer.__cause__ = inner
+    return outer
+
+
+def _failing_stream(exc: Exception):
+    """A log iterator that fails while being read, like the SDK's generator."""
+    raise exc
+    yield  # pragma: no cover - makes this a generator
+
+
+class TestJobLogs:
+    def test_logs_are_bounded_like_session_logs(self, mock_spark_client):
+        mock_spark_client.get_job_logs.return_value = iter([f"line{i}" for i in range(10)])
+        out = monitoring.get_spark_job_logs("x", tail_lines=3)
+        assert out["success"] is True
+        assert out["data"]["name"] == "x"
+        assert out["data"]["lines"] == 3
+        assert out["data"]["truncated"] is True
+        assert out["data"]["logs"].splitlines()[1:] == ["line7", "line8", "line9"]
+        mock_spark_client.get_job_logs.assert_called_once_with("x", follow=False)
+
+    def test_invalid_name_is_rejected_before_sdk_call(self, mock_spark_client):
+        out = monitoring.get_spark_job_logs("Not a valid/name")
+        assert out["error_code"] == "VALIDATION_ERROR"
+        mock_spark_client.get_job_logs.assert_not_called()
+
+    def test_invalid_tail_lines(self, mock_spark_client):
+        out = monitoring.get_spark_job_logs("x", tail_lines=0)
+        assert out["error_code"] == "VALIDATION_ERROR"
+        mock_spark_client.get_job_logs.assert_not_called()
+
+    def test_missing_job_is_resource_not_found(self, mock_spark_client):
+        from kubernetes.client.exceptions import ApiException
+
+        exc = RuntimeError("Spark job not found: default/x")
+        exc.__cause__ = ApiException(status=404)
+        mock_spark_client.get_job_logs.side_effect = exc
+        out = monitoring.get_spark_job_logs("x")
+        assert out["error_code"] == "RESOURCE_NOT_FOUND"
+
+    def test_job_without_driver_pod_is_validation_error(self, mock_spark_client):
+        mock_spark_client.get_job_logs.side_effect = RuntimeError(
+            "No driver pod for SparkApplication: default/x"
+        )
+        out = monitoring.get_spark_job_logs("x")
+        assert out["error_code"] == "VALIDATION_ERROR"
+        assert "not started" in out["error"]
+
+    def test_deleted_driver_pod_is_not_reported_as_missing_job(self, mock_spark_client):
+        """The job exists but its pod is gone: say so, not "job not found"."""
+        mock_spark_client.get_job_logs.return_value = _failing_stream(_wrapped_pod_404())
+        out = monitoring.get_spark_job_logs("x")
+        assert out["error_code"] == "VALIDATION_ERROR"
+        assert "no longer exists" in out["error"]
+
+    def test_other_read_failure_stays_sdk_error(self, mock_spark_client):
+        mock_spark_client.get_job_logs.return_value = _failing_stream(
+            RuntimeError("Timeout to get logs for SparkApplication: default/x")
+        )
+        out = monitoring.get_spark_job_logs("x")
+        assert out["error_code"] == "SDK_ERROR"
