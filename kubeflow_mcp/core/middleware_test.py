@@ -210,6 +210,54 @@ class TestAuditIdentityMiddleware:
         # After middleware completes, the *outer* value should be restored
         assert get_mcp_request_id() == "outer-request"
 
+    async def test_context_property_exception_handled_gracefully(self) -> None:
+        """Exceptions raised when reading fastmcp_context or request_context are caught."""
+
+        class BrokenContext:
+            @property
+            def fastmcp_context(self):
+                raise RuntimeError("fastmcp_context error")
+
+            @property
+            def request_context(self):
+                raise RuntimeError("request_context error")
+
+        mw = AuditIdentityMiddleware()
+        called = False
+
+        async def call_next(_ctx):
+            nonlocal called
+            called = True
+            return "ok"
+
+        result = await mw(BrokenContext(), call_next)
+        assert result == "ok"
+        assert called is True
+        assert get_mcp_request_id() is None
+        assert get_user_id() is None
+
+    async def test_fastmcp_request_id_property_exception_handled_gracefully(self) -> None:
+        """Exceptions raised when reading request_id from fastmcp_context are caught."""
+
+        class BrokenFastmcpCtx:
+            @property
+            def request_id(self):
+                raise RuntimeError("request_id error")
+
+        ctx = SimpleNamespace(fastmcp_context=BrokenFastmcpCtx(), request_context=None)
+        mw = AuditIdentityMiddleware()
+        called = False
+
+        async def call_next(_ctx):
+            nonlocal called
+            called = True
+            return "ok"
+
+        result = await mw(ctx, call_next)
+        assert result == "ok"
+        assert called is True
+        assert get_mcp_request_id() is None
+
 
 class TestGetterFunctions:
     """Tests for the public getter functions."""
