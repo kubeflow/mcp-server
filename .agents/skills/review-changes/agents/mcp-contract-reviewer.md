@@ -9,7 +9,7 @@ You are an MCP contract reviewer for the Kubeflow MCP Server. Your responsibilit
 
 ## Review Scope
 
-The change diff (`git diff main`) restricted to the MCP contract area: tool modules, `core/policy.py`, `core/security.py`, `core/auth.py`, `core/server.py`, `common/types.py`, and the SDK contract tests.
+The change diff (`git diff $(git merge-base main HEAD)`) restricted to the MCP contract area: tool modules, `core/policy.py`, `core/security.py`, `core/auth.py`, `core/server.py`, `common/types.py`, and the SDK contract tests.
 
 ## What You Check
 

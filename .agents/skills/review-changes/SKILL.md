@@ -20,11 +20,15 @@ Report every finding directly where the user is working: the `file:line`, why it
 
 1. **Gather Context and Determine Review Scope**
    - Parse arguments to see if the user requested specific review aspects
-   - The change is the primary context: `git diff main` shows everything the branch changes
-     relative to `main`, including work already committed to the branch. Update your local
-     `main` first if it is stale.
+   - The change is the primary context: `git diff $(git merge-base main HEAD)` shows
+     everything the branch changes since it diverged from `main`, including committed work and
+     uncommitted edits. Diffing against `main` directly would instead show commits that landed
+     on `main` after the branch point as reversed changes. Update your local `main` first: a
+     stale `main` pulls unrelated commits into the diff.
    - `git status --porcelain` covers what the diff cannot see — untracked files. Read those
-     files directly; they are part of the change.
+     files directly; they are part of the change. Skip untracked tooling paths such as the
+     `.claude/` symlinks from the README setup: they are local configuration, not review
+     material.
    - `git log main..HEAD --oneline` gives the commits on the branch and their rationale
 
 2. **Available Review Aspects:**
@@ -41,8 +45,8 @@ Report every finding directly where the user is working: the `file:line`, why it
    - **all** - Run every except simplify
 
 3. **Identify Changed Files**
-   - Get the changed file list from `git diff main --name-only`, plus the untracked files
-     reported by `git status --porcelain`
+   - Get the changed file list from `git diff $(git merge-base main HEAD) --name-only`, plus
+     the untracked files reported by `git status --porcelain` (excluding `.claude/`)
    - Identify file types and what reviews apply
 
 4. **Route Reviews by Changed Files**
@@ -223,7 +227,7 @@ Findings are printed where the skill is running, with `file:line` and a `diff` b
 ## Tips:
 
 - **Run early**: before you commit and open a pull request
-- **Focus on changes**: the scope is `git diff main`, so committed and uncommitted work are both covered
+- **Focus on changes**: the scope is the merge-base diff against `main`, so committed and uncommitted work are both covered
 - **Address critical first**: Fix high-priority issues before lower priority
 - **Re-run after fixes**: Verify issues are resolved
 - **Use specific reviews**: Target specific aspects when you know the concern

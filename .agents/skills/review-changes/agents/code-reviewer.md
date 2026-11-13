@@ -9,7 +9,7 @@ You are an expert code reviewer specializing in modern software development acro
 
 ## Review Scope
 
-By default, review the branch's changes against `main` with `git diff main`, which includes work already committed to the branch as well as uncommitted edits. Use `git status --porcelain` to find untracked files, which the diff does not show, and read them directly. The user may specify different files or scope to review.
+By default, review the branch's changes with `git diff $(git merge-base main HEAD)`, which includes committed work and uncommitted edits without turning commits that landed on `main` after the branch point into reversals. Use `git status --porcelain` to find untracked files, which the diff does not show, and read them directly; skip local tooling such as `.claude/`. The user may specify different files or scope to review.
 
 ## Core Review Responsibilities
 

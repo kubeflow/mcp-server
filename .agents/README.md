@@ -12,9 +12,9 @@ Shared resources for AI coding agents working on Kubeflow MCP Server.
 
 Runs a comprehensive review with specialized subagents. It is meant for self-review of your
 branch before you commit and open a pull request: the scope is everything the branch changes
-relative to `main` (`git diff main`), and findings come back where the skill runs — the terminal
-or the agent UI — as `file:line` plus a `diff` block you apply in your editor. Nothing is posted
-anywhere.
+since it diverged from `main` (`git diff $(git merge-base main HEAD)`), and findings come back
+where the skill runs — the terminal or the agent UI — as `file:line` plus a `diff` block you
+apply in your editor. Nothing is posted anywhere.
 
 ```
 skills/review-changes/
@@ -39,9 +39,10 @@ skills/review-changes/
 /review-changes simplify        # Separate opt-in step that edits code, never part of a review
 ```
 
-The run stays local: `git diff main` covers committed and uncommitted work, and
-`git status --porcelain` surfaces untracked files for the reviewers to read. Overlapping
-findings from different agents are combined into one finding before they are reported.
+The run stays local: `git diff $(git merge-base main HEAD)` covers committed and uncommitted
+work, and `git status --porcelain` surfaces untracked files for the reviewers to read (the
+`.claude/` symlinks from the setup below are skipped). Overlapping findings from different
+agents are combined into one finding before they are reported.
 
 Available aspects: `code`, `mcp`, `comments`, `tests`, `errors`, `types`,
 `simplify` (opt-in, separate step), `all`.
@@ -61,3 +62,7 @@ done
 
 If the subagents are not registered, the skill falls back to launching a general-purpose subagent
 with the prompt from `agents/<name>.md`.
+
+`.claude/` is local tooling: it stays untracked (don't commit it) and the skill skips it, so it
+never becomes part of a review. On Windows, run these commands from WSL or enable Developer Mode
+— Git Bash otherwise copies the files instead of creating symlinks.
