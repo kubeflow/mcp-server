@@ -16,6 +16,8 @@
 
 from __future__ import annotations
 
+import concurrent.futures
+import threading
 import time
 from collections.abc import Callable
 from unittest.mock import AsyncMock
@@ -204,7 +206,30 @@ class TestCircuitBreaker:
         assert cb.can_execute() is False
         assert cb.state == CircuitState.OPEN
 
-    # TODO(test): test thread safety with concurrent record_failure/record_success
+    def test_concurrent_record_failure_and_success_thread_safety(self):
+        """Concurrent calls to record_failure and record_success must be thread-safe."""
+        cb = CircuitBreaker(failure_threshold=5, recovery_timeout=0.01)
+        errors: list[Exception] = []
+
+        def worker(thread_id: int) -> None:
+            try:
+                for i in range(50):
+                    gen = cb.acquire()
+                    if (thread_id + i) % 2 == 0:
+                        cb.record_failure(gen)
+                    else:
+                        cb.record_success(gen)
+            except Exception as e:
+                errors.append(e)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+            futures = [executor.submit(worker, i) for i in range(8)]
+            concurrent.futures.wait(futures)
+
+        assert not errors
+        assert cb.state in (CircuitState.CLOSED, CircuitState.OPEN, CircuitState.HALF_OPEN)
+        assert isinstance(cb.failure_count, int)
+        assert cb.failure_count >= 0
 
 
 # ─── get_breaker / configure ────────────────────────────────────────────────
@@ -341,7 +366,31 @@ class TestRateLimiter:
         monkeypatch.setattr("time.time", lambda: 0.0)
         assert rl.acquire() is True
 
-    # TODO(test): test thread safety with concurrent acquire
+    def test_concurrent_acquire_thread_safety(self, clock):
+        """Concurrent acquire calls must atomically consume tokens without exceeding capacity."""
+        capacity = 50.0
+        rl = RateLimiter(rate=100.0, capacity=capacity)
+        successes = 0
+        lock = threading.Lock()
+        errors: list[Exception] = []
+
+        def worker() -> None:
+            nonlocal successes
+            try:
+                for _ in range(20):
+                    if rl.acquire(1.0):
+                        with lock:
+                            successes += 1
+            except Exception as e:
+                errors.append(e)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            futures = [executor.submit(worker) for _ in range(10)]
+            concurrent.futures.wait(futures)
+
+        assert not errors
+        assert successes == int(capacity)
+        assert rl.acquire(1.0) is False
 
 
 # ─── retry_with_backoff ─────────────────────────────────────────────────────
@@ -377,7 +426,43 @@ class TestRetryWithBackoff:
         with pytest.raises(ValueError, match="permanent"):
             always_fail()
 
-    # TODO(test): test retryable_exceptions filtering
+    def test_retryable_exceptions_raises_immediately_on_non_matching(self):
+        """Non-retryable exceptions must raise immediately without retrying."""
+        call_count = 0
+
+        @retry_with_backoff(
+            max_retries=3,
+            base_delay=0.001,
+            retryable_exceptions=(KeyError,),
+        )
+        def fail_non_retryable():
+            nonlocal call_count
+            call_count += 1
+            raise ValueError("fatal error")
+
+        with pytest.raises(ValueError, match="fatal error"):
+            fail_non_retryable()
+
+        assert call_count == 1
+
+    def test_retryable_exceptions_retries_on_matching_type(self):
+        """Retryable exceptions matching the filter must be retried up to max_retries."""
+        call_count = 0
+
+        @retry_with_backoff(
+            max_retries=3,
+            base_delay=0.001,
+            retryable_exceptions=(KeyError, IndexError),
+        )
+        def fail_then_succeed():
+            nonlocal call_count
+            call_count += 1
+            if call_count < 3:
+                raise KeyError("transient key error")
+            return "recovered"
+
+        assert fail_then_succeed() == "recovered"
+        assert call_count == 3
 
 
 # ─── retry_with_backoff_async ─────────────────────────────────────────────
