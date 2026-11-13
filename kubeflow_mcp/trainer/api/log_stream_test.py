@@ -208,23 +208,16 @@ def test_line_cap_counts_incomplete_utf8_as_more_data(monkeypatch):
 def test_previous_logs_are_bounded_and_cannot_be_used_as_cursor(monkeypatch):
     monkeypatch.setattr(monitoring, "MAX_LOG_BUFFER_BYTES", 8)
     client = MagicMock()
-    client.get_job.return_value = SimpleNamespace(steps=[])
-    pod = SimpleNamespace(
-        metadata=SimpleNamespace(
-            name="pod",
-            labels={
-                monitoring.trainer_constants.JOBSET_RJOB_NAME_LABEL: "node",
-                monitoring.trainer_constants.JOB_INDEX_LABEL: "0",
-            },
-        )
-    )
+    client.get_job.side_effect = [
+        SimpleNamespace(steps=[]),
+        SimpleNamespace(steps=[SimpleNamespace(name="node-0", pod_name="pod")]),
+    ]
     response, body, pool = response_for(b"x" * 100000)
     with (
         patch.object(monitoring, "get_trainer_client_for_namespace", return_value=client),
         patch.object(monitoring, "get_core_v1_api") as core,
         patch.object(monitoring, "check_namespace_allowed", return_value=None),
     ):
-        core.return_value.list_namespaced_pod.return_value = SimpleNamespace(items=[pod])
         core.return_value.read_namespaced_pod_log.return_value = response
         result = monitoring.get_training_logs("job", namespace="ns", since_line=0)
     assert not result["success"]
