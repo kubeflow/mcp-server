@@ -53,6 +53,12 @@ class TestIsK8sNotFound:
     def test_returns_false_for_module_not_found(self):
         assert is_k8s_not_found(ModuleNotFoundError("not found")) is False
 
+    def test_returns_false_when_kubernetes_import_fails(self, monkeypatch):
+        import sys
+
+        monkeypatch.setitem(sys.modules, "kubernetes.client.exceptions", None)
+        assert is_k8s_not_found(RuntimeError("not found")) is False
+
     def test_chained_cause_with_api_404(self):
         from kubernetes.client.exceptions import ApiException
 
