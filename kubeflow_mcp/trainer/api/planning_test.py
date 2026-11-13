@@ -373,6 +373,55 @@ def test_estimate_from_params_small_model():
     assert "weights_gb" in result["breakdown"]
 
 
+@pytest.mark.parametrize(
+    ("params", "batch_size", "quantization", "expected_gb", "expected_tier"),
+    [
+        # gemma-2b, the docstring example: 8.78 GB must not become the 8 GB tier.
+        (2.51e9, 1, "bf16", 9, "16GB (T4/RTX 4080)"),
+        # Llama-3-8B: 24.16 GB must not be served by a 24 GB card.
+        (8.03e9, 2, "bf16", 25, "40GB (A100-40GB)"),
+        # Mistral-7B int4: 8.52 GB.
+        (7.24e9, 16, "int4", 9, "16GB (T4/RTX 4080)"),
+    ],
+)
+def test_estimate_from_params_rounds_memory_up_before_picking_a_tier(
+    params, batch_size, quantization, expected_gb, expected_tier
+):
+    result = _estimate_from_params(params, batch_size=batch_size, quantization=quantization)
+
+    assert result["gpu_memory_gb"] == expected_gb
+    assert result["gpu_type"] == expected_tier
+
+
+@pytest.mark.parametrize("params", [1.1e9, 2.51e9, 8.03e9, 70.6e9])
+@pytest.mark.parametrize("batch_size", [1, 12])
+@pytest.mark.parametrize("quantization", ["bf16", "int4"])
+def test_estimate_from_params_never_reports_less_than_the_breakdown(
+    params, batch_size, quantization
+):
+    result = _estimate_from_params(params, batch_size=batch_size, quantization=quantization)
+    needed = sum(result["breakdown"].values())
+
+    assert result["gpu_memory_gb"] >= needed
+    assert result["gpu_memory_gb"] - needed < 1
+
+
+def test_estimate_resources_reports_the_rounded_up_memory():
+    """The tool's memory string, tier and recommendation follow the rounded-up estimate."""
+    with patch(
+        "kubeflow_mcp.trainer.api.planning._get_model_info_from_hf",
+        return_value={"model_id": "google/gemma-2b", "params": 2.51e9},
+    ):
+        result = estimate_resources("google/gemma-2b", batch_size=1, quantization="bf16")
+
+    assert result["success"] is True
+    data = result["data"]
+    assert data["gpu_memory_required"] == "9GB"
+    assert data["gpu_type_recommended"] == "16GB (T4/RTX 4080)"
+    assert data["recommendation"] == "Request 1 GPU(s) - 16GB (T4/RTX 4080)"
+    assert sum(data["breakdown"].values()) <= 9
+
+
 # ─── Error code classification ──────────────────────────────────────────────
 
 
