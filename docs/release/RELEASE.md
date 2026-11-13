@@ -93,3 +93,10 @@ If PyPI publication has already succeeded, do **not** dispatch a fresh workflow 
 
 - Manual dispatch must be started from `main` or the relevant `release-X.Y` branch. The workflow explicitly rejects runs dispatched from any other branch.
 - The selected branch must already contain a valid release version (`X.Y.Z` or `X.Y.ZrcN`) in `kubeflow_mcp/__init__.py`.
+
+## Manual development images
+
+Manual Docker builds accept a source `ref` and a `dev-*` or `sha-*` tag
+(default: commit SHA). Publishing defaults to false. Release tags and `latest`
+are reserved for the release workflow, which passes the exact tag ref and
+explicitly enables publication.

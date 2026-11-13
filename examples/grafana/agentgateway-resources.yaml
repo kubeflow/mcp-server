@@ -1,0 +1,51 @@
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: agentgateway-resources
+  namespace: observability
+spec:
+  instanceSelector:
+    matchLabels:
+      app.kubernetes.io/name: kubeflow-observability
+  folder: Agentgateway
+  datasources:
+    - inputName: datasource
+      datasourceName: prometheus
+  json: |
+    {
+      "uid": "agentgateway-resources",
+      "title": "Agentgateway Resources",
+      "schemaVersion": 39,
+      "time": {"from": "now-1h", "to": "now"},
+      "templating": {"list": []},
+      "panels": [
+        {
+          "id": 1,
+          "type": "timeseries",
+          "title": "Memory",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+          "targets": [{
+            "expr": "sum by (pod, namespace) (container_memory_working_set_bytes{namespace=\"agentgateway-system\",pod=~\"kagent-model-gateway-.*\",container!=\"POD\",container!=\"\"})",
+            "legendFormat": "{{pod}}",
+            "refId": "A"
+          }],
+          "fieldConfig": {"defaults": {"unit": "bytes"}, "overrides": []},
+          "options": {"legend": {"displayMode": "list"}, "tooltip": {"mode": "multi"}}
+        },
+        {
+          "id": 2,
+          "type": "timeseries",
+          "title": "CPU",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+          "targets": [{
+            "expr": "sum by (pod, namespace) (irate(container_cpu_usage_seconds_total{namespace=\"agentgateway-system\",pod=~\"kagent-model-gateway-.*\",container!=\"POD\",container!=\"\"}[5m]))",
+            "legendFormat": "{{pod}}",
+            "refId": "A"
+          }],
+          "fieldConfig": {"defaults": {"unit": "cores"}, "overrides": []},
+          "options": {"legend": {"displayMode": "list"}, "tooltip": {"mode": "multi"}}
+        }
+      ]
+    }
