@@ -522,8 +522,9 @@ def test_inspect_controller_missing_pod_is_still_not_found(mock_k8s_apis, scan_d
     verify_tool_error(result, error_code=RESOURCE_NOT_FOUND)
 
 
+@pytest.mark.parametrize("controller_name", ["trainer", "kubeflow-trainer"])
 def test_inspect_controller_finds_pod_despite_forbidden_namespace(
-    mock_k8s_apis, scan_default_namespaces
+    mock_k8s_apis, scan_default_namespaces, controller_name
 ):
     core = mock_k8s_apis["core_v1"]
     pod = MagicMock()
@@ -531,10 +532,11 @@ def test_inspect_controller_finds_pod_despite_forbidden_namespace(
     pod.metadata.namespace = "kubeflow-system"
     pod.status.phase = "Running"
 
-    def list_pods(namespace, **_kwargs):
+    def list_pods(namespace, label_selector, **_kwargs):
         if namespace == "kubeflow":
             raise ApiException(status=403, reason="Forbidden")
-        return MagicMock(items=[pod])
+        selector = f"app.kubernetes.io/name={controller_name},app.kubernetes.io/component=manager"
+        return MagicMock(items=[pod] if label_selector == selector else [])
 
     core.list_namespaced_pod.side_effect = list_pods
     core.read_namespaced_pod_log.return_value = "controller started"

@@ -31,15 +31,12 @@ from kubeflow_mcp.core.security import (
     validate_namespace,
     validate_runtime_name,
 )
+from kubeflow_mcp.trainer.constants import TRAINER_CONTROLLER_LABEL_SELECTORS
 
 logger = logging.getLogger(__name__)
 
 _TRAINER_CRD_GROUP = "trainer.kubeflow.org"
 _MAX_TAIL_LINES = 1000
-_CONTROLLER_LABELS = [
-    "app.kubernetes.io/name=trainer,app.kubernetes.io/component=manager",
-    "app.kubernetes.io/name=trainer,app.kubernetes.io/part-of=kubeflow",
-]
 _LOG_TAIL_DEFAULT = 200
 
 
@@ -84,7 +81,7 @@ def _find_controller_pod(namespace: str | None = None):
 
     last_error: Exception | None = None
     for ns in namespaces:
-        for label in _CONTROLLER_LABELS:
+        for label in TRAINER_CONTROLLER_LABEL_SELECTORS:
             try:
                 pods = core.list_namespaced_pod(
                     namespace=ns,
