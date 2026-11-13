@@ -99,7 +99,7 @@ CLIENT_TOOL_DESCRIPTIONS: dict[str, str] = {
     "list_training_jobs": "List training jobs. Filter by runtime, status, or namespace.",
     "get_training_job": "Get details of a specific training job, including the status of each step (pod). Supports optional namespace.",
     "list_runtimes": "List available ClusterTrainingRuntimes.",
-    "get_runtime": "Get runtime config. Pass include_packages=True to fetch pip list (slow: creates a Pod).",
+    "get_runtime": "Get runtime config. Pass include_packages=True to fetch pip list (slow: creates a Pod, needs a training persona and no read_only policy).",
     "fine_tune": (
         "Fine-tune HuggingFace model with LoRA. Run list_runtimes() first to find the "
         "correct runtime name. Optional name= for custom job name. Set confirmed=True to submit."
@@ -354,7 +354,7 @@ PLANNING (always do first):
 DISCOVERY (before training):
 - list_runtimes() -> find available runtimes; ALWAYS pass the exact runtime name to training tools
 - get_runtime(name) -> inspect runtime spec, container images, default config
-- get_runtime(name, include_packages=True) -> list installed packages (slow: ~30-60s, creates temporary Pod). Call BEFORE choosing packages to avoid version conflicts""",
+- get_runtime(name, include_packages=True) -> list installed packages (slow: ~30-60s, creates temporary Pod; needs a training persona, not readonly/read_only). Call BEFORE choosing packages to avoid version conflicts""",
     },
     "monitoring": {
         "full": """\

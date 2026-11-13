@@ -664,7 +664,7 @@ def test_get_training_job_keeps_failed_step_beyond_the_cap():
 class TestFetchPackagesPodLog:
     """How the pip-list pod's log is read and interpreted."""
 
-    def _fetch(self, logs):
+    def _fetch(self, logs, persona="data-scientist", read_only=False):
         from kubeflow_mcp.trainer.api.discovery import _fetch_packages_via_pod
 
         pod = MagicMock()
@@ -679,8 +679,46 @@ class TestFetchPackagesPodLog:
             patch(f"{mod}.get_trainer_effective_namespace", return_value="ns"),
             patch(f"{mod}.check_namespace_allowed", return_value=None),
             patch(f"{mod}.get_core_v1_api", return_value=core),
+            patch(f"{mod}.get_effective_persona", return_value=persona),
+            patch(f"{mod}.is_read_only", return_value=read_only),
         ):
             return _fetch_packages_via_pod("rt")
+
+    @pytest.mark.parametrize(
+        ("persona", "read_only"),
+        [("readonly", False), ("data-scientist", True), ("platform-admin", True)],
+    )
+    def test_no_pod_for_read_only_callers(self, persona, read_only):
+        """get_runtime is read-only: it must not create a Pod for readonly or read_only."""
+        result = self._fetch("Package Version\nnumpy 2.0.0\n", persona, read_only)
+        assert "creates a Pod" in result["packages_error"]
+        self.core.create_namespaced_pod.assert_not_called()
+
+    @pytest.mark.parametrize("persona", ["data-scientist", "ml-engineer", "platform-admin"])
+    def test_pod_created_for_training_personas(self, persona):
+        assert self._fetch("Package Version\nnumpy 2.0.0\n", persona)["total"] == 1
+        self.core.create_namespaced_pod.assert_called_once()
+
+    @pytest.mark.parametrize(
+        ("persona", "policy", "expect_pod"),
+        [
+            # a policy that strips every training tool leaves nothing that justifies a Pod
+            ("data-scientist", {"deny": ["category:training"]}, False),
+            ("platform-admin", {"deny": ["category:training"]}, False),
+            # one remaining training tool is enough
+            ("data-scientist", {"deny": ["fine_tune", "run_container_training"]}, True),
+        ],
+    )
+    def test_policy_deny_is_respected(self, persona, policy, expect_pod):
+        from kubeflow_mcp.trainer.api.discovery import _can_create_pods
+
+        mod = "kubeflow_mcp.trainer.api.discovery"
+        with (
+            patch(f"{mod}.get_effective_persona", return_value=persona),
+            patch(f"{mod}.is_read_only", return_value=False),
+            patch("kubeflow_mcp.core.policy._get_cached_policy", return_value={"policy": policy}),
+        ):
+            assert _can_create_pods() is expect_pod
 
     def test_missing_pip_is_reported_instead_of_parsed(self):
         """The pod command's own fallback text is not a package list."""
