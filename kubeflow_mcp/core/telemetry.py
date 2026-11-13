@@ -136,9 +136,32 @@ def setup_tracing(endpoint: str | None = None, service_name: str = "kubeflow-mcp
             _otel_trace.set_tracer_provider(provider)
             atexit.register(provider.shutdown)
 
+        _instrument_http_client()
         _tracing_initialized = True
         _configured_endpoint = normalized_endpoint
         return True
+
+
+def _instrument_http_client() -> None:
+    """Trace outgoing urllib3 requests, which carry every Kubernetes API call.
+
+    Most Kubernetes calls happen inside the Kubeflow SDK, where manual spans in this
+    package cannot reach, but the Kubernetes client sends all of them through urllib3.
+    This covers every urllib3 request in the process, not only Kubernetes ones; the
+    OTLP exporter's own requests are suppressed by the SDK. Header capture is pinned
+    off so ``OTEL_INSTRUMENTATION_HTTP_CAPTURE_HEADERS_*`` cannot record the bearer
+    token the Kubernetes client sends.
+    """
+    try:
+        from opentelemetry.instrumentation.urllib3 import URLLib3Instrumentor
+    except ImportError:
+        logger.debug("urllib3 instrumentation not installed; Kubernetes calls are not traced")
+        return
+
+    instrumentor = URLLib3Instrumentor()
+    if instrumentor.is_instrumented_by_opentelemetry:
+        return
+    instrumentor.instrument(captured_request_headers=[], captured_response_headers=[])
 
 
 def get_tracer(name: str = "kubeflow_mcp") -> Any:

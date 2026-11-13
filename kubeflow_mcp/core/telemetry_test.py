@@ -18,8 +18,11 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
+import threading
 from contextlib import contextmanager
-from types import SimpleNamespace
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -79,6 +82,17 @@ class _FakeBreaker:
         self.releases += 1
 
 
+_real_instrument_http_client = telemetry._instrument_http_client
+
+
+@pytest.fixture(autouse=True)
+def _http_instrumentation_calls(monkeypatch: pytest.MonkeyPatch) -> list[bool]:
+    """Keep setup_tracing() from instrumenting urllib3 for the whole test process."""
+    calls: list[bool] = []
+    monkeypatch.setattr(telemetry, "_instrument_http_client", lambda: calls.append(True))
+    return calls
+
+
 def test_get_tracer_returns_noop_when_otel_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(telemetry, "_OTEL_AVAILABLE", False)
     tracer = telemetry.get_tracer("test")
@@ -105,7 +119,9 @@ def test_setup_tracing_logs_install_command_when_otel_unavailable(
     assert "uv sync --group otel" in caplog.text
 
 
-def test_setup_tracing_configures_provider_when_available(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_setup_tracing_configures_provider_when_available(
+    monkeypatch: pytest.MonkeyPatch, _http_instrumentation_calls: list[bool]
+) -> None:
     calls: dict[str, object] = {}
 
     class _FakeProvider:
@@ -162,6 +178,114 @@ def test_setup_tracing_configures_provider_when_available(monkeypatch: pytest.Mo
     assert calls["endpoint"] == "http://collector:4318/v1/traces"
     assert calls["resource"] == {"service.name": "kubeflow-mcp"}
     assert telemetry.get_tracer("unit") == "tracer:unit"
+    assert _http_instrumentation_calls == [True]
+
+
+def test_setup_tracing_does_not_instrument_when_disabled(
+    monkeypatch: pytest.MonkeyPatch, _http_instrumentation_calls: list[bool]
+) -> None:
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+    monkeypatch.setattr(telemetry, "_tracing_initialized", False)
+
+    assert telemetry.setup_tracing(None) is False
+    assert _http_instrumentation_calls == []
+
+
+def test_instrument_http_client_skips_when_package_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(sys.modules, "opentelemetry.instrumentation.urllib3", None)
+
+    _real_instrument_http_client()
+
+
+@pytest.mark.parametrize("already_instrumented", [False, True])
+def test_instrument_http_client_pins_header_capture_off(
+    monkeypatch: pytest.MonkeyPatch, already_instrumented: bool
+) -> None:
+    instrument_calls: list[dict[str, object]] = []
+
+    class _FakeInstrumentor:
+        is_instrumented_by_opentelemetry = already_instrumented
+
+        def instrument(self, **kwargs: object) -> None:
+            instrument_calls.append(kwargs)
+
+    fake_module = ModuleType("opentelemetry.instrumentation.urllib3")
+    fake_module.URLLib3Instrumentor = _FakeInstrumentor  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "opentelemetry.instrumentation.urllib3", fake_module)
+
+    _real_instrument_http_client()
+
+    if already_instrumented:
+        assert instrument_calls == []
+    else:
+        assert instrument_calls == [
+            {"captured_request_headers": [], "captured_response_headers": []}
+        ]
+
+
+def test_kubernetes_call_is_traced_without_recording_the_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A real Kubernetes client call yields a span that never carries the bearer token."""
+    pytest.importorskip("opentelemetry.sdk.trace")
+    urllib3_instrumentation = pytest.importorskip("opentelemetry.instrumentation.urllib3")
+    from kubernetes import client as k8s_client
+    from opentelemetry import trace as otel_trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    token = "test-secret-token-0123456789"
+    received_auth: list[str | None] = []
+
+    class _Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802 - http.server naming
+            received_auth.append(self.headers.get("Authorization"))
+            body = json.dumps({"kind": "NamespaceList", "apiVersion": "v1", "items": []})
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body.encode())
+
+        def log_message(self, *args: object) -> None:
+            return None
+
+    server = HTTPServer(("127.0.0.1", 0), _Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(otel_trace, "_TRACER_PROVIDER", provider)
+    # Even if an operator asks for headers, the token must not be recorded.
+    monkeypatch.setenv("OTEL_INSTRUMENTATION_HTTP_CAPTURE_HEADERS_CLIENT_REQUEST", ".*")
+    monkeypatch.setenv("OTEL_INSTRUMENTATION_HTTP_CAPTURE_HEADERS_CLIENT_RESPONSE", ".*")
+
+    instrumentor = urllib3_instrumentation.URLLib3Instrumentor()
+    try:
+        _real_instrument_http_client()
+
+        config = k8s_client.Configuration(host=f"http://127.0.0.1:{server.server_port}")
+        config.api_key = {"authorization": token}
+        config.api_key_prefix = {"authorization": "Bearer"}
+        with k8s_client.ApiClient(config) as api_client:
+            k8s_client.CoreV1Api(api_client).list_namespace()
+    finally:
+        instrumentor.uninstrument()
+        server.shutdown()
+        thread.join(timeout=5)
+
+    assert received_auth == [f"Bearer {token}"]
+    spans = exporter.get_finished_spans()
+    assert len(spans) == 1
+    attributes = dict(spans[0].attributes or {})
+    assert any("/api/v1/namespaces" in str(value) for value in attributes.values())
+    assert all(token not in str(value) for value in attributes.values())
+    assert not any(key.startswith("http.request.header.") for key in attributes)
 
 
 def test_setup_tracing_sets_exporter_timeout_in_seconds(monkeypatch: pytest.MonkeyPatch) -> None:
