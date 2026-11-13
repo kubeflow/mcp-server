@@ -47,6 +47,7 @@ from kubeflow_mcp.core.health import (
 )
 from kubeflow_mcp.core.http_edge import register_probe_routes
 from kubeflow_mcp.core.logging import with_correlation_id
+from kubeflow_mcp.core.metrics import record_circuit_open, record_rate_limited
 from kubeflow_mcp.core.middleware import get_mcp_request_id, get_user_id
 from kubeflow_mcp.core.policy import (
     apply_policy_filters,
@@ -201,6 +202,7 @@ def _audit_wrap(tool_func, *, is_dynamic_execute_tool: bool = False):
                 span.set_attribute("tool.success", False)
                 span.set_attribute("tool.duration_ms", duration_ms)
                 logger.warning("rate_limited", extra={"tool": tool_name})
+                record_rate_limited(tool_name)
                 return {
                     "error": "Rate limit exceeded. Retry after a brief pause.",
                     "error_code": ErrorCode.RATE_LIMITED,
@@ -216,6 +218,7 @@ def _audit_wrap(tool_func, *, is_dynamic_execute_tool: bool = False):
                 span.set_attribute("tool.success", False)
                 span.set_attribute("tool.duration_ms", duration_ms)
                 logger.warning("circuit_open", extra={"tool": tool_name})
+                record_circuit_open(tool_name)
                 return {
                     "error": f"Circuit breaker open for '{tool_name}' — K8s API may be degraded. Retries automatically after recovery timeout.",
                     "error_code": ErrorCode.CIRCUIT_OPEN,
