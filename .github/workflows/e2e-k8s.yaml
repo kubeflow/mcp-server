@@ -45,7 +45,12 @@ jobs:
       fail-fast: false
       matrix:
         kubernetes-version: ["1.32.3"]
-        trainer-ref: ["v2.3.0"]  # CI baseline; >=2.3.0,<2.4.0 supported at runtime
+        trainer-version: ["v2.3.0"]  # CI baseline; >=2.3.0,<2.4.0 supported at runtime
+        include:
+          # Check out the release commit, not the tag: a moved tag must not be
+          # able to change the Trainer code these jobs execute (#435).
+          - trainer-version: "v2.3.0"
+            trainer-ref: "658725bdae5c7e3a0854d93ac6ff492e109a22ab"
 
     steps:
       - name: Checkout repository
@@ -69,7 +74,11 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v7
         with:
-          enable-cache: true
+          # No shared cache: this job executes code from the Trainer checkout
+          # before setup-uv's post-job cache save, so a trusted push or
+          # workflow_dispatch run could persist a poisoned cache that later
+          # trusted runs restore (#435).
+          enable-cache: false
 
       - name: Synchronize dependencies
         run: uv sync --all-extras --group dev
@@ -88,7 +97,7 @@ jobs:
           uv run pytest tests/e2e/test_kubernetes_e2e.py -v
 
   e2e-image:
-    name: E2E Test (Runtime Image) (${{ matrix.kubernetes-version }}, ${{ matrix.trainer-ref }})
+    name: E2E Test (Runtime Image) (${{ matrix.kubernetes-version }}, ${{ matrix.trainer-version }})
     runs-on: cncf-ubuntu-16-64-x86
     timeout-minutes: 60
 
@@ -96,7 +105,11 @@ jobs:
       fail-fast: false
       matrix:
         kubernetes-version: ["1.32.3"]
-        trainer-ref: ["v2.3.0"]
+        trainer-version: ["v2.3.0"]
+        include:
+          # Same pinned release commit as the e2e job (#435).
+          - trainer-version: "v2.3.0"
+            trainer-ref: "658725bdae5c7e3a0854d93ac6ff492e109a22ab"
 
     env:
       IMAGE: kubeflow-mcp:${{ github.sha }}
@@ -124,7 +137,11 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v7
         with:
-          enable-cache: true
+          # No shared cache: this job executes code from the Trainer checkout
+          # before setup-uv's post-job cache save, so a trusted push or
+          # workflow_dispatch run could persist a poisoned cache that later
+          # trusted runs restore (#435).
+          enable-cache: false
 
       # Only the test client runs from source; the server runs from the image.
       - name: Synchronize dependencies
