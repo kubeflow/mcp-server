@@ -26,6 +26,7 @@ from kubeflow_mcp.core.security import (
     _SENSITIVE_EXACT,
     _SENSITIVE_SUBSTRINGS,
     is_safe_python_code,
+    is_sensitive_key,
     mask_sensitive_data,
     truncate_log_output,
     validate_image_reference,
@@ -413,6 +414,34 @@ def test_validate_training_bounds(test_case):
             expected_status=SUCCESS,
             config={"code": "getattr(().__class__.__base__, '__subcl' + 'asses__')()"},
         ),
+        TestCase(
+            name="detects literal dangerous dunder in getattr",
+            expected_status=FAILED,
+            config={"code": "getattr(obj, '__globals__')"},
+            expected_output="getattr",
+        ),
+        TestCase(
+            name="detects literal dangerous dunder in setattr",
+            expected_status=FAILED,
+            config={"code": "setattr(obj, '__code__', None)"},
+            expected_output="setattr",
+        ),
+        TestCase(
+            name="detects literal dangerous dunder in delattr",
+            expected_status=FAILED,
+            config={"code": "delattr(obj, '__builtins__')"},
+            expected_output="delattr",
+        ),
+        TestCase(
+            name="allows safe getattr with standard attribute name",
+            expected_status=SUCCESS,
+            config={"code": "getattr(obj, 'normal_attr')"},
+        ),
+        TestCase(
+            name="allows safe getattr with fewer than two arguments",
+            expected_status=SUCCESS,
+            config={"code": "getattr(obj)"},
+        ),
     ],
 )
 def test_is_safe_python_code(test_case):
@@ -774,3 +803,9 @@ class TestValidateImageReference:
         err = validate_image_reference("[::1]:5000/Team/image:tag")
         assert err is not None
         assert "repository path must be lowercase" in err.error
+
+
+def test_is_sensitive_key_safe_keys():
+    for key in _SAFE_KEYS:
+        assert is_sensitive_key(key) is False
+        assert is_sensitive_key(key.upper()) is False
