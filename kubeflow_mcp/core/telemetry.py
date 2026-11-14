@@ -30,13 +30,19 @@ logger = logging.getLogger(__name__)
 try:
     from opentelemetry import trace as _otel_trace
     from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
-    from opentelemetry.sdk.resources import Resource
+    from opentelemetry.sdk.resources import OTELResourceDetector, Resource
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
     _OTEL_AVAILABLE = True
 except ImportError:
     _OTEL_AVAILABLE = False
+    OTELResourceDetector = None  # type: ignore[assignment]
+    Resource = None  # type: ignore[assignment]
+    TracerProvider = None  # type: ignore[assignment]
+    BatchSpanProcessor = None  # type: ignore[assignment]
+    OTLPSpanExporter = None  # type: ignore[assignment]
+    _otel_trace = None  # type: ignore[assignment]
 
 # The OTel API (no SDK) is enough to read the active span. FastMCP depends on it and
 # sets the span from the traceparent in the request _meta.
@@ -88,6 +94,20 @@ def _normalize_and_validate_endpoint(endpoint: str | None) -> str:
     return normalized_endpoint
 
 
+def _has_env_service_name() -> bool:
+    """Return True if OTEL_SERVICE_NAME or service.name in OTEL_RESOURCE_ATTRIBUTES is set."""
+    if os.environ.get("OTEL_SERVICE_NAME", "").strip():
+        return True
+    resource_attrs = os.environ.get("OTEL_RESOURCE_ATTRIBUTES", "")
+    if resource_attrs:
+        for item in resource_attrs.split(","):
+            if "=" in item:
+                k, v = item.split("=", 1)
+                if k.strip() == "service.name" and v.strip():
+                    return True
+    return False
+
+
 def setup_tracing(endpoint: str | None = None, service_name: str = "kubeflow-mcp-server") -> bool:
     """Configure OpenTelemetry tracing.
 
@@ -130,7 +150,20 @@ def setup_tracing(endpoint: str | None = None, service_name: str = "kubeflow-mcp
         if hasattr(current_provider, "add_span_processor"):
             current_provider.add_span_processor(processor)
         else:
-            resource = Resource.create({"service.name": service_name})
+            # OTEL_SERVICE_NAME and service.name in OTEL_RESOURCE_ATTRIBUTES must win over
+            # the default. Attributes passed to Resource.create() override the env ones.
+            has_env_service_name = False
+            if OTELResourceDetector is not None:
+                try:
+                    env_resource = OTELResourceDetector().detect()
+                    has_env_service_name = bool(env_resource.attributes.get("service.name"))
+                except Exception:
+                    pass
+            if not has_env_service_name:
+                has_env_service_name = _has_env_service_name()
+
+            attributes = {} if has_env_service_name else {"service.name": service_name}
+            resource = Resource.create(attributes)
             provider = TracerProvider(resource=resource)
             provider.add_span_processor(processor)
             _otel_trace.set_tracer_provider(provider)
