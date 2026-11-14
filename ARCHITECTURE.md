@@ -288,10 +288,20 @@ rules:
     resources: ["pods", "pods/log", "events"]
     verbs: ["list", "get"]
 
+  # Discovery: get_runtime(include_packages=True) runs pip list in a short-lived Pod
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create", "delete"]
+
   # Discovery: list/get runtimes; Platform: patch/create/delete runtimes
   - apiGroups: ["trainer.kubeflow.org"]
     resources: ["clustertrainingruntimes"]
     verbs: ["list", "get", "create", "delete", "patch"]
+
+  # Spark: list_spark_sessions, get_spark_session, create_spark_session, delete_spark_session
+  - apiGroups: ["sparkoperator.k8s.io"]
+    resources: ["sparkconnects"]
+    verbs: ["list", "get", "create", "delete"]
 ```
 
 #### Read-Only ClusterRole
@@ -324,6 +334,11 @@ rules:
     verbs: ["list", "get"]
   - apiGroups: [""]
     resources: ["pods", "pods/log", "events"]
+    verbs: ["list", "get"]
+
+  # Spark: list_spark_sessions / get_spark_session
+  - apiGroups: ["sparkoperator.k8s.io"]
+    resources: ["sparkconnects"]
     verbs: ["list", "get"]
 ```
 
