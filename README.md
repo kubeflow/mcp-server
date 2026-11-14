@@ -376,6 +376,10 @@ export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
 kubeflow-mcp serve
 ```
 
+The env vars follow the OpenTelemetry spec: `OTEL_EXPORTER_OTLP_ENDPOINT` is a base URL, so
+traces go to `<endpoint>/v1/traces`, and `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` is used as-is
+and takes precedence.
+
 Each tool invocation emits an `execute_tool <tool>` span with attributes:
 `tool.name`, `tool.args_preview`, `tool.success`, `tool.duration_ms`, `kubeflow.persona`, and `correlation_id`.
 It is a child of the `tools/call <tool>` span that FastMCP creates, which continues the
