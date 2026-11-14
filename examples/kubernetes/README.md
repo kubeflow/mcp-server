@@ -47,13 +47,16 @@ kubectl rollout restart deploy/kubeflow-mcp -n "$NAMESPACE"
 |---|---|
 | `ServiceAccount/kubeflow-mcp` | Identity the server uses against the Kubernetes API |
 | `ClusterRole/kubeflow-mcp-read` | Read-only: `ClusterTrainingRuntime`, nodes, namespaces, CRDs |
-| `Role/kubeflow-mcp-trainjobs` | Full TrainJob lifecycle, in this namespace only |
+| `Role/kubeflow-mcp-trainjobs` | Full TrainJob and Spark session (`SparkConnect`) lifecycle, in this namespace only |
 | `Role/kubeflow-mcp-trainer-version` | Read of the single `kubeflow-trainer-public` ConfigMap in `kubeflow-system`, so the SDK can report the Trainer control-plane version |
 | `Deployment/kubeflow-mcp` | The server, HTTP transport on port 8000 |
 | `Service/kubeflow-mcp` | ClusterIP, reachable at `kubeflow-mcp:8000` in-namespace |
 
-The server can create and delete TrainJobs in its own namespace, and can only read
-anything outside it.
+The server can create and delete TrainJobs and Spark sessions in its own namespace, and
+can only read anything outside it. `ClusterTrainingRuntime` stays read-only because the
+runtime write tools (`create_runtime`, `patch_runtime`, `delete_runtime`) are
+`platform-admin` only; see [RBAC Configuration](../../ARCHITECTURE.md#rbac-configuration)
+for that role.
 
 ## Verify
 
