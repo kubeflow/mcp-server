@@ -23,10 +23,12 @@ tool at a time:
   no write request to the Kubernetes or Kubeflow Pipelines API, in every tool mode
 - each persona exposes exactly its allowlist over MCP, and hidden tools cannot
   be called, in every tool mode
+- the readonly persona sends no write request, whichever of its tools is called
 """
 
 import importlib
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 from fastmcp import Client
@@ -34,7 +36,7 @@ from fastmcp import Client
 from kubeflow_mcp.core.health import HEALTH_TOOLS
 from kubeflow_mcp.core.policy import get_allowed_tools
 from kubeflow_mcp.core.server import CLIENT_MODULES, create_server
-from tests.eval.helpers import GATE_ARGS, READ_ARGS, payload
+from tests.eval.helpers import GATE_ARGS, READ_ARGS, READONLY_ARGS, payload
 
 # Every registered client is loaded, not only the default one, so a new client's
 # tools are judged as soon as it is added to CLIENT_MODULES.
@@ -156,6 +158,29 @@ async def test_readonly_persona_exposes_no_mutating_tool():
     tools = await _list_tools("readonly")
     mutating = sorted(n for n, t in tools.items() if t.annotations.read_only_hint is not True)
     assert mutating == []
+
+
+async def test_every_readonly_tool_has_arguments():
+    assert set(await _list_tools("readonly")) == set(READONLY_ARGS), (
+        "update READONLY_ARGS so every tool the readonly persona exposes is judged"
+    )
+
+
+async def test_readonly_persona_never_writes(k8s, kfp):
+    """The default persona must not change the cluster, whatever a read-only tool does inside.
+
+    Annotations and allowlists cannot show this: get_runtime is readOnlyHint=True but
+    include_packages=True starts a Pod (#535).
+    """
+    written = {}
+    with patch("kubeflow_mcp.trainer.api.discovery._PACKAGES_POD_TIMEOUT", 0):
+        async with Client(create_server(clients=CLIENTS, persona="readonly")) as client:
+            for name, args in sorted(READONLY_ARGS.items()):
+                before = (len(k8s.writes), len(kfp.writes))
+                await client.call_tool(name, args, raise_on_error=False)
+                if (len(k8s.writes), len(kfp.writes)) != before:
+                    written[name] = k8s.writes[before[0] :] + kfp.writes[before[1] :]
+    assert written == {}, f"readonly persona wrote through read-only tools: {written}"
 
 
 async def test_every_hidden_read_only_tool_has_arguments():
