@@ -380,6 +380,9 @@ Each tool invocation emits an `execute_tool <tool>` span with attributes:
 `tool.name`, `tool.args_preview`, `tool.success`, `tool.duration_ms`, `kubeflow.persona`, and `correlation_id`.
 It is a child of the `tools/call <tool>` span that FastMCP creates, which continues the
 caller's trace when the request `_meta` carries a W3C `traceparent`.
+A tool that returns an error result (sent to the client with `isError: true`), is rate
+limited, or hits an open circuit breaker sets the span status to `ERROR` with
+`error.type=tool_error`. A tool that raises sets `error.type` to the exception type.
 
 JSON logs and `get_server_logs` entries include `trace_id` and `span_id` while a span is
 active, so logs can be joined to traces. A missing or malformed `traceparent` just starts
