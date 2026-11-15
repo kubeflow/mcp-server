@@ -164,6 +164,37 @@ def _render_latency_table(payload: dict[str, Any]) -> str:
     """
 
 
+def _render_tool_list_table(payload: dict[str, Any]) -> str:
+    rows = []
+    for result in payload.get("results", []):
+        rows.append(
+            "<tr>"
+            f"<td>{_escape(result.get('mode', '-'))}</td>"
+            f"<td>{_escape(result.get('client', '-'))}</td>"
+            f"<td>{_escape(result.get('persona', '-'))}</td>"
+            f"<td>{_escape(result.get('tool_count', '-'))}</td>"
+            f"<td>{_escape(result.get('payload_bytes', '-'))}</td>"
+            "</tr>"
+        )
+
+    return f"""
+        <section>
+          <div class="section-header">
+            <div>
+              <h2>Initial tools/list payload</h2>
+              <p>Size of the first MCP result serialized as compact UTF-8 JSON.</p>
+            </div>
+          </div>
+          <table>
+            <thead>
+              <tr><th>Mode</th><th>Client</th><th>Persona</th><th>Tools</th><th>Bytes</th></tr>
+            </thead>
+            <tbody>{"".join(rows)}</tbody>
+          </table>
+        </section>
+    """
+
+
 def _render_placeholder_table(payload: dict[str, Any]) -> str:
     suite = _escape(payload.get("suite", "benchmark"))
     results = payload.get("results", [])
@@ -202,6 +233,7 @@ def _render_placeholder_table(payload: dict[str, Any]) -> str:
 
 SUITE_RENDERERS: dict[str, SectionRenderer] = {
     "latency": _render_latency_table,
+    "token_usage": _render_tool_list_table,
 }
 
 
