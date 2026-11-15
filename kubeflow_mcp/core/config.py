@@ -252,12 +252,18 @@ def load_config(config_path: Path | None = None) -> Config:
             logger.debug(f"Loaded config from {default_path}")
 
     server_file = file_config.get("server", {})
+    clients_from_file = server_file.get("clients", ["trainer"])
+    if not isinstance(clients_from_file, list) or not all(
+        isinstance(c, str) for c in clients_from_file
+    ):
+        raise ValueError("server.clients in configuration must be a list of strings")
+
     raw_clients = os.getenv(
         "KUBEFLOW_MCP_CLIENTS",
-        ",".join(server_file.get("clients", ["trainer"])),
+        ",".join(clients_from_file),
     )
     clients = [c.strip() for c in raw_clients.split(",") if c.strip()]
-    if raw_clients.strip() and not clients:
+    if not clients:
         raise ValueError("at least one client must be specified")
 
     server = ServerConfig(

@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -202,3 +203,52 @@ def test_find_config_file_prefers_project_local_config(tmp_path):
         patch("kubeflow_mcp.core.config.Path.cwd", return_value=tmp_path),
     ):
         assert _find_config_file() == local_config
+
+
+@pytest.mark.parametrize(
+    "invalid_clients",
+    [
+        "trainer",
+        123,
+        {"name": "trainer"},
+        [123],
+        ["trainer", 123],
+    ],
+)
+def test_load_config_rejects_non_list_server_clients(invalid_clients):
+    with (
+        patch("kubeflow_mcp.core.config._find_config_file", return_value=Path("config.yaml")),
+        patch(
+            "kubeflow_mcp.core.config._load_yaml_config",
+            return_value={"server": {"clients": invalid_clients}},
+        ),
+        pytest.raises(
+            ValueError,
+            match=r"server\.clients in configuration must be a list of strings",
+        ),
+    ):
+        load_config()
+
+
+def test_load_config_rejects_empty_server_clients_list_in_file():
+    with (
+        patch("kubeflow_mcp.core.config._find_config_file", return_value=Path("config.yaml")),
+        patch(
+            "kubeflow_mcp.core.config._load_yaml_config",
+            return_value={"server": {"clients": []}},
+        ),
+        pytest.raises(ValueError, match="at least one client must be specified"),
+    ):
+        load_config()
+
+
+def test_load_config_accepts_valid_clients_list_in_file():
+    with (
+        patch("kubeflow_mcp.core.config._find_config_file", return_value=Path("config.yaml")),
+        patch(
+            "kubeflow_mcp.core.config._load_yaml_config",
+            return_value={"server": {"clients": ["trainer", "spark"]}},
+        ),
+    ):
+        cfg = load_config()
+    assert cfg.server.clients == ["trainer", "spark"]
