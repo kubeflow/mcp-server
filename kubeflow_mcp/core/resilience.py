@@ -287,7 +287,7 @@ async def retry_with_backoff_async(
 
 @dataclass
 class RateLimiter:
-    """Token bucket rate limiter (thread-safe)."""
+    """Thread-safe token bucket limiter; fractional costs can use fractional capacities."""
 
     rate: float = 10.0
     capacity: float = 10.0

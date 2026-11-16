@@ -84,6 +84,8 @@ def configure_resilience(
     rate_capacity: float = 20.0,
 ) -> None:
     """Initialize the global rate limiter from config. Called once at startup."""
+    if rate_capacity < 1.0:
+        raise ValueError("rate_capacity must be at least 1")
     global _rate_limiter
     _rate_limiter = RateLimiter(rate=rate_limit, capacity=rate_capacity)
 
