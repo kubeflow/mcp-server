@@ -20,6 +20,8 @@ The spark module imports the SDK lazily, so these run without the
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from kubeflow_mcp.conftest import make_spark_session_info
 from kubeflow_mcp.spark.api import discovery
 
@@ -75,6 +77,18 @@ class TestListSessions:
         out = discovery.list_spark_sessions(state="failed")  # case-insensitive
         assert out["data"]["total"] == 1
         assert out["data"]["sessions"][0]["name"] == "b"
+
+    @pytest.mark.parametrize("invalid_state", ["Redy", "Complete", "unknown", "   "])
+    def test_unsupported_state_returns_validation_error(self, invalid_state):
+        client = MagicMock()
+        with patch.object(discovery, "get_spark_client_for_namespace", return_value=client):
+            out = discovery.list_spark_sessions(state=invalid_state)
+        assert out["success"] is False
+        assert out["error_code"] == "VALIDATION_ERROR"
+        assert f"Unsupported session state '{invalid_state}'" in out["error"]
+        assert "supported_states" in out["details"]
+        assert "Ready" in out["details"]["supported_states"]
+        client.list_sessions.assert_not_called()
 
     def test_invalid_limit(self):
         out = discovery.list_spark_sessions(limit=0)

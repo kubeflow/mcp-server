@@ -27,6 +27,11 @@ logger = logging.getLogger(__name__)
 
 MAX_LIST_LIMIT = 500
 
+_VALID_SESSION_STATES: frozenset[str] = frozenset(
+    {"Provisioning", "Ready", "Running", "NotReady", "Failed"}
+)
+_SESSION_STATE_LOOKUP: dict[str, str] = {s.lower(): s for s in _VALID_SESSION_STATES}
+
 
 def list_spark_sessions(
     state: str | None = None,
@@ -65,13 +70,23 @@ def list_spark_sessions(
         ).model_dump()
     limit = min(limit, MAX_LIST_LIMIT)
 
+    normalized_state = None
+    if state is not None:
+        trimmed_state = state.strip().lower()
+        if not trimmed_state or trimmed_state not in _SESSION_STATE_LOOKUP:
+            return ToolError(
+                error=f"Unsupported session state '{state}'",
+                error_code=ErrorCode.VALIDATION_ERROR,
+                details={"supported_states": sorted(_VALID_SESSION_STATES)},
+            ).model_dump()
+        normalized_state = trimmed_state
+
     try:
         client = get_spark_client_for_namespace(namespace)
         sessions = [session_info_to_dict(s) for s in client.list_sessions()]
 
-        if state:
-            want = state.strip().lower()
-            sessions = [s for s in sessions if (s.get("state") or "").lower() == want]
+        if normalized_state:
+            sessions = [s for s in sessions if (s.get("state") or "").lower() == normalized_state]
 
         shown = sessions[:limit]
         return ToolResponse(
