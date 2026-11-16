@@ -306,6 +306,24 @@ IMPORTANT:
 - Use get_training_events() to debug stuck/failed jobs
 """
 
+# In progressive and semantic mode only the meta-tools are registered, so the tool
+# calls named in the instructions have to go through them.
+_DYNAMIC_MODE_TOOL_ACCESS = {
+    "progressive": """\
+TOOL ACCESS (progressive mode):
+- The tools named below are not registered directly. Find them with list_tools(),
+  read their parameters with describe_tools([...]), then run them with
+  execute_tool(tool_name, {args}).
+- e.g. pre_flight(model="...") means execute_tool("pre_flight", {"model": "..."}).
+""",
+    "semantic": """\
+TOOL ACCESS (semantic mode):
+- The tools named below are not registered directly. Find them with
+  find_tools("what you want to do"), then run them with execute_tool(tool_name, {args}).
+- e.g. pre_flight(model="...") means execute_tool("pre_flight", {"model": "..."}).
+""",
+}
+
 
 def _derive_tier(full_text: str, tier: str, allowed: set[str] | None = None) -> str:
     """Derive compact/minimal instruction content from full tier.
@@ -381,11 +399,14 @@ def _build_server_instructions(
     persona: str,
     tier: str,
     allowed: set[str] | None = None,
+    mode: str = "full",
 ) -> str:
     """Build server instructions from client module sections, filtered by persona and tier.
 
     ``allowed`` is the final set of registered tools (persona, policy and read_only
-    filters applied). When omitted, the persona's tools are used.
+    filters applied). When omitted, the persona's tools are used. In progressive and
+    semantic ``mode`` a TOOL ACCESS block follows the header, since the tools named in
+    the sections are reachable only through the meta-tools.
     """
     sections = _sections_for_persona(persona)
     if allowed is None:
@@ -407,6 +428,9 @@ def _build_server_instructions(
             resource_lines.append(f"- {uri} -> {desc}")
 
     result = _GLOBAL_HEADER
+    tool_access = _DYNAMIC_MODE_TOOL_ACCESS.get(mode)
+    if tool_access:
+        result += "\n" + tool_access
     if fragments:
         result += "\n" + "\n\n".join(fragments) + "\n"
     if resource_lines and tier == "full":
@@ -503,10 +527,10 @@ def create_server(  # noqa: C901
         final_allowed = final_allowed & read_tools
         logger.info(f"read_only policy active, excluded {len(write_tools)} write tools")
 
-    # Build instructions (persona + tier aware), listing only the tools that
+    # Build instructions (persona + tier + mode aware), listing only the tools that
     # survive the persona, policy and read_only filters above
     instructions = _build_server_instructions(
-        loaded_modules, persona, instruction_tier, final_allowed
+        loaded_modules, persona, instruction_tier, final_allowed, mode
     )
     mcp_kwargs: dict[str, Any] = {"instructions": instructions}
     if auth_provider is not None:
