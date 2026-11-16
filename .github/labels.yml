@@ -18,6 +18,10 @@
   color: "ecfc15"
   description: "Design discussion or question"
 
+- name: kind/plan-kep
+  color: "c7def8"
+  description: "Kubeflow Enhancement Proposal (KEP)"
+
 # ── area/* ─────────────────────────────────────────────────────────────────────
 - name: area/core
   color: "0052cc"
