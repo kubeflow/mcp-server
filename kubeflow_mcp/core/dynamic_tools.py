@@ -172,15 +172,23 @@ def list_tools(prefix: str = "") -> dict[str, Any]:
 
 
 def _tool_parameters(name: str) -> dict[str, Any]:
-    """Parameter names, types and defaults of a registered tool."""
-    sig = inspect.signature(TOOL_REGISTRY[name]["func"])
+    """Parameter names, types and defaults of a registered tool.
+
+    Defaults come from the args model execute_tool validates against, which resolves a
+    default written as ``Field(default=...)`` to its value. The raw FieldInfo can't be
+    serialized as JSON, so FastMCP drops the structured result and MCP clients reject
+    the whole describe_tools or find_tools response.
+    """
+    tool = TOOL_REGISTRY[name]
+    fields = tool["args_model"].model_fields
     params: dict[str, Any] = {}
-    for param_name, param in sig.parameters.items():
+    for param_name, param in inspect.signature(tool["func"]).parameters.items():
         param_info: dict[str, Any] = {"type": "any"}
         if param.annotation != inspect.Parameter.empty:
             param_info["type"] = str(param.annotation)
-        if param.default != inspect.Parameter.empty:
-            param_info["default"] = param.default
+        field = fields[param_name]
+        if not field.is_required():
+            param_info["default"] = field.get_default(call_default_factory=True)
         params[param_name] = param_info
     return params
 
