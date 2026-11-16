@@ -256,6 +256,31 @@ async def test_server_info_reports_package_version():
         set_effective_persona(previous)
 
 
+@pytest.mark.parametrize(
+    "policy",
+    [{"read_only": True}, {"deny": ["delete_*"]}],
+    ids=["read_only", "deny"],
+)
+async def test_minimal_instructions_list_only_registered_tools(tmp_policy_file, policy):
+    """The minimal tier must not list tools the policy file removed."""
+    tmp_policy_file({"policy": policy})
+    previous = get_effective_persona()
+    try:
+        server = create_server(persona="platform-admin", instruction_tier="minimal")
+        async with Client(server) as client:
+            registered = {tool.name for tool in await client.list_tools()}
+    finally:
+        set_effective_persona(previous)
+    listed = {
+        name
+        for line in server.instructions.splitlines()
+        if line.startswith("Tools: ")
+        for name in line.removeprefix("Tools: ").split(", ")
+    }
+    assert listed
+    assert listed <= registered
+
+
 def test_audit_wrap_execute_tool_circuit_breaker_isolation(monkeypatch):
     from kubeflow_mcp.common.constants import ErrorCode
     from kubeflow_mcp.core import dynamic_tools, server
