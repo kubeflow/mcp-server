@@ -93,7 +93,7 @@ class TestListSessions:
         out = discovery.list_spark_sessions(state=state)
         assert out["success"] is False
         assert out["error_code"] == "VALIDATION_ERROR"
-        assert state in out["error"]
+        assert out["error"] == f"Unsupported state '{state}'"
         assert out["details"]["supported_states"] == sorted(discovery.SESSION_STATES)
         mock_spark_client.list_sessions.assert_not_called()
 
