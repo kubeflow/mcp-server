@@ -34,7 +34,7 @@ from kubeflow_mcp.common.constants import TOOL_NEXT_HINTS, TOOL_TO_PHASE
 from kubeflow_mcp.common.types import PreviewResponse, ToolResponse
 from kubeflow_mcp.core.policy import get_effective_persona, set_effective_persona
 from kubeflow_mcp.core.resilience import reset_breakers
-from kubeflow_mcp.core.server import _inject_meta, create_server
+from kubeflow_mcp.core.server import _inject_meta, configure_resilience, create_server
 from kubeflow_mcp.trainer import CLIENT_TOOL_ANNOTATIONS, CLIENT_TOOL_DESCRIPTIONS
 
 
@@ -460,3 +460,26 @@ async def test_confirm_gate_matches_full_mode_in_dynamic_modes(k8s_writes, tool)
         set_effective_persona(previous)
 
     assert mismatches == {}
+
+
+class TestConfigureResilience:
+    @pytest.fixture(autouse=True)
+    def _reset_limiter(self):
+        import kubeflow_mcp.core.server as server_mod
+
+        prev = server_mod._rate_limiter
+        try:
+            yield
+        finally:
+            server_mod._rate_limiter = prev
+
+    def test_rejects_sub_one_capacity(self):
+        with pytest.raises(ValueError, match="rate_capacity must be at least 1"):
+            configure_resilience(rate_limit=10.0, rate_capacity=0.5)
+
+    def test_rejects_non_positive_rate(self):
+        with pytest.raises(ValueError, match="rate_limit must be greater than zero"):
+            configure_resilience(rate_limit=0.0, rate_capacity=1.0)
+
+    def test_accepts_valid_capacity_and_fractional_rate(self):
+        configure_resilience(rate_limit=0.5, rate_capacity=1.0)
