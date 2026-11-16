@@ -19,6 +19,7 @@ Covers discovery behavior, input validation, and status filter aliasing.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -375,9 +376,14 @@ class TestGetRuntimeImage:
 # ---------------------------------------------------------------------------
 
 
-def _fake_job(name, status="Running", runtime_name="torch-tune"):
+def _fake_job(name, status="Running", runtime_name="torch-tune", created_at=None):
     runtime = SimpleNamespace(name=runtime_name) if runtime_name else None
-    return SimpleNamespace(name=name, status=status, runtime=runtime)
+    return SimpleNamespace(
+        name=name,
+        status=status,
+        runtime=runtime,
+        creation_timestamp=created_at,
+    )
 
 
 def _fake_runtime(name):
@@ -396,6 +402,31 @@ def test_list_training_jobs_returns_all_when_no_filters():
     assert result["data"]["total"] == 2
     assert result["data"]["returned"] == 2
     assert result["data"]["has_more"] is False
+
+
+def test_list_training_jobs_includes_creation_timestamp():
+    created_at = datetime(2026, 10, 14, 9, 30, tzinfo=timezone.utc)
+    client = MagicMock()
+    client.list_jobs.return_value = [_fake_job("job-a", created_at=created_at)]
+    with patch(
+        "kubeflow_mcp.trainer.api.discovery.get_trainer_client_for_namespace",
+        return_value=client,
+    ):
+        result = list_training_jobs()
+
+    assert result["data"]["jobs"][0]["created_at"] == "2026-10-14T09:30:00+00:00"
+
+
+def test_list_training_jobs_returns_none_when_creation_timestamp_missing():
+    client = MagicMock()
+    client.list_jobs.return_value = [_fake_job("job-a")]
+    with patch(
+        "kubeflow_mcp.trainer.api.discovery.get_trainer_client_for_namespace",
+        return_value=client,
+    ):
+        result = list_training_jobs()
+
+    assert result["data"]["jobs"][0]["created_at"] is None
 
 
 def test_list_training_jobs_filters_by_status():
@@ -521,6 +552,19 @@ def test_get_training_job_failed_status_suggests_diagnostics():
     next_steps = result["data"]["next_steps"]
     assert any("get_training_events" in step for step in next_steps)
     assert any("get_training_logs" in step for step in next_steps)
+
+
+def test_get_training_job_includes_creation_timestamp():
+    created_at = datetime(2026, 10, 14, 9, 30, tzinfo=timezone.utc)
+    client = MagicMock()
+    client.get_job.return_value = _fake_job("job-a", created_at=created_at)
+    with patch(
+        "kubeflow_mcp.trainer.api.discovery.get_trainer_client_for_namespace",
+        return_value=client,
+    ):
+        result = get_training_job("job-a")
+
+    assert result["data"]["created_at"] == "2026-10-14T09:30:00+00:00"
 
 
 def test_get_training_job_complete_status_has_no_next_steps():
