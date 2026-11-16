@@ -21,12 +21,15 @@ for the security model and RBAC YAML see [ARCHITECTURE.md](../ARCHITECTURE.md).
 
 ## Install
 
-### Option A — pip (recommended for local dev)
+### Option A — pip
 
 ```bash
 pip install kubeflow-mcp
-kubeflow-mcp serve          # starts with stdio transport by default
+kubeflow-mcp serve
 ```
+
+Ensure `kubeflow-mcp` is available on your MCP client's `PATH`. If you installed it in a virtual
+environment, use the full path to that environment's executable in the client configuration.
 
 ### Option B — Docker (recommended for shared / in-cluster deployments)
 
@@ -59,20 +62,14 @@ Choose the transport that fits your setup:
 
 ### Cursor
 
-Install [`uv`](https://docs.astral.sh/uv/) and ensure it is available on your system `PATH`:
-
-```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
-```
-
 Add to `.cursor/mcp.json` (or use the repo-root [`.mcp.json`](../.mcp.json) for local dev):
 
 ```json
 {
   "mcpServers": {
     "kubeflow": {
-      "command": "uv",
-      "args": ["run", "kubeflow-mcp", "serve"]
+      "command": "kubeflow-mcp",
+      "args": ["serve"]
     }
   }
 }
@@ -83,10 +80,14 @@ Transport: `stdio` (Cursor spawns the server process; no port or auth required).
 ### Claude Code
 
 ```bash
-claude mcp add kubeflow -- kubeflow-mcp serve
+claude mcp add --transport stdio kubeflow -- kubeflow-mcp serve
 ```
 
-Transport: `stdio`. Claude Code manages the server lifecycle.
+Transport: `stdio`. Claude Code manages the server lifecycle. Codex CLI uses the same server command:
+
+```bash
+codex mcp add kubeflow -- kubeflow-mcp serve
+```
 
 ### VS Code (or any HTTP client)
 

@@ -169,6 +169,8 @@ All mutating tools require `confirmed=True` and return a preview before making c
 
 ### MCP Client Config
 
+Install the package first and ensure `kubeflow-mcp` is on your client's `PATH`. For a virtual
+environment, use the full path to its `kubeflow-mcp` executable.
 
 <details>
 <summary>Cursor</summary>
@@ -179,8 +181,8 @@ Add to `.cursor/mcp.json` (or use the `.mcp.json` at the repo root for local dev
 {
   "mcpServers": {
     "kubeflow": {
-      "command": "uv",
-      "args": ["run", "kubeflow-mcp", "serve"]
+      "command": "kubeflow-mcp",
+      "args": ["serve"]
     }
   }
 }
@@ -192,7 +194,7 @@ Add to `.cursor/mcp.json` (or use the `.mcp.json` at the repo root for local dev
 <summary>Claude Code</summary>
 
 ```bash
-claude mcp add kubeflow -- kubeflow-mcp serve
+claude mcp add --transport stdio kubeflow -- kubeflow-mcp serve
 ```
 
 </details>
@@ -410,6 +412,8 @@ make inspector TRANSPORT=sse      # Inspector + SSE (deprecated; start server se
 - **[SECURITY](SECURITY.md)**: Vulnerability reporting; see [ARCHITECTURE.md#security-model](ARCHITECTURE.md#security-model) for threat model, RBAC, and hardening
 - **[Client conventions](docs/CONVENTIONS.md)**: Checklist for adding client modules
 - **[KEP-936](https://github.com/kubeflow/community/tree/master/proposals/936-kubeflow-mcp-server)**: Design proposal
+- **[KEP format and proposals](docs/proposals/README.md)**: Enhancement process and proposal template
+- **[KEP-467: MCP Server and Agent Skills](docs/proposals/467-kubeflow-agenthub/README.md)**: Provisional design for the MCP server and independently installable skills
 
 ## License
 
