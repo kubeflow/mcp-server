@@ -29,6 +29,7 @@ from tests.common import TestCase
 from kubeflow_mcp.common.constants import (
     KUBEFLOW_SDK_VERSION_MIN,
     KUBEFLOW_SDK_VERSION_SPEC,
+    MIN_K8S_VERSION,
     MIN_TRAINER_CRD_VERSION,
     TRAINER_CRD_NAME,
 )
@@ -1233,3 +1234,21 @@ def test_pre_flight_propagates_failed_checks(step: int, code: str) -> None:
             later.assert_not_called()
     assert result == error
     assert "_meta" not in _inject_meta(result, "pre_flight")
+
+
+def test_check_compatibility_docstring_states_version_requirements():
+    # describe_tools() and the semantic index read __doc__. A docstring built with
+    # .format() inside the function body is an expression and leaves it None.
+    doc = check_compatibility.__doc__
+
+    assert doc is not None
+    assert f"minimum {MIN_K8S_VERSION[0]}.{MIN_K8S_VERSION[1]} required" in doc
+    assert MIN_TRAINER_CRD_VERSION in doc
+    assert KUBEFLOW_SDK_VERSION_SPEC in doc
+    assert '{"data": {"compatible": true' in doc
+
+
+@pytest.mark.parametrize("tool", [check_compatibility, pre_flight])
+def test_planning_docstring_examples_are_not_format_escaped(tool):
+    assert tool.__doc__ is not None
+    assert "{{" not in tool.__doc__
