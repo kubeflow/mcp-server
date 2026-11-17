@@ -311,15 +311,17 @@ IMPORTANT:
 _DYNAMIC_MODE_TOOL_ACCESS = {
     "progressive": """\
 TOOL ACCESS (progressive mode):
-- The tools named below are not registered directly. Find them with list_tools(),
+- The tool calls named in these instructions are not registered directly.
+  list_tools() shows the categories and list_tools("<category>") the tools in one;
   read their parameters with describe_tools([...]), then run them with
   execute_tool(tool_name, {args}).
 - e.g. pre_flight(model="...") means execute_tool("pre_flight", {"model": "..."}).
 """,
     "semantic": """\
 TOOL ACCESS (semantic mode):
-- The tools named below are not registered directly. Find them with
-  find_tools("what you want to do"), then run them with execute_tool(tool_name, {args}).
+- The tool calls named in these instructions are not registered directly. Find them
+  with find_tools("what you want to do"), then run them with
+  execute_tool(tool_name, {args}).
 - e.g. pre_flight(model="...") means execute_tool("pre_flight", {"model": "..."}).
 """,
 }
