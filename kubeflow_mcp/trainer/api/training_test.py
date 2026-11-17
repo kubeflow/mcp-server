@@ -1226,3 +1226,61 @@ class TestFineTuneHuggingFaceDatasetWorkaround:
 
         assert "dataset.source=/workspace/dataset" not in args
         assert "dataset.data_dir=null" not in args
+
+
+@pytest.mark.parametrize(
+    "message,expected",
+    [
+        (
+            'admission webhook "validator.trainer" denied the request: spec.runtimeRef.name: Invalid value: "qwen": QLoRA is not supported',
+            "VALIDATION_ERROR",
+        ),
+        (
+            'admission webhook "validator.trainer" denied the request: spec.runtimeRef: Required value',
+            "VALIDATION_ERROR",
+        ),
+        (
+            'admission webhook "validator.trainer" denied the request: spec.trainer: Unsupported value',
+            "VALIDATION_ERROR",
+        ),
+        (
+            'admission webhook "validator.trainer" denied the request: spec.initializer: Forbidden',
+            "VALIDATION_ERROR",
+        ),
+        (
+            'admission webhook "security-policy" denied the request: spec.trainerPolicy: Invalid value',
+            "PERMISSION_DENIED",
+        ),
+        (
+            'admission webhook "security-policy" denied the request: service account forbidden',
+            "PERMISSION_DENIED",
+        ),
+        (
+            'admission webhook "security-policy" denied the request: spec.serviceAccountName: Invalid value: "admin"',
+            "PERMISSION_DENIED",
+        ),
+        ("User cannot create trainjobs in namespace workloads", "PERMISSION_DENIED"),
+    ],
+)
+@pytest.mark.parametrize("wrapping", ["direct", "cause", "context"])
+def test_admission_validation_distinguished_from_permissions(
+    message: str, expected: str, wrapping: str
+) -> None:
+    import json
+
+    from kubeflow_mcp.trainer.api.training import _sdk_error
+
+    api_error = ApiException(status=403)
+    api_error.body = json.dumps({"message": message})
+    error: Exception = api_error
+    if wrapping != "direct":
+        error = RuntimeError("Failed to create TrainJob")
+        if wrapping == "cause":
+            error.__cause__ = api_error
+        else:
+            error.__context__ = api_error
+    result = _sdk_error(error)
+    assert result["error_code"] == expected
+    if expected == "VALIDATION_ERROR":
+        assert result["error"] == message
+        assert "service_account_name" not in result["hint"]

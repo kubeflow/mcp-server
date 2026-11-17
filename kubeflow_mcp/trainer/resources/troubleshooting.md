@@ -188,3 +188,10 @@ update_training_job(name, action="resume", confirmed=True)   # Resume (preview f
 - Volume scope: `fine_tune()` volumes apply to ALL replicated jobs; `run_custom_training()` applies to node only
 - `loss` in `fine_tune` only supports `CEWithChunkedOutputLoss`
 - `dataset_source`/`dataset_split`/`dataset_column_map` configure instruct-format preprocessing
+
+### Admission configuration rejections
+
+Webhook rejections naming `spec.runtimeRef`, `spec.trainer`, or `spec.initializer` return
+`VALIDATION_ERROR` with the webhook reason, including required, unsupported, or forbidden settings.
+RBAC and security policy denials remain `PERMISSION_DENIED`; check model/runtime compatibility
+before retrying an unsupported configuration.
