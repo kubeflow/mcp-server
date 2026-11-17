@@ -13,3 +13,12 @@
 # limitations under the License.
 
 """Trainer-specific constants."""
+
+TRAINER_CONTROLLER_LABEL_SELECTORS: tuple[str, ...] = (
+    # Default Helm chart labels.
+    "app.kubernetes.io/name=kubeflow-trainer,app.kubernetes.io/component=manager",
+    # Kustomize installations still use trainer, including current releases.
+    "app.kubernetes.io/name=trainer,app.kubernetes.io/component=manager",
+    # Retain the existing compatibility fallback.
+    "app.kubernetes.io/name=trainer,app.kubernetes.io/part-of=kubeflow",
+)
