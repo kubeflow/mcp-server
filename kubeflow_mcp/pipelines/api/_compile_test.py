@@ -25,6 +25,7 @@ import sys
 import textwrap
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -309,10 +310,20 @@ class TestRejectedPipelineBody:
             ("s = f'{n}-{n}'", "can only hold a task, a task output or a literal"),
             ("y = n", "can only hold a task, a task output or a literal"),
             ("y = -n", "can only hold a task, a task output or a literal"),
+            ("x = 'a'\nx = {'v': x + x}['v']", "only a task output like task.outputs"),
+            ("x = [n, n][0]", "only a task output like task.outputs"),
+            ("t = step(x=n)\nx = t.outputs[n]", "only a task output like task.outputs"),
+            ("x = dsl.Collected(n + 1)", "dsl.Collected only takes task outputs"),
+            ("x = dsl.OneOf('a' + 'b')", "dsl.OneOf only takes task outputs"),
         ],
     )
     def test_rejected(self, body, message):
         assert message in _error(_pipeline(body))
+
+    def test_doubling_through_a_subscript_is_rejected(self):
+        # Second review repro: a dict subscript let `+` back into a variable.
+        body = "x = 'aaaa'\n" + "x = {'v': x + x}['v']\n" * 20 + "step(x=x)"
+        assert "only a task output" in _error(_pipeline(body))
 
     def test_doubling_a_value_is_rejected_before_compiling(self):
         # Review repro: ~500 bytes of `x = x + x` compiled to a 4 MB spec.
@@ -401,6 +412,52 @@ class TestCompileProcess:
     def test_worker_and_server_agree_on_limit_names(self):
         assert _compile_worker.MEMORY_ENV == _compile.COMPILE_MEMORY_ENV
         assert _compile_worker.OUTPUT_ENV == _compile.COMPILE_OUTPUT_ENV
+
+    @staticmethod
+    def _fake_resource(monkeypatch, hard=-1, refuse=()):
+        calls = {}
+
+        def setrlimit(limit, values):
+            if limit in refuse:
+                # What CPython raises when the OS answers EINVAL (macOS for RLIMIT_AS).
+                raise ValueError("current limit exceeds maximum limit")
+            calls[limit] = values
+
+        fake = SimpleNamespace(
+            RLIMIT_AS="AS",
+            RLIMIT_FSIZE="FSIZE",
+            RLIM_INFINITY=-1,
+            getrlimit=lambda limit: (hard, hard),
+            setrlimit=setrlimit,
+        )
+        monkeypatch.setitem(sys.modules, "resource", fake)
+        monkeypatch.setenv(_compile.COMPILE_MEMORY_ENV, "1000")
+        monkeypatch.setenv(_compile.COMPILE_OUTPUT_ENV, "500")
+        return calls
+
+    def test_limits_are_set_when_unlimited(self, monkeypatch):
+        calls = self._fake_resource(monkeypatch)
+
+        applied = _compile_worker.apply_limits()
+
+        assert applied == [_compile.COMPILE_MEMORY_ENV, _compile.COMPILE_OUTPUT_ENV]
+        assert calls == {"AS": (1000, 1000), "FSIZE": (500, 500)}
+
+    def test_a_refused_limit_is_skipped_and_the_rest_still_apply(self, monkeypatch):
+        # Review repro: setrlimit raised and broke every compile on that platform.
+        calls = self._fake_resource(monkeypatch, refuse=("AS",))
+
+        applied = _compile_worker.apply_limits()
+
+        assert applied == [_compile.COMPILE_OUTPUT_ENV]
+        assert calls == {"FSIZE": (500, 500)}
+
+    def test_limits_never_go_above_the_current_hard_limit(self, monkeypatch):
+        calls = self._fake_resource(monkeypatch, hard=300)
+
+        _compile_worker.apply_limits()
+
+        assert calls == {"AS": (300, 300), "FSIZE": (300, 300)}
 
     @pytest.mark.skipif(sys.platform != "win32", reason="Windows has no resource module")
     def test_limits_are_skipped_without_resource_module(self, monkeypatch):

@@ -45,18 +45,30 @@ def apply_limits() -> list[str]:
     A pipeline body that grows a value faster than expected then fails with
     MemoryError, or with "File too large" when writing the spec, instead of exhausting
     the server container. Windows has no ``resource`` module, so only the caller's
-    timeout applies there. Returns the limits that were set.
+    timeout applies there. Each limit is set on its own and never above the current
+    hard limit; a limit the platform refuses (macOS rejects ``RLIMIT_AS``, which
+    Python reports as a ValueError) is skipped so compiling still works. Returns the
+    limits that were set.
     """
     try:
         import resource
     except ImportError:
         return []
     applied = []
-    for env, limit in ((MEMORY_ENV, resource.RLIMIT_AS), (OUTPUT_ENV, resource.RLIMIT_FSIZE)):
+    for env, name in ((MEMORY_ENV, "RLIMIT_AS"), (OUTPUT_ENV, "RLIMIT_FSIZE")):
         value = os.environ.get(env, "")
-        if value.isdigit() and int(value) > 0:
-            resource.setrlimit(limit, (int(value), int(value)))
-            applied.append(env)
+        limit = getattr(resource, name, None)
+        if limit is None or not value.isdigit() or int(value) <= 0:
+            continue
+        try:
+            _, hard = resource.getrlimit(limit)
+            target = int(value)
+            if hard != resource.RLIM_INFINITY and hard >= 0:
+                target = min(target, hard)
+            resource.setrlimit(limit, (target, target))
+        except (ValueError, OSError):
+            continue
+        applied.append(env)
     return applied
 
 

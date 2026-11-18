@@ -457,7 +457,18 @@ class _PipelineBodyChecker:
         a few lines grow a string exponentially while the body runs at compile time, so
         ``+`` and f-strings are only accepted inline, as call arguments.
         """
-        if isinstance(value, (ast.Call, ast.Attribute, ast.Subscript)):
+        if isinstance(value, ast.Subscript):
+            # Only a task output such as ``t.outputs["model"]``; subscripting a dict or
+            # list literal (``{"v": x + x}["v"]``) would smuggle ``+`` back into a variable.
+            if not self.is_output_subscript(value):
+                raise _CodeError(
+                    value,
+                    "only a task output like task.outputs['name'] can be stored from a "
+                    "subscript; build strings inline in the call that uses them",
+                )
+            self.check_expr(value)
+            return
+        if isinstance(value, (ast.Call, ast.Attribute)):
             self.check_expr(value)
             return
         try:
@@ -470,6 +481,28 @@ class _PipelineBodyChecker:
                 "a pipeline variable can only hold a task, a task output or a literal; "
                 "build strings inline in the call that uses them",
             ) from None
+
+    @staticmethod
+    def is_output_subscript(node: ast.Subscript) -> bool:
+        """``<expr>.outputs["name"]`` with a string literal key."""
+        return (
+            isinstance(node.value, ast.Attribute)
+            and node.value.attr == "outputs"
+            and isinstance(node.slice, ast.Constant)
+            and isinstance(node.slice.value, str)
+        )
+
+    def check_channel_arguments(self, call: ast.Call, name: str) -> None:
+        """dsl.OneOf / dsl.Collected only take task outputs or variables holding them."""
+        values = [*call.args, *(keyword.value for keyword in call.keywords)]
+        for value in values:
+            is_reference = (
+                (isinstance(value, ast.Name) and value.id in self.scope)
+                or (isinstance(value, ast.Attribute) and value.attr in _TASK_OUTPUT_ATTRS)
+                or (isinstance(value, ast.Subscript) and self.is_output_subscript(value))
+            )
+            if not is_reference:
+                raise _CodeError(value, f"dsl.{name} only takes task outputs")
 
     def define(self, name: str, node: ast.AST) -> None:
         if name in self.module.aliases or name in self.module.components:
@@ -512,6 +545,8 @@ class _PipelineBodyChecker:
             return
         kind = self.module.qualified(func) or ""
         dsl_name = kind.removeprefix("kfp.dsl.")
+        if dsl_name in ("OneOf", "Collected"):
+            self.check_channel_arguments(call, dsl_name)
         if (
             dsl_name in _DSL_CALLS
             or dsl_name in _DSL_CONTEXTS
