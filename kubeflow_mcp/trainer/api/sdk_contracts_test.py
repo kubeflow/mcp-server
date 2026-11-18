@@ -14,6 +14,7 @@ import builtins
 import inspect
 import textwrap
 from dataclasses import fields
+from types import SimpleNamespace
 from typing import get_type_hints
 
 import pytest
@@ -295,6 +296,37 @@ class TestSDKAPISignatures:
         assert "timeout" in params
         assert "polling_interval" in params
         assert "callbacks" in params
+
+    def test_wait_callback_updates_status_before_the_sdk_checks_the_target(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Monitoring reconciles resumed jobs through this SDK callback ordering."""
+        from kubeflow.trainer.backends.kubernetes import backend as sdk_backend
+
+        job = SimpleNamespace(status="Created")
+        calls: list[str] = []
+
+        def get_job(name: str) -> SimpleNamespace:
+            calls.append(name)
+            return job
+
+        def reconcile(observed: SimpleNamespace) -> None:
+            observed.status = "Running"
+
+        def unexpected_sleep(_seconds: int) -> None:
+            pytest.fail("SDK did not recognize the callback's status on the first poll")
+
+        monkeypatch.setattr(sdk_backend.time, "sleep", unexpected_sleep)
+        result = sdk_backend.KubernetesBackend.wait_for_job_status(
+            SimpleNamespace(get_job=get_job),
+            name="resumed-job",
+            status={"Running"},
+            timeout=2,
+            polling_interval=1,
+            callbacks=[reconcile],
+        )
+        assert result is job
+        assert calls == ["resumed-job"]
 
     def test_trainer_client_delete_job_signature(self):
         """Verify delete_job() signature."""

@@ -14,6 +14,7 @@
 
 """Read-only pod diagnostics shared by discovery and wait responses."""
 
+import json
 import logging
 from typing import Any
 
@@ -26,7 +27,11 @@ from kubeflow_mcp.common.utils import (
     get_trainer_effective_namespace,
 )
 from kubeflow_mcp.core.logging import _redact_text
-from kubeflow_mcp.trainer.constants import MAX_DIAGNOSTIC_PODS
+from kubeflow_mcp.trainer.constants import (
+    MAX_DIAGNOSTIC_CHARS,
+    MAX_DIAGNOSTIC_MESSAGE_CHARS,
+    MAX_DIAGNOSTIC_PODS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +47,9 @@ def _container_details(container: V1ContainerStatus) -> dict[str, Any]:
         if value is not None:
             details["state"] = state
             details["reason"] = getattr(value, "reason", None)
-            details["message"] = _redact_text(getattr(value, "message", None) or "")[:1000]
+            details["message"] = _redact_text(getattr(value, "message", None) or "")[
+                :MAX_DIAGNOSTIC_MESSAGE_CHARS
+            ]
             details["exit_code"] = getattr(value, "exit_code", None)
             break
     previous = getattr(container.last_state, "terminated", None)
@@ -66,7 +73,7 @@ def _pod_details(pod: V1Pod) -> dict[str, Any]:
             "type": condition.type,
             "status": condition.status,
             "reason": condition.reason,
-            "message": _redact_text(condition.message or "")[:1000],
+            "message": _redact_text(condition.message or "")[:MAX_DIAGNOSTIC_MESSAGE_CHARS],
         }
         for condition in (status.conditions or [])
         if condition.status != "True"
@@ -99,6 +106,38 @@ def _pod_blocking_reasons(pod: dict[str, Any]) -> list[str]:
     return reasons
 
 
+def _bounded_diagnostics(diagnostics: list[tuple[dict[str, Any], list[str]]]) -> dict[str, Any]:
+    """Keep failure-first pod details and reasons within one serialized character budget."""
+    data: dict[str, Any] = {"pods": [], "pods_truncated": False, "blocking_reasons": []}
+    reasons_truncated = False
+    # Leave room for the truncation summaries and the final boolean value.
+    budget = MAX_DIAGNOSTIC_CHARS - 256
+    for detail, blockers in diagnostics[:MAX_DIAGNOSTIC_PODS]:
+        for reason in blockers:
+            data["blocking_reasons"].append(reason)
+            if len(json.dumps(data, ensure_ascii=False)) > budget:
+                data["blocking_reasons"].pop()
+                reasons_truncated = True
+                break
+        data["pods"].append(detail)
+        if len(json.dumps(data, ensure_ascii=False)) > budget:
+            data["pods"].pop()
+    included = {pod["name"] for pod in data["pods"]}
+    omitted = sum(
+        bool(blockers) for detail, blockers in diagnostics if detail["name"] not in included
+    )
+    if omitted:
+        data["blocking_reasons"].append(
+            f"{omitted} additional pods have blocking conditions; pod details are truncated"
+        )
+    if reasons_truncated:
+        data["blocking_reasons"].append(
+            "Additional blocking reasons omitted; use get_training_events for details"
+        )
+    data["pods_truncated"] = len(data["pods"]) < len(diagnostics) or reasons_truncated
+    return data
+
+
 def get_training_pod_diagnostics(name: str, namespace: str | None) -> dict[str, Any]:
     """Describe bounded job-associated pods; callers enforce name and namespace policy."""
     try:
@@ -119,18 +158,7 @@ def get_training_pod_diagnostics(name: str, namespace: str | None) -> dict[str, 
         diagnostics.sort(
             key=lambda item: (not item[1], item[0]["phase"] in ("Succeeded", "Failed"))
         )
-        selected = diagnostics[:MAX_DIAGNOSTIC_PODS]
-        reasons = [reason for _, blockers in selected for reason in blockers]
-        omitted = sum(bool(blockers) for _, blockers in diagnostics[MAX_DIAGNOSTIC_PODS:])
-        if omitted:
-            reasons.append(
-                f"{omitted} additional pods have blocking conditions; pod details are truncated"
-            )
-        return {
-            "pods": [detail for detail, _ in selected],
-            "pods_truncated": len(pods) > MAX_DIAGNOSTIC_PODS,
-            "blocking_reasons": reasons,
-        }
+        return _bounded_diagnostics(diagnostics)
     except Exception:
         logger.debug("Pod diagnostics unavailable for %s", name, exc_info=True)
         return {

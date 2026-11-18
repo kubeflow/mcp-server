@@ -75,6 +75,21 @@ def _trainjob_runtime_to_mcp(runtime: object | None) -> dict[str, str] | None:
     return None
 
 
+def _trainjob_created_at_to_mcp(job: object) -> str | None:
+    """Serialize a TrainJob creation timestamp as an ISO 8601 string."""
+    created_at = getattr(job, "creation_timestamp", None)
+    if created_at is None:
+        return None
+    if isinstance(created_at, str):
+        return created_at
+    isoformat = getattr(created_at, "isoformat", None)
+    if callable(isoformat):
+        serialized = isoformat()
+        if isinstance(serialized, str):
+            return serialized
+    return None
+
+
 # Upper bound on steps returned by get_training_job, so a large multi-node job
 # cannot blow up the response. The step summary still counts every step.
 MAX_JOB_STEPS = 32
@@ -133,7 +148,7 @@ def list_training_jobs(
     Returns:
         dict: Response containing:
 
-        - ``jobs`` (list): List of jobs with ``name``, ``status``, ``runtime``
+        - ``jobs`` (list): List of jobs with ``name``, ``status``, ``runtime``, and ``created_at``
         - ``total`` (int): Total matching jobs
         - ``returned`` (int): Number of jobs included in the response
         - ``has_more`` (bool): Whether matching jobs were omitted by ``limit``
@@ -173,7 +188,17 @@ def list_training_jobs(
         limit = min(limit, MAX_LIST_LIMIT)
         client = get_trainer_client_for_namespace(namespace)
         if runtime:
-            rt_obj = client.get_runtime(name=runtime)
+            try:
+                rt_obj = client.get_runtime(name=runtime)
+            except Exception as e:
+                if is_k8s_not_found(e):
+                    return ToolError(
+                        error=f"TrainingRuntime '{runtime}' not found",
+                        error_code=ErrorCode.RESOURCE_NOT_FOUND,
+                        hint="Use list_runtimes to find available runtimes",
+                        details=exception_details(e),
+                    ).model_dump()
+                raise
             jobs = client.list_jobs(runtime=rt_obj)
         else:
             jobs = client.list_jobs()
@@ -185,6 +210,7 @@ def list_training_jobs(
                 "name": job.name,
                 "status": get_training_job_status(job, namespace),
                 "runtime": _trainjob_runtime_to_mcp(jr),
+                "created_at": _trainjob_created_at_to_mcp(job),
             }
             job_list.append(job_data)
 
@@ -217,12 +243,16 @@ def get_training_job(name: str, namespace: str | None = None) -> dict[str, Any]:
         namespace: K8s namespace. Uses default from kubeconfig when omitted.
 
     Returns:
-        dict: Response containing ``name``, ``status``, ``runtime``, ``num_nodes``,
-        ``steps`` (each step's ``name``, pod ``status``, ``pod``, ``device`` and
-        ``device_count``; failed steps first, at most ``MAX_JOB_STEPS``) and
-        ``step_summary`` (step counts by status). ``pods`` adds readiness, restarts,
-        container waiting/termination reasons and failed scheduling conditions;
-        ``blocking_reasons`` summarizes blockers. Diagnostics are best-effort and bounded.
+        dict: Response containing:
+
+        - ``name``, ``status``, ``runtime``, and ``created_at``
+          (ISO 8601, or ``null`` when unavailable)
+        - ``num_nodes`` (when available)
+        - ``steps`` (each step's ``name``, pod ``status``, ``pod``, ``device``,
+          and ``device_count``; failed steps first, at most ``MAX_JOB_STEPS``)
+        - ``step_summary`` (step counts by status)
+        - ``pods`` (readiness, restarts, container failures and scheduling conditions)
+          and ``blocking_reasons`` (best-effort, bounded diagnostics).
 
     Raises:
         ToolError: If job not found (``RESOURCE_NOT_FOUND``).
@@ -274,6 +304,7 @@ def get_training_job(name: str, namespace: str | None = None) -> dict[str, Any]:
             "name": job.name,
             "status": status,
             "runtime": _trainjob_runtime_to_mcp(jr),
+            "created_at": _trainjob_created_at_to_mcp(job),
             "steps": steps,
             "step_summary": step_summary,
         }

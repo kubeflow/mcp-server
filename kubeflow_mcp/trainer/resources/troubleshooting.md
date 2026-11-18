@@ -87,9 +87,14 @@ All three training tools (`fine_tune`, `run_custom_training`, `run_container_tra
 **Add OpenShift emptyDir volumes:**
 ```json
 "volumes": [
-  {"name": "dot-local", "mount_path": "/.local", "empty_dir": {}},
-  {"name": "dot-cache", "mount_path": "/.cache", "empty_dir": {}},
-  {"name": "tmp", "mount_path": "/tmp", "empty_dir": {}}
+  {"name": "dot-local", "emptyDir": {}},
+  {"name": "dot-cache", "emptyDir": {}},
+  {"name": "tmp", "emptyDir": {}}
+],
+"volume_mounts": [
+  {"name": "dot-local", "mountPath": "/.local"},
+  {"name": "dot-cache", "mountPath": "/.cache"},
+  {"name": "tmp", "mountPath": "/tmp"}
 ]
 ```
 
@@ -202,6 +207,21 @@ update_training_job(name, action="resume", confirmed=True)   # Resume (preview f
 Use `get_training_job(name, namespace)` to inspect associated initializer and trainer pods.
 `pods` includes readiness, restarts, container waiting/termination reasons and failed scheduling
 conditions; `blocking_reasons` highlights issues such as insufficient GPUs or CrashLoopBackOff.
-Pods with blockers take priority in the bounded response; additional omitted blockers are summarized.
+Pods with blockers take priority within the 16,000-character diagnostic budget;
+additional omitted blockers are summarized and `pods_truncated` indicates omitted details.
 If pod access fails, `pod_diagnostics_error` reports that diagnostics are unavailable.
 A `wait_for_training` timeout preserves the last observed job status and includes the same diagnostics.
+
+### Persistent training storage
+
+Use Kubernetes camelCase inside storage dictionaries: `persistentVolumeClaim`, `claimName`,
+`emptyDir` and `mountPath`. Invalid fields are rejected before preview and submission.
+For persistent checkpoints, mount a PVC; `emptyDir` is temporary and cannot carry checkpoints
+between jobs.
+
+### Admission configuration rejections
+
+Webhook rejections naming `spec.runtimeRef`, `spec.trainer`, or `spec.initializer` return
+`VALIDATION_ERROR` with the webhook reason, including required, unsupported, or forbidden settings.
+RBAC and security policy denials remain `PERMISSION_DENIED`; check model/runtime compatibility
+before retrying an unsupported configuration.

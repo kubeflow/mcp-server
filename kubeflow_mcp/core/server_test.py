@@ -272,6 +272,31 @@ async def test_server_info_reports_package_version():
         set_effective_persona(previous)
 
 
+@pytest.mark.parametrize(
+    "policy",
+    [{"read_only": True}, {"deny": ["delete_*"]}],
+    ids=["read_only", "deny"],
+)
+async def test_minimal_instructions_list_only_registered_tools(tmp_policy_file, policy):
+    """The minimal tier must not list tools the policy file removed."""
+    tmp_policy_file({"policy": policy})
+    previous = get_effective_persona()
+    try:
+        server = create_server(persona="platform-admin", instruction_tier="minimal")
+        async with Client(server) as client:
+            registered = {tool.name for tool in await client.list_tools()}
+    finally:
+        set_effective_persona(previous)
+    listed = {
+        name
+        for line in server.instructions.splitlines()
+        if line.startswith("Tools: ")
+        for name in line.removeprefix("Tools: ").split(", ")
+    }
+    assert listed
+    assert listed <= registered
+
+
 def test_audit_wrap_execute_tool_circuit_breaker_isolation(monkeypatch):
     from kubeflow_mcp.common.constants import ErrorCode
     from kubeflow_mcp.core import dynamic_tools, server
@@ -388,9 +413,32 @@ def k8s_writes():
     """
     writes: list[tuple[str, str]] = []
 
-    def fake_call_api(self, resource_path, method, *args, **kwargs):
+    def fake_call_api(self, resource_path, method, path_params=None, *args, **kwargs):
         if method in _WRITE_METHODS:
             writes.append((method, resource_path))
+        if method == "GET" and (path_params or {}).get("plural") in (
+            "trainingruntimes",
+            "clustertrainingruntimes",
+        ):
+            # Custom training reads runtime storage before reaching its confirm gate.
+            return {
+                "spec": {
+                    "template": {
+                        "spec": {
+                            "replicatedJobs": [
+                                {
+                                    "name": "node",
+                                    "template": {
+                                        "spec": {
+                                            "template": {"spec": {"containers": [{"name": "node"}]}}
+                                        }
+                                    },
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
         # An empty object, as the API returns for custom resources. A MagicMock would end
         # up in tool responses and take FastMCP ~0.3s per call to fail to serialize.
         return {}

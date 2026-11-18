@@ -15,8 +15,10 @@
 """Training submission tools: fine_tune, run_custom_training, run_container_training."""
 
 import ast
+import json
 import logging
 import os
+import posixpath
 import re
 import tempfile
 import textwrap
@@ -28,10 +30,15 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 
-from kubeflow.trainer.constants.constants import DATASET_PATH, DEFAULT_PIP_INDEX_URLS
+from kubeflow.trainer.constants.constants import (
+    DATASET_PATH,
+    DEFAULT_PIP_INDEX_URLS,
+    DEFAULT_TRAINING_RUNTIME,
+)
+from kubernetes import client as k8s_client
 
 from kubeflow_mcp.common.constants import ErrorCode
-from kubeflow_mcp.common.types import PreviewResponse, ToolError, ToolResponse
+from kubeflow_mcp.common.types import PreviewResponse, ToolError, ToolResponse, is_k8s_not_found
 from kubeflow_mcp.common.utils import (
     MCP_MANAGED_LABEL,
     MCP_MANAGED_VALUE,
@@ -484,7 +491,24 @@ def _sdk_error(e: Exception, hint: str | None = None) -> dict[str, Any]:
     # context, for errors raised without ``from``, as is_k8s_not_found does). RBAC or
     # an admission policy (e.g. one restricting service_account_name) denied the
     # request: that is a permission problem to report, not a transient SDK failure.
-    if any(getattr(err, "status", None) == 403 for err in (e, e.__cause__ or e.__context__)):
+    forbidden = next(
+        (err for err in (e, e.__cause__ or e.__context__) if getattr(err, "status", None) == 403),
+        None,
+    )
+    if forbidden is not None:
+        try:
+            message = json.loads(getattr(forbidden, "body", None) or "{}").get("message", "")
+        except (ValueError, AttributeError):
+            message = ""
+        # Configuration rejection is distinct from RBAC and security admission policies.
+        if "admission webhook" in message and re.search(
+            r"\bspec\.(?:runtimeRef|trainer|initializer)(?:[.:\s\[]|$)", message
+        ):
+            return ToolError(
+                error=message,
+                error_code=ErrorCode.VALIDATION_ERROR,
+                hint="The admission webhook rejected the training configuration; check model and runtime compatibility.",
+            ).model_dump()
         return ToolError(
             error=str(e),
             error_code=ErrorCode.PERMISSION_DENIED,
@@ -517,6 +541,55 @@ def _validate_service_account_name(name: str | None) -> ToolError | None:
     if name is None:
         return None
     return validate_k8s_subdomain_name(name, "service_account_name")
+
+
+def _validate_k8s_fields(value: Any, model: Any, path: str) -> None:
+    """Reject fields the SDK's Kubernetes deserializer would silently discard."""
+    if not isinstance(value, dict):
+        raise ValueError(f"{path} must be an object")
+    unknown = value.keys() - set(model.attribute_map.values())
+    if unknown:
+        raise ValueError(f"{path}: unknown Kubernetes fields {sorted(unknown)}; use camelCase")
+
+
+def _validate_storage(volumes: Any, volume_mounts: Any) -> ToolError | None:
+    """Validate storage equally for previews and confirmed submissions."""
+    try:
+        for path, values in (("volumes", volumes), ("volume_mounts", volume_mounts)):
+            if values is not None and not isinstance(values, list):
+                raise ValueError(f"{path} must be a list")
+        names = set()
+        for volume in volumes or []:
+            _validate_k8s_fields(volume, k8s_client.V1Volume, "volumes")
+            error = validate_k8s_name(volume.get("name", ""), "volume name")
+            if error:
+                return error
+            if volume["name"] in names:
+                raise ValueError(f"Duplicate volume name: {volume['name']}")
+            names.add(volume["name"])
+            sources = volume.keys() - {"name"}
+            if len(sources) != 1:
+                raise ValueError(
+                    "Each volume must define exactly one source, e.g. persistentVolumeClaim or emptyDir"
+                )
+            source = next(iter(sources))
+            attr = next(k for k, v in k8s_client.V1Volume.attribute_map.items() if v == source)
+            model = getattr(k8s_client, k8s_client.V1Volume.openapi_types[attr])
+            _validate_k8s_fields(volume[source], model, f"volumes.{source}")
+            if source == "persistentVolumeClaim":
+                error = validate_k8s_subdomain_name(
+                    volume[source].get("claimName", ""), "claimName"
+                )
+                if error:
+                    return error
+        for mount in volume_mounts or []:
+            _validate_k8s_fields(mount, k8s_client.V1VolumeMount, "volume_mounts")
+        if volume_mounts:
+            # Reuse SDK validation for required name and absolute mountPath.
+            ContainerPatch(name="node", volume_mounts=volume_mounts)
+    except (ValueError, TypeError) as e:
+        return ToolError(error=str(e), error_code=ErrorCode.VALIDATION_ERROR)
+    return None
 
 
 def _validate_resources_per_node(resources: dict[str, Any] | None) -> ToolError | None:
@@ -620,6 +693,78 @@ def _build_initializer(
         )
 
     return Initializer(model=model_init, dataset=dataset_init)
+
+
+def _get_runtime_node_spec(runtime: str, namespace: str | None) -> dict[str, Any]:
+    """Read node defaults in the same namespace-first order as the Trainer SDK."""
+    from kubeflow.trainer.constants import constants
+
+    from kubeflow_mcp.common.utils import (
+        K8S_TIMEOUT,
+        get_custom_objects_api,
+        get_trainer_effective_namespace,
+    )
+
+    api = get_custom_objects_api()
+    try:
+        raw = api.get_namespaced_custom_object(
+            group=constants.GROUP,
+            version=constants.VERSION,
+            namespace=get_trainer_effective_namespace(namespace),
+            plural=constants.TRAINING_RUNTIME_PLURAL,
+            name=runtime,
+            _request_timeout=K8S_TIMEOUT,
+        )
+    except Exception as e:
+        if not is_k8s_not_found(e):
+            raise
+        raw = api.get_cluster_custom_object(
+            group=constants.GROUP,
+            version=constants.VERSION,
+            plural=constants.CLUSTER_TRAINING_RUNTIME_PLURAL,
+            name=runtime,
+            _request_timeout=K8S_TIMEOUT,
+        )
+    jobs = raw["spec"]["template"]["spec"]["replicatedJobs"]
+    node_job = next((job for job in jobs if job["name"] == "node"), None)
+    if node_job is None:
+        raise ValueError(f"Training runtime '{runtime}' has no node job")
+    return node_job["template"]["spec"]["template"]["spec"]
+
+
+def _ensure_workspace(
+    volumes: list[dict[str, Any]] | None,
+    volume_mounts: list[dict[str, Any]] | None,
+    *,
+    runtime: str,
+    namespace: str | None,
+) -> tuple[list[dict[str, Any]] | None, list[dict[str, Any]] | None]:
+    """Add fallback storage only when neither caller nor runtime mounts /workspace."""
+    if any(
+        posixpath.normpath(m.get("mountPath", "")) == "/workspace" for m in (volume_mounts or [])
+    ):
+        return volumes, volume_mounts
+
+    pod_spec = _get_runtime_node_spec(runtime, namespace)
+    container = next((c for c in pod_spec.get("containers", []) if c["name"] == "node"), None)
+    if container is None:
+        raise ValueError(f"Training runtime '{runtime}' has no node container")
+    if any(
+        posixpath.normpath(m.get("mountPath", "")) == "/workspace"
+        for m in container.get("volumeMounts", [])
+    ):
+        return volumes, volume_mounts
+
+    volume_names = {v["name"] for v in [*(volumes or []), *pod_spec.get("volumes", [])]}
+    workspace_name = "workspace"
+    suffix = 1
+    while workspace_name in volume_names:
+        workspace_name = f"workspace-{suffix}"
+        suffix += 1
+    return (
+        [*(volumes or []), {"name": workspace_name, "emptyDir": {}}],
+        [*(volume_mounts or []), {"name": workspace_name, "mountPath": "/workspace"}],
+    )
 
 
 def _build_runtime_patch(
@@ -1057,8 +1202,10 @@ def fine_tune(
         s3_role_arn: IAM role ARN for S3 access.
         node_selector: K8s node selector (e.g., ``{"gpu-type": "a100"}``).
         tolerations: K8s tolerations for tainted nodes.
-        volumes: K8s volume definitions.
-        volume_mounts: K8s volume mounts.
+        volumes: Kubernetes camelCase dictionaries, each with ``name`` and one source
+            (e.g., ``persistentVolumeClaim`` with ``claimName``, or ``emptyDir``).
+        volume_mounts: Kubernetes camelCase dictionaries, each with ``name`` and an
+            absolute ``mountPath``.
         affinity: K8s pod affinity/anti-affinity rules.
         service_account_name: K8s service account for the training pod.
         image_pull_secrets: K8s image pull secrets.
@@ -1081,9 +1228,11 @@ def fine_tune(
     try:
         # Before _validate_fine_tune_params(): its GPU preflight queries the cluster, and
         # invalid input should never trigger an external call.
-        input_err = _validate_resources_per_node(
-            resources_per_node
-        ) or _validate_service_account_name(service_account_name)
+        input_err = (
+            _validate_resources_per_node(resources_per_node)
+            or _validate_service_account_name(service_account_name)
+            or _validate_storage(volumes, volume_mounts)
+        )
         if input_err:
             return input_err.model_dump()
 
@@ -1314,8 +1463,10 @@ def run_custom_training(
             spec. Dict format: ``{"KEY": "VALUE"}``.
         node_selector: K8s node selector applied to the pod.
         tolerations: K8s tolerations for tainted nodes.
-        volumes: K8s volume definitions.
-        volume_mounts: K8s volume mounts.
+        volumes: Kubernetes camelCase dictionaries, each with ``name`` and one source
+            (e.g., ``persistentVolumeClaim`` with ``claimName``, or ``emptyDir``).
+        volume_mounts: Kubernetes camelCase dictionaries, each with ``name`` and an
+            absolute ``mountPath``.
         affinity: K8s pod affinity/anti-affinity rules.
         service_account_name: K8s service account for the training pod.
         image_pull_secrets: K8s image pull secrets.
@@ -1326,6 +1477,9 @@ def run_custom_training(
     Returns:
         dict: If ``confirmed=False``: preview with truncated script.
             If ``confirmed=True``: ``job_name``, ``status``, ``message``.
+
+    Adds a temporary writable /workspace when neither the caller nor runtime mounts it,
+    even when volumes are omitted. Any needed runtime lookup must succeed before proceeding.
     """
     try:
         if not _SDK_AVAILABLE:
@@ -1334,9 +1488,11 @@ def run_custom_training(
                 error_code=ErrorCode.SDK_ERROR,
             ).model_dump()
 
-        input_err = _validate_resources_per_node(
-            resources_per_node
-        ) or _validate_service_account_name(service_account_name)
+        input_err = (
+            _validate_resources_per_node(resources_per_node)
+            or _validate_service_account_name(service_account_name)
+            or _validate_storage(volumes, volume_mounts)
+        )
         if input_err:
             return input_err.model_dump()
 
@@ -1362,6 +1518,11 @@ def run_custom_training(
 
         effective_resources = resources_per_node or (
             {"gpu": gpu_per_node} if gpu_per_node > 0 else None
+        )
+
+        # The SDK writes its script into /workspace, which may be unwritable for non-root UIDs.
+        volumes, volume_mounts = _ensure_workspace(
+            volumes, volume_mounts, runtime=runtime or DEFAULT_TRAINING_RUNTIME, namespace=namespace
         )
 
         config: dict[str, Any] = {
@@ -1420,13 +1581,6 @@ def run_custom_training(
 
         train_func = _make_train_func(script, func_args=func_args)
 
-        if volumes and not any(m.get("mountPath") == "/workspace" for m in (volume_mounts or [])):
-            volumes = [*volumes, {"name": "workspace", "emptyDir": {}}]
-            volume_mounts = [
-                *(volume_mounts or []),
-                {"name": "workspace", "mountPath": "/workspace"},
-            ]
-
         trainer = CustomTrainer(
             func=train_func,
             func_args=func_args,
@@ -1474,6 +1628,15 @@ def run_custom_training(
         ).model_dump()
 
     except Exception as e:
+        if is_k8s_not_found(e):
+            return ToolError(
+                error=(
+                    f"Training resource not found (runtime '{runtime or DEFAULT_TRAINING_RUNTIME}', "
+                    f"namespace '{namespace or 'default configuration'}')"
+                ),
+                error_code=ErrorCode.RESOURCE_NOT_FOUND,
+                hint="Verify the namespace and referenced resources exist; use list_runtimes to check the runtime.",
+            ).model_dump()
         return _sdk_error(e, hint="Read trainer://guides/troubleshooting")
 
 
@@ -1525,8 +1688,10 @@ def run_container_training(
         env: Environment variables as dict (e.g., ``{"HF_TOKEN": "xxx"}``).
         node_selector: K8s node selector.
         tolerations: K8s tolerations.
-        volumes: K8s volume definitions.
-        volume_mounts: K8s volume mounts.
+        volumes: Kubernetes camelCase dictionaries, each with ``name`` and one source
+            (e.g., ``persistentVolumeClaim`` with ``claimName``, or ``emptyDir``).
+        volume_mounts: Kubernetes camelCase dictionaries, each with ``name`` and an
+            absolute ``mountPath``.
         affinity: K8s pod affinity/anti-affinity rules.
         service_account_name: K8s service account for the training pod.
         image_pull_secrets: K8s image pull secrets.
@@ -1545,9 +1710,11 @@ def run_container_training(
                 error_code=ErrorCode.SDK_ERROR,
             ).model_dump()
 
-        input_err = _validate_resources_per_node(
-            resources_per_node
-        ) or _validate_service_account_name(service_account_name)
+        input_err = (
+            _validate_resources_per_node(resources_per_node)
+            or _validate_service_account_name(service_account_name)
+            or _validate_storage(volumes, volume_mounts)
+        )
         if input_err:
             return input_err.model_dump()
 

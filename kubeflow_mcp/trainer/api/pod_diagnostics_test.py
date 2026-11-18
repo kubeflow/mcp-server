@@ -14,6 +14,7 @@
 
 """Regression tests for job-scoped scheduling and container diagnostics."""
 
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -21,7 +22,11 @@ from kubernetes import client as k8s
 from kubernetes.client.exceptions import ApiException
 
 from kubeflow_mcp.trainer.api.pod_diagnostics import get_training_pod_diagnostics
-from kubeflow_mcp.trainer.constants import MAX_DIAGNOSTIC_PODS
+from kubeflow_mcp.trainer.constants import (
+    MAX_DIAGNOSTIC_CHARS,
+    MAX_DIAGNOSTIC_MESSAGE_CHARS,
+    MAX_DIAGNOSTIC_PODS,
+)
 
 
 def _pod(name="trainer-node-0", phase="Pending", **status):
@@ -165,3 +170,54 @@ def test_omitted_blockers_are_summarized_without_expanding_response() -> None:
     assert len(result["pods"]) == MAX_DIAGNOSTIC_PODS
     assert len(result["blocking_reasons"]) == MAX_DIAGNOSTIC_PODS + 1
     assert result["blocking_reasons"][-1].startswith("2 additional pods have blocking conditions")
+
+
+def test_wide_failed_jobs_respect_one_diagnostic_character_budget() -> None:
+    container = k8s.V1ContainerStatus(
+        name="node",
+        image="trainer",
+        image_id="id",
+        ready=False,
+        restart_count=2,
+        state=k8s.V1ContainerState(
+            waiting=k8s.V1ContainerStateWaiting(
+                reason="CrashLoopBackOff",
+                message="x" * (MAX_DIAGNOSTIC_MESSAGE_CHARS + 100),
+            )
+        ),
+    )
+    api = MagicMock()
+    api.list_namespaced_pod.return_value.items = [
+        _pod(name=f"blocked-{i}", container_statuses=[container] * 20)
+        for i in range(MAX_DIAGNOSTIC_PODS)
+    ]
+    with patch("kubeflow_mcp.trainer.api.pod_diagnostics.get_core_v1_api", return_value=api):
+        result = get_training_pod_diagnostics("trainer", "workloads")
+    assert len(json.dumps(result, ensure_ascii=False)) <= MAX_DIAGNOSTIC_CHARS
+    assert result["pods_truncated"] is True
+    assert result["blocking_reasons"][0].startswith("blocked-0/node: CrashLoopBackOff")
+    assert any("additional pods" in reason for reason in result["blocking_reasons"])
+
+
+def test_individual_condition_and_container_messages_are_capped() -> None:
+    from kubeflow_mcp.trainer.api.pod_diagnostics import _pod_details
+
+    long_message = "x" * (MAX_DIAGNOSTIC_MESSAGE_CHARS + 100)
+    container = k8s.V1ContainerStatus(
+        name="node",
+        image="trainer",
+        image_id="id",
+        ready=False,
+        restart_count=0,
+        state=k8s.V1ContainerState(waiting=k8s.V1ContainerStateWaiting(message=long_message)),
+    )
+    detail = _pod_details(
+        _pod(
+            container_statuses=[container],
+            conditions=[
+                k8s.V1PodCondition(type="PodScheduled", status="False", message=long_message),
+            ],
+        )
+    )
+    assert len(detail["containers"][0]["message"]) == MAX_DIAGNOSTIC_MESSAGE_CHARS
+    assert len(detail["conditions"][0]["message"]) == MAX_DIAGNOSTIC_MESSAGE_CHARS

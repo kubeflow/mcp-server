@@ -1237,9 +1237,14 @@ class TestWaitForTraining:
                 "kubeflow_mcp.trainer.api.monitoring.get_training_job_status",
                 return_value=observed_status,
             ),
-            patch("kubeflow.trainer.backends.kubernetes.backend.time.sleep") as sleep,
+            patch(
+                "kubeflow.trainer.backends.kubernetes.backend.time.sleep",
+                side_effect=AssertionError("A reconciled status must finish on the first poll"),
+            ) as sleep,
         ):
-            result = wait_for_training("resumed-job", target_statuses="Running")
+            result = wait_for_training(
+                "resumed-job", target_statuses="Running", timeout_seconds=2, polling_interval=1
+            )
         assert result["data"]["status"] == observed_status
         assert result["data"]["reached"] is (observed_status == "Running")
         sleep.assert_not_called()

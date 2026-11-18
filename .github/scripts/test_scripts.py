@@ -12,8 +12,43 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import pytest
+import yaml
 
 SCRIPTS_DIR = Path(__file__).parent
+
+
+class TestReleasePublicationGates:
+    """A failed image scan must prevent either registry from receiving a release."""
+
+    def test_pypi_waits_for_image_validation_and_publication(self) -> None:
+        workflow = yaml.safe_load((SCRIPTS_DIR.parent / "workflows/release.yaml").read_text())
+        jobs = workflow["jobs"]
+        assert "docker" in jobs["publish-pypi"]["needs"]
+        assert jobs["docker"]["uses"] == "./.github/workflows/docker-publish.yaml"
+        assert "if" not in jobs["publish-pypi"]  # Default success() propagates scan failures.
+        assert not jobs["docker"].get("continue-on-error", False)
+
+    def test_both_architectures_are_scanned_before_publication(self) -> None:
+        workflow = yaml.safe_load(
+            (SCRIPTS_DIR.parent / "workflows/docker-publish.yaml").read_text()
+        )
+        steps = workflow["jobs"]["build-and-push"]["steps"]
+        scans = [s for s in steps if s.get("uses", "").startswith("aquasecurity/trivy-action@")]
+        assert {s["with"]["input"] for s in scans} == {
+            "${{ runner.temp }}/mcp-image-amd64",
+            "${{ runner.temp }}/mcp-image-arm64",
+        }
+        publish = next(s for s in steps if "docker://$tag" in s.get("run", ""))
+        for scan in scans:
+            assert steps.index(scan) < steps.index(publish)
+            assert "if" not in scan  # Scan PR builds as well as releases.
+            assert not scan.get("continue-on-error", False)
+            assert scan["with"]["exit-code"] == 1
+            assert scan["with"]["severity"] == "CRITICAL"
+        for step in steps[: steps.index(scans[-1]) + 1]:
+            assert step.get("with", {}).get("push", False) is False
+        assert publish["if"] == "steps.ver.outputs.push == 'true'"
+        assert "--all --preserve-digests" in publish["run"]
 
 
 def _assert_valid_toml(content: str) -> None:
