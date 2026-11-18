@@ -18,6 +18,7 @@ import logging
 import time
 import uuid
 from collections import Counter
+from datetime import datetime
 from typing import Any
 
 from kubeflow.trainer.constants import constants as trainer_constants
@@ -122,6 +123,74 @@ def _trainjob_steps_to_mcp(job: object) -> tuple[list[dict[str, Any]], dict[str,
         "truncated": len(steps) > MAX_JOB_STEPS,
     }
     return step_list, summary
+
+
+# Upper bound on reported metrics in get_training_job. The CRD allows 256, each
+# value up to 64 characters; agents need the latest few, not a full dump.
+MAX_PROGRESS_METRICS = 32
+
+_NO_PROGRESS_REASON = (
+    "No progress reported. It needs Kubeflow Trainer 2.4+ with the TrainJobStatus "
+    "feature gate, and a training script that sends its status (KEP-2779)."
+)
+
+
+def _seconds_since(timestamp: object) -> int | None:
+    """Seconds elapsed since an RFC 3339 timestamp, or ``None`` if it cannot be parsed."""
+    if not isinstance(timestamp, str):
+        return None
+    try:
+        # Python 3.10's fromisoformat does not accept the "Z" suffix.
+        updated = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if updated.tzinfo is None:
+        return None
+    return max(0, int(time.time() - updated.timestamp()))
+
+
+def _trainjob_progress_to_mcp(name: str, namespace: str | None) -> dict[str, Any]:
+    """Return the progress a TrainJob reports in ``status.trainerStatus`` (KEP-2779).
+
+    The SDK's ``TrainJob`` does not carry this field yet, so the TrainJob object is
+    read directly. Never raises: a missing field (Trainer 2.3, feature gate off, or a
+    script that does not report) and a failed read both return ``reported: False``
+    with a reason, so the rest of ``get_training_job`` is unaffected.
+    """
+    try:
+        obj = get_custom_objects_api().get_namespaced_custom_object(
+            group="trainer.kubeflow.org",
+            version="v1alpha1",
+            namespace=get_trainer_effective_namespace(namespace),
+            plural="trainjobs",
+            name=name,
+        )
+    except Exception as e:
+        logger.debug("Could not read progress for TrainJob %s: %s", name, e)
+        return {"reported": False, "reason": f"Could not read progress: {type(e).__name__}"}
+
+    status = obj.get("status") if isinstance(obj, dict) else None
+    trainer_status = status.get("trainerStatus") if isinstance(status, dict) else None
+    if not isinstance(trainer_status, dict) or not trainer_status:
+        return {"reported": False, "reason": _NO_PROGRESS_REASON}
+
+    raw_metrics = trainer_status.get("metrics")
+    metrics = [
+        {"name": m.get("name"), "value": m.get("value")}
+        for m in (raw_metrics if isinstance(raw_metrics, list) else [])
+        if isinstance(m, dict)
+    ]
+    progress: dict[str, Any] = {
+        "reported": True,
+        "progress_percentage": trainer_status.get("progressPercentage"),
+        "estimated_remaining_seconds": trainer_status.get("estimatedRemainingSeconds"),
+        "metrics": metrics[:MAX_PROGRESS_METRICS],
+        "last_updated_time": trainer_status.get("lastUpdatedTime"),
+        "seconds_since_update": _seconds_since(trainer_status.get("lastUpdatedTime")),
+    }
+    if len(metrics) > MAX_PROGRESS_METRICS:
+        progress["metrics_truncated"] = True
+    return progress
 
 
 MAX_LIST_LIMIT = 500
@@ -249,6 +318,11 @@ def get_training_job(name: str, namespace: str | None = None) -> dict[str, Any]:
         - ``steps`` (each step's ``name``, pod ``status``, ``pod``, ``device``,
           and ``device_count``; failed steps first, at most ``MAX_JOB_STEPS``)
         - ``step_summary`` (step counts by status).
+        - ``progress``: what the job reports in ``status.trainerStatus`` (Trainer 2.4+,
+          KEP-2779): ``progress_percentage``, ``estimated_remaining_seconds``,
+          ``metrics`` (``name``/``value`` strings, at most ``MAX_PROGRESS_METRICS``),
+          ``last_updated_time`` and ``seconds_since_update``. ``reported`` is ``False``
+          with a ``reason`` when nothing was reported or the read failed.
 
     Raises:
         ToolError: If job not found (``RESOURCE_NOT_FOUND``).
@@ -303,6 +377,7 @@ def get_training_job(name: str, namespace: str | None = None) -> dict[str, Any]:
             "created_at": _trainjob_created_at_to_mcp(job),
             "steps": steps,
             "step_summary": step_summary,
+            "progress": _trainjob_progress_to_mcp(name, namespace),
         }
         num_nodes = getattr(job, "num_nodes", None)
         if isinstance(num_nodes, int):
