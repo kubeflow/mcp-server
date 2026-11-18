@@ -21,6 +21,7 @@ Structure mirrors kubeflow/trainer/:
 """
 
 from kubeflow_mcp.common.constants import KUBEFLOW_SDK_VERSION_SPEC
+from kubeflow_mcp.common.types import ToolPermission
 from kubeflow_mcp.trainer.api.discovery import (
     get_runtime,
     get_training_job,
@@ -409,11 +410,95 @@ PLATFORM ADMINISTRATION:
 }
 
 
+# Kubernetes permissions each tool's requests need (#565). Recorded from the API
+# server audit log while calling every tool on Trainer v2.4.0, as platform-admin
+# and as ml-engineer (whose ownership check reads the job first). Not declared:
+# the SDK's best-effort read of the kubeflow-trainer-public ConfigMap and GET /version.
+_RUNTIME_READS = (
+    ToolPermission("get", "trainer.kubeflow.org", "trainingruntimes"),
+    ToolPermission("get", "trainer.kubeflow.org", "clustertrainingruntimes", cluster_wide=True),
+)
+_JOB_READS = (
+    ToolPermission("get", "trainer.kubeflow.org", "trainjobs"),
+    ToolPermission("list", "", "pods"),
+    *_RUNTIME_READS,
+)
+_JOB_CREATE = (*_RUNTIME_READS, ToolPermission("create", "trainer.kubeflow.org", "trainjobs"))
+_RUNTIME_LISTS = (
+    ToolPermission("list", "trainer.kubeflow.org", "trainingruntimes"),
+    ToolPermission("list", "trainer.kubeflow.org", "clustertrainingruntimes", cluster_wide=True),
+)
+_CRD_GET = ToolPermission(
+    "get", "apiextensions.k8s.io", "customresourcedefinitions", cluster_wide=True
+)
+_NODES_LIST = ToolPermission("list", "", "nodes", cluster_wide=True)
+_OWNED_JOB_GET = ToolPermission("get", "trainer.kubeflow.org", "trainjobs")  # ownership check
+_CLUSTER_RUNTIME = ("trainer.kubeflow.org", "clustertrainingruntimes")
+
+CLIENT_TOOL_PERMISSIONS: dict[str, tuple[ToolPermission, ...]] = {
+    "pre_flight": (_CRD_GET, _NODES_LIST, *_RUNTIME_LISTS),
+    "check_compatibility": (_CRD_GET, _NODES_LIST),
+    "get_cluster_resources": (_NODES_LIST,),
+    "estimate_resources": (),  # reads model configs from Hugging Face only
+    "fine_tune": (_NODES_LIST, *_JOB_CREATE),  # nodes: the GPU check
+    "run_custom_training": _JOB_CREATE,
+    "run_container_training": _JOB_CREATE,
+    "list_training_jobs": (
+        ToolPermission("list", "trainer.kubeflow.org", "trainjobs"),
+        ToolPermission("list", "", "pods"),
+        *_RUNTIME_READS,
+    ),
+    "get_training_job": _JOB_READS,
+    "list_runtimes": _RUNTIME_LISTS,
+    # include_packages=True runs a short-lived Pod to list packages (#535).
+    "get_runtime": (
+        *_RUNTIME_READS,
+        ToolPermission("create", "", "pods"),
+        ToolPermission("get", "", "pods"),
+        ToolPermission("get", "", "pods/log"),
+        ToolPermission("delete", "", "pods"),
+    ),
+    "get_training_logs": (*_JOB_READS, ToolPermission("get", "", "pods/log")),
+    "get_training_events": (*_JOB_READS, ToolPermission("list", "", "events")),
+    "wait_for_training": _JOB_READS,
+    "delete_training_job": (
+        _OWNED_JOB_GET,
+        ToolPermission("delete", "trainer.kubeflow.org", "trainjobs"),
+    ),
+    "update_training_job": (
+        _OWNED_JOB_GET,
+        ToolPermission("patch", "trainer.kubeflow.org", "trainjobs"),
+    ),
+    "inspect_crd": (
+        ToolPermission(
+            "list", "apiextensions.k8s.io", "customresourcedefinitions", cluster_wide=True
+        ),
+        _CRD_GET,
+    ),
+    # In the controller's namespace, not the caller's.
+    "inspect_controller": (
+        ToolPermission("list", "", "pods"),
+        ToolPermission("get", "", "pods/log"),
+        ToolPermission("list", "", "events"),
+    ),
+    "patch_runtime": (
+        ToolPermission("get", *_CLUSTER_RUNTIME, cluster_wide=True),
+        ToolPermission("patch", *_CLUSTER_RUNTIME, cluster_wide=True),
+    ),
+    "create_runtime": (ToolPermission("create", *_CLUSTER_RUNTIME, cluster_wide=True),),
+    "delete_runtime": (
+        # Refuses while a TrainJob in any namespace still uses the runtime.
+        ToolPermission("list", "trainer.kubeflow.org", "trainjobs", cluster_wide=True),
+        ToolPermission("delete", *_CLUSTER_RUNTIME, cluster_wide=True),
+    ),
+}
+
 __all__ = [
     "MODULE_INFO",
     "TOOLS",
     "CLIENT_TOOL_DESCRIPTIONS",
     "CLIENT_TOOL_ANNOTATIONS",
+    "CLIENT_TOOL_PERMISSIONS",
     "CLIENT_RESOURCES",
     "INSTRUCTION_SECTIONS",
     "SECTION_ORDER",

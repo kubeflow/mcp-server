@@ -26,6 +26,7 @@ optional ``kubeflow[spark]`` extra; every SDK import in this module is lazy so
 the module — and its metadata — load even when the extra is absent.
 """
 
+from kubeflow_mcp.common.types import ToolPermission
 from kubeflow_mcp.spark.api.discovery import get_spark_session, list_spark_sessions
 from kubeflow_mcp.spark.api.monitoring import get_spark_session_logs
 from kubeflow_mcp.spark.api.sessions import create_spark_session, delete_spark_session
@@ -154,11 +155,30 @@ SPARK SESSION LIFECYCLE:
 }
 
 
+# Kubernetes permissions each tool's requests need (#565), recorded from the API
+# server audit log; the driver log read comes from the SDK, as no driver pod ran there.
+_SESSION_GET = ToolPermission("get", "sparkoperator.k8s.io", "sparkconnects")
+
+CLIENT_TOOL_PERMISSIONS: dict[str, tuple[ToolPermission, ...]] = {
+    "list_spark_sessions": (ToolPermission("list", "sparkoperator.k8s.io", "sparkconnects"),),
+    "get_spark_session": (_SESSION_GET,),
+    "get_spark_session_logs": (_SESSION_GET, ToolPermission("get", "", "pods/log")),
+    "create_spark_session": (
+        ToolPermission("create", "sparkoperator.k8s.io", "sparkconnects"),
+        _SESSION_GET,
+    ),
+    "delete_spark_session": (
+        _SESSION_GET,  # ownership check
+        ToolPermission("delete", "sparkoperator.k8s.io", "sparkconnects"),
+    ),
+}
+
 __all__ = [
     "MODULE_INFO",
     "TOOLS",
     "CLIENT_TOOL_DESCRIPTIONS",
     "CLIENT_TOOL_ANNOTATIONS",
+    "CLIENT_TOOL_PERMISSIONS",
     "CLIENT_RESOURCES",
     "INSTRUCTION_SECTIONS",
     "PHASE_TO_SECTION",

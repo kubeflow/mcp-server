@@ -86,7 +86,7 @@ Full cross-client rules (module exports, personas, confirm gate, testing checkli
 - Prefer shared response shapes from `kubeflow_mcp.common.types`
   (`ToolResponse`, `PreviewResponse`, `ToolError`).
 - Register new tools in the client module `TOOLS` list and update
-  `CLIENT_TOOL_DESCRIPTIONS` / `CLIENT_TOOL_ANNOTATIONS`.
+  `CLIENT_TOOL_DESCRIPTIONS` / `CLIENT_TOOL_ANNOTATIONS` / `CLIENT_TOOL_PERMISSIONS`.
 - Do **not** change tool schemas (parameters, required fields, return contracts)
   without KEP discussion or explicit maintainer approval.
 
