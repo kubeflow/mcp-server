@@ -35,6 +35,7 @@ from kubeflow_mcp.conftest import (
 )
 from kubeflow_mcp.trainer.api.discovery import (
     _JOB_STATUS_FILTER_ALIASES,
+    MAX_PROGRESS_METRICS,
     _get_runtime_image,
     _trainjob_runtime_to_mcp,
     get_runtime,
@@ -42,6 +43,19 @@ from kubeflow_mcp.trainer.api.discovery import (
     list_runtimes,
     list_training_jobs,
 )
+
+
+@pytest.fixture(autouse=True)
+def _no_trainjob_object_reads():
+    """Keep get_training_job's progress read off any real cluster in this module.
+
+    Tests that need a specific TrainJob object (or the runtime fallback) patch
+    ``get_custom_objects_api`` themselves, which takes precedence.
+    """
+    api = MagicMock()
+    api.get_namespaced_custom_object.return_value = {}
+    with patch("kubeflow_mcp.trainer.api.discovery.get_custom_objects_api", return_value=api):
+        yield api
 
 
 class TestJobStatusFilterAliases:
@@ -870,3 +884,108 @@ def test_job_details_include_pod_diagnostics():
     assert result["data"]["pods"] == diagnostics["pods"]
     assert result["data"]["blocking_reasons"] == ["Unschedulable"]
     read.assert_called_once_with("job-a", "workloads")
+
+
+# ---------------------------------------------------------------------------
+# get_training_job progress (status.trainerStatus, Trainer 2.4+, KEP-2779)
+# ---------------------------------------------------------------------------
+
+
+def _get_job_with_trainjob_object(obj, _no_trainjob_object_reads):
+    _no_trainjob_object_reads.get_namespaced_custom_object.return_value = obj
+    client = MagicMock()
+    client.get_job.return_value = _fake_job("job-a")
+    with patch(
+        "kubeflow_mcp.trainer.api.discovery.get_trainer_client_for_namespace",
+        return_value=client,
+    ):
+        return get_training_job("job-a", namespace="team-a")
+
+
+class TestTrainingJobProgress:
+    def test_reports_progress_eta_and_metrics(self, _no_trainjob_object_reads):
+        updated = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        trainer_status = {
+            "progressPercentage": 45,
+            "estimatedRemainingSeconds": 795,
+            "metrics": [
+                {"name": "loss", "value": "0.2347"},
+                {"name": "currentEpoch", "value": "2"},
+            ],
+            "lastUpdatedTime": updated,
+        }
+        result = _get_job_with_trainjob_object(
+            {"status": {"trainerStatus": trainer_status}}, _no_trainjob_object_reads
+        )
+
+        progress = verify_tool_success(result)["progress"]
+        assert progress["reported"] is True
+        assert progress["progress_percentage"] == 45
+        assert progress["estimated_remaining_seconds"] == 795
+        # Values stay the strings the API stores; no float parsing.
+        assert progress["metrics"] == trainer_status["metrics"]
+        assert progress["last_updated_time"] == updated
+        assert 0 <= progress["seconds_since_update"] < 60
+        assert "metrics_truncated" not in progress
+
+    def test_reads_the_requested_trainjob(self, _no_trainjob_object_reads):
+        _get_job_with_trainjob_object({}, _no_trainjob_object_reads)
+        kwargs = _no_trainjob_object_reads.get_namespaced_custom_object.call_args.kwargs
+        assert kwargs == {
+            "group": "trainer.kubeflow.org",
+            "version": "v1alpha1",
+            "namespace": "team-a",
+            "plural": "trainjobs",
+            "name": "job-a",
+        }
+
+    @pytest.mark.parametrize(
+        "obj",
+        [{}, {"status": {}}, {"status": {"trainerStatus": {}}}, None],
+        ids=["no-status", "no-trainer-status", "empty-trainer-status", "not-a-dict"],
+    )
+    def test_says_why_nothing_was_reported(self, obj, _no_trainjob_object_reads):
+        """Trainer 2.3, the feature gate off, or a script that does not report."""
+        result = _get_job_with_trainjob_object(obj, _no_trainjob_object_reads)
+        progress = verify_tool_success(result)["progress"]
+        assert progress["reported"] is False
+        assert "TrainJobStatus" in progress["reason"]
+
+    def test_failed_read_keeps_the_rest_of_the_job(self, _no_trainjob_object_reads):
+        _no_trainjob_object_reads.get_namespaced_custom_object.side_effect = RuntimeError("403")
+        client = MagicMock()
+        client.get_job.return_value = _fake_job("job-a")
+        with patch(
+            "kubeflow_mcp.trainer.api.discovery.get_trainer_client_for_namespace",
+            return_value=client,
+        ):
+            result = get_training_job("job-a", namespace="team-a")
+
+        data = verify_tool_success(result)
+        assert data["status"] == "Running"
+        assert data["progress"] == {
+            "reported": False,
+            "reason": "Could not read progress: RuntimeError",
+        }
+
+    def test_caps_the_metric_list(self, _no_trainjob_object_reads):
+        metrics = [{"name": f"m{i}", "value": str(i)} for i in range(MAX_PROGRESS_METRICS + 5)]
+        trainer_status = {"metrics": metrics, "lastUpdatedTime": "2026-11-18T10:30:45Z"}
+        result = _get_job_with_trainjob_object(
+            {"status": {"trainerStatus": trainer_status}}, _no_trainjob_object_reads
+        )
+
+        progress = verify_tool_success(result)["progress"]
+        assert progress["metrics"] == metrics[:MAX_PROGRESS_METRICS]
+        assert progress["metrics_truncated"] is True
+
+    @pytest.mark.parametrize("stamp", ["not-a-time", "2026-11-18T10:30:45", None])
+    def test_unusable_timestamp_gives_no_age(self, stamp, _no_trainjob_object_reads):
+        trainer_status = {"progressPercentage": 10, "lastUpdatedTime": stamp}
+        result = _get_job_with_trainjob_object(
+            {"status": {"trainerStatus": trainer_status}}, _no_trainjob_object_reads
+        )
+
+        progress = verify_tool_success(result)["progress"]
+        assert progress["progress_percentage"] == 10
+        assert progress["seconds_since_update"] is None

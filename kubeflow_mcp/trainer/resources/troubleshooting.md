@@ -146,6 +146,15 @@ read path and should not be used as a bounded-download workaround.
 After `update_training_job(name, action="suspend", confirmed=True)`, status becomes "Created" not "Suspended". This is controller behavior.
 **Workaround**: Check `get_training_events()` for the suspend event.
 
+### Training Progress Needs Trainer 2.4 and Opt-In
+
+`get_training_job` returns `progress` from the TrainJob's `status.trainerStatus` (KEP-2779):
+percentage, estimated remaining seconds, the latest metrics and `seconds_since_update`.
+It only fills in on Trainer 2.4+ with the `TrainJobStatus` feature gate enabled, and only
+when the training script sends its status. Otherwise `progress.reported` is `false`; that is
+normal and not a sign of a problem. Use `get_training_logs` to follow those jobs.
+A large `seconds_since_update` on a Running job means the script stopped reporting.
+
 ### list_training_jobs Status Filter is Client-Side
 
 Fetches all jobs then filters. Slow with hundreds of jobs. `limit` truncates after filtering.
