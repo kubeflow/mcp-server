@@ -157,7 +157,7 @@ class TestListJobs:
         """A status the SDK never reports would silently return no jobs."""
         out = discovery.list_spark_jobs(status="Succeeded")
         assert out["error_code"] == "VALIDATION_ERROR"
-        assert "Completed" in out["error"]
+        assert out["details"]["supported_statuses"] == ["Completed", "Created", "Failed", "Running"]
         mock_spark_client.list_jobs.assert_not_called()
 
     def test_truncated_flag_set_when_limit_cuts(self, mock_spark_client):
