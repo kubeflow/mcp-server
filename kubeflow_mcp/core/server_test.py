@@ -397,9 +397,32 @@ def k8s_writes():
     """
     writes: list[tuple[str, str]] = []
 
-    def fake_call_api(self, resource_path, method, *args, **kwargs):
+    def fake_call_api(self, resource_path, method, path_params=None, *args, **kwargs):
         if method in _WRITE_METHODS:
             writes.append((method, resource_path))
+        if method == "GET" and (path_params or {}).get("plural") in (
+            "trainingruntimes",
+            "clustertrainingruntimes",
+        ):
+            # Custom training reads runtime storage before reaching its confirm gate.
+            return {
+                "spec": {
+                    "template": {
+                        "spec": {
+                            "replicatedJobs": [
+                                {
+                                    "name": "node",
+                                    "template": {
+                                        "spec": {
+                                            "template": {"spec": {"containers": [{"name": "node"}]}}
+                                        }
+                                    },
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
         # An empty object, as the API returns for custom resources. A MagicMock would end
         # up in tool responses and take FastMCP ~0.3s per call to fail to serialize.
         return {}
