@@ -212,8 +212,9 @@ def list_spark_jobs(
         want = status.strip().lower()
         if want not in {s.lower() for s in JOB_STATUSES}:
             return ToolError(
-                error=f"Invalid status '{status}'. Must be one of: {', '.join(JOB_STATUSES)}",
+                error=f"Unsupported status '{status}'",
                 error_code=ErrorCode.VALIDATION_ERROR,
+                details={"supported_statuses": sorted(JOB_STATUSES)},
             ).model_dump()
 
     if limit < 1:
