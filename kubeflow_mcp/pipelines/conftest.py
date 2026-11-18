@@ -27,7 +27,7 @@ import pytest
 RUN_ID = "3f2a9c1e-5b7d-4e8a-9c21-7d4e5f6a8b90"
 CREATED = datetime(2026, 10, 20, 9, 30, tzinfo=timezone.utc)
 
-_API_MODULES = ("discovery", "monitoring", "runs")
+_API_MODULES = ("discovery", "monitoring", "runs", "experiments", "authoring")
 
 
 class ApiException(Exception):
@@ -36,6 +36,47 @@ class ApiException(Exception):
     def __init__(self, status: int, reason: str = "") -> None:
         super().__init__(f"({status}) {reason}")
         self.status = status
+
+
+# A small pipeline create_pipeline accepts; it compiles with the real kfp as well.
+PIPELINE_CODE = """from kfp import dsl
+from kfp.dsl import Dataset, Input, Output
+
+IMAGE = "python:3.11-slim"
+
+
+@dsl.component(base_image=IMAGE, packages_to_install=["pandas==2.2.3"])
+def load(rows: int, data: Output[Dataset]):
+    import pandas as pd
+
+    pd.DataFrame({"x": range(rows)}).to_csv(data.path, index=False)
+
+
+@dsl.component(base_image=IMAGE)
+def train(data: Input[Dataset], epochs: int) -> float:
+    return 0.1 * epochs
+
+
+@dsl.pipeline(name="churn-prediction", description="Load rows and train.")
+def churn(rows: int = 100, epochs: int = 2):
+    load_task = load(rows=rows)
+    train_task = train(data=load_task.outputs["data"], epochs=epochs)
+    train_task.set_cpu_limit("2").set_memory_limit("4G")
+"""
+
+
+def make_experiment(
+    name: str = "churn", experiment_id: str = "e-1", namespace: str = "team-a"
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        experiment_id=experiment_id,
+        display_name=name,
+        description="churn runs",
+        namespace=namespace,
+        storage_state=SimpleNamespace(value="AVAILABLE"),
+        created_at=CREATED,
+        last_run_created_at=None,
+    )
 
 
 def make_pipeline(name: str = "churn-prediction", pipeline_id: str = "p-1") -> SimpleNamespace:

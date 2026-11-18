@@ -96,6 +96,8 @@ PERSONAS: dict[str, dict[str, Any]] = {
             "list_pipeline_runs",
             "get_pipeline_run",
             "get_pipeline_logs",
+            "list_experiments",
+            "get_experiment",
         ]
     },
     "data-scientist": {
@@ -110,6 +112,7 @@ PERSONAS: dict[str, dict[str, Any]] = {
             "delete_spark_session",
             # Pipelines
             "create_pipeline_run",
+            "create_experiment",
         ],
     },
     "ml-engineer": {
@@ -123,6 +126,9 @@ PERSONAS: dict[str, dict[str, Any]] = {
             # run in the namespace and sit above data-scientist.
             "stop_pipeline_run",
             "retry_pipeline_run",
+            # Compiling agent-written code runs its pipeline body on the server, and an
+            # existing name gets a new version whoever registered it.
+            "create_pipeline",
         ],
     },
     "platform-admin": {"tools": "*"},
@@ -133,6 +139,9 @@ DESTRUCTIVE_TOOLS = {
     "delete_runtime",
     "delete_spark_session",
     "stop_pipeline_run",
+    # platform-admin only: KFP experiments and pipelines carry no MCP ownership label.
+    "delete_experiment",
+    "delete_pipeline",
 }
 
 # Tools matched by each ``risk:<level>`` policy pattern.
