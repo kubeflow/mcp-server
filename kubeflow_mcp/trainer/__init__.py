@@ -410,10 +410,9 @@ PLATFORM ADMINISTRATION:
 }
 
 
-# Kubernetes permissions each tool's requests need (#565). Recorded from the API
-# server audit log while calling every tool on Trainer v2.4.0, as platform-admin
-# and as ml-engineer (whose ownership check reads the job first). Not declared:
-# the SDK's best-effort read of the kubeflow-trainer-public ConfigMap and GET /version.
+# Kubernetes permissions each tool's requests need, including the SDK's (#565).
+# Not declared: the SDK's best-effort read of the kubeflow-trainer-public ConfigMap
+# and GET /version, which the tools tolerate being denied.
 _RUNTIME_READS = (
     ToolPermission("get", "trainer.kubeflow.org", "trainingruntimes"),
     ToolPermission("get", "trainer.kubeflow.org", "clustertrainingruntimes", cluster_wide=True),
@@ -453,10 +452,10 @@ CLIENT_TOOL_PERMISSIONS: dict[str, tuple[ToolPermission, ...]] = {
     # include_packages=True runs a short-lived Pod to list packages (#535).
     "get_runtime": (
         *_RUNTIME_READS,
-        ToolPermission("create", "", "pods"),
-        ToolPermission("get", "", "pods"),
-        ToolPermission("get", "", "pods/log"),
-        ToolPermission("delete", "", "pods"),
+        ToolPermission("create", "", "pods", when="include_packages"),
+        ToolPermission("get", "", "pods", when="include_packages"),
+        ToolPermission("get", "", "pods/log", when="include_packages"),
+        ToolPermission("delete", "", "pods", when="include_packages"),
     ),
     "get_training_logs": (*_JOB_READS, ToolPermission("get", "", "pods/log")),
     "get_training_events": (*_JOB_READS, ToolPermission("list", "", "events")),
@@ -473,7 +472,13 @@ CLIENT_TOOL_PERMISSIONS: dict[str, tuple[ToolPermission, ...]] = {
         ToolPermission(
             "list", "apiextensions.k8s.io", "customresourcedefinitions", cluster_wide=True
         ),
-        _CRD_GET,
+        ToolPermission(
+            "get",
+            "apiextensions.k8s.io",
+            "customresourcedefinitions",
+            cluster_wide=True,
+            when="name",
+        ),
     ),
     # In the controller's namespace, not the caller's.
     "inspect_controller": (
