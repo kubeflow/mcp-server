@@ -24,7 +24,9 @@ benchmark-results/token_usage.json
 benchmark-results/index.html
 ```
 
-`benchmark-results/` is generated output. It should be overwritten on each run and should not be committed unless otherwise noted.
+`benchmark-results/` is generated output and should not be committed unless otherwise noted.
+Failed runs and runs that measure only some of the three `tools/list` modes leave existing
+output intact.
 
 ## Current Scope
 
@@ -97,7 +99,8 @@ particular model and tokenizer.
 
 ## Report
 
-The HTML report is generated from benchmark JSON files.
+The HTML report combines the available benchmark JSON files. A standalone suite run
+updates its own JSON file, so the report can include other suites' results from earlier runs.
 
 Current report includes:
 

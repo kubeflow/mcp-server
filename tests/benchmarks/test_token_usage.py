@@ -15,15 +15,17 @@
 """Measure the size of the first Trainer tools/list result across loading modes."""
 
 from collections.abc import Callable
+from importlib import import_module
 
 import pytest
 from fastmcp import Client
 
-from kubeflow_mcp.core import policy
-from kubeflow_mcp.core.server import create_server
+from kubeflow_mcp.core import dynamic_tools, policy
+from kubeflow_mcp.core.server import CLIENT_MODULES, create_server
+from tests.benchmarks import TOOL_LIST_MODES
 
 
-@pytest.mark.parametrize("mode", ["full", "progressive", "semantic"])
+@pytest.mark.parametrize("mode", TOOL_LIST_MODES)
 async def test_trainer_tool_list_size(
     mode: str,
     record_tool_list_size: Callable[[dict[str, object]], None],
@@ -31,8 +33,16 @@ async def test_trainer_tool_list_size(
 ) -> None:
     client_name = "trainer"
     persona = "readonly"
+    # Fail before create_server can fall back to health tools if Trainer cannot load.
+    import_module(CLIENT_MODULES[client_name])
+
     # Use the built-in persona even if the operator has a local policy override.
     monkeypatch.setattr(policy, "_get_cached_policy", dict)
+    # Server creation in progressive and semantic mode reinitializes this shared state.
+    monkeypatch.setattr(dynamic_tools, "TOOL_REGISTRY", {})
+    monkeypatch.setattr(dynamic_tools, "TOOL_HIERARCHY", {})
+    monkeypatch.setattr(dynamic_tools, "_embedding_cache", dynamic_tools._EmbeddingCache())
+
     previous_persona = policy.get_effective_persona()
     try:
         server = create_server(clients=[client_name], persona=persona, mode=mode)

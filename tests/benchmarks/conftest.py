@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+from tests.benchmarks import TOOL_LIST_MODES
 from tests.benchmarks.report import generate_report
 
 DEFAULT_ITERATIONS = 100
@@ -69,7 +70,14 @@ def record_tool_list_size() -> Callable[[dict[str, object]], None]:
 
 
 def pytest_terminal_summary(terminalreporter: Any, exitstatus: int, config: Any) -> None:
-    if not LATENCY_RESULTS and not TOOL_LIST_RESULTS:
+    if exitstatus != pytest.ExitCode.OK or not (LATENCY_RESULTS or TOOL_LIST_RESULTS):
+        return
+
+    if TOOL_LIST_RESULTS and (
+        len(TOOL_LIST_RESULTS) != len(TOOL_LIST_MODES)
+        or {result["mode"] for result in TOOL_LIST_RESULTS} != set(TOOL_LIST_MODES)
+    ):
+        terminalreporter.write_sep("-", "benchmark report skipped: requires all tools/list modes")
         return
 
     OUTPUT_DIR.mkdir(exist_ok=True)
