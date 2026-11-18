@@ -275,10 +275,10 @@ rules:
     resources: ["nodes"]
     verbs: ["list"]
 
-  # Planning: check_compatibility reads the Trainer CRD
+  # Planning: check_compatibility reads the Trainer CRD; Platform: inspect_crd lists CRDs
   - apiGroups: ["apiextensions.k8s.io"]
     resources: ["customresourcedefinitions"]
-    verbs: ["get"]
+    verbs: ["get", "list"]
 
   # Discovery + Monitoring: list/get jobs, logs, events
   - apiGroups: ["trainer.kubeflow.org"]
@@ -292,6 +292,12 @@ rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["create", "delete"]
+
+  # Discovery: the SDK reads a namespaced TrainingRuntime before the cluster one,
+  # and fails (instead of falling back) when that read is forbidden
+  - apiGroups: ["trainer.kubeflow.org"]
+    resources: ["trainingruntimes"]
+    verbs: ["list", "get"]
 
   # Discovery: list/get runtimes; Platform: patch/create/delete runtimes
   - apiGroups: ["trainer.kubeflow.org"]
@@ -330,7 +336,7 @@ rules:
     verbs: ["get"]
 
   - apiGroups: ["trainer.kubeflow.org"]
-    resources: ["trainjobs", "clustertrainingruntimes"]
+    resources: ["trainjobs", "trainingruntimes", "clustertrainingruntimes"]
     verbs: ["list", "get"]
   - apiGroups: [""]
     resources: ["pods", "pods/log", "events"]
