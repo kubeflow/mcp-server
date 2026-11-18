@@ -115,6 +115,8 @@ def test_conditional_permissions_name_a_parameter(client, tool, permissions, ann
 @pytest.mark.parametrize("client,tool,permissions,annotations", list(_all_tools()), ids=_tool_id)
 def test_write_verbs_match_the_read_only_hint(client, tool, permissions, annotations):
     name = tool.__name__
+    # Without annotations the tool would silently count as a write tool here.
+    assert "readOnlyHint" in annotations, f"{name}: no readOnlyHint annotation to check against"
     writes = {p.verb for p in permissions} & _WRITE_VERBS
     if annotations.get("readOnlyHint"):
         if name in _READ_ONLY_TOOLS_THAT_WRITE:
