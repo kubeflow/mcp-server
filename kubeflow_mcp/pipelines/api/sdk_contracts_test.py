@@ -52,6 +52,11 @@ class TestPipelinesClient:
                 ["self", "pipeline", "experiment", "status", "page_token", "page_size"],
             ),
             ("run", ["self", "pipeline", "params", "name", "experiment", "version"]),
+            ("list_experiments", ["self", "page_token", "page_size"]),
+            ("create_experiment", ["self", "name", "description"]),
+            ("delete_experiment", ["self", "name"]),
+            ("upload_pipeline", ["self", "pipeline", "name", "version", "description"]),
+            ("delete_pipeline", ["self", "name", "version", "force"]),
         ],
     )
     def test_method_signatures(self, method, params):
@@ -98,7 +103,68 @@ class TestModels:
                 {"display_name", "state", "pod_name", "child_tasks", "error"},
             ),
             ("V2beta1ListRunsResponse", {"runs", "next_page_token", "total_size"}),
+            (
+                "V2beta1Experiment",
+                {
+                    "experiment_id",
+                    "display_name",
+                    "description",
+                    "namespace",
+                    "storage_state",
+                    "created_at",
+                    "last_run_created_at",
+                },
+            ),
+            ("V2beta1ListExperimentsResponse", {"experiments", "next_page_token", "total_size"}),
         ],
     )
     def test_fields_the_serializers_read(self, model, fields):
         assert fields <= set(getattr(kfp_server_api, model).openapi_types)
+
+
+class TestCompiler:
+    """create_pipeline's compile worker relies on these."""
+
+    def test_compile_takes_a_function_and_a_path(self):
+        from kfp import compiler
+
+        assert _params(compiler.Compiler.compile)[:3] == ["self", "pipeline_func", "package_path"]
+
+    def test_pipelines_are_graph_components(self):
+        from kfp import dsl
+        from kfp.dsl import graph_component
+
+        @dsl.component
+        def step(x: int):
+            pass
+
+        @dsl.pipeline
+        def one_step():
+            step(x=1)
+
+        assert isinstance(one_step, graph_component.GraphComponent)
+
+    def test_default_base_image_matches(self):
+        from kfp.dsl import component_factory
+
+        from kubeflow_mcp.pipelines.api._compile import KFP_DEFAULT_BASE_IMAGE
+
+        assert component_factory._DEFAULT_BASE_IMAGE == KFP_DEFAULT_BASE_IMAGE
+
+    def test_allowed_dsl_and_kubernetes_names_exist(self):
+        from kfp import dsl, kubernetes
+
+        from kubeflow_mcp.pipelines.api import _compile
+
+        for name in _compile._DSL_NAMES:
+            assert hasattr(dsl, name), name
+        for name in _compile._KUBERNETES_NAMES:
+            assert hasattr(kubernetes, name), name
+
+    def test_task_methods_exist(self):
+        from kfp.dsl import pipeline_task
+
+        from kubeflow_mcp.pipelines.api import _compile
+
+        for name in _compile._TASK_METHODS:
+            assert hasattr(pipeline_task.PipelineTask, name), name

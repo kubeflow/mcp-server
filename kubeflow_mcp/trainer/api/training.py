@@ -38,6 +38,12 @@ from kubeflow.trainer.constants.constants import (
 from kubernetes import client as k8s_client
 
 from kubeflow_mcp.common.constants import ErrorCode
+from kubeflow_mcp.common.huggingface import (
+    check_hf_dataset_exists,
+    hf_repo_id,
+    hub_confirms_missing,
+    validate_hf_reference,
+)
 from kubeflow_mcp.common.types import PreviewResponse, ToolError, ToolResponse, is_k8s_not_found
 from kubeflow_mcp.common.utils import (
     MCP_MANAGED_LABEL,
@@ -363,56 +369,15 @@ def _should_apply_hf_dataset_workaround(dataset: str) -> bool:
     return bool(hf_repo and len(hf_repo.split("/")) == 2)
 
 
-_HF_REPO_PART_RE = re.compile(r"[a-zA-Z0-9._-]+")
-
-
-def _hf_repo_id(uri: str, *, dataset: bool) -> str | None:
-    """Return the repo ID of an ``hf://`` URI, or None if it is malformed.
-
-    Models and datasets differ because the Trainer initializers parse them
-    differently. The model initializer passes the whole path to
-    ``snapshot_download``, so an unscoped model such as ``hf://gpt2`` works. The
-    dataset initializer reads the second path segment, so a dataset needs
-    ``org/name`` and may add a subpath (``hf://org/ds/subpath``).
-    """
-    parts = uri.removeprefix("hf://").rstrip("/").split("/")
-    # A subpath is not checked against the repo pattern, so block path traversal here.
-    if "" in parts or any(part in (".", "..") for part in parts):
-        return None
-    if dataset:
-        repo_parts = parts[:2] if len(parts) >= 2 else []
-    else:
-        repo_parts = parts if len(parts) <= 2 else []
-    if not repo_parts or not all(_HF_REPO_PART_RE.fullmatch(p) for p in repo_parts):
-        return None
-    return "/".join(repo_parts)
-
-
 def _validate_hf_reference_formats(model: str, dataset: str) -> ToolError | None:
     """Check that ``hf://`` model and dataset references are well formed.
 
     Local check only, so it is safe in preview. Other schemes (e.g. ``s3://``)
     are left alone.
     """
-    for field, uri, is_dataset, example in (
-        ("model", model, False, "hf://[<org>/]<model>"),
-        ("dataset", dataset, True, "hf://<org>/<dataset>[/<path>]"),
-    ):
-        # Check whitespace for hf:// references, including leading whitespace (e.g. " hf://org/model").
-        # Non-HF references (e.g. s3:// paths with spaces) are out of scope and left alone.
-        if (uri.startswith("hf://") or uri.strip().startswith("hf://")) and any(
-            ch.isspace() for ch in uri
-        ):
-            return ToolError(
-                error=f"Invalid Hugging Face {field} reference '{uri}' (must not contain whitespace)",
-                error_code=ErrorCode.VALIDATION_ERROR,
-            )
-        if uri.startswith("hf://") and _hf_repo_id(uri, dataset=is_dataset) is None:
-            return ToolError(
-                error=f"Invalid Hugging Face {field} reference '{uri}' (expected {example})",
-                error_code=ErrorCode.VALIDATION_ERROR,
-            )
-    return None
+    return validate_hf_reference(model, "model", dataset=False) or validate_hf_reference(
+        dataset, "dataset", dataset=True
+    )
 
 
 def _check_hf_repos_exist(model: str, dataset: str) -> dict[str, Any] | None:
@@ -425,12 +390,12 @@ def _check_hf_repos_exist(model: str, dataset: str) -> dict[str, Any] | None:
     Without an ``HF_TOKEN`` on the MCP host, the Hub answers 401 even for a
     missing repo, so in that setup this check never rejects anything.
     """
-    from huggingface_hub import dataset_info, model_info
+    from huggingface_hub import model_info
 
     from kubeflow_mcp.trainer.api.planning import _get_model_info_from_hf, _suggest_hf_model_ids
 
     if model.startswith("hf://"):
-        repo_id = _hf_repo_id(model, dataset=False)
+        repo_id = hf_repo_id(model, dataset=False)
         if "/" in repo_id:
             info = _get_model_info_from_hf(repo_id) or {}
             if info.get("kind") == "not_found":
@@ -446,7 +411,7 @@ def _check_hf_repos_exist(model: str, dataset: str) -> dict[str, Any] | None:
                     "Could not verify model %s, submitting anyway: %s", repo_id, info["error"]
                 )
         # _get_model_info_from_hf() only accepts org/name, so check an unscoped model directly.
-        elif _hub_confirms_missing(model_info, repo_id, "model"):
+        elif hub_confirms_missing(model_info, repo_id, "model"):
             suggestions = _suggest_hf_model_ids(repo_id)
             return ToolError(
                 error=f"Hugging Face model '{repo_id}' does not exist",
@@ -454,27 +419,8 @@ def _check_hf_repos_exist(model: str, dataset: str) -> dict[str, Any] | None:
                 details={"suggestions": suggestions} if suggestions else None,
             ).model_dump()
 
-    if dataset.startswith("hf://"):
-        repo_id = _hf_repo_id(dataset, dataset=True)
-        if _hub_confirms_missing(dataset_info, repo_id, "dataset"):
-            return ToolError(
-                error=f"Hugging Face dataset '{repo_id}' does not exist",
-                error_code=ErrorCode.VALIDATION_ERROR,
-            ).model_dump()
-    return None
-
-
-def _hub_confirms_missing(fetch: Callable[..., Any], repo_id: str, kind: str) -> bool:
-    """Return True only when the Hub confirms ``repo_id`` missing; log other failures."""
-    from kubeflow_mcp.trainer.api.planning import _is_confirmed_missing
-
-    try:
-        fetch(repo_id, timeout=10)
-    except Exception as e:
-        if _is_confirmed_missing(e):
-            return True
-        logger.warning("Could not verify %s %s, submitting anyway: %s", kind, repo_id, e)
-    return False
+    dataset_err = check_hf_dataset_exists(dataset)
+    return dataset_err.model_dump() if dataset_err is not None else None
 
 
 def _sdk_error(e: Exception, hint: str | None = None) -> dict[str, Any]:

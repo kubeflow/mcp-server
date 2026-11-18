@@ -40,8 +40,19 @@ READ_TOOLS = {
     "list_pipeline_runs",
     "get_pipeline_run",
     "get_pipeline_logs",
+    "list_experiments",
+    "get_experiment",
 }
-MUTATING_TOOLS = {"create_pipeline_run", "stop_pipeline_run", "retry_pipeline_run"}
+MUTATING_TOOLS = {
+    "create_pipeline_run",
+    "stop_pipeline_run",
+    "retry_pipeline_run",
+    "create_experiment",
+    "delete_experiment",
+    "create_pipeline",
+    "delete_pipeline",
+}
+ADMIN_ONLY_TOOLS = {"delete_experiment", "delete_pipeline"}
 ANNOTATION_KEYS = {
     "title",
     "readOnlyHint",
@@ -89,6 +100,17 @@ class TestModuleContract:
         assert CLIENT_TOOL_DESCRIPTIONS["stop_pipeline_run"].startswith("[DESTRUCTIVE]")
         assert "stop_pipeline_run" in DESTRUCTIVE_TOOLS
 
+    @pytest.mark.parametrize("name", sorted({"delete_experiment", "delete_pipeline"}))
+    def test_deletes_are_marked_destructive(self, name):
+        assert CLIENT_TOOL_ANNOTATIONS[name]["destructiveHint"] is True
+        assert CLIENT_TOOL_DESCRIPTIONS[name].startswith("[DESTRUCTIVE]")
+        assert name in DESTRUCTIVE_TOOLS
+
+    def test_destructive_set_matches_hints(self):
+        for name in TOOL_NAMES:
+            hint = CLIENT_TOOL_ANNOTATIONS[name]["destructiveHint"]
+            assert hint is (name in DESTRUCTIVE_TOOLS), name
+
     def test_hints_never_skip_the_preview(self):
         for name in TOOL_NAMES:
             assert "confirmed=True" not in TOOL_NEXT_HINTS[name], name
@@ -117,8 +139,24 @@ class TestPersonas:
         assert "stop_pipeline_run" not in allowed
         assert "retry_pipeline_run" not in allowed
 
-    def test_ml_engineer_gets_every_tool(self):
-        assert TOOL_NAMES <= get_allowed_tools("ml-engineer")
+    def test_data_scientist_can_create_experiments_but_not_pipelines(self):
+        allowed = get_allowed_tools("data-scientist")
+        assert "create_experiment" in allowed
+        assert "create_pipeline" not in allowed
+        assert "delete_experiment" not in allowed
+
+    def test_ml_engineer_gets_every_tool_but_the_admin_deletes(self):
+        allowed = get_allowed_tools("ml-engineer")
+        assert TOOL_NAMES - ADMIN_ONLY_TOOLS <= allowed
+        assert not ADMIN_ONLY_TOOLS & allowed
+
+    @pytest.mark.parametrize("persona", ["readonly", "data-scientist", "ml-engineer"])
+    def test_admin_only_deletes(self, persona):
+        assert not ADMIN_ONLY_TOOLS & get_allowed_tools(persona)
+
+    def test_platform_admin_gets_every_tool(self):
+        # None means unrestricted.
+        assert get_allowed_tools("platform-admin") is None
 
 
 class TestInstructions:
@@ -137,3 +175,13 @@ class TestInstructions:
         text = _build_server_instructions({"pipelines": module}, persona, "full")
         assert "KUBEFLOW PIPELINES:" in text
         assert ("PIPELINE RUNS:" in text) is has_runs
+
+    @pytest.mark.parametrize(
+        ("persona", "has_authoring"),
+        [("readonly", False), ("data-scientist", False), ("ml-engineer", True)],
+    )
+    def test_authoring_guidance_follows_persona(self, persona, has_authoring):
+        import kubeflow_mcp.pipelines as module
+
+        text = _build_server_instructions({"pipelines": module}, persona, "full")
+        assert ("PIPELINE AUTHORING" in text) is has_authoring
