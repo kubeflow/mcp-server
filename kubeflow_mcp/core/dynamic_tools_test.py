@@ -534,9 +534,11 @@ def test_find_tools_semantic_results_include_parameters(monkeypatch):
 def field_default_tool(
     retries: int = Field(default=2, ge=0, le=5),
     level: int = Field(ge=1),
+    tags: list[str] = Field(default_factory=list),  # noqa: B008
+    color: _Color = _Color.RED,
 ) -> dict:
     """Field default tool with retries."""
-    return {"retries": retries, "level": level}
+    return {"retries": retries, "level": level, "tags": tags, "color": color}
 
 
 def test_parameters_report_field_defaults_by_value():
@@ -546,6 +548,7 @@ def test_parameters_report_field_defaults_by_value():
 
     assert params["retries"]["default"] == 2
     assert "default" not in params["level"]  # Field() without a default is required
+    assert params["tags"]["default"] == []  # default_factory is called, not left unset
 
 
 @pytest.mark.parametrize(
@@ -558,7 +561,10 @@ def test_parameters_report_field_defaults_by_value():
 async def test_meta_tools_return_structured_content_for_field_defaults(
     offline_model, meta_tool, arguments
 ):
-    """A FieldInfo default can't be serialized, so MCP clients rejected the whole response."""
+    """A FieldInfo default can't be serialized, so MCP clients rejected the whole response.
+
+    The Enum default checks that FastMCP serializes plain non-literal defaults by value.
+    """
     server = FastMCP("field-defaults")
     server.tool(dynamic_tools.describe_tools)
     server.tool(dynamic_tools.find_tools)
@@ -569,6 +575,8 @@ async def test_meta_tools_return_structured_content_for_field_defaults(
 
     params = result.structured_content["tools"][0]["parameters"]
     assert params["retries"]["default"] == 2
+    assert params["tags"]["default"] == []
+    assert params["color"]["default"] == "red"
 
 
 def test_find_tools_listing_all_points_to_parameter_lookup():
