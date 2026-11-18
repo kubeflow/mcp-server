@@ -19,6 +19,7 @@ tool without one, or one that hides a write, must fail here rather than in a clu
 """
 
 import importlib
+import inspect
 import re
 
 import pytest
@@ -57,16 +58,16 @@ def _all_tools():
         for tool in module.TOOLS:
             yield (
                 name,
-                tool.__name__,
+                tool,
                 permissions.get(tool.__name__),
-                module.CLIENT_TOOL_ANNOTATIONS[tool.__name__],
+                module.CLIENT_TOOL_ANNOTATIONS.get(tool.__name__, {}),
             )
     for tool in HEALTH_TOOLS:
         yield (
             "health",
-            tool.__name__,
+            tool,
             HEALTH_TOOL_PERMISSIONS.get(tool.__name__),
-            HEALTH_TOOL_ANNOTATIONS[tool.__name__],
+            HEALTH_TOOL_ANNOTATIONS.get(tool.__name__, {}),
         )
 
 
@@ -85,31 +86,50 @@ def test_every_health_tool_declares_permissions():
     assert set(HEALTH_TOOL_PERMISSIONS) == {tool.__name__ for tool in HEALTH_TOOLS}
 
 
-@pytest.mark.parametrize(
-    "client,tool,permissions,annotations",
-    list(_all_tools()),
-    ids=lambda v: v if isinstance(v, str) else "",
-)
+def _tool_id(value):
+    return value.__name__ if callable(value) else value if isinstance(value, str) else ""
+
+
+@pytest.mark.parametrize("client,tool,permissions,annotations", list(_all_tools()), ids=_tool_id)
 def test_permissions_are_well_formed(client, tool, permissions, annotations):
+    name = tool.__name__
     for permission in permissions:
-        assert isinstance(permission, ToolPermission), f"{tool}: {permission!r}"
-        assert permission.verb in _VERBS, f"{tool}: unknown verb {permission.verb!r}"
-        assert _GROUP.match(permission.group), f"{tool}: bad group {permission.group!r}"
-        assert _RESOURCE.match(permission.resource), f"{tool}: bad resource {permission.resource!r}"
-    assert len(set(permissions)) == len(permissions), f"{tool}: duplicate entries"
+        assert isinstance(permission, ToolPermission), f"{name}: {permission!r}"
+        assert permission.verb in _VERBS, f"{name}: unknown verb {permission.verb!r}"
+        assert _GROUP.match(permission.group), f"{name}: bad group {permission.group!r}"
+        assert _RESOURCE.match(permission.resource), f"{name}: bad resource {permission.resource!r}"
+    assert len(set(permissions)) == len(permissions), f"{name}: duplicate entries"
 
 
-@pytest.mark.parametrize(
-    "client,tool,permissions,annotations",
-    list(_all_tools()),
-    ids=lambda v: v if isinstance(v, str) else "",
-)
+@pytest.mark.parametrize("client,tool,permissions,annotations", list(_all_tools()), ids=_tool_id)
+def test_conditional_permissions_name_a_parameter(client, tool, permissions, annotations):
+    """``when`` must name a real parameter, or a check would skip the request forever."""
+    parameters = set(inspect.signature(tool).parameters)
+    for permission in permissions:
+        if permission.when is not None:
+            assert permission.when in parameters, (
+                f"{tool.__name__}: when={permission.when!r} is not a parameter"
+            )
+
+
+@pytest.mark.parametrize("client,tool,permissions,annotations", list(_all_tools()), ids=_tool_id)
 def test_write_verbs_match_the_read_only_hint(client, tool, permissions, annotations):
+    name = tool.__name__
     writes = {p.verb for p in permissions} & _WRITE_VERBS
     if annotations.get("readOnlyHint"):
-        if tool in _READ_ONLY_TOOLS_THAT_WRITE:
-            assert writes, f"{tool} no longer writes; drop it from _READ_ONLY_TOOLS_THAT_WRITE"
+        if name in _READ_ONLY_TOOLS_THAT_WRITE:
+            assert writes, f"{name} no longer writes; drop it from _READ_ONLY_TOOLS_THAT_WRITE"
         else:
-            assert not writes, f"read-only tool {tool} declares writes: {sorted(writes)}"
+            assert not writes, f"read-only tool {name} declares writes: {sorted(writes)}"
     elif client not in _WRITES_AUTHORIZED_ELSEWHERE:
-        assert writes, f"write tool {tool} declares no Kubernetes write"
+        assert writes, f"write tool {name} declares no Kubernetes write"
+
+
+def test_read_only_writes_are_conditional():
+    """A read-only tool may only write for an opt-in argument, never on every call."""
+    for _client, tool, permissions, annotations in _all_tools():
+        if not annotations.get("readOnlyHint"):
+            continue
+        for permission in permissions:
+            if permission.verb in _WRITE_VERBS:
+                assert permission.when, f"{tool.__name__} writes {permission} on every call"
