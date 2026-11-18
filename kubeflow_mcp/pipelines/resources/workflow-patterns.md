@@ -9,6 +9,23 @@ A **pipeline** is the registered blueprint, found by name (`list_pipelines`,
 (`pipeline_id`, `run_id`, `experiment_id`), and every tool call is written to the
 server's audit log with sensitive values masked.
 
+## Build a pipeline from a request
+
+When the user asks for a pipeline ("train this model on this dataset"), write KFP v2
+code as described in `pipelines://guides/authoring`, then:
+
+```
+create_pipeline(name, pipeline_code, dataset="hf://org/ds")   # preview: checks the code
+create_pipeline(name, pipeline_code, dataset=..., confirmed=True)   # compile and upload
+create_experiment(name="...")                                 # preview, then confirmed=True
+create_pipeline_run(pipeline=name, experiment="...", params={...})   # preview, then confirm
+get_pipeline_run(run_id)                                      # follow it
+```
+
+- When the preview or the compile reports an error, fix the code and preview again.
+- An existing pipeline name gets a new version; the preview says which it will be.
+- `list_experiments()` shows existing experiments to reuse.
+
 ## Run a registered pipeline
 
 ```
@@ -20,9 +37,10 @@ get_pipeline_run(run_id)                           # follow the state until it f
 ```
 
 - `version=` picks a pipeline version; the latest is used when it is omitted.
-- `experiment=` must name an existing experiment; the server default is used when omitted.
-- Only registered pipelines can be run. Compile and upload a pipeline outside MCP
-  (KFP UI, `kfp` CLI or SDK), then run it here by name.
+- `experiment=` must name an existing experiment (`create_experiment` makes one); the
+  server default is used when omitted.
+- Only registered pipelines can be run, by name. Register one with `create_pipeline`
+  or outside MCP (KFP UI, `kfp` CLI or SDK).
 
 ## Find and debug a failed run
 
@@ -45,6 +63,29 @@ stop_pipeline_run(run_id, confirmed=True)  # after the user approves
 
 KFP runs carry no MCP ownership label, so stop and retry act on any run in the
 namespace. Always show the preview and confirm the run with the user first.
+
+## Experiments
+
+```
+list_experiments()                        # experiments in the namespace
+get_experiment(name)
+create_experiment(name)                   # preview, then confirmed=True
+delete_experiment(name)                   # platform-admin only; preview, then confirmed=True
+```
+
+`create_experiment` returns the existing experiment when the name is taken.
+`delete_experiment` keeps the experiment's runs.
+
+## Delete a pipeline
+
+```
+delete_pipeline(name)                        # preview: lists every version it removes
+delete_pipeline(name, version="v1")          # only that version
+delete_pipeline(name, confirmed=True)        # platform-admin only
+```
+
+Runs are kept, but a run whose version is gone can no longer be retried. Pipelines
+carry no MCP ownership label, so only `platform-admin` can delete them.
 
 ## Run states
 
