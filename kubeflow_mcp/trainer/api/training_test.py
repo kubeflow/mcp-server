@@ -1542,4 +1542,81 @@ def test_custom_training_reports_runtime_not_found(confirmed: bool) -> None:
         )
     assert result["error_code"] == "RESOURCE_NOT_FOUND"
     assert "missing-runtime" in result["error"]
+    assert "workloads" in result["error"]
     client.assert_not_called()
+
+
+def test_custom_training_namespace_404_keeps_the_submission_context() -> None:
+    with patch(PATCH_NS_CHECK, return_value=None), patch(PATCH_CLIENT) as client:
+        client.return_value.train.side_effect = ApiException(status=404, reason="Namespace missing")
+        result = run_custom_training(
+            script="print('hello')",
+            runtime="torch-distributed",
+            namespace="missing-namespace",
+            volumes=[{"name": "workspace", "emptyDir": {}}],
+            volume_mounts=[{"name": "workspace", "mountPath": "/workspace"}],
+            confirmed=True,
+        )
+    assert result["error_code"] == "RESOURCE_NOT_FOUND"
+    assert "missing-namespace" in result["error"]
+    assert "torch-distributed" in result["error"]
+    assert "namespace" in result["hint"]
+    client.return_value.train.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "message,expected",
+    [
+        (
+            'admission webhook "validator.trainer" denied the request: spec.runtimeRef.name: Invalid value: "qwen": QLoRA is not supported',
+            "VALIDATION_ERROR",
+        ),
+        (
+            'admission webhook "validator.trainer" denied the request: spec.runtimeRef: Required value',
+            "VALIDATION_ERROR",
+        ),
+        (
+            'admission webhook "validator.trainer" denied the request: spec.trainer: Unsupported value',
+            "VALIDATION_ERROR",
+        ),
+        (
+            'admission webhook "validator.trainer" denied the request: spec.initializer: Forbidden',
+            "VALIDATION_ERROR",
+        ),
+        (
+            'admission webhook "security-policy" denied the request: spec.trainerPolicy: Invalid value',
+            "PERMISSION_DENIED",
+        ),
+        (
+            'admission webhook "security-policy" denied the request: service account forbidden',
+            "PERMISSION_DENIED",
+        ),
+        (
+            'admission webhook "security-policy" denied the request: spec.serviceAccountName: Invalid value: "admin"',
+            "PERMISSION_DENIED",
+        ),
+        ("User cannot create trainjobs in namespace workloads", "PERMISSION_DENIED"),
+    ],
+)
+@pytest.mark.parametrize("wrapping", ["direct", "cause", "context"])
+def test_admission_validation_distinguished_from_permissions(
+    message: str, expected: str, wrapping: str
+) -> None:
+    import json
+
+    from kubeflow_mcp.trainer.api.training import _sdk_error
+
+    api_error = ApiException(status=403)
+    api_error.body = json.dumps({"message": message})
+    error: Exception = api_error
+    if wrapping != "direct":
+        error = RuntimeError("Failed to create TrainJob")
+        if wrapping == "cause":
+            error.__cause__ = api_error
+        else:
+            error.__context__ = api_error
+    result = _sdk_error(error)
+    assert result["error_code"] == expected
+    if expected == "VALIDATION_ERROR":
+        assert result["error"] == message
+        assert "service_account_name" not in result["hint"]

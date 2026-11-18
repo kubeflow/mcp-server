@@ -200,3 +200,9 @@ Use Kubernetes camelCase inside storage dictionaries: `persistentVolumeClaim`, `
 `emptyDir` and `mountPath`. Invalid fields are rejected before preview and submission.
 For persistent checkpoints, mount a PVC; `emptyDir` is temporary and cannot carry checkpoints
 between jobs.
+### Admission configuration rejections
+
+Webhook rejections naming `spec.runtimeRef`, `spec.trainer`, or `spec.initializer` return
+`VALIDATION_ERROR` with the webhook reason, including required, unsupported, or forbidden settings.
+RBAC and security policy denials remain `PERMISSION_DENIED`; check model/runtime compatibility
+before retrying an unsupported configuration.

@@ -15,6 +15,7 @@
 """Training submission tools: fine_tune, run_custom_training, run_container_training."""
 
 import ast
+import json
 import logging
 import os
 import posixpath
@@ -490,7 +491,24 @@ def _sdk_error(e: Exception, hint: str | None = None) -> dict[str, Any]:
     # context, for errors raised without ``from``, as is_k8s_not_found does). RBAC or
     # an admission policy (e.g. one restricting service_account_name) denied the
     # request: that is a permission problem to report, not a transient SDK failure.
-    if any(getattr(err, "status", None) == 403 for err in (e, e.__cause__ or e.__context__)):
+    forbidden = next(
+        (err for err in (e, e.__cause__ or e.__context__) if getattr(err, "status", None) == 403),
+        None,
+    )
+    if forbidden is not None:
+        try:
+            message = json.loads(getattr(forbidden, "body", None) or "{}").get("message", "")
+        except (ValueError, AttributeError):
+            message = ""
+        # Configuration rejection is distinct from RBAC and security admission policies.
+        if "admission webhook" in message and re.search(
+            r"\bspec\.(?:runtimeRef|trainer|initializer)(?:[.:\s\[]|$)", message
+        ):
+            return ToolError(
+                error=message,
+                error_code=ErrorCode.VALIDATION_ERROR,
+                hint="The admission webhook rejected the training configuration; check model and runtime compatibility.",
+            ).model_dump()
         return ToolError(
             error=str(e),
             error_code=ErrorCode.PERMISSION_DENIED,
@@ -1184,8 +1202,10 @@ def fine_tune(
         s3_role_arn: IAM role ARN for S3 access.
         node_selector: K8s node selector (e.g., ``{"gpu-type": "a100"}``).
         tolerations: K8s tolerations for tainted nodes.
-        volumes: K8s volume definitions.
-        volume_mounts: K8s volume mounts.
+        volumes: Kubernetes camelCase dictionaries, each with ``name`` and one source
+            (e.g., ``persistentVolumeClaim`` with ``claimName``, or ``emptyDir``).
+        volume_mounts: Kubernetes camelCase dictionaries, each with ``name`` and an
+            absolute ``mountPath``.
         affinity: K8s pod affinity/anti-affinity rules.
         service_account_name: K8s service account for the training pod.
         image_pull_secrets: K8s image pull secrets.
@@ -1443,8 +1463,10 @@ def run_custom_training(
             spec. Dict format: ``{"KEY": "VALUE"}``.
         node_selector: K8s node selector applied to the pod.
         tolerations: K8s tolerations for tainted nodes.
-        volumes: K8s volume definitions.
-        volume_mounts: K8s volume mounts.
+        volumes: Kubernetes camelCase dictionaries, each with ``name`` and one source
+            (e.g., ``persistentVolumeClaim`` with ``claimName``, or ``emptyDir``).
+        volume_mounts: Kubernetes camelCase dictionaries, each with ``name`` and an
+            absolute ``mountPath``.
         affinity: K8s pod affinity/anti-affinity rules.
         service_account_name: K8s service account for the training pod.
         image_pull_secrets: K8s image pull secrets.
@@ -1608,9 +1630,12 @@ def run_custom_training(
     except Exception as e:
         if is_k8s_not_found(e):
             return ToolError(
-                error=f"Training resource not found (runtime '{runtime or DEFAULT_TRAINING_RUNTIME}')",
+                error=(
+                    f"Training resource not found (runtime '{runtime or DEFAULT_TRAINING_RUNTIME}', "
+                    f"namespace '{namespace or 'default configuration'}')"
+                ),
                 error_code=ErrorCode.RESOURCE_NOT_FOUND,
-                hint="Use list_runtimes to check the runtime; verify any referenced resources exist.",
+                hint="Verify the namespace and referenced resources exist; use list_runtimes to check the runtime.",
             ).model_dump()
         return _sdk_error(e, hint="Read trainer://guides/troubleshooting")
 
@@ -1663,8 +1688,10 @@ def run_container_training(
         env: Environment variables as dict (e.g., ``{"HF_TOKEN": "xxx"}``).
         node_selector: K8s node selector.
         tolerations: K8s tolerations.
-        volumes: K8s volume definitions.
-        volume_mounts: K8s volume mounts.
+        volumes: Kubernetes camelCase dictionaries, each with ``name`` and one source
+            (e.g., ``persistentVolumeClaim`` with ``claimName``, or ``emptyDir``).
+        volume_mounts: Kubernetes camelCase dictionaries, each with ``name`` and an
+            absolute ``mountPath``.
         affinity: K8s pod affinity/anti-affinity rules.
         service_account_name: K8s service account for the training pod.
         image_pull_secrets: K8s image pull secrets.
