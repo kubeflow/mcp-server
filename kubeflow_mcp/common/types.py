@@ -16,7 +16,7 @@
 
 import logging
 import traceback
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 
 from pydantic import BaseModel
 
@@ -64,6 +64,22 @@ def exception_details(exc: Exception) -> dict[str, Any]:
             details["traceback"] = tb
 
     return details
+
+
+class ToolPermission(NamedTuple):
+    """A Kubernetes API permission that a tool's own requests need.
+
+    Declared per tool in each client module's ``CLIENT_TOOL_PERMISSIONS`` so an
+    authorization check can ask whether a caller holds them (#565). Only requests
+    the server sends to the Kubernetes API count, including the ones the Kubeflow
+    SDK makes on the tool's behalf; requests authorized elsewhere (the Pipelines
+    API server) and best-effort reads whose failure the tool tolerates do not.
+    """
+
+    verb: str
+    group: str  # "" is the core API group
+    resource: str  # plural, optionally with a subresource, e.g. "pods/log"
+    cluster_wide: bool = False  # cluster-scoped, or across all namespaces
 
 
 class ToolResponse(BaseModel):

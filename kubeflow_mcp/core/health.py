@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from kubeflow_mcp.common.constants import ErrorCode
-from kubeflow_mcp.common.types import ToolError, ToolResponse
+from kubeflow_mcp.common.types import ToolError, ToolPermission, ToolResponse
 from kubeflow_mcp.core.logging import get_log_buffer
 
 logger = logging.getLogger(__name__)
@@ -124,6 +124,12 @@ def get_server_logs(
 
 
 HEALTH_TOOLS = [health_check, get_server_logs]
+
+# Kubernetes permissions each health tool's requests need (#565).
+HEALTH_TOOL_PERMISSIONS: dict[str, tuple[ToolPermission, ...]] = {
+    "health_check": (ToolPermission("list", "", "namespaces", cluster_wide=True),),
+    "get_server_logs": (),  # reads the server's own log buffer
+}
 
 # MCP registrations for health tools live here (server-level), not client modules.
 HEALTH_TOOL_DESCRIPTIONS: dict[str, str] = {
