@@ -22,12 +22,15 @@ checked in three steps:
 1. ``check_pipeline_code`` parses the source (nothing runs) and only accepts a small
    shape: ``kfp`` / ``typing`` imports, literal constants, ``@dsl.component``
    functions and exactly one ``@dsl.pipeline`` function whose body only calls
-   components, task methods and ``dsl`` / ``kfp.kubernetes`` helpers. Component
-   bodies are free, since they run in the cluster.
+   components, task methods and ``dsl`` / ``kfp.kubernetes`` helpers. Its variables
+   only hold tasks, task outputs or literals, so a value cannot be grown line by
+   line. Component bodies are free, since they run in the cluster.
 2. ``compile_pipeline_code`` compiles in a child interpreter (``python -I``) with a
-   stripped environment and a timeout, never in the server process.
+   stripped environment and a timeout, never in the server process. On POSIX the
+   worker also caps its memory and the size of the file it writes.
 3. ``inspect_pipeline_spec`` reads the compiled YAML (it is never rewritten, so the
    uploaded file keeps KFP's usual header) and checks its images and accelerators.
+   Importer steps run no container, so they are listed without an image.
 
 The AST check is the boundary that keeps pipeline code from doing anything but
 building a graph at compile time; the child process limits the damage if it misses
@@ -58,6 +61,11 @@ MAX_SPEC_BYTES = 2_000_000
 MAX_EXECUTORS = 50
 MAX_ERRORS = 10
 COMPILE_TIMEOUT_SECONDS = 120
+# Address-space cap for the compile worker on POSIX, so a runaway pipeline body fails
+# with MemoryError instead of exhausting the server container's memory.
+MAX_COMPILE_MEMORY_BYTES = 1024 * 1024 * 1024
+COMPILE_MEMORY_ENV = "KUBEFLOW_MCP_COMPILE_MAX_MEMORY_BYTES"
+COMPILE_OUTPUT_ENV = "KUBEFLOW_MCP_COMPILE_MAX_OUTPUT_BYTES"
 MAX_COMPILE_ERROR_CHARS = 2_000
 # Image kfp uses for a @dsl.component without base_image (kfp 2.17).
 KFP_DEFAULT_BASE_IMAGE = "python:3.11"
@@ -430,7 +438,7 @@ class _PipelineBodyChecker:
         elif isinstance(stmt, ast.Assign):
             if len(stmt.targets) != 1 or not isinstance(stmt.targets[0], ast.Name):
                 raise _CodeError(stmt, "assign each task to one plain name")
-            self.check_expr(stmt.value)
+            self.check_assigned_value(stmt.value)
             self.define(stmt.targets[0].id, stmt)
         elif isinstance(stmt, ast.With):
             self.check_with(stmt)
@@ -441,6 +449,27 @@ class _PipelineBodyChecker:
                 "only call components, set task options and use 'with dsl.If / "
                 "dsl.ParallelFor / dsl.ExitHandler'",
             )
+
+    def check_assigned_value(self, value: ast.AST) -> None:
+        """Only tasks, task outputs and literals can be stored in a pipeline variable.
+
+        Building a value from other variables (``x = x + x``, ``s = f"{s}{s}"``) would let
+        a few lines grow a string exponentially while the body runs at compile time, so
+        ``+`` and f-strings are only accepted inline, as call arguments.
+        """
+        if isinstance(value, (ast.Call, ast.Attribute, ast.Subscript)):
+            self.check_expr(value)
+            return
+        try:
+            ast.literal_eval(value)
+        except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+            # Report a forbidden expression with its own message first.
+            self.check_expr(value)
+            raise _CodeError(
+                value,
+                "a pipeline variable can only hold a task, a task output or a literal; "
+                "build strings inline in the call that uses them",
+            ) from None
 
     def define(self, name: str, node: ast.AST) -> None:
         if name in self.module.aliases or name in self.module.components:
@@ -637,6 +666,9 @@ class CompiledPipeline:
 def _worker_env() -> dict[str, str]:
     env = {key: os.environ[key] for key in _WORKER_ENV_KEYS if key in os.environ}
     env["PYTHONIOENCODING"] = "utf-8"
+    # Read by _compile_worker.py, which applies them as OS limits where it can (POSIX).
+    env[COMPILE_MEMORY_ENV] = str(MAX_COMPILE_MEMORY_BYTES)
+    env[COMPILE_OUTPUT_ENV] = str(MAX_SPEC_BYTES)
     return env
 
 
@@ -745,6 +777,19 @@ def inspect_pipeline_spec(documents: list[Any]) -> tuple[dict[str, Any] | None, 
         )
     steps = []
     for name, executor in sorted(executors.items()):
+        if isinstance(executor, dict) and "importer" in executor:
+            # dsl.importer registers an existing artifact; it runs no container of its own.
+            importer = executor.get("importer") or {}
+            steps.append(
+                {
+                    "executor": name,
+                    "kind": "importer",
+                    "image": None,
+                    "accelerators": 0,
+                    "artifact_uri": importer.get("artifactUri"),
+                }
+            )
+            continue
         container = (executor or {}).get("container") or {}
         image = container.get("image")
         image_err = validate_image_reference(image, f"image of step '{name}'")
@@ -761,13 +806,15 @@ def inspect_pipeline_spec(documents: list[Any]) -> tuple[dict[str, Any] | None, 
                 f"(allowed 0 to {MAX_GPU_PER_NODE})",
                 error_code=ErrorCode.VALIDATION_ERROR,
             )
-        steps.append({"executor": name, "image": image, "accelerators": accelerators})
+        steps.append(
+            {"executor": name, "kind": "container", "image": image, "accelerators": accelerators}
+        )
 
     parameters = ((spec.get("root") or {}).get("inputDefinitions") or {}).get("parameters") or {}
     return {
         "pipeline_name": (spec.get("pipelineInfo") or {}).get("name"),
         "steps": steps,
-        "images": sorted({step["image"] for step in steps}),
+        "images": sorted({step["image"] for step in steps if step["image"]}),
         "parameters": {
             name: {
                 "type": (value or {}).get("parameterType"),

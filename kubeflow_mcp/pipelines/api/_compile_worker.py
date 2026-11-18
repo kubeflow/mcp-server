@@ -35,6 +35,31 @@ EXIT_KFP_MISSING = 3
 _MODULE_NAME = "kubeflow_mcp_user_pipeline"
 
 
+MEMORY_ENV = "KUBEFLOW_MCP_COMPILE_MAX_MEMORY_BYTES"
+OUTPUT_ENV = "KUBEFLOW_MCP_COMPILE_MAX_OUTPUT_BYTES"
+
+
+def apply_limits() -> list[str]:
+    """Cap this process's memory and the size of files it writes (POSIX only).
+
+    A pipeline body that grows a value faster than expected then fails with
+    MemoryError, or with "File too large" when writing the spec, instead of exhausting
+    the server container. Windows has no ``resource`` module, so only the caller's
+    timeout applies there. Returns the limits that were set.
+    """
+    try:
+        import resource
+    except ImportError:
+        return []
+    applied = []
+    for env, limit in ((MEMORY_ENV, resource.RLIMIT_AS), (OUTPUT_ENV, resource.RLIMIT_FSIZE)):
+        value = os.environ.get(env, "")
+        if value.isdigit() and int(value) > 0:
+            resource.setrlimit(limit, (int(value), int(value)))
+            applied.append(env)
+    return applied
+
+
 def _user_line(exc: BaseException, source: str) -> int | None:
     """Return the last line of the user's file in the traceback, if any."""
     line = None
@@ -84,4 +109,5 @@ def main(argv: list[str]) -> int:
 
 
 if __name__ == "__main__":
+    apply_limits()
     sys.exit(main(sys.argv))

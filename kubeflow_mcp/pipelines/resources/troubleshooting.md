@@ -34,6 +34,8 @@ Error-to-fix reference for the `pipelines` client tools.
 - `create_pipeline` compiles in a child process on the server host, so that host needs
   `kubeflow-mcp[pipelines]`. The `@dsl.pipeline` body runs there at compile time, which is
   why its shape is restricted; component bodies only run in the cluster.
+- On Linux the compile worker is capped at 1 GiB of memory and a 2 MB pipeline spec;
+  on Windows only the 120 s timeout applies.
 - There is no image allowlist: the preview and the response list every image a pipeline
   uses, so review them before confirming.
 - KFP experiments and pipelines carry no MCP ownership label, so `delete_experiment` and

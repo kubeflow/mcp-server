@@ -19,9 +19,11 @@ the server at compile time, so most tests here try to get code past it.
 """
 
 import importlib.util
+import os
 import subprocess
 import sys
 import textwrap
+import time
 from pathlib import Path
 
 import pytest
@@ -303,10 +305,32 @@ class TestRejectedPipelineBody:
             ("global n", "Global is not allowed"),
             ("try:\n    pass\nexcept Exception:\n    pass", "Try is not allowed"),
             ("raise ValueError()", "Raise is not allowed"),
+            ("x = 'a'\nx = x + x", "can only hold a task, a task output or a literal"),
+            ("s = f'{n}-{n}'", "can only hold a task, a task output or a literal"),
+            ("y = n", "can only hold a task, a task output or a literal"),
+            ("y = -n", "can only hold a task, a task output or a literal"),
         ],
     )
     def test_rejected(self, body, message):
         assert message in _error(_pipeline(body))
+
+    def test_doubling_a_value_is_rejected_before_compiling(self):
+        # Review repro: ~500 bytes of `x = x + x` compiled to a 4 MB spec.
+        body = "x = 'aaaa'\n" + "x = x + x\n" * 20 + "step(x=x)"
+        assert "can only hold a task" in _error(_pipeline(body))
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "items = [1, 2, 3]\nwith dsl.ParallelFor(items=items) as i:\n    step(x=i)",
+            "data = step(x=n).outputs['data']\nuse(data=data)",
+            "t = step(x=n)\nout = t.output\nuse(data=out)",
+            "label = 'run'\nt = step(x=n)\nt.set_display_name(label + '-a')",
+        ],
+    )
+    def test_tasks_outputs_and_literals_can_be_assigned(self, body):
+        summary, err = check_pipeline_code(_pipeline(body))
+        assert err is None, err and err.details
 
     def test_errors_name_the_line(self):
         err = _error(_pipeline("open('x')"))
@@ -371,6 +395,17 @@ class TestCompileProcess:
         assert kwargs["timeout"] == _compile.COMPILE_TIMEOUT_SECONDS
         assert kwargs["cwd"] == str(tmp_path)
         assert (tmp_path / "pipeline_source.py").read_text(encoding="utf-8") == PIPELINE_CODE
+        assert kwargs["env"][_compile.COMPILE_MEMORY_ENV] == str(_compile.MAX_COMPILE_MEMORY_BYTES)
+        assert kwargs["env"][_compile.COMPILE_OUTPUT_ENV] == str(_compile.MAX_SPEC_BYTES)
+
+    def test_worker_and_server_agree_on_limit_names(self):
+        assert _compile_worker.MEMORY_ENV == _compile.COMPILE_MEMORY_ENV
+        assert _compile_worker.OUTPUT_ENV == _compile.COMPILE_OUTPUT_ENV
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows has no resource module")
+    def test_limits_are_skipped_without_resource_module(self, monkeypatch):
+        monkeypatch.setenv(_compile.COMPILE_MEMORY_ENV, "1000")
+        assert _compile_worker.apply_limits() == []
 
     def test_timeout_is_reported(self, tmp_path, monkeypatch):
         def slow(args, **kwargs):
@@ -439,6 +474,49 @@ class TestRealCompile:
         assert err is None, err
         assert len(compiled.documents) == 2
         assert "platforms" in compiled.documents[1]
+
+    def test_importer_pipeline_compiles_and_passes_inspection(self, tmp_path):
+        # Review repro: an importer step has no container, which the image check rejected.
+        code = _pipeline(
+            "i = dsl.importer(artifact_uri='gs://bucket/data.csv', artifact_class=dsl.Dataset)\n"
+            "use(data=i.output)"
+        )
+        compiled, err = compile_pipeline_code(code, str(tmp_path))
+        assert err is None, err
+
+        summary, err = inspect_pipeline_spec(compiled.documents)
+
+        assert err is None, err
+        importer = next(s for s in summary["steps"] if s["kind"] == "importer")
+        assert importer["image"] is None
+        assert "gs://bucket/data.csv" in str(importer["artifact_uri"])
+        assert summary["images"] == ["python:3.11-slim"]
+
+    @pytest.mark.skipif(not hasattr(os, "fork"), reason="OS limits need POSIX (resource module)")
+    def test_oversized_output_is_stopped_by_the_file_size_limit(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(_compile, "MAX_SPEC_BYTES", 1024)
+
+        started = time.monotonic()
+        compiled, err = compile_pipeline_code(PIPELINE_CODE, str(tmp_path))
+
+        assert compiled is None
+        assert err.error_code == "VALIDATION_ERROR"
+        assert "File too large" in err.error
+        assert time.monotonic() - started < _compile.COMPILE_TIMEOUT_SECONDS
+        assert not (tmp_path / "pipeline.yaml").exists() or (
+            (tmp_path / "pipeline.yaml").stat().st_size <= 1024
+        )
+
+    @pytest.mark.skipif(not hasattr(os, "fork"), reason="OS limits need POSIX (resource module)")
+    def test_memory_limit_stops_the_worker(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(_compile, "MAX_COMPILE_MEMORY_BYTES", 64 * 1024 * 1024)
+
+        started = time.monotonic()
+        compiled, err = compile_pipeline_code(PIPELINE_CODE, str(tmp_path))
+
+        assert compiled is None
+        assert err is not None
+        assert time.monotonic() - started < _compile.COMPILE_TIMEOUT_SECONDS
 
     def test_kfp_errors_come_back_with_the_line(self, tmp_path):
         code = PIPELINE_CODE.replace("load(rows=rows)", "load(rowz=rows)")
@@ -516,6 +594,7 @@ class TestInspectSpec:
         assert summary["steps"] == [
             {
                 "executor": "exec-train",
+                "kind": "container",
                 "image": "pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime",
                 "accelerators": 2,
             }
@@ -550,6 +629,25 @@ class TestInspectSpec:
     def test_bad_steps(self, container, message):
         _, err = inspect_pipeline_spec(_spec(executors={"exec-a": {"container": container}}))
         assert message in err.error
+
+    def test_importer_steps_need_no_image(self):
+        summary, err = inspect_pipeline_spec(
+            _spec(
+                executors={
+                    "exec-importer": {"importer": {"artifactUri": {"constant": "gs://b/d.csv"}}},
+                    "exec-use": {"container": {"image": "python:3.11"}},
+                }
+            )
+        )
+        assert err is None
+        assert summary["steps"][0] == {
+            "executor": "exec-importer",
+            "kind": "importer",
+            "image": None,
+            "accelerators": 0,
+            "artifact_uri": {"constant": "gs://b/d.csv"},
+        }
+        assert summary["images"] == ["python:3.11"]
 
     def test_too_many_steps(self):
         executors = {

@@ -33,6 +33,8 @@ Inside the `@dsl.pipeline` function:
 - `with dsl.If(...)`, `dsl.Elif`, `dsl.Else`, `with dsl.ParallelFor(...) as item`,
   `with dsl.ExitHandler(task)`, and `dsl.Collected`, `dsl.OneOf`, `dsl.importer`
 - task results through `.output` and `.outputs["name"]`
+- variables hold a task, a task output or a literal; build strings (`+`, f-strings)
+  inline in the call that uses them, e.g. `t.set_display_name(prefix + "-train")`
 
 Not accepted, with the reason in the error: other top-level imports, `import x`, loops,
 comprehensions, builtins such as `open` or `print` in the pipeline body, string type
