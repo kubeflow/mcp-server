@@ -27,6 +27,7 @@ import pytest
 from tests.common import RESOURCE_NOT_FOUND
 
 from kubeflow_mcp.common.constants import ErrorCode
+from kubeflow_mcp.common.utils import K8S_TIMEOUT
 from kubeflow_mcp.conftest import (
     NOT_FOUND_NAME,
     VALID_JOB_NAME,
@@ -46,7 +47,7 @@ from kubeflow_mcp.trainer.api.discovery import (
 
 
 @pytest.fixture(autouse=True)
-def _no_trainjob_object_reads():
+def trainjob_object_api():
     """Keep get_training_job's progress read off any real cluster in this module.
 
     Tests that need a specific TrainJob object (or the runtime fallback) patch
@@ -891,8 +892,8 @@ def test_job_details_include_pod_diagnostics():
 # ---------------------------------------------------------------------------
 
 
-def _get_job_with_trainjob_object(obj, _no_trainjob_object_reads):
-    _no_trainjob_object_reads.get_namespaced_custom_object.return_value = obj
+def _get_job_with_trainjob_object(obj, trainjob_object_api):
+    trainjob_object_api.get_namespaced_custom_object.return_value = obj
     client = MagicMock()
     client.get_job.return_value = _fake_job("job-a")
     with patch(
@@ -903,7 +904,7 @@ def _get_job_with_trainjob_object(obj, _no_trainjob_object_reads):
 
 
 class TestTrainingJobProgress:
-    def test_reports_progress_eta_and_metrics(self, _no_trainjob_object_reads):
+    def test_reports_progress_eta_and_metrics(self, trainjob_object_api):
         updated = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         trainer_status = {
             "progressPercentage": 45,
@@ -915,7 +916,7 @@ class TestTrainingJobProgress:
             "lastUpdatedTime": updated,
         }
         result = _get_job_with_trainjob_object(
-            {"status": {"trainerStatus": trainer_status}}, _no_trainjob_object_reads
+            {"status": {"trainerStatus": trainer_status}}, trainjob_object_api
         )
 
         progress = verify_tool_success(result)["progress"]
@@ -928,15 +929,16 @@ class TestTrainingJobProgress:
         assert 0 <= progress["seconds_since_update"] < 60
         assert "metrics_truncated" not in progress
 
-    def test_reads_the_requested_trainjob(self, _no_trainjob_object_reads):
-        _get_job_with_trainjob_object({}, _no_trainjob_object_reads)
-        kwargs = _no_trainjob_object_reads.get_namespaced_custom_object.call_args.kwargs
+    def test_reads_the_requested_trainjob(self, trainjob_object_api):
+        _get_job_with_trainjob_object({}, trainjob_object_api)
+        kwargs = trainjob_object_api.get_namespaced_custom_object.call_args.kwargs
         assert kwargs == {
             "group": "trainer.kubeflow.org",
             "version": "v1alpha1",
             "namespace": "team-a",
             "plural": "trainjobs",
             "name": "job-a",
+            "_request_timeout": K8S_TIMEOUT,
         }
 
     @pytest.mark.parametrize(
@@ -944,15 +946,15 @@ class TestTrainingJobProgress:
         [{}, {"status": {}}, {"status": {"trainerStatus": {}}}, None],
         ids=["no-status", "no-trainer-status", "empty-trainer-status", "not-a-dict"],
     )
-    def test_says_why_nothing_was_reported(self, obj, _no_trainjob_object_reads):
+    def test_says_why_nothing_was_reported(self, obj, trainjob_object_api):
         """Trainer 2.3, the feature gate off, or a script that does not report."""
-        result = _get_job_with_trainjob_object(obj, _no_trainjob_object_reads)
+        result = _get_job_with_trainjob_object(obj, trainjob_object_api)
         progress = verify_tool_success(result)["progress"]
         assert progress["reported"] is False
         assert "TrainJobStatus" in progress["reason"]
 
-    def test_failed_read_keeps_the_rest_of_the_job(self, _no_trainjob_object_reads):
-        _no_trainjob_object_reads.get_namespaced_custom_object.side_effect = RuntimeError("403")
+    def test_failed_read_keeps_the_rest_of_the_job(self, trainjob_object_api):
+        trainjob_object_api.get_namespaced_custom_object.side_effect = RuntimeError("403")
         client = MagicMock()
         client.get_job.return_value = _fake_job("job-a")
         with patch(
@@ -968,11 +970,34 @@ class TestTrainingJobProgress:
             "reason": "Could not read progress: RuntimeError",
         }
 
-    def test_caps_the_metric_list(self, _no_trainjob_object_reads):
+    def test_forbidden_read_says_so(self, trainjob_object_api):
+        from kubernetes.client.exceptions import ApiException
+
+        trainjob_object_api.get_namespaced_custom_object.side_effect = ApiException(status=403)
+        result = _get_job_with_trainjob_object({}, trainjob_object_api)
+        reason = verify_tool_success(result)["progress"]["reason"]
+        assert reason == "Could not read progress: no permission to get this TrainJob"
+
+    def test_running_job_with_progress_points_back_at_itself(self, trainjob_object_api):
+        trainer_status = {"progressPercentage": 30, "lastUpdatedTime": "2026-11-18T10:30:45Z"}
+        result = _get_job_with_trainjob_object(
+            {"status": {"trainerStatus": trainer_status}}, trainjob_object_api
+        )
+        next_steps = verify_tool_success(result)["next_steps"]
+        assert next_steps[0].startswith("get_training_job(name='job-a')")
+        assert any("get_training_logs" in step for step in next_steps)
+
+    def test_running_job_without_progress_keeps_the_logs_hint(self, trainjob_object_api):
+        result = _get_job_with_trainjob_object({}, trainjob_object_api)
+        assert verify_tool_success(result)["next_steps"] == [
+            "get_training_logs(name='job-a') — check progress"
+        ]
+
+    def test_caps_the_metric_list(self, trainjob_object_api):
         metrics = [{"name": f"m{i}", "value": str(i)} for i in range(MAX_PROGRESS_METRICS + 5)]
         trainer_status = {"metrics": metrics, "lastUpdatedTime": "2026-11-18T10:30:45Z"}
         result = _get_job_with_trainjob_object(
-            {"status": {"trainerStatus": trainer_status}}, _no_trainjob_object_reads
+            {"status": {"trainerStatus": trainer_status}}, trainjob_object_api
         )
 
         progress = verify_tool_success(result)["progress"]
@@ -980,10 +1005,10 @@ class TestTrainingJobProgress:
         assert progress["metrics_truncated"] is True
 
     @pytest.mark.parametrize("stamp", ["not-a-time", "2026-11-18T10:30:45", None])
-    def test_unusable_timestamp_gives_no_age(self, stamp, _no_trainjob_object_reads):
+    def test_unusable_timestamp_gives_no_age(self, stamp, trainjob_object_api):
         trainer_status = {"progressPercentage": 10, "lastUpdatedTime": stamp}
         result = _get_job_with_trainjob_object(
-            {"status": {"trainerStatus": trainer_status}}, _no_trainjob_object_reads
+            {"status": {"trainerStatus": trainer_status}}, trainjob_object_api
         )
 
         progress = verify_tool_success(result)["progress"]
