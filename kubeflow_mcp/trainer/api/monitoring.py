@@ -54,20 +54,6 @@ _TARGET_STATUS_ALIASES = {"Succeeded": "Complete"}
 _VALID_TARGET_STATUSES = frozenset({"Complete", "Failed", "Running", "Created"})
 
 
-def _is_pod_for_step(pod: Any, step: str) -> bool:
-    """Return whether a JobSet pod corresponds to the requested TrainJob step.
-
-    Mirrors how the SDK names steps: launcher and node pods are ``<role>-<completion
-    index>`` (all nodes share one ReplicatedJob), initializer pods are the role alone.
-    """
-    labels = getattr(pod.metadata, "labels", None) or {}
-    role = labels.get(trainer_constants.JOBSET_RJOB_NAME_LABEL)
-    if role in (trainer_constants.LAUNCHER, trainer_constants.NODE):
-        index = labels.get(trainer_constants.JOB_INDEX_LABEL)
-        return index is not None and f"{role}-{index}" == step
-    return role == step
-
-
 def _read_bounded_log_lines(response: Any) -> tuple[list[str], bool]:
     """Read a bounded prefix, returning (complete lines, more data observed).
 
@@ -160,46 +146,40 @@ def _collect_log_lines(
     try:
         eff_ns = get_trainer_effective_namespace(namespace)
         v1 = get_core_v1_api()
-        pods = v1.list_namespaced_pod(
-            namespace=eff_ns,
-            label_selector=trainer_constants.POD_LABEL_SELECTOR.format(trainjob_name=name),
-        )
-        # Same container the SDK reads for the step: "node-1" -> "node".
+        job = client.get_job(name=name)
+        pod_name = next((s.pod_name for s in job.steps if s.name == step and s.pod_name), None)
+        if pod_name is None:
+            return log_lines, True, False
         container = re.sub(r"-\d+$", "", step)
-        for pod in pods.items:
-            if not _is_pod_for_step(pod, step):
-                continue
-            try:
-                if cursor_mode:
-                    response = v1.read_namespaced_pod_log(
-                        name=pod.metadata.name,
-                        namespace=eff_ns,
-                        container=container,
-                        previous=True,
-                        tail_lines=MAX_LOG_LINES,
-                        _preload_content=False,
-                        _request_timeout=K8S_TIMEOUT,
-                    )
-                    log_lines, truncated = _read_bounded_log_lines(response)
-                    if log_lines or truncated:
-                        return log_lines, True, truncated
-                    continue
-                raw = v1.read_namespaced_pod_log(
-                    name=pod.metadata.name,
+        try:
+            if cursor_mode:
+                response = v1.read_namespaced_pod_log(
+                    name=pod_name,
                     namespace=eff_ns,
                     container=container,
                     previous=True,
                     tail_lines=MAX_LOG_LINES,
+                    _preload_content=False,
+                    _request_timeout=K8S_TIMEOUT,
                 )
-                if raw:
-                    log_lines.extend(raw.splitlines())
-            except Exception as e:
-                logger.debug(
-                    "Failed to read previous pod logs for pod %s/%s: %s",
-                    eff_ns,
-                    pod.metadata.name,
-                    e,
-                )
+                log_lines, truncated = _read_bounded_log_lines(response)
+                return log_lines, True, truncated
+            raw = v1.read_namespaced_pod_log(
+                name=pod_name,
+                namespace=eff_ns,
+                container=container,
+                previous=True,
+                tail_lines=MAX_LOG_LINES,
+            )
+            if raw:
+                log_lines.extend(raw.splitlines())
+        except Exception as e:
+            logger.debug(
+                "Failed to read previous pod logs for pod %s/%s: %s",
+                eff_ns,
+                pod_name,
+                e,
+            )
     except Exception as e:
         logger.debug(
             "Previous-log fallback failed for job %s (namespace=%s): %s",
@@ -302,6 +282,9 @@ def get_training_logs(
     max_lines: int | None = None,
 ) -> dict[str, Any]:
     """Get pod logs from a training job.
+
+    If active logs are empty, try previous-container logs from the pod selected by
+    the SDK for the requested step at fallback time.
 
     Args:
         name: TrainJob name.
