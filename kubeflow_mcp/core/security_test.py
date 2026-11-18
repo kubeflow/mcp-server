@@ -774,3 +774,40 @@ class TestValidateImageReference:
         err = validate_image_reference("[::1]:5000/Team/image:tag")
         assert err is not None
         assert "repository path must be lowercase" in err.error
+
+    @pytest.mark.parametrize(
+        "image",
+        [
+            "localhost:1/img",
+            "localhost:80/img",
+            "localhost:5000/img",
+            "localhost:65535/img",
+            "registry.example.com:443/img:latest",
+            "10.0.0.1:8080/img:v1",
+            "[::1]:5000/img",
+            "[::1]:65535/img",
+        ],
+    )
+    def test_accepts_valid_registry_port(self, image):
+        assert validate_image_reference(image) is None
+
+    @pytest.mark.parametrize(
+        "image",
+        [
+            "localhost:0/img",
+            "localhost:65536/img",
+            "localhost:99999/img",
+            "registry.io:abc/img",
+            "registry.io:/img",
+            "registry.io:123:456/img",
+            "[::1]:0/img",
+            "[::1]:65536/img",
+            "[::1]:99999/img",
+            "registry.io:" + "9" * 5000 + "/img",
+        ],
+    )
+    def test_rejects_invalid_registry_port(self, image):
+        err = validate_image_reference(image)
+        assert err is not None
+        assert err.error_code == "VALIDATION_ERROR"
+        assert "has an invalid registry port (expected 1-65535)" in err.error

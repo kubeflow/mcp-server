@@ -14,7 +14,14 @@
 
 """Pipelines API tools."""
 
+from kubeflow_mcp.pipelines.api.authoring import create_pipeline, delete_pipeline
 from kubeflow_mcp.pipelines.api.discovery import get_pipeline, list_pipelines
+from kubeflow_mcp.pipelines.api.experiments import (
+    create_experiment,
+    delete_experiment,
+    get_experiment,
+    list_experiments,
+)
 from kubeflow_mcp.pipelines.api.monitoring import (
     get_pipeline_logs,
     get_pipeline_run,
@@ -35,4 +42,10 @@ __all__ = [
     "create_pipeline_run",
     "stop_pipeline_run",
     "retry_pipeline_run",
+    "list_experiments",
+    "get_experiment",
+    "create_experiment",
+    "delete_experiment",
+    "create_pipeline",
+    "delete_pipeline",
 ]

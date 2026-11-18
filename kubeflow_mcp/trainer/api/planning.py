@@ -27,6 +27,7 @@ from kubeflow_mcp.common.constants import (
     TRAINER_CRD_NAME,
     ErrorCode,
 )
+from kubeflow_mcp.common.huggingface import is_confirmed_missing as _is_confirmed_missing
 from kubeflow_mcp.common.types import ToolError, ToolResponse, exception_details
 
 logger = logging.getLogger(__name__)
@@ -70,21 +71,6 @@ def _suggest_hf_model_ids(model: str, limit: int = 3) -> list[str]:
         return []
     except Exception:  # noqa: BLE001 - suggestions are best-effort, never fatal
         return []
-
-
-def _is_confirmed_missing(error: Exception) -> bool:
-    """Return True when a Hub error confirms the repo does not exist.
-
-    The Hub raises RepositoryNotFoundError for private or gated repos and missing
-    auth too (401, GatedRepoError), and a 401 is ambiguous: an anonymous request
-    gets it for a missing repo as well. Only a plain 404 is treated as a
-    nonexistent repo, so an access failure is never reported as bad input.
-    """
-    from huggingface_hub.errors import GatedRepoError, RepositoryNotFoundError
-
-    if not isinstance(error, RepositoryNotFoundError) or isinstance(error, GatedRepoError):
-        return False
-    return getattr(getattr(error, "response", None), "status_code", None) == 404
 
 
 def _get_model_info_from_hf(model: str) -> dict[str, Any] | None:

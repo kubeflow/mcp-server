@@ -158,5 +158,8 @@ def test_preview_tools_latency(
         patch.object(training, "_check_gpu_available", return_value=None),
         patch("kubeflow_mcp.trainer.api.planning.get_cluster_resources", return_value={}),
         patch.object(training, "_fine_tune_resource_preview", return_value={}),
+        patch.object(
+            training, "_get_runtime_node_spec", return_value={"containers": [{"name": "node"}]}
+        ),
     ):
         record_latency_benchmark(name, benchmark_func)

@@ -138,3 +138,21 @@ def test_executor_node_is_attributed_to_its_parent_task():
     )
 
     assert run_node_ids(run) == [("work", "work-driver"), ("work", "work-executor")]
+
+
+def test_experiment_is_json_safe():
+    from kubeflow_mcp.pipelines.conftest import make_experiment
+    from kubeflow_mcp.pipelines.types import experiment_to_dict
+
+    data = experiment_to_dict(make_experiment())
+
+    assert data == {
+        "experiment_id": "e-1",
+        "name": "churn",
+        "description": "churn runs",
+        "namespace": "team-a",
+        "storage_state": "available",
+        "created_at": "2026-10-20T09:30:00+00:00",
+        "last_run_created_at": None,
+    }
+    json.dumps(data)

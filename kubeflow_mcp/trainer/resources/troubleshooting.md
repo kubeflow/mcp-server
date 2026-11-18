@@ -11,6 +11,14 @@ Diagnostic workflows, error-to-fix tables, and known tool limitations.
 3. `get_training_logs(name)` — check container output
 4. Match error in tables below
 
+Empty logs do not establish a failure cause. If pods were deleted, use retained cluster logs;
+events may also have expired. `get_training_logs` reports when no matching pods remain or
+log availability cannot be verified. An existing pod can legitimately have empty output.
+
+For SDK 0.5, discovery and wait tools reconcile `Created` with active workers after resume.
+This requires reading the TrainJob to rule out suspension and terminal conditions; if that
+read fails, the SDK status is preserved. A wait response with `reached=false` is not completion.
+
 ## Error-to-Fix Table
 
 | Error / Event | Cause | Fix |
@@ -79,9 +87,14 @@ All three training tools (`fine_tune`, `run_custom_training`, `run_container_tra
 **Add OpenShift emptyDir volumes:**
 ```json
 "volumes": [
-  {"name": "dot-local", "mount_path": "/.local", "empty_dir": {}},
-  {"name": "dot-cache", "mount_path": "/.cache", "empty_dir": {}},
-  {"name": "tmp", "mount_path": "/tmp", "empty_dir": {}}
+  {"name": "dot-local", "emptyDir": {}},
+  {"name": "dot-cache", "emptyDir": {}},
+  {"name": "tmp", "emptyDir": {}}
+],
+"volume_mounts": [
+  {"name": "dot-local", "mountPath": "/.local"},
+  {"name": "dot-cache", "mountPath": "/.cache"},
+  {"name": "tmp", "mountPath": "/tmp"}
 ]
 ```
 
@@ -199,3 +212,29 @@ are discarded. Completed pods are excluded; these estimates do not guarantee sch
 Fine-tuning previews show inherited runtime requests and GPU fit warnings using the SDK's
 resource aliases. A worker requesting two GPUs needs both on one node; separate one-GPU nodes
 cannot satisfy it. Validation and preview share one cluster inspection.
+
+### Training stalls or restarts
+
+Use `get_training_job(name, namespace)` to inspect associated initializer and trainer pods.
+Diagnostics use the newest pod attempt per step; earlier failed retries do not block a healthy replacement.
+Normal `ContainerCreating` and `PodInitializing` states remain visible without being reported as blockers.
+`pods` includes readiness, restarts, container waiting/termination reasons and failed scheduling
+conditions; `blocking_reasons` highlights issues such as insufficient GPUs or CrashLoopBackOff.
+Pods with blockers take priority within the 16,000-character diagnostic budget;
+additional omitted blockers are summarized and `pods_truncated` indicates omitted details.
+If pod access fails, `pod_diagnostics_error` reports that diagnostics are unavailable.
+A `wait_for_training` timeout preserves the last observed job status and includes the same diagnostics.
+
+### Persistent training storage
+
+Use Kubernetes camelCase inside storage dictionaries: `persistentVolumeClaim`, `claimName`,
+`emptyDir` and `mountPath`. Invalid fields are rejected before preview and submission.
+For persistent checkpoints, mount a PVC; `emptyDir` is temporary and cannot carry checkpoints
+between jobs.
+
+### Admission configuration rejections
+
+Webhook rejections naming `spec.runtimeRef`, `spec.trainer`, or `spec.initializer` return
+`VALIDATION_ERROR` with the webhook reason, including required, unsupported, or forbidden settings.
+RBAC and security policy denials remain `PERMISSION_DENIED`; check model/runtime compatibility
+before retrying an unsupported configuration.
