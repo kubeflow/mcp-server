@@ -111,6 +111,8 @@ class ToolPermission(NamedTuple):
     group: str  # "" is the core API group
     resource: str  # plural, optionally with a subresource, e.g. "pods/log"
     cluster_wide: bool = False  # cluster-scoped, or across all namespaces
+    # Parameter that triggers the request; None means every call makes it.
+    when: str | None = None
 
 
 class ToolResponse(BaseModel):

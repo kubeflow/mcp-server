@@ -155,8 +155,7 @@ SPARK SESSION LIFECYCLE:
 }
 
 
-# Kubernetes permissions each tool's requests need (#565), recorded from the API
-# server audit log; the driver log read comes from the SDK, as no driver pod ran there.
+# Kubernetes permissions each tool's requests need, including the SDK's (#565).
 _SESSION_GET = ToolPermission("get", "sparkoperator.k8s.io", "sparkconnects")
 
 CLIENT_TOOL_PERMISSIONS: dict[str, tuple[ToolPermission, ...]] = {
