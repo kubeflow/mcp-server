@@ -179,6 +179,34 @@ jobs:
           done
           KUBEFLOW_MCP_E2E_TOKEN="$E2E_TOKEN" uv run pytest tests/e2e/test_kubernetes_e2e.py -v
 
+      # The persona is fixed at server startup, so restart the deployment with each
+      # persona and run only the auth/persona tests against it.
+      - name: Run HTTP auth and persona E2E tests
+        env:
+          KUBEFLOW_MCP_E2E: "true"
+          KUBEFLOW_MCP_E2E_URL: http://localhost:8000/mcp
+        run: |
+          for persona in readonly data-scientist ml-engineer platform-admin; do
+            echo "::group::persona ${persona}"
+            kubectl -n "$MCP_NAMESPACE" set env deployment/kubeflow-mcp \
+              KUBEFLOW_MCP_PERSONA="${persona}"
+            kubectl -n "$MCP_NAMESPACE" rollout status deployment/kubeflow-mcp --timeout=5m
+
+            kubectl -n "$MCP_NAMESPACE" port-forward svc/kubeflow-mcp 8000:8000 &
+            pf_pid=$!
+            for _ in $(seq 1 30); do
+              curl -sf http://localhost:8000/health >/dev/null && break
+              sleep 1
+            done
+            status=0
+            KUBEFLOW_MCP_E2E_TOKEN="$E2E_TOKEN" KUBEFLOW_MCP_E2E_PERSONA="${persona}" \
+              uv run pytest tests/e2e/test_http_auth_persona_e2e.py -v || status=$?
+            kill "$pf_pid" || true
+            wait "$pf_pid" 2>/dev/null || true
+            echo "::endgroup::"
+            [ "$status" -eq 0 ] || exit "$status"
+          done
+
       - name: Dump server state on failure
         if: failure()
         run: |
