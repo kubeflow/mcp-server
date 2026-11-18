@@ -124,6 +124,16 @@ TOOL_PHASES: dict[str, list[str]] = {
         "delete_runtime",
     ],
     "health": ["health_check", "get_server_logs"],
+    # Spark client (kubeflow.spark.SparkClient) — SparkConnect session management.
+    "spark_discovery": ["list_spark_sessions", "get_spark_session"],
+    "spark_sessions": ["create_spark_session", "delete_spark_session"],
+    "spark_monitoring": ["get_spark_session_logs"],
+    # Pipelines client (kubeflow.pipelines.PipelinesClient). Prefixed so the phases
+    # never merge into the trainer's instruction sections.
+    "pipelines_discovery": ["list_pipelines", "get_pipeline"],
+    "pipelines_monitoring": ["list_pipeline_runs", "get_pipeline_run", "get_pipeline_logs"],
+    "pipelines_runs": ["create_pipeline_run"],
+    "pipelines_lifecycle": ["stop_pipeline_run", "retry_pipeline_run"],
 }
 
 # Reverse mapping: tool name -> phase
@@ -182,6 +192,27 @@ TOOL_NEXT_HINTS: dict[str, str] = {
     "patch_runtime": "Verify changes with get_runtime(name)",
     "create_runtime": "Verify with list_runtimes() or get_runtime(name)",
     "delete_runtime": "Confirm removal with list_runtimes()",
+    # Spark client
+    "list_spark_sessions": "Call get_spark_session(name) for details on a specific session",
+    "get_spark_session": (
+        "Use get_spark_session_logs(name) for driver output, or delete_spark_session(name) to tear down"
+    ),
+    "get_spark_session_logs": "If errors found, check the session state with get_spark_session(name)",
+    "create_spark_session": (
+        "Monitor with get_spark_session(name); attach with pyspark using the returned connect info"
+    ),
+    "delete_spark_session": "Confirm removal with list_spark_sessions()",
+    # Pipelines client
+    "list_pipelines": "Call get_pipeline(name) for its versions, or list_pipeline_runs()",
+    "get_pipeline": "Preview a run with create_pipeline_run(pipeline=name)",
+    "list_pipeline_runs": "Call get_pipeline_run(run_id) for a run's tasks and error",
+    "get_pipeline_run": "If it failed, read get_pipeline_logs(run_id) for the failing task",
+    "get_pipeline_logs": "Fix the cause, then preview retry_pipeline_run(run_id)",
+    "create_pipeline_run": "Follow the run with get_pipeline_run(run_id)",
+    "stop_pipeline_run": (
+        "Confirm with get_pipeline_run(run_id) that it stopped ('canceled' or 'failed')"
+    ),
+    "retry_pipeline_run": "Follow the retried run with get_pipeline_run(run_id)",
 }
 
 
@@ -227,14 +258,58 @@ SDK_COMPATIBILITY: dict[str, object] = {
             "covered_methods": [],
         },
         "pipelines": {
-            "status": "planned",
-            "sdk_client": "kubeflow.pipelines.Client",
-            "covered_methods": [],
+            "status": "implemented",
+            "sdk_client": "kubeflow.pipelines.PipelinesClient",
+            "covered_methods": [
+                "list_pipelines",
+                "get_pipeline",
+                "get_pipeline_version",
+                "list_pipeline_versions",
+                "list_runs",
+                "get_run",
+                "run",
+                "get_experiment",
+                "_backend.run_api.run_service_terminate_run",
+                "_backend.run_api.run_service_retry_run",
+                "_backend.experiment_api.experiment_service_get_experiment",
+            ],
+            "uncovered_methods": [
+                "upload_pipeline",  # reads local files and takes code; register outside MCP
+                "delete_pipeline",
+                "wait_for_run_status",  # blocks; agents poll get_pipeline_run instead
+                "list_pipeline_versions(page_token)",  # get_pipeline returns the first page
+                "create_experiment",
+                "list_experiments",
+                "delete_experiment",
+            ],
+            "k8s_api_operations": [
+                "retry run (kfp.Client run API, run_service_retry_run)",
+                "task pod logs (CoreV1Api read_namespaced_pod_log)",
+            ],
         },
         "spark": {
-            "status": "planned",
+            "status": "implemented",
             "sdk_client": "kubeflow.spark.SparkClient",
-            "covered_methods": [],
+            "covered_methods": [
+                "connect",  # create mode, via create_spark_session
+                "list_sessions",
+                "get_session",
+                "delete_session",
+                "get_session_logs",
+            ],
+            "uncovered_methods": [
+                "connect(base_url=...)",  # attaching to an existing server returns a live
+                # pyspark SparkSession, which is not serializable over MCP; the data plane
+                # attaches directly using the connect info returned by create_spark_session.
+                "get_session_logs(follow=True)",  # streaming not exposed
+                # SparkApplication batch lifecycle is deferred to issue #331.
+                "submit_job",
+                "get_job",
+                "list_jobs",
+                "delete_job",
+                "wait_for_job_status",
+                "get_job_logs",
+            ],
         },
         "feast": {
             "status": "planned",

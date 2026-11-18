@@ -15,6 +15,7 @@
 """Training submission tools: fine_tune, run_custom_training, run_container_training."""
 
 import ast
+import json
 import logging
 import os
 import re
@@ -139,6 +140,31 @@ def _inject_trainer_hf_home(hf_home_path: str):
                 if path and not any(e.name == "HF_HOME" for e in (cr.env or [])):
                     hf_env = IoK8sApiCoreV1EnvVar(name="HF_HOME", value=path)
                     cr.env = (cr.env or []) + [hf_env]
+
+                # Fix for top-level Hugging Face datasets (#32, #494):
+                # The SDK generates dataset.data_dir=/workspace/dataset/. (trailing /.)
+                # which causes torchtune dataset loading to fail.
+                # In SDK 0.5.0, TrainerArgs cannot be used with BuiltinTrainer options,
+                # so we adjust the torchtune CLI args directly on the returned CR.
+                if initializer and hasattr(initializer, "dataset") and initializer.dataset:
+                    storage_uri = getattr(initializer.dataset, "storage_uri", "") or ""
+                    if _should_apply_hf_dataset_workaround(storage_uri):
+                        norm_dataset_path = DATASET_PATH.replace("\\", "/")
+                        has_dataset_source = any(
+                            a.startswith("dataset.source=") for a in (cr.args or [])
+                        )
+                        cleaned: list[str] = []
+                        for a in cr.args or []:
+                            if a.startswith("dataset.data_dir="):
+                                if has_dataset_source:
+                                    cleaned.append(f"dataset.data_dir={norm_dataset_path}")
+                            else:
+                                cleaned.append(a)
+                        if not has_dataset_source:
+                            cleaned.append(f"dataset.source={norm_dataset_path}")
+                            cleaned.append("dataset.data_dir=null")
+                        cr.args = cleaned
+
                 return cr
 
             k8s_utils.get_trainer_cr_from_builtin_trainer = _patched
@@ -459,7 +485,24 @@ def _sdk_error(e: Exception, hint: str | None = None) -> dict[str, Any]:
     # context, for errors raised without ``from``, as is_k8s_not_found does). RBAC or
     # an admission policy (e.g. one restricting service_account_name) denied the
     # request: that is a permission problem to report, not a transient SDK failure.
-    if any(getattr(err, "status", None) == 403 for err in (e, e.__cause__ or e.__context__)):
+    forbidden = next(
+        (err for err in (e, e.__cause__ or e.__context__) if getattr(err, "status", None) == 403),
+        None,
+    )
+    if forbidden is not None:
+        try:
+            message = json.loads(getattr(forbidden, "body", None) or "{}").get("message", "")
+        except (ValueError, AttributeError):
+            message = ""
+        # Configuration rejection is distinct from RBAC and security admission policies.
+        if "admission webhook" in message and re.search(
+            r"\bspec\.(?:runtimeRef|trainer|initializer)(?:[.:\s\[]|$)", message
+        ):
+            return ToolError(
+                error=message,
+                error_code=ErrorCode.VALIDATION_ERROR,
+                hint="The admission webhook rejected the training configuration; check model and runtime compatibility.",
+            ).model_dump()
         return ToolError(
             error=str(e),
             error_code=ErrorCode.PERMISSION_DENIED,
@@ -1161,13 +1204,9 @@ def fine_tune(
         if name:
             options.append(Name(name=name))
 
-        # Workaround for SDK bug where top-level HF datasets construct
-        # invalid torchtune dataset.data_dir=/workspace/dataset/.
-        # We override the torchtune CLI args directly via TrainerArgs.
-        if _should_apply_hf_dataset_workaround(dataset):
-            options.append(
-                TrainerArgs(args=[f"dataset.source={DATASET_PATH}", "dataset.data_dir=null"])
-            )
+        # Note: Top-level HF dataset torchtune CLI args are adjusted directly
+        # on BuiltinTrainer CR in _inject_trainer_hf_home, as SDK 0.5.0
+        # rejects TrainerArgs with BuiltinTrainer (#494).
 
         client = _get_client(namespace)
         initializer = _build_initializer(

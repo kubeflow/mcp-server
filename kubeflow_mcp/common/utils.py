@@ -22,7 +22,7 @@ import logging
 import os
 import threading
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 # Import at module level to avoid import deadlocks when tools are called rapidly
 from kubeflow.trainer import TrainerClient
@@ -151,6 +151,112 @@ def get_trainer_client_for_namespace(namespace: str | None = None) -> Any:
         return client
 
 
+# Kubeflow Pipelines connection settings come only from the server environment, never
+# from tool arguments, so an agent cannot point the server at another endpoint.
+PIPELINES_URL_ENV = "KUBEFLOW_MCP_PIPELINES_URL"
+PIPELINES_TOKEN_ENV = "KUBEFLOW_MCP_PIPELINES_TOKEN"
+PIPELINES_NAMESPACE_ENV = "KUBEFLOW_MCP_PIPELINES_NAMESPACE"
+
+_pipelines_client_cache: dict[str, Any] = {}
+_pipelines_client_lock = threading.Lock()
+
+
+_SA_NAMESPACE_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
+
+
+def get_default_kubeconfig_namespace() -> str:
+    """Return the active context namespace from kubeconfig without loading TrainerClient.
+
+    Resolution order:
+    1. Active kubeconfig context namespace (honouring ``KUBECONFIG`` path lists).
+    2. In-cluster ServiceAccount namespace file (``/var/run/secrets/.../namespace``).
+    3. ``"default"`` when a valid kubeconfig exists but has no namespace field.
+
+    Genuine config-resolution failures (missing/corrupt kubeconfig *and* not in-cluster)
+    are raised so ``resolve_namespace()`` can fail closed.
+    """
+    from kubernetes import config
+
+    # Honour KUBECONFIG path lists, matching _get_api_client().
+    paths = os.getenv("KUBECONFIG") or "~/.kube/config"
+    kubeconfig_found = any(
+        os.path.exists(os.path.expanduser(p)) for p in paths.split(os.pathsep) if p
+    )
+
+    if kubeconfig_found:
+        try:
+            _, active_context = config.list_kube_config_contexts(config_file=paths)
+            if active_context and "context" in active_context:
+                ns = active_context["context"].get("namespace")
+                if ns:
+                    return str(ns)
+            # Kubeconfig exists but has no namespace field → "default" is the kubectl
+            # convention and safe when an allowlist is configured.
+            return "default"
+        except Exception:
+            # Corrupt / unreadable kubeconfig: fall through to in-cluster check.
+            pass
+
+    # In-cluster: read the projected ServiceAccount namespace file.
+    if os.path.isfile(_SA_NAMESPACE_PATH):
+        try:
+            with open(_SA_NAMESPACE_PATH) as fh:
+                ns = fh.read().strip()
+                if ns:
+                    return ns
+        except OSError:
+            pass
+
+    if kubeconfig_found:
+        raise RuntimeError(
+            "Cannot determine default namespace: kubeconfig is invalid and not running in-cluster"
+        )
+
+    # No kubeconfig, not in-cluster → let resolve_namespace() fail closed.
+    raise RuntimeError(
+        "Cannot determine default namespace: no kubeconfig found and not running in-cluster"
+    )
+
+
+def get_pipelines_effective_namespace(namespace: str | None = None) -> str:
+    """Namespace for Kubeflow Pipelines calls.
+
+    Explicit argument first, then ``KUBEFLOW_MCP_PIPELINES_NAMESPACE``, then the active
+    kubeconfig default namespace (or ``default``).
+    """
+    if namespace:
+        return namespace
+    configured = os.environ.get(PIPELINES_NAMESPACE_ENV, "").strip()
+    if configured:
+        return configured
+    return get_default_kubeconfig_namespace()
+
+
+def get_pipelines_client(namespace: str) -> Any:
+    """Return a ``PipelinesClient`` bound to *namespace*.
+
+    The namespace is always passed explicitly, so the namespace a tool checks against
+    policy is the one the SDK operates in. Requires the ``kubeflow[pipelines]`` extra;
+    the import raises ``ImportError`` with install instructions when ``kfp`` is missing.
+    """
+    with _pipelines_client_lock:
+        if namespace in _pipelines_client_cache:
+            return _pipelines_client_cache[namespace]
+        from kubeflow.pipelines import KubernetesBackendConfig, PipelinesClient
+
+        config = KubernetesBackendConfig(
+            base_url=os.environ.get(PIPELINES_URL_ENV) or None,
+            user_token=os.environ.get(PIPELINES_TOKEN_ENV) or None,
+            namespace=namespace,
+        )
+        client = PipelinesClient(backend_config=config)
+        if len(_pipelines_client_cache) >= _NS_CLIENT_CACHE_MAX:
+            oldest = next(iter(_pipelines_client_cache))
+            del _pipelines_client_cache[oldest]
+        _pipelines_client_cache[namespace] = client
+        return client
+
+
 MCP_MANAGED_LABEL = "kubeflow-mcp/managed-by"
 MCP_MANAGED_VALUE = "mcp"
 _TRAINJOB_GROUP = "trainer.kubeflow.org"
@@ -197,9 +303,163 @@ def get_trainer_ownership(name: str, namespace: str) -> str | None:
         return None
 
 
+_SPARK_CONNECT_GROUP = "sparkoperator.k8s.io"
+_SPARK_CONNECT_VERSION = "v1alpha1"
+_SPARK_CONNECT_PLURAL = "sparkconnects"
+
+
+SparkOwnership = Literal["managed", "unmanaged", "not_found", "unknown"]
+SPARK_CREATION_LABEL = "kubeflow-mcp/creation-id"
+
+
+def get_spark_session_created_by(
+    name: str, namespace: str, creation_id: str
+) -> dict[str, Any] | None:
+    """Return the checked CR snapshot for this attempt; lookup failures propagate.
+
+    Using this snapshot avoids a second read returning a different incarnation
+    of the same session name after the ownership/provenance check.
+    """
+    obj = get_custom_objects_api().get_namespaced_custom_object(
+        group=_SPARK_CONNECT_GROUP,
+        version=_SPARK_CONNECT_VERSION,
+        namespace=namespace,
+        plural=_SPARK_CONNECT_PLURAL,
+        name=name,
+        _request_timeout=K8S_TIMEOUT,
+    )
+    metadata = (obj or {}).get("metadata", {})
+    labels = metadata.get("labels", {}) or {}
+    if (
+        metadata.get("name") == name
+        and metadata.get("namespace") == namespace
+        and labels.get(MCP_MANAGED_LABEL) == MCP_MANAGED_VALUE
+        and labels.get(SPARK_CREATION_LABEL) == creation_id
+    ):
+        return obj
+    return None
+
+
+def get_spark_session_ownership(name: str, namespace: str) -> SparkOwnership:
+    """Classify a SparkConnect session by MCP ownership.
+
+    Unlike :func:`is_mcp_managed` (which collapses a missing TrainJob into
+    "unmanaged"), this distinguishes absence from lack of ownership, because
+    ``docs/CONVENTIONS.md`` requires distinct error codes for the two cases:
+    ``RESOURCE_NOT_FOUND`` for a missing resource, ``VALIDATION_ERROR`` for one
+    that exists but was not created by MCP.
+
+    Returns:
+        ``"managed"``: session carries the MCP ownership label.
+        ``"unmanaged"``: session exists but lacks the label.
+        ``"not_found"``: no such session in *namespace*.
+        ``"unknown"``: the check could not be performed (API error, permissions).
+    """
+    try:
+        api = get_custom_objects_api()
+        obj = api.get_namespaced_custom_object(
+            group=_SPARK_CONNECT_GROUP,
+            version=_SPARK_CONNECT_VERSION,
+            namespace=namespace,
+            plural=_SPARK_CONNECT_PLURAL,
+            name=name,
+            _request_timeout=K8S_TIMEOUT,
+        )
+    except Exception as e:
+        from kubeflow_mcp.common.types import is_k8s_not_found
+
+        if is_k8s_not_found(e):
+            return "not_found"
+        return "unknown"
+
+    labels = (obj or {}).get("metadata", {}).get("labels", {}) or {}
+    if labels.get(MCP_MANAGED_LABEL) == MCP_MANAGED_VALUE:
+        return "managed"
+    return "unmanaged"
+
+
+# ─── Spark client factories ────────────────────────────────────────────────
+# SparkClient lives behind the optional ``kubeflow[spark]`` extra (it pulls in
+# pyspark). Import it lazily so the rest of the server — and the spark module's
+# metadata — load even when the extra is not installed.
+
+_SPARK_EXTRA_HINT = (
+    "SparkClient requires the Spark extra. Install it with: pip install 'kubeflow[spark]' "
+    "(or 'kubeflow-mcp[spark]')."
+)
+
+
+def _import_spark_client() -> Any:
+    """Import ``kubeflow.spark.SparkClient`` or raise a friendly ImportError."""
+    try:
+        from kubeflow.spark import SparkClient
+    except ImportError as e:  # pragma: no cover - exercised via friendly-message test
+        raise ImportError(_SPARK_EXTRA_HINT) from e
+    return SparkClient
+
+
+@lru_cache(maxsize=1)
+def get_spark_client() -> Any:
+    """Get or create the SparkClient singleton (default kubeconfig namespace)."""
+    spark_client_cls = _import_spark_client()
+    return spark_client_cls()
+
+
+_spark_ns_client_cache: dict[str, Any] = {}
+_spark_ns_client_lock = threading.Lock()
+
+
+def get_spark_effective_namespace(namespace: str | None = None) -> str:
+    """Namespace for SparkConnect operations: explicit arg, else the resolved default.
+
+    The single resolver for the spark module. Every spark caller — the client
+    factory and the ownership guard alike — must go through this, so the
+    namespace a request is *policy-checked* against can never drift from the one
+    it *operates* in. Currently delegates to :func:`get_trainer_effective_namespace`
+    (both clients share the Kubernetes backend's notion of the default); keeping
+    one function means a future spark-specific default cannot desynchronise the
+    two call sites.
+    """
+    return get_trainer_effective_namespace(namespace)
+
+
+def get_spark_client_for_namespace(namespace: str | None = None) -> Any:
+    """Return a SparkClient targeting the given namespace.
+
+    When *namespace* is ``None`` the effective default is resolved via
+    :func:`get_spark_effective_namespace` and the client is scoped to it, so the
+    namespace a request is *policy-checked* against always matches the one the
+    SparkClient actually *operates* in — closing a potential namespace-allowlist
+    bypass where the SDK's own default could diverge from the checked namespace.
+    Falls back to the unscoped singleton only if resolution fails.
+    """
+    if namespace is None:
+        try:
+            namespace = get_spark_effective_namespace(None)
+        except Exception:
+            return get_spark_client()
+    with _spark_ns_client_lock:
+        if namespace in _spark_ns_client_cache:
+            return _spark_ns_client_cache[namespace]
+        spark_client_cls = _import_spark_client()
+        from kubeflow.common.types import KubernetesBackendConfig
+
+        client = spark_client_cls(backend_config=KubernetesBackendConfig(namespace=namespace))
+        if len(_spark_ns_client_cache) >= _NS_CLIENT_CACHE_MAX:
+            oldest = next(iter(_spark_ns_client_cache))
+            del _spark_ns_client_cache[oldest]
+        _spark_ns_client_cache[namespace] = client
+        return client
+
+
 def reset_clients() -> None:
     """Reset all cached clients (for testing or kubeconfig rotation)."""
     get_trainer_client.cache_clear()
+    get_spark_client.cache_clear()
     _get_api_client.cache_clear()
     with _ns_client_lock:
         _ns_client_cache.clear()
+    with _spark_ns_client_lock:
+        _spark_ns_client_cache.clear()
+    with _pipelines_client_lock:
+        _pipelines_client_cache.clear()

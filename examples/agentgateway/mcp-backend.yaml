@@ -1,0 +1,20 @@
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayBackend
+metadata:
+  name: kubeflow-mcp
+  namespace: agentgateway-system
+spec:
+  mcp:
+    targets:
+      - name: kubeflow-mcp
+        static:
+          host: kubeflow-mcp-http.kagent.svc.cluster.local
+          port: 8000
+          path: /mcp
+          protocol: StreamableHTTP
+          policies:
+            auth:
+              secretRef:
+                name: kubeflow-mcp-upstream-auth
+    sessionRouting: Stateful
+    failureMode: FailClosed

@@ -4,8 +4,8 @@ A minimal, self-contained example for running the MCP Server inside Kubernetes s
 that agents can reach it over HTTP and drive
 [Kubeflow Trainer](https://github.com/kubeflow/trainer) in your own namespace.
 
-It is intentionally small: one Deployment, one ClusterIP Service, a ServiceAccount
-and least-privilege RBAC. No Ingress, no OIDC, no Helm chart.
+It contains one Deployment, one ClusterIP Service, a ServiceAccount, and
+least-privilege RBAC. Ingress, OIDC, and Helm are outside this profile.
 
 ## Quick start
 
@@ -20,7 +20,7 @@ NAMESPACE=kubeflow-user-example-com
 kubectl create secret generic kubeflow-mcp-auth -n "$NAMESPACE" \
   --from-literal=token="$(openssl rand -hex 32)"
 
-kubectl apply -f manifests.yaml
+kubectl apply -k examples/kubernetes
 kubectl rollout status deploy/kubeflow-mcp -n "$NAMESPACE"
 ```
 
@@ -105,25 +105,18 @@ backup suffix and fails without one.
 **Requests return HTTP 421** — DNS rebinding protection allows loopback `Host`
 headers by default, so anything arriving via the Service is rejected.
 `KUBEFLOW_MCP_ALLOWED_HOSTS` must list the exact hostname clients use; only the
-`:*` port wildcard is supported, not a host wildcard. Note that `port-forward`
-does *not* reproduce this, because it sends a loopback `Host` header.
+`:*` port wildcard is supported, not a host wildcard. `port-forward` does not
+reproduce this because it sends a loopback `Host` header.
 
 **A browser-based client returns 403** — the `Origin` header is not allowed. Add it
 to `KUBEFLOW_MCP_ALLOWED_ORIGINS`; setting hosts alone leaves origins at their
 loopback-only defaults. Non-browser MCP clients send no `Origin` and are unaffected.
 
-**Tools report an empty namespace, or a 403 listing runtimes** — the pod is running
-outside the namespace whose TrainJobs you expect. See the section above.
+**Tools report an empty namespace or a 403 listing runtimes** — the pod is running
+outside the namespace whose TrainJobs you expect. See the namespace section above.
 
 **The agent has no tool for submitting a TrainJob** — the persona is `readonly`.
 Set `KUBEFLOW_MCP_PERSONA` to `data-scientist` or higher.
-
-**Log line: `Trainer control-plane version info is not available ... (404)`** — the
-SDK reads the Trainer version from the `kubeflow-trainer-public` ConfigMap in
-`kubeflow-system`, which older Trainer releases do not create. Harmless: every
-`check_compatibility` check still passes, including the CRD and API version. If the
-same message shows `(403)` instead, the `kubeflow-mcp-trainer-version` Role is
-missing or Trainer runs in a different namespace than `kubeflow-system`.
 
 **Every authenticated request returns 401** — the client is sending a different
 token than the one stored in the Secret.
@@ -131,16 +124,19 @@ token than the one stored in the Secret.
 **Pod stuck in `CreateContainerConfigError`** — the `kubeflow-mcp-auth` Secret does
 not exist yet. Create it as shown in the quick start.
 
-**`kubectl apply` fails with `namespaces "kubeflow-system" not found`** — Trainer
-runs somewhere else, so the two `kubeflow-mcp-trainer-version` documents have
-nowhere to go while the Deployment and Service are still created. Point those two
-documents at the Trainer namespace and set `KUBEFLOW_SYSTEM_NAMESPACE` to match.
+**Trainer control-plane version information is unavailable** — older Trainer
+releases may not create the `kubeflow-trainer-public` ConfigMap in
+`kubeflow-system`. This warning is harmless when the CRD and API checks pass. A
+403 instead usually means the version Role is missing or Trainer runs in a
+different namespace.
 
-**The pod is `Ready` but calls still fail** — `/ready` is evaluated once when routes
-are registered and never re-checked, so it carries no more signal than `/health`. If
-the Kubernetes API becomes unreachable the pod stays `Ready` and keeps taking
-traffic from the Service.
+**Applying the manifests reports that `kubeflow-system` does not exist** — point
+the Trainer version Role and RoleBinding at the namespace where Trainer is
+installed, and update `KUBEFLOW_SYSTEM_NAMESPACE` to match.
 
-**A service mesh blocks traffic to the pod** — the Deployment sets
-`sidecar.istio.io/inject: "false"`. If your mesh enforces strict mTLS, remove that
-annotation and allow the traffic with a `PeerAuthentication`/`DestinationRule`.
+**The pod is `Ready` but calls still fail** — `/ready` does not re-check Kubernetes
+dependencies. Check the server logs and verify cluster connectivity separately.
+
+**A service mesh blocks traffic to the pod** — the Deployment disables automatic
+sidecar injection. If the mesh enforces strict mTLS, remove that annotation and
+allow the traffic with the mesh's peer-authentication and destination rules.
