@@ -163,7 +163,7 @@ jobs:
 
   publish-pypi:
     name: Publish to PyPI
-    needs: [prepare, build, create-tag]
+    needs: [prepare, build, create-tag, docker]
     runs-on: ubuntu-latest
     environment:
       name: release

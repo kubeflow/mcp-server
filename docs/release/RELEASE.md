@@ -52,8 +52,9 @@ After the version PR merges, GitHub Actions:
 1. Creates or updates the release branch.
 2. Verifies, tests, and packages the project.
 3. Creates the version tag.
-4. Publishes the package to PyPI and the image to GHCR.
-5. Creates the GitHub Release.
+4. Builds and scans both image architectures, then publishes the image to GHCR.
+5. Publishes the package to PyPI.
+6. Creates the GitHub Release.
 
 PyPI and GitHub Release publication require approval in the release environment.
 
@@ -67,6 +68,11 @@ kubeflow-mcp --version
 Also confirm that the package, container image, and GitHub Release have the expected version.
 
 ## Re-run or recover a release
+
+Both image architectures are scanned for fixable critical CVEs before any image tags
+are published. PyPI publication waits for the image job to succeed; the GitHub Release
+is published after both registries succeed. Registry or network failures can still
+leave a partial release.
 
 If a release workflow fails or requires manual recovery:
 
@@ -88,6 +94,10 @@ If PyPI publication has already succeeded, do **not** dispatch a fresh workflow 
 1. Open the failed release workflow run in **Actions**.
 2. Click **Re-run failed jobs** (instead of re-running all jobs or triggering a new workflow dispatch).
 3. This retries only the incomplete jobs (such as Docker publish or GitHub Release) without attempting to re-upload to PyPI.
+
+If recovery requires changing released code or dependencies, publish a new version
+(for example, the next RC). Re-running jobs uses the original workflow revision and
+does not apply fixes merged afterward; do not move an existing release tag.
 
 ### Requirements for manual dispatch
 
