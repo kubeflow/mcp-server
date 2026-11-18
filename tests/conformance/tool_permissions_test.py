@@ -1,0 +1,115 @@
+# Copyright The Kubeflow Authors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Every served tool declares the Kubernetes permissions its requests need (#565).
+
+The declarations are what a per-caller authorization check will ask about, so a
+tool without one, or one that hides a write, must fail here rather than in a cluster.
+"""
+
+import importlib
+import re
+
+import pytest
+
+from kubeflow_mcp.common.types import ToolPermission
+from kubeflow_mcp.core.health import (
+    HEALTH_TOOL_ANNOTATIONS,
+    HEALTH_TOOL_PERMISSIONS,
+    HEALTH_TOOLS,
+)
+from kubeflow_mcp.core.server import CLIENT_MODULES
+
+_VERBS = {"get", "list", "watch", "create", "update", "patch", "delete", "deletecollection"}
+_WRITE_VERBS = {"create", "update", "patch", "delete", "deletecollection"}
+_RESOURCE = re.compile(r"^[a-z][a-z0-9]*(/[a-z]+)?$")
+_GROUP = re.compile(r"^([a-z0-9-]+(\.[a-z0-9-]+)+)?$")
+
+# Read-only tools whose requests still write, and why. Keep this list short.
+_READ_ONLY_TOOLS_THAT_WRITE = {
+    "get_runtime": "include_packages=True runs a short-lived Pod to list packages (#535)",
+}
+# Clients whose writes go to another API server that authorizes them itself.
+_WRITES_AUTHORIZED_ELSEWHERE = {"pipelines"}
+
+
+def _clients():
+    for name, module_path in CLIENT_MODULES.items():
+        module = importlib.import_module(module_path)
+        if getattr(module, "TOOLS", []):
+            yield name, module
+
+
+def _all_tools():
+    for name, module in _clients():
+        permissions = getattr(module, "CLIENT_TOOL_PERMISSIONS", {})
+        for tool in module.TOOLS:
+            yield (
+                name,
+                tool.__name__,
+                permissions.get(tool.__name__),
+                module.CLIENT_TOOL_ANNOTATIONS[tool.__name__],
+            )
+    for tool in HEALTH_TOOLS:
+        yield (
+            "health",
+            tool.__name__,
+            HEALTH_TOOL_PERMISSIONS.get(tool.__name__),
+            HEALTH_TOOL_ANNOTATIONS[tool.__name__],
+        )
+
+
+@pytest.mark.parametrize("client,module", list(_clients()), ids=lambda v: getattr(v, "__name__", v))
+def test_every_tool_declares_permissions(client, module):
+    tools = {tool.__name__ for tool in module.TOOLS}
+    declared = set(getattr(module, "CLIENT_TOOL_PERMISSIONS", {}))
+    assert tools - declared == set(), (
+        f"{client}: add these tools to CLIENT_TOOL_PERMISSIONS (use () if they make no "
+        f"Kubernetes requests): {sorted(tools - declared)}"
+    )
+    assert declared - tools == set(), f"{client}: entries for unknown tools {declared - tools}"
+
+
+def test_every_health_tool_declares_permissions():
+    assert set(HEALTH_TOOL_PERMISSIONS) == {tool.__name__ for tool in HEALTH_TOOLS}
+
+
+@pytest.mark.parametrize(
+    "client,tool,permissions,annotations",
+    list(_all_tools()),
+    ids=lambda v: v if isinstance(v, str) else "",
+)
+def test_permissions_are_well_formed(client, tool, permissions, annotations):
+    for permission in permissions:
+        assert isinstance(permission, ToolPermission), f"{tool}: {permission!r}"
+        assert permission.verb in _VERBS, f"{tool}: unknown verb {permission.verb!r}"
+        assert _GROUP.match(permission.group), f"{tool}: bad group {permission.group!r}"
+        assert _RESOURCE.match(permission.resource), f"{tool}: bad resource {permission.resource!r}"
+    assert len(set(permissions)) == len(permissions), f"{tool}: duplicate entries"
+
+
+@pytest.mark.parametrize(
+    "client,tool,permissions,annotations",
+    list(_all_tools()),
+    ids=lambda v: v if isinstance(v, str) else "",
+)
+def test_write_verbs_match_the_read_only_hint(client, tool, permissions, annotations):
+    writes = {p.verb for p in permissions} & _WRITE_VERBS
+    if annotations.get("readOnlyHint"):
+        if tool in _READ_ONLY_TOOLS_THAT_WRITE:
+            assert writes, f"{tool} no longer writes; drop it from _READ_ONLY_TOOLS_THAT_WRITE"
+        else:
+            assert not writes, f"read-only tool {tool} declares writes: {sorted(writes)}"
+    elif client not in _WRITES_AUTHORIZED_ELSEWHERE:
+        assert writes, f"write tool {tool} declares no Kubernetes write"
