@@ -26,6 +26,7 @@ from kubeflow.trainer.constants import constants as trainer_constants
 from kubeflow_mcp.common.constants import ErrorCode
 from kubeflow_mcp.common.types import ToolError, ToolResponse, exception_details, is_k8s_not_found
 from kubeflow_mcp.common.utils import (
+    K8S_TIMEOUT,
     get_core_v1_api,
     get_custom_objects_api,
     get_trainer_client,
@@ -164,10 +165,15 @@ def _trainjob_progress_to_mcp(name: str, namespace: str | None) -> dict[str, Any
             namespace=get_trainer_effective_namespace(namespace),
             plural="trainjobs",
             name=name,
+            _request_timeout=K8S_TIMEOUT,
         )
     except Exception as e:
         logger.debug("Could not read progress for TrainJob %s: %s", name, e)
-        return {"reported": False, "reason": f"Could not read progress: {type(e).__name__}"}
+        if getattr(e, "status", None) == 403:
+            reason = "Could not read progress: no permission to get this TrainJob"
+        else:
+            reason = f"Could not read progress: {type(e).__name__}"
+        return {"reported": False, "reason": reason}
 
     status = obj.get("status") if isinstance(obj, dict) else None
     trainer_status = status.get("trainerStatus") if isinstance(status, dict) else None
@@ -342,6 +348,7 @@ def get_training_job(name: str, namespace: str | None = None) -> dict[str, Any]:
         jr = job.runtime if hasattr(job, "runtime") else None
         status = job.status if hasattr(job, "status") else "Unknown"
         steps, step_summary = _trainjob_steps_to_mcp(job)
+        progress = _trainjob_progress_to_mcp(name, namespace)
 
         next_steps: list[str] = []
         if status == "Failed":
@@ -349,6 +356,11 @@ def get_training_job(name: str, namespace: str | None = None) -> dict[str, Any]:
                 f"get_training_events(name='{name}') — check for OOM/scheduling issues",
                 f"get_training_logs(name='{name}') — check error output",
                 "Read trainer://guides/troubleshooting",
+            ]
+        elif status == "Running" and progress["reported"]:
+            next_steps = [
+                f"get_training_job(name='{name}') — poll again to follow progress",
+                f"get_training_logs(name='{name}') — check output",
             ]
         elif status == "Running":
             next_steps = [f"get_training_logs(name='{name}') — check progress"]
@@ -377,7 +389,7 @@ def get_training_job(name: str, namespace: str | None = None) -> dict[str, Any]:
             "created_at": _trainjob_created_at_to_mcp(job),
             "steps": steps,
             "step_summary": step_summary,
-            "progress": _trainjob_progress_to_mcp(name, namespace),
+            "progress": progress,
         }
         num_nodes = getattr(job, "num_nodes", None)
         if isinstance(num_nodes, int):
