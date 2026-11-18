@@ -128,6 +128,13 @@ class TestJobLogs:
         assert out["data"]["logs"].splitlines()[1:] == ["line7", "line8", "line9"]
         mock_spark_client.get_job_logs.assert_called_once_with("x", follow=False)
 
+    def test_trailing_empty_item_does_not_cost_a_line(self, mock_spark_client):
+        """The SDK splits the log on newlines, so it ends with an empty item."""
+        mock_spark_client.get_job_logs.return_value = iter(["a", "", "b", "c", "d", ""])
+        out = monitoring.get_spark_job_logs("x", tail_lines=4)
+        assert out["data"]["lines"] == 4
+        assert out["data"]["logs"].splitlines()[1:] == ["", "b", "c", "d"]
+
     def test_invalid_name_is_rejected_before_sdk_call(self, mock_spark_client):
         out = monitoring.get_spark_job_logs("Not a valid/name")
         assert out["error_code"] == "VALIDATION_ERROR"

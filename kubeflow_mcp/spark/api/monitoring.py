@@ -17,7 +17,7 @@
 import logging
 import re
 from collections import deque
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from typing import Any
 
 from kubeflow_mcp.common.constants import ErrorCode
@@ -49,6 +49,23 @@ def _is_missing_server_pod(exc: Exception) -> bool:
     )
 
 
+def _without_trailing_blanks(lines: Iterable[str]) -> Iterator[str]:
+    """Yield *lines*, dropping empty items at the end only.
+
+    The SDK splits the pod log on newlines, so a log ending in a newline yields a
+    final empty item; left in, it takes one of the ``tail_lines`` slots and the
+    caller gets one line fewer. Blank lines inside the log are kept.
+    """
+    pending = 0
+    for line in lines:
+        if line == "":
+            pending += 1
+            continue
+        yield from [""] * pending
+        pending = 0
+        yield line
+
+
 def _bounded_tail(log_iter: Iterable[str], tail_lines: int) -> dict[str, Any]:
     """Keep the last *tail_lines* lines of *log_iter*, capped at ``MAX_LOG_CHARS``.
 
@@ -62,7 +79,7 @@ def _bounded_tail(log_iter: Iterable[str], tail_lines: int) -> dict[str, Any]:
     window_chars = 0
     total = 0
     truncated = False
-    for line in log_iter:
+    for line in _without_trailing_blanks(log_iter):
         # Keep memory bounded even if the SDK yields a single enormous line.
         if len(line) > MAX_LOG_CHARS:
             line = line[-MAX_LOG_CHARS:]
