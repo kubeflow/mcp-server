@@ -64,12 +64,12 @@ class TestIdentity:
     def test_user_and_groups_from_claims_with_prefixes(self):
         config = AuthzConfig(mode="sar", username_prefix="oidc:", groups_prefix="oidc:")
         identity = identity_from_claims({"sub": "alice", "groups": ["team-a", 7, ""]}, config)
-        assert identity == CallerIdentity("oidc:alice", ("oidc:team-a",))
+        assert identity == CallerIdentity("oidc:alice", ("oidc:team-a", "system:authenticated"))
 
     def test_custom_claims_and_single_group_string(self):
         config = AuthzConfig(mode="sar", user_claim="email", groups_claim="roles")
         identity = identity_from_claims({"email": "a@example.com", "roles": "admins"}, config)
-        assert identity == CallerIdentity("a@example.com", ("admins",))
+        assert identity == CallerIdentity("a@example.com", ("admins", "system:authenticated"))
 
     @pytest.mark.parametrize("claims", [{}, {"sub": ""}, {"sub": 42}, {"auth_method": "api_key"}])
     def test_no_usable_user_claim(self, claims):
@@ -183,6 +183,21 @@ class TestReviewer:
         reviewer = SubjectAccessReviewer(lambda: api, cache_ttl=30, clock=lambda: 0.0)
         assert reviewer.missing(ALICE, [(GET_JOB, "ns")]) == []
         assert reviewer.missing(CallerIdentity("bob", ()), [(GET_JOB, "ns")]) != []
+
+    def test_cache_stays_bounded_whatever_namespaces_callers_send(self, monkeypatch):
+        monkeypatch.setattr("kubeflow_mcp.core.authz.MAX_CACHE_ENTRIES", 10)
+        now = [0.0]
+        reviewer = SubjectAccessReviewer(
+            lambda: FakeAuthorizationApi(), cache_ttl=30, clock=lambda: now[0]
+        )
+        for i in range(10):
+            reviewer.missing(ALICE, [(GET_JOB, f"old-{i}")])
+        now[0] = 100.0  # the cache is full of expired entries: only they go
+        reviewer.missing(ALICE, [(GET_JOB, "fresh")])
+        assert len(reviewer._cache) == 1
+        for i in range(25):  # a burst of fresh ones never passes the cap
+            reviewer.missing(ALICE, [(GET_JOB, f"ns-{i}")])
+        assert len(reviewer._cache) <= 10
 
     def test_zero_ttl_never_caches(self):
         api = FakeAuthorizationApi()
