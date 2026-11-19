@@ -190,6 +190,11 @@ def kfp():
         error=None,
     )
     client.get_experiment.side_effect = _get_experiment
+    # Empty pages, so list tools return a response instead of a mock they cannot serialize.
+    page = {"next_page_token": None, "total_size": 0}
+    client.list_pipelines.return_value = SimpleNamespace(pipelines=[], **page)
+    client.list_runs.return_value = SimpleNamespace(runs=[], **page)
+    client.list_experiments.return_value = SimpleNamespace(experiments=[], **page)
     # stop and retry check the run's experiment namespace before they preview.
     experiments = client._backend.experiment_api
     experiments.experiment_service_get_experiment.return_value = SimpleNamespace(
