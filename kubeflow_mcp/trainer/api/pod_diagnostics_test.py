@@ -15,6 +15,7 @@
 """Regression tests for job-scoped scheduling and container diagnostics."""
 
 import json
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -57,7 +58,8 @@ def test_pending_pod_explains_scheduling_and_scopes_lookup():
     assert "trainer" in args["label_selector"]
     assert args["_request_timeout"] > 0
     assert result["pods"][0]["ready"] is False
-    assert "Insufficient nvidia.com/gpu" in result["blocking_reasons"][0]
+    assert "Unschedulable" in result["blocking_reasons"][0]
+    assert "Insufficient nvidia.com/gpu" in result["pods"][0]["conditions"][0]["message"]
 
 
 def test_running_pod_surfaces_crashloop_and_initializer_termination():
@@ -101,6 +103,7 @@ def test_running_pod_surfaces_crashloop_and_initializer_termination():
     assert pod["containers"][0]["init"] is True
     assert "private-token" not in str(result)
     assert any("CrashLoopBackOff" in r for r in result["blocking_reasons"])
+    assert any("exit 1" in r for r in result["blocking_reasons"])
 
 
 def test_pod_diagnostics_bounded_and_errors_explicit():
@@ -221,3 +224,64 @@ def test_individual_condition_and_container_messages_are_capped() -> None:
     )
     assert len(detail["containers"][0]["message"]) == MAX_DIAGNOSTIC_MESSAGE_CHARS
     assert len(detail["conditions"][0]["message"]) == MAX_DIAGNOSTIC_MESSAGE_CHARS
+
+
+@pytest.mark.parametrize("reason", ["ContainerCreating", "PodInitializing"])
+def test_starting_containers_remain_visible_without_blockers(reason: str) -> None:
+    container = k8s.V1ContainerStatus(
+        name="node",
+        image="trainer",
+        image_id="id",
+        ready=False,
+        restart_count=0,
+        state=k8s.V1ContainerState(waiting=k8s.V1ContainerStateWaiting(reason=reason)),
+    )
+    api = MagicMock()
+    api.list_namespaced_pod.return_value.items = [_pod(container_statuses=[container])]
+    with patch("kubeflow_mcp.trainer.api.pod_diagnostics.get_core_v1_api", return_value=api):
+        result = get_training_pod_diagnostics("trainer", "workloads")
+    assert result["blocking_reasons"] == []
+    assert result["pods"][0]["containers"][0]["reason"] == reason
+
+
+@pytest.mark.parametrize("role", ["node", "launcher", "dataset-initializer"])
+@pytest.mark.parametrize("phase", ["Running", "Failed"])
+def test_only_the_latest_attempt_of_each_step_contributes_diagnostics(
+    role: str, phase: str
+) -> None:
+    from kubeflow.trainer.constants import constants
+
+    old = _pod(name="old-attempt", phase="Failed")
+    current = _pod(name="current-attempt", phase=phase)
+    for pod, age in ((old, 1), (current, 0)):
+        pod.metadata.labels = {constants.JOBSET_RJOB_NAME_LABEL: role}
+        if role in (constants.NODE, constants.LAUNCHER):
+            pod.metadata.labels[constants.JOB_INDEX_LABEL] = "0"
+        pod.metadata.creation_timestamp = datetime(2026, 11, 19, tzinfo=timezone.utc) - timedelta(
+            minutes=age
+        )
+    api = MagicMock()
+    api.list_namespaced_pod.return_value.items = [old, current, _pod(name="unlabeled")]
+    with patch("kubeflow_mcp.trainer.api.pod_diagnostics.get_core_v1_api", return_value=api):
+        result = get_training_pod_diagnostics("trainer", "workloads")
+    assert {p["name"] for p in result["pods"]} == {"current-attempt", "unlabeled"}
+    assert bool(result["blocking_reasons"]) == (phase == "Failed")
+    assert "old-attempt" not in str(result)
+
+
+def test_omitted_count_excludes_pods_whose_reasons_were_reported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from kubeflow_mcp.trainer.api import pod_diagnostics
+
+    monkeypatch.setattr(pod_diagnostics, "MAX_DIAGNOSTIC_CHARS", 800)
+    result = pod_diagnostics._bounded_diagnostics(
+        [
+            ({"name": "reported", "message": "x" * 1000}, ["reported: Failed"]),
+            ({"name": "omitted", "message": "x" * 1000}, ["omitted: " + "x" * 1000]),
+        ]
+    )
+    assert result["pods"] == []
+    assert result["blocking_reasons"][0] == "reported: Failed"
+    assert any(r.startswith("1 additional pods") for r in result["blocking_reasons"])
+    assert len(json.dumps(result)) <= 800

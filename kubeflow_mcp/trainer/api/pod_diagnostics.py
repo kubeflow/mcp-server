@@ -25,12 +25,14 @@ from kubeflow_mcp.common.utils import (
     K8S_TIMEOUT,
     get_core_v1_api,
     get_trainer_effective_namespace,
+    get_training_pod_step,
 )
 from kubeflow_mcp.core.logging import _redact_text
 from kubeflow_mcp.trainer.constants import (
     MAX_DIAGNOSTIC_CHARS,
     MAX_DIAGNOSTIC_MESSAGE_CHARS,
     MAX_DIAGNOSTIC_PODS,
+    TRANSIENT_WAITING_REASONS,
 )
 
 logger = logging.getLogger(__name__)
@@ -91,16 +93,20 @@ def _pod_details(pod: V1Pod) -> dict[str, Any]:
 
 def _pod_blocking_reasons(pod: dict[str, Any]) -> list[str]:
     reasons = [
-        f"{pod['name']}: {condition['reason']}: {condition['message']}"
+        f"{pod['name']}: {condition['reason'] or condition['type']}"
         for condition in pod["conditions"]
         if condition["type"] == "PodScheduled"
     ]
     for container in pod["containers"]:
-        if container.get("state") == "waiting" or container.get("exit_code"):
-            reasons.append(
-                f"{pod['name']}/{container['name']}: {container.get('reason')} "
-                f"{container.get('message', '')}".strip()
-            )
+        waiting = container.get("state") == "waiting"
+        if (waiting and container.get("reason") not in TRANSIENT_WAITING_REASONS) or container.get(
+            "exit_code"
+        ):
+            exit_code = container.get("exit_code")
+            reason = f"{pod['name']}/{container['name']}: {container.get('reason') or container['state']}"
+            if exit_code:
+                reason += f" (exit {exit_code})"
+            reasons.append(reason)
     if pod["phase"] == "Failed" and not reasons:
         reasons.append(f"{pod['name']}: pod Failed; use get_training_events for the cause")
     return reasons
@@ -110,6 +116,7 @@ def _bounded_diagnostics(diagnostics: list[tuple[dict[str, Any], list[str]]]) ->
     """Keep failure-first pod details and reasons within one serialized character budget."""
     data: dict[str, Any] = {"pods": [], "pods_truncated": False, "blocking_reasons": []}
     reasons_truncated = False
+    reported: set[str] = set()
     # Leave room for the truncation summaries and the final boolean value.
     budget = MAX_DIAGNOSTIC_CHARS - 256
     for detail, blockers in diagnostics[:MAX_DIAGNOSTIC_PODS]:
@@ -119,10 +126,11 @@ def _bounded_diagnostics(diagnostics: list[tuple[dict[str, Any], list[str]]]) ->
                 data["blocking_reasons"].pop()
                 reasons_truncated = True
                 break
+            reported.add(detail["name"])
         data["pods"].append(detail)
         if len(json.dumps(data, ensure_ascii=False)) > budget:
             data["pods"].pop()
-    included = {pod["name"] for pod in data["pods"]}
+    included = {pod["name"] for pod in data["pods"]} | reported
     omitted = sum(
         bool(blockers) for detail, blockers in diagnostics if detail["name"] not in included
     )
@@ -151,7 +159,20 @@ def get_training_pod_diagnostics(name: str, namespace: str | None) -> dict[str, 
             .items
         )
         diagnostics = []
-        for pod in pods:
+        seen_steps: set[str] = set()
+        # Match the SDK's newest attempt per step; retries can leave failed pods behind.
+        for pod in sorted(
+            pods,
+            key=lambda p: (
+                p.metadata.creation_timestamp is not None,
+                p.metadata.creation_timestamp,
+            ),
+            reverse=True,
+        ):
+            step = get_training_pod_step(pod) or pod.metadata.name
+            if step in seen_steps:
+                continue
+            seen_steps.add(step)
             detail = _pod_details(pod)
             diagnostics.append((detail, _pod_blocking_reasons(detail)))
         # Keep blockers visible before applying the response cap; prefer active attempts on ties.

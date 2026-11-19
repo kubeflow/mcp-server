@@ -264,6 +264,18 @@ _TRAINJOB_VERSION = "v1alpha1"
 _TRAINJOB_PLURAL = "trainjobs"
 
 
+def get_training_pod_step(pod: Any) -> str | None:
+    """Match the SDK's step names without grouping pods with incomplete labels."""
+    from kubeflow.trainer.constants import constants
+
+    labels = getattr(pod.metadata, "labels", None) or {}
+    role = labels.get(constants.JOBSET_RJOB_NAME_LABEL)
+    if role in (constants.LAUNCHER, constants.NODE):
+        index = labels.get(constants.JOB_INDEX_LABEL)
+        return f"{role}-{index}" if index is not None else None
+    return role
+
+
 def get_training_job_status(job: Any, namespace: str | None = None) -> str:
     """Recover running status when SDK 0.5 skips worker inference after resume."""
     status = getattr(job, "status", "Unknown")
@@ -283,14 +295,18 @@ def get_training_job_status(job: Any, namespace: str | None = None) -> str:
             name=job.name,
             _request_timeout=K8S_TIMEOUT,
         )
-        for condition in raw.get("status", {}).get("conditions", []):
+        conditions = raw.get("status", {}).get("conditions", [])
+        for condition in conditions:
             if (
                 condition.get("type") in {"Complete", "Failed"}
                 and condition.get("status") == "True"
             ):
                 return condition["type"]
         # A suspended job can still have terminating workers; don't call it running.
-        if not raw.get("spec", {}).get("suspend", False):
+        suspended = raw.get("spec", {}).get("suspend", False) or any(
+            c.get("type") == "Suspended" and c.get("status") == "True" for c in conditions
+        )
+        if not suspended:
             return "Running"
     except Exception:
         logger.debug("Could not reconcile SDK status for job %s", job.name, exc_info=True)

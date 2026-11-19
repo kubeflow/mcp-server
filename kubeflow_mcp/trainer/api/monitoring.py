@@ -32,6 +32,7 @@ from kubeflow_mcp.common.utils import (
     get_trainer_client_for_namespace,
     get_trainer_effective_namespace,
     get_training_job_status,
+    get_training_pod_step,
 )
 from kubeflow_mcp.core.security import (
     check_namespace_allowed,
@@ -62,12 +63,7 @@ def _is_pod_for_step(pod: Any, step: str) -> bool:
     Mirrors how the SDK names steps: launcher and node pods are ``<role>-<completion
     index>`` (all nodes share one ReplicatedJob), initializer pods are the role alone.
     """
-    labels = getattr(pod.metadata, "labels", None) or {}
-    role = labels.get(trainer_constants.JOBSET_RJOB_NAME_LABEL)
-    if role in (trainer_constants.LAUNCHER, trainer_constants.NODE):
-        index = labels.get(trainer_constants.JOB_INDEX_LABEL)
-        return index is not None and f"{role}-{index}" == step
-    return role == step
+    return get_training_pod_step(pod) == step
 
 
 def _read_bounded_log_lines(response: Any) -> tuple[list[str], bool]:
@@ -170,7 +166,16 @@ def _collect_log_lines(
         # Same container the SDK reads for the step: "node-1" -> "node".
         container = re.sub(r"-\d+$", "", step)
         matching_pods = [pod for pod in pods.items if _is_pod_for_step(pod, step)]
-        if not matching_pods:
+        if not matching_pods and pods.items:
+            steps = {get_training_pod_step(pod) for pod in pods.items}
+            available_steps = sorted(s for s in steps if s)
+            availability_hint = f"Step '{step}' has no matching pods in this job. "
+            availability_hint += (
+                f"Available steps: {', '.join(available_steps)}."
+                if available_steps
+                else "Use get_training_job to inspect the current steps."
+            )
+        elif not matching_pods:
             availability_hint = (
                 "No pods remain for the requested step; they may not have been created yet "
                 "or may have been deleted. Empty logs do not prove the job produced no output. "
@@ -696,14 +701,24 @@ def wait_for_training(
             }
         ).model_dump()
     except TimeoutError:
+        diagnostics = get_training_pod_diagnostics(name, namespace)
+        if diagnostics.get("blocking_reasons"):
+            hint = "Pods report blocking_reasons; resolve them or check get_training_events"
+        elif last_status == "Running":
+            hint = (
+                "Job is still running; call wait_for_training again "
+                "or follow progress with get_training_logs"
+            )
+        else:
+            hint = "Use get_training_events to check for scheduling issues"
         return ToolResponse(
             data={
                 "job": name,
                 "status": last_status,
                 "reached": False,
                 "message": f"Timeout after {timeout_seconds}s",
-                "hint": "Use get_training_events to check for scheduling issues",
-                **get_training_pod_diagnostics(name, namespace),
+                "hint": hint,
+                **diagnostics,
             }
         ).model_dump()
     except Exception as e:

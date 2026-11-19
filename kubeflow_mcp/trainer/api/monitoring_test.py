@@ -1361,7 +1361,8 @@ class TestWaitForTraining:
 
 
 @pytest.mark.parametrize("status", ["Created", "Running"])
-def test_wait_timeout_keeps_last_status_and_pod_blockers(status):
+@pytest.mark.parametrize("blocked", [False, True])
+def test_wait_timeout_keeps_last_status_and_pod_blockers(status: str, blocked: bool) -> None:
     client = MagicMock()
 
     def timeout(**kwargs):
@@ -1371,7 +1372,7 @@ def test_wait_timeout_keeps_last_status_and_pod_blockers(status):
     client.wait_for_job_status.side_effect = timeout
     diagnostics = {
         "pods": [{"name": "node-0", "phase": "Pending"}],
-        "blocking_reasons": ["Insufficient nvidia.com/gpu"],
+        "blocking_reasons": ["Insufficient nvidia.com/gpu"] if blocked else [],
     }
     with (
         patch(PATCH_NS_CHECK, return_value=None),
@@ -1386,6 +1387,58 @@ def test_wait_timeout_keeps_last_status_and_pod_blockers(status):
     assert result["data"]["status"] == status
     assert result["data"]["reached"] is False
     assert result["data"]["blocking_reasons"] == diagnostics["blocking_reasons"]
+    hint = result["data"]["hint"]
+    if blocked:
+        assert "blocking_reasons" in hint
+    elif status == "Running":
+        assert "wait_for_training again" in hint
+        assert "scheduling issues" not in hint
+    else:
+        assert "get_training_events" in hint
+
+
+@pytest.mark.parametrize("cursor", [False, True])
+@pytest.mark.parametrize("pods_exist", [False, True])
+def test_empty_logs_distinguish_unknown_steps_from_absent_pods(
+    cursor: bool, pods_exist: bool
+) -> None:
+    client = MagicMock()
+    client.get_job_logs.return_value = iter(())
+    client.get_job.return_value = SimpleNamespace(steps=[])
+    api = MagicMock()
+    api.list_namespaced_pod.return_value.items = (
+        [
+            SimpleNamespace(
+                metadata=SimpleNamespace(
+                    labels={
+                        trainer_constants.JOBSET_RJOB_NAME_LABEL: "node",
+                        trainer_constants.JOB_INDEX_LABEL: str(i),
+                    }
+                )
+            )
+            for i in range(2)
+        ]
+        if pods_exist
+        else []
+    )
+    with (
+        patch(PATCH_NS_CHECK, return_value=None),
+        patch(PATCH_CLIENT, return_value=client),
+        patch("kubeflow_mcp.trainer.api.monitoring.get_core_v1_api", return_value=api),
+        patch(
+            "kubeflow_mcp.trainer.api.monitoring.get_trainer_effective_namespace",
+            return_value="workloads",
+        ),
+    ):
+        result = get_training_logs("my-job", step="node-5", since_line=0 if cursor else None)
+    assert result["success"] is True
+    hint = result["data"]["next_steps"][0]
+    if pods_exist:
+        assert "Available steps: node-0, node-1" in hint
+        assert "deleted" not in hint
+    else:
+        assert "No pods remain" in hint
+    api.read_namespaced_pod_log.assert_not_called()
 
 
 @pytest.fixture(autouse=True)

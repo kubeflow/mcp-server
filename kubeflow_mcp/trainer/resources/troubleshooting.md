@@ -205,6 +205,8 @@ update_training_job(name, action="resume", confirmed=True)   # Resume (preview f
 ### Training stalls or restarts
 
 Use `get_training_job(name, namespace)` to inspect associated initializer and trainer pods.
+Diagnostics use the newest pod attempt per step; earlier failed retries do not block a healthy replacement.
+Normal `ContainerCreating` and `PodInitializing` states remain visible without being reported as blockers.
 `pods` includes readiness, restarts, container waiting/termination reasons and failed scheduling
 conditions; `blocking_reasons` highlights issues such as insufficient GPUs or CrashLoopBackOff.
 Pods with blockers take priority within the 16,000-character diagnostic budget;

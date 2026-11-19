@@ -55,6 +55,7 @@ PATCH_TRAINER_CLIENT = "kubeflow_mcp.common.utils.get_trainer_client"
     [
         (False, [{"type": "Suspended", "status": "False"}], "Running"),
         (True, [{"type": "Suspended", "status": "True"}], "Created"),
+        (False, [{"type": "Suspended", "status": "True"}], "Created"),
         (False, [{"type": "Complete", "status": "True"}], "Complete"),
         (False, [{"type": "Failed", "status": "True"}], "Failed"),
     ],
