@@ -257,3 +257,60 @@ def _no_default_namespace(namespace: str | None) -> str:
     if not namespace:
         raise ValueError("no default namespace for this tool")
     return namespace
+
+
+def _namespace_resolvers() -> dict[str, Callable[[str | None], str]]:
+    from kubeflow_mcp.common import utils
+
+    return {
+        "trainer": utils.get_trainer_effective_namespace,
+        "spark": utils.get_spark_effective_namespace,
+        "pipelines": utils.get_pipelines_effective_namespace,
+        # Health tools use the Trainer client's namespace.
+        "health": utils.get_trainer_effective_namespace,
+    }
+
+
+def _verified_claims() -> Mapping[str, Any] | None:
+    from fastmcp.server.dependencies import get_access_token
+
+    token = get_access_token()
+    return token.claims if token is not None else None
+
+
+def build_authz_middleware(
+    config: AuthzConfig, loaded_modules: Mapping[str, Any], auth_provider: Any
+) -> SarAuthorizationMiddleware:
+    """Build the middleware for the loaded clients; refuse a setup that cannot work.
+
+    Raises:
+        ValueError: when there is no per-caller identity to check (no auth, or a shared
+            API key), since every call would then be refused.
+    """
+    from kubeflow_mcp.common.utils import get_authorization_api
+    from kubeflow_mcp.core.auth import APIKeyVerifier
+    from kubeflow_mcp.core.health import HEALTH_TOOL_PERMISSIONS
+
+    if auth_provider is None or isinstance(auth_provider, APIKeyVerifier):
+        raise ValueError(
+            "authz mode 'sar' needs JWT auth (auth.jwks_uri): the caller's user comes "
+            "from the verified token, and an API key carries no per-user identity"
+        )
+    resolvers = _namespace_resolvers()
+    permissions: dict[str, tuple[ToolPermission, ...]] = {}
+    tool_resolvers: dict[str, Callable[[str | None], str]] = {}
+    tables = [
+        (name, getattr(m, "CLIENT_TOOL_PERMISSIONS", {})) for name, m in loaded_modules.items()
+    ]
+    for client, table in [*tables, ("health", HEALTH_TOOL_PERMISSIONS)]:
+        for tool, declared in table.items():
+            permissions[tool] = declared
+            if client in resolvers:
+                tool_resolvers[tool] = resolvers[client]
+    return SarAuthorizationMiddleware(
+        config,
+        permissions,
+        tool_resolvers,
+        SubjectAccessReviewer(get_authorization_api, config.cache_ttl),
+        _verified_claims,
+    )
