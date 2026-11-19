@@ -23,11 +23,31 @@ from typing import Any
 # stopped, and one failed, so it can be retried. Run IDs must be UUIDs.
 RUNNING_RUN_ID = "00000000-0000-4000-8000-000000000001"
 FAILED_RUN_ID = "00000000-0000-4000-8000-000000000002"
+# The one experiment the KFP fake knows, so it can be deleted.
+EXPERIMENT = "exp-a"
+
+PIPELINE_CODE = """
+from kfp import dsl
+
+
+@dsl.component
+def hello() -> str:
+    return "hi"
+
+
+@dsl.pipeline
+def pipe():
+    hello()
+"""
 
 GATE_ARGS: dict[str, dict[str, Any]] = {
+    "create_experiment": {"name": "exp-new", "namespace": "default"},
+    "create_pipeline": {"name": "pipe-a", "pipeline_code": PIPELINE_CODE, "namespace": "default"},
     "create_pipeline_run": {"pipeline": "pipe-a", "namespace": "default"},
     "create_runtime": {"name": "rt-a", "spec": {"template": {}}},
     "create_spark_session": {"name": "spark-a"},
+    "delete_experiment": {"name": EXPERIMENT, "namespace": "default"},
+    "delete_pipeline": {"name": "pipe-a", "namespace": "default"},
     "delete_runtime": {"name": "rt-a"},
     "delete_spark_session": {"name": "spark-a"},
     "delete_training_job": {"name": "job-a"},

@@ -14,6 +14,7 @@
 
 """Shared fixtures for the Tier 1 eval judges."""
 
+import copy
 import importlib.util
 from contextlib import ExitStack
 from dataclasses import dataclass, field
@@ -25,23 +26,73 @@ import pytest
 
 from kubeflow_mcp.common import utils as mcp_utils
 from kubeflow_mcp.core.policy import get_effective_persona, set_effective_persona
-from tests.eval.helpers import FAILED_RUN_ID
+from tests.eval.helpers import EXPERIMENT, FAILED_RUN_ID
 
 WRITE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
 # The pipelines tools call a Kubeflow Pipelines client, which talks to KFP's REST API
 # rather than the Kubernetes API, so the Kubernetes fake cannot see their writes.
-KFP_TOOL_MODULES = ("discovery", "monitoring", "runs")
+KFP_TOOL_MODULES = ("authoring", "discovery", "experiments", "monitoring", "runs")
+
+# What a GET of one training runtime returns, so previews that read the runtime's
+# node job (run_custom_training) see a real one instead of a mock.
+RUNTIME: dict[str, Any] = {
+    "apiVersion": "trainer.kubeflow.org/v1alpha1",
+    "kind": "TrainingRuntime",
+    "metadata": {
+        "name": "torch-distributed",
+        "namespace": "default",
+        "labels": {"trainer.kubeflow.org/framework": "torch"},
+    },
+    "spec": {
+        "mlPolicy": {"numNodes": 1},
+        "template": {
+            "spec": {
+                "replicatedJobs": [
+                    {
+                        "name": "node",
+                        "template": {
+                            "metadata": {
+                                "labels": {"trainer.kubeflow.org/trainjob-ancestor-step": "trainer"}
+                            },
+                            "spec": {
+                                "template": {
+                                    "spec": {
+                                        "containers": [
+                                            {"name": "node", "image": "python:3.11-slim"}
+                                        ]
+                                    }
+                                }
+                            },
+                        },
+                    }
+                ]
+            }
+        },
+    },
+}
+RUNTIME_PLURALS = {"trainingruntimes", "clustertrainingruntimes"}
 
 
 @dataclass
 class FakeKubernetes:
-    """Records every request and answers with a mock."""
+    """Records every request and answers with a mock (a real runtime for runtime GETs)."""
 
     calls: list[tuple[str, str]] = field(default_factory=list)
 
-    def call_api(self, resource_path: str, method: str) -> Any:
+    def call_api(
+        self, resource_path: str, method: str, path_params: Any = None, async_req: bool = False
+    ) -> Any:
         self.calls.append((method, resource_path))
+        params = path_params or {}
+        if method == "GET" and params.get("plural") in RUNTIME_PLURALS and "name" in params:
+            runtime = copy.deepcopy(RUNTIME)
+            if not async_req:
+                return runtime
+            # The SDK calls with async_req=True and reads the body from thread.get().
+            thread = MagicMock()
+            thread.get.return_value = runtime
+            return thread
         return MagicMock()
 
     @property
@@ -58,8 +109,8 @@ def k8s():
     """
     fake = FakeKubernetes()
 
-    def fake_call_api(self, resource_path, method, *args, **kwargs):
-        return fake.call_api(resource_path, method)
+    def fake_call_api(self, resource_path, method, path_params=None, *args, **kwargs):
+        return fake.call_api(resource_path, method, path_params, kwargs.get("async_req", False))
 
     with (
         patch("kubernetes.config.load_kube_config"),
@@ -90,6 +141,13 @@ class FakeKfp:
         return [name for name in self.calls if not _is_kfp_read(name.rsplit(".", 1)[-1])]
 
 
+def _get_experiment(name: str, *args: Any, **kwargs: Any) -> SimpleNamespace:
+    # Only EXPERIMENT exists, so create_experiment can preview a new one.
+    if name != EXPERIMENT:
+        raise ValueError(f"Experiment not found: {name}")
+    return SimpleNamespace(experiment_id="e-1", display_name=EXPERIMENT, namespace="default")
+
+
 def _is_kfp_read(method: str) -> bool:
     return method.startswith(("get_", "list_")) or "_service_get_" in method
 
@@ -112,6 +170,7 @@ def kfp():
         experiment_id="e-1",
         error=None,
     )
+    client.get_experiment.side_effect = _get_experiment
     # stop and retry check the run's experiment namespace before they preview.
     experiments = client._backend.experiment_api
     experiments.experiment_service_get_experiment.return_value = SimpleNamespace(
