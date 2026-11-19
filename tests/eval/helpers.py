@@ -98,6 +98,20 @@ READONLY_ARGS: dict[str, dict[str, Any]] = {
     "pre_flight": {},
 }
 
+# Readonly tools the fakes cannot serve yet: the call fails before the tool's main
+# work, so the judge cannot see a write that comes after that point. Every other
+# readonly tool must succeed. Drop an entry once the fakes can serve the tool.
+SHALLOW_TOOLS: dict[str, str] = {
+    "get_spark_session": "the SDK cannot parse a mock SparkConnect",
+    "get_spark_session_logs": "the SDK cannot parse a mock SparkConnect",
+    "get_training_events": "the SDK cannot parse a mock TrainJob",
+    "get_training_job": "the SDK cannot parse a mock TrainJob",
+    "get_training_logs": "the SDK cannot parse a mock TrainJob",
+    "list_runtimes": "the SDK cannot parse a mock runtime list",
+    "list_spark_sessions": "the SDK cannot parse a mock SparkConnect list",
+    "list_training_jobs": "the SDK cannot parse a mock TrainJob list",
+}
+
 
 def payload(result: Any) -> dict[str, Any]:
     """Return the tool's response dict from an MCP CallToolResult."""
