@@ -379,11 +379,7 @@ def check_compatibility() -> dict[str, Any]:
     Example:
         >>> check_compatibility()
         {{"data": {{"compatible": true, "checks": {{...}}, "platform": "kubernetes"}}}}
-    """.format(
-        min_k8s=f"{MIN_K8S_VERSION[0]}.{MIN_K8S_VERSION[1]}",
-        crd_version=MIN_TRAINER_CRD_VERSION,
-        sdk_version=KUBEFLOW_SDK_VERSION_SPEC,
-    )
+    """
     try:
         from kubeflow_mcp.common.utils import (
             K8S_TIMEOUT,
@@ -420,6 +416,17 @@ def check_compatibility() -> dict[str, Any]:
             error_code=ErrorCode.KUBERNETES_ERROR,
             details=exception_details(e),
         ).model_dump()
+
+
+# The docstring above carries placeholders for the version requirements. A string
+# literal followed by ``.format()`` is an expression, not a docstring, so the
+# placeholders are filled in here instead. ``__doc__`` is None under ``python -OO``.
+if check_compatibility.__doc__:
+    check_compatibility.__doc__ = check_compatibility.__doc__.format(
+        min_k8s=f"{MIN_K8S_VERSION[0]}.{MIN_K8S_VERSION[1]}",
+        crd_version=MIN_TRAINER_CRD_VERSION,
+        sdk_version=KUBEFLOW_SDK_VERSION_SPEC,
+    )
 
 
 def get_cluster_resources() -> dict[str, Any]:
@@ -635,7 +642,7 @@ def pre_flight(
 
     Example:
         >>> pre_flight(model="meta-llama/Llama-3.2-1B")
-        {{"data": {{"compatibility": {{...}}, "cluster": {{...}}, "estimate": {{...}}, ...}}}}
+        {"data": {"compatibility": {...}, "cluster": {...}, "estimate": {...}, ...}}
     """
     result: dict[str, Any] = {}
     next_steps: list[str] = []
