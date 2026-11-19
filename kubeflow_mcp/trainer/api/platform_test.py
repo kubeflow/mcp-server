@@ -716,9 +716,7 @@ def test_inspect_crd_returns_schema_and_conditions(mock_k8s_apis):
 
 def test_inspect_crd_invalid_name_returns_kubernetes_error(mock_k8s_apis):
     api = mock_k8s_apis["apiextensions"]
-    api.read_custom_resource_definition.side_effect = ApiException(
-        status=400, reason="Bad Request"
-    )
+    api.read_custom_resource_definition.side_effect = ApiException(status=400, reason="Bad Request")
 
     result = inspect_crd("not a valid/name")
 
