@@ -94,14 +94,27 @@ class AuditIdentityMiddleware:
         try:
             request_context = getattr(context, "request_context", None)
             if request_context is not None:
+                user_id = None
                 meta = getattr(request_context, "meta", None)
                 if meta is not None:
                     if isinstance(meta, dict):
-                        user_id = meta.get("user_id")
+                        user_id = meta.get("user_id") or meta.get("sub")
                     else:
-                        user_id = getattr(meta, "user_id", None)
-                    if user_id is not None:
-                        _user_id_var.set(str(user_id))
+                        user_id = getattr(meta, "user_id", None) or getattr(meta, "sub", None)
+
+                if user_id is None:
+                    token = getattr(request_context, "token", None) or getattr(
+                        request_context, "access_token", None
+                    )
+                    if token is not None:
+                        claims = getattr(token, "claims", {})
+                        if isinstance(claims, dict):
+                            user_id = claims.get("sub") or claims.get("user_id")
+                        if user_id is None and hasattr(token, "client_id") and token.client_id:
+                            user_id = getattr(token, "client_id", None)
+
+                if user_id is not None:
+                    _user_id_var.set(str(user_id))
         except Exception:
             pass
 
