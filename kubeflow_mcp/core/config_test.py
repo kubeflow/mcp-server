@@ -202,3 +202,27 @@ def test_find_config_file_prefers_project_local_config(tmp_path):
         patch("kubeflow_mcp.core.config.Path.cwd", return_value=tmp_path),
     ):
         assert _find_config_file() == local_config
+
+
+def test_authz_is_off_by_default():
+    with patch("kubeflow_mcp.core.config._find_config_file", return_value=None):
+        cfg = load_config()
+    assert cfg.authz.mode == "none"
+
+
+def test_authz_from_file_and_env_mode(tmp_path):
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        yaml.dump({"authz": {"mode": "none", "user_claim": "email", "cache_ttl": 0}})
+    )
+    with patch.dict("os.environ", {"KUBEFLOW_MCP_AUTHZ": "sar"}):
+        cfg = load_config(config_path=config_file)
+    assert (cfg.authz.mode, cfg.authz.user_claim, cfg.authz.cache_ttl) == ("sar", "email", 0)
+
+
+@pytest.mark.parametrize("authz", [{"mode": "rbac"}, {"cache_ttl": -1}, {"unknown_key": 1}])
+def test_invalid_authz_config_is_rejected(tmp_path, authz):
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(yaml.dump({"authz": authz}))
+    with pytest.raises(ValueError, match="Invalid authz config"):
+        load_config(config_path=config_file)
