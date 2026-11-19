@@ -172,6 +172,37 @@ def test_load_config_rejects_invalid_yaml_and_non_mapping_roots(tmp_path, conten
         load_config(config_path=config_file)
 
 
+@pytest.mark.parametrize(
+    "section",
+    [
+        "server",
+        "logging",
+        "observability",
+        "trainer",
+        "optimizer",
+        "auth",
+        "security",
+        "resilience",
+    ],
+)
+def test_load_config_treats_section_with_no_keys_as_empty(tmp_path, section):
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(f"{section}:\n  # level: DEBUG\n")
+
+    cfg = load_config(config_path=config_file)
+
+    assert cfg.server.persona == "readonly"
+    assert cfg.resilience.rate_limit == 10.0
+
+
+def test_load_config_rejects_non_mapping_section(tmp_path):
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("server: trainer\n")
+
+    with pytest.raises(ValueError, match="'server' must be a mapping, got str"):
+        load_config(config_path=config_file)
+
+
 # TODO(test): test config_path that doesn't exist falls back to default search
 # TODO(test): test auth config env overrides (KUBEFLOW_MCP_AUTH_TOKEN, KUBEFLOW_MCP_JWKS_URI)
 # TODO(test): test OTEL env, controller namespace, and multiple clients
