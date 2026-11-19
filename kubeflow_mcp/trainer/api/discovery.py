@@ -30,12 +30,14 @@ from kubeflow_mcp.common.utils import (
     get_trainer_client,
     get_trainer_client_for_namespace,
     get_trainer_effective_namespace,
+    get_training_job_status,
 )
 from kubeflow_mcp.core.security import (
     check_namespace_allowed,
     validate_k8s_name,
     validate_runtime_name,
 )
+from kubeflow_mcp.trainer.api.pod_diagnostics import get_training_pod_diagnostics
 
 logger = logging.getLogger(__name__)
 
@@ -206,7 +208,7 @@ def list_training_jobs(
             jr = job.runtime if hasattr(job, "runtime") else None
             job_data = {
                 "name": job.name,
-                "status": job.status if hasattr(job, "status") else "Unknown",
+                "status": get_training_job_status(job, namespace),
                 "runtime": _trainjob_runtime_to_mcp(jr),
                 "created_at": _trainjob_created_at_to_mcp(job),
             }
@@ -248,7 +250,9 @@ def get_training_job(name: str, namespace: str | None = None) -> dict[str, Any]:
         - ``num_nodes`` (when available)
         - ``steps`` (each step's ``name``, pod ``status``, ``pod``, ``device``,
           and ``device_count``; failed steps first, at most ``MAX_JOB_STEPS``)
-        - ``step_summary`` (step counts by status).
+        - ``step_summary`` (step counts by status)
+        - ``pods`` (readiness, restarts, container failures and scheduling conditions)
+          and ``blocking_reasons`` (best-effort, bounded diagnostics).
 
     Raises:
         ToolError: If job not found (``RESOURCE_NOT_FOUND``).
@@ -266,7 +270,7 @@ def get_training_job(name: str, namespace: str | None = None) -> dict[str, Any]:
         job = client.get_job(name=name)
 
         jr = job.runtime if hasattr(job, "runtime") else None
-        status = job.status if hasattr(job, "status") else "Unknown"
+        status = get_training_job_status(job, namespace)
         steps, step_summary = _trainjob_steps_to_mcp(job)
 
         next_steps: list[str] = []
@@ -309,6 +313,7 @@ def get_training_job(name: str, namespace: str | None = None) -> dict[str, Any]:
             data["num_nodes"] = num_nodes
         if next_steps:
             data["next_steps"] = next_steps
+        data.update(get_training_pod_diagnostics(name, namespace))
 
         return ToolResponse(data=data).model_dump()
 

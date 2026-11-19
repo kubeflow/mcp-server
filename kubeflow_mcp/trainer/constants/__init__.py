@@ -14,6 +14,11 @@
 
 """Trainer-specific constants."""
 
+MAX_DIAGNOSTIC_PODS = 32
+MAX_DIAGNOSTIC_CHARS = 16000
+MAX_DIAGNOSTIC_MESSAGE_CHARS = 1000
+TRANSIENT_WAITING_REASONS = frozenset({"ContainerCreating", "PodInitializing"})
+
 TRAINER_CONTROLLER_LABEL_SELECTORS: tuple[str, ...] = (
     # Default Helm chart labels.
     "app.kubernetes.io/name=kubeflow-trainer,app.kubernetes.io/component=manager",

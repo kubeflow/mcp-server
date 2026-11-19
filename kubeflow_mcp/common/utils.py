@@ -264,6 +264,55 @@ _TRAINJOB_VERSION = "v1alpha1"
 _TRAINJOB_PLURAL = "trainjobs"
 
 
+def get_training_pod_step(pod: Any) -> str | None:
+    """Match the SDK's step names without grouping pods with incomplete labels."""
+    from kubeflow.trainer.constants import constants
+
+    labels = getattr(pod.metadata, "labels", None) or {}
+    role = labels.get(constants.JOBSET_RJOB_NAME_LABEL)
+    if role in (constants.LAUNCHER, constants.NODE):
+        index = labels.get(constants.JOB_INDEX_LABEL)
+        return f"{role}-{index}" if index is not None else None
+    return role
+
+
+def get_training_job_status(job: Any, namespace: str | None = None) -> str:
+    """Recover running status when SDK 0.5 skips worker inference after resume."""
+    status = getattr(job, "status", "Unknown")
+    if status != "Created":
+        return status
+    workers = [step for step in getattr(job, "steps", []) if step.name.startswith("node-")]
+    if not workers or len(workers) != getattr(job, "num_nodes", None):
+        return status
+    if any(step.status not in {"Running", "Succeeded"} for step in workers):
+        return status
+    try:
+        raw = get_custom_objects_api().get_namespaced_custom_object(
+            group=_TRAINJOB_GROUP,
+            version=_TRAINJOB_VERSION,
+            namespace=get_trainer_effective_namespace(namespace),
+            plural=_TRAINJOB_PLURAL,
+            name=job.name,
+            _request_timeout=K8S_TIMEOUT,
+        )
+        conditions = raw.get("status", {}).get("conditions", [])
+        for condition in conditions:
+            if (
+                condition.get("type") in {"Complete", "Failed"}
+                and condition.get("status") == "True"
+            ):
+                return condition["type"]
+        # A suspended job can still have terminating workers; don't call it running.
+        suspended = raw.get("spec", {}).get("suspend", False) or any(
+            c.get("type") == "Suspended" and c.get("status") == "True" for c in conditions
+        )
+        if not suspended:
+            return "Running"
+    except Exception:
+        logger.debug("Could not reconcile SDK status for job %s", job.name, exc_info=True)
+    return status
+
+
 # Outcomes of an ownership check. "missing" is kept distinct from "unmanaged"
 # because the two need opposite responses: a job that does not exist is a
 # not-found, while collapsing it into "unmanaged" tells the caller to go fix
