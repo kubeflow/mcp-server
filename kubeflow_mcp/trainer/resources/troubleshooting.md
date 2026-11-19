@@ -212,6 +212,8 @@ are discarded. Completed pods are excluded; these estimates do not guarantee sch
 Fine-tuning previews show inherited runtime requests and GPU fit warnings using the SDK's
 resource aliases. A worker requesting two GPUs needs both on one node; separate one-GPU nodes
 cannot satisfy it. Validation and preview share one cluster inspection.
+When overriding CPU or memory on a GPU runtime, also set `gpu` explicitly: Trainer v2.3
+sizes torchrun from the override, independently of the pod's inherited GPU allocation.
 
 ### Training stalls or restarts
 

@@ -942,12 +942,18 @@ def _fine_tune_resource_preview(
             "Runtime resource defaults could not be read; effective requests may be incomplete."
         )
     if resources:
-        effective.update(
-            {
-                key: value.actual_instance
-                for key, value in get_resources_per_node(resources).requests.items()
-            }
-        )
+        override = {
+            key: value.actual_instance
+            for key, value in get_resources_per_node(resources).requests.items()
+        }
+        if parse_quantity(effective.get("nvidia.com/gpu", 0)) > 0 and not any(
+            key == "nvidia.com/gpu" or key.startswith("nvidia.com/mig-") for key in override
+        ):
+            warnings.append(
+                "resources_per_node omits gpu; Trainer v2.3 sizes torchrun from the override "
+                "instead of the runtime's GPUs. Set gpu explicitly to use the intended GPU count."
+            )
+        effective.update(override)
     gpu = int(parse_quantity(effective.get("nvidia.com/gpu", 0)))
     if gpu:
         nodes = cluster_data.get("nodes", [])

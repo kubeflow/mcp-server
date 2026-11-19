@@ -1810,3 +1810,60 @@ def test_fine_tune_healthy_resource_preview_has_no_warnings() -> None:
         result = _fine_tune_resource_preview("torchtune", "workloads", None, 1, cluster)
     assert result["effective_resources_per_node"] == {"nvidia.com/gpu": "1"}
     assert result["resource_warnings"] == []
+
+
+@pytest.mark.parametrize(
+    "resources,runtime_gpus,warned",
+    [
+        ({"cpu": "8", "memory": "32Gi"}, 2, True),
+        ({"memory": "32Gi"}, 2, True),
+        ({"CPU": "8"}, 2, True),
+        ({"gpu": 2, "cpu": "8"}, 2, False),
+        ({"GPU": 2}, 2, False),
+        ({"nvidia.com/gpu": 2}, 2, False),
+        ({"mig-1g.5gb": 1}, 2, False),
+        ({"memory": "32Gi"}, 0, False),
+        (None, 2, False),
+    ],
+)
+def test_preview_warns_when_overrides_omit_inherited_gpus(
+    resources: dict | None, runtime_gpus: int, warned: bool
+) -> None:
+    pod = {
+        "containers": [
+            {
+                "name": "node",
+                "resources": {"limits": {"nvidia.com/gpu": str(runtime_gpus)}},
+            }
+        ]
+    }
+    cluster = {
+        "data": {
+            "gpu_total": 2,
+            "gpu_available": 2,
+            "nodes": [{"gpus": 2, "gpu_available": 2}],
+        }
+    }
+    original = dict(resources) if resources is not None else None
+    with (
+        patch(PATCH_NS_CHECK, return_value=None),
+        patch(PATCH_CLIENT) as sdk,
+        patch("kubeflow_mcp.trainer.api.training._get_runtime_node_spec", return_value=pod),
+        patch(
+            "kubeflow_mcp.trainer.api.planning.get_cluster_resources", return_value=cluster
+        ) as inspect,
+    ):
+        result = fine_tune(
+            "hf://org/model",
+            "hf://org/dataset",
+            runtime="torchtune-test",
+            resources_per_node=resources,
+        )
+    assert result["status"] == "preview"
+    config = result["config"]
+    assert any("Set gpu explicitly" in w for w in config["resource_warnings"]) == warned
+    assert int(config["effective_resources_per_node"]["nvidia.com/gpu"]) == runtime_gpus
+    assert config.get("resources_per_node") == original
+    assert resources == original
+    inspect.assert_called_once_with()
+    sdk.assert_not_called()
