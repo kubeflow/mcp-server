@@ -91,6 +91,13 @@ def get_custom_objects_api() -> "k8s_client.CustomObjectsApi":
     return client.CustomObjectsApi(_get_api_client())
 
 
+def get_authorization_api() -> "k8s_client.AuthorizationV1Api":
+    """Get AuthorizationV1Api backed by the shared, timeout-configured ApiClient."""
+    from kubernetes import client
+
+    return client.AuthorizationV1Api(_get_api_client())
+
+
 def get_apiextensions_api() -> "k8s_client.ApiextensionsV1Api":
     """Get ApiextensionsV1Api backed by the shared, timeout-configured ApiClient."""
     from kubernetes import client
