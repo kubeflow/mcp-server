@@ -119,6 +119,7 @@ dependencies.
 | `KUBEFLOW_MCP_JWKS_URI` | _(none)_ | JWKS endpoint for JWT verification (production) |
 | `KUBEFLOW_MCP_JWT_ISSUER` | _(none)_ | Expected JWT issuer |
 | `KUBEFLOW_MCP_JWT_AUDIENCE` | _(none)_ | Expected JWT audience |
+| `KUBEFLOW_MCP_AUTHZ` | `none` | `sar` checks each tool call as the caller (needs JWT auth) |
 | `KUBEFLOW_MCP_CLIENTS` | `trainer` | Comma-separated client modules to load |
 | `KUBEFLOW_MCP_PERSONA` | `readonly` | Tool persona (`readonly`, `data-scientist`, `ml-engineer`, `platform-admin`, or a custom persona from the policy file) |
 | `KUBEFLOW_MCP_INSTRUCTION_TIER` | `full` | Instruction verbosity (`full`, `compact`, `minimal`) |
@@ -315,6 +316,7 @@ kubeflow-mcp serve \
 | `--instruction-tier` | `full` \| `compact` \| `minimal` |
 | `--transport` | `stdio` \| `http` \| `sse` |
 | `--auth-token` | bearer token for HTTP auth (dev/staging) |
+| `--authz` | `none` \| `sar` (check each call as the caller, needs JWT auth) |
 | `--otel-endpoint` | OTLP HTTP endpoint (optional tracing) |
 | `--log-level` | `DEBUG` \| `INFO` \| `WARNING` \| `ERROR` |
 | `--log-format` | `console` \| `json` (auto-detected if omitted) |
@@ -354,6 +356,17 @@ kubeflow-mcp serve --transport http
 ```
 
 Without auth configured, the server logs a warning that the HTTP endpoint is open.
+
+With JWT auth, `--authz sar` also checks every tool call against the **caller's** Kubernetes
+RBAC with a `SubjectAccessReview`, instead of only the server's own account:
+
+```bash
+kubeflow-mcp serve --transport http --authz sar
+```
+
+A refused call returns `PERMISSION_DENIED` naming the missing permissions. See
+[Per-caller authorization](ARCHITECTURE.md#per-caller-authorization---authz-sar) for the
+identity mapping, the extra rule the server's account needs, and the limits.
 
 </details>
 
