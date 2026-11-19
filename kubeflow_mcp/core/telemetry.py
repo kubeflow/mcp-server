@@ -88,6 +88,26 @@ def _normalize_and_validate_endpoint(endpoint: str | None) -> str:
     return normalized_endpoint
 
 
+def otlp_endpoint_from_env(signal: str = "traces") -> str | None:
+    """Return the OTLP HTTP endpoint for ``signal`` set by the standard OTel env vars.
+
+    Follows the OTel exporter spec, so the server reads these variables the same way
+    an OTel SDK does. ``OTEL_EXPORTER_OTLP_<SIGNAL>_ENDPOINT`` is used as-is.
+    ``OTEL_EXPORTER_OTLP_ENDPOINT`` is a base URL that gets ``/v1/<signal>``
+    appended to its path, so ``http://collector:4318/otlp`` sends traces to
+    ``http://collector:4318/otlp/v1/traces``.
+    """
+    signal_endpoint = os.environ.get(f"OTEL_EXPORTER_OTLP_{signal.upper()}_ENDPOINT", "").strip()
+    if signal_endpoint:
+        return signal_endpoint
+
+    base_endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "").strip()
+    if not base_endpoint:
+        return None
+    parsed = urlparse(base_endpoint)
+    return parsed._replace(path=f"{parsed.path.rstrip('/')}/v1/{signal}").geturl()
+
+
 def setup_tracing(endpoint: str | None = None, service_name: str = "kubeflow-mcp-server") -> bool:
     """Configure OpenTelemetry tracing.
 
@@ -95,9 +115,9 @@ def setup_tracing(endpoint: str | None = None, service_name: str = "kubeflow-mcp
     """
     global _configured_endpoint, _tracing_initialized
 
-    # Fall back to standard OTel env var when no explicit endpoint is provided
+    # Fall back to the standard OTel env vars when no explicit endpoint is provided
     if not endpoint or not endpoint.strip():
-        endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
+        endpoint = otlp_endpoint_from_env("traces")
 
     normalized_endpoint = _normalize_and_validate_endpoint(endpoint)
     if not normalized_endpoint:

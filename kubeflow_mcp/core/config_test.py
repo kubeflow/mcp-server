@@ -115,6 +115,27 @@ def test_load_config_env_overrides(test_case):
     assert getattr(getattr(cfg, section), field) == test_case.expected_output["value"]
 
 
+@pytest.mark.parametrize(
+    ("env", "expected"),
+    [
+        ({"OTEL_EXPORTER_OTLP_ENDPOINT": "http://env:4318/otlp"}, "http://env:4318/otlp/v1/traces"),
+        (
+            {"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "http://env:4318/custom"},
+            "http://env:4318/custom",
+        ),
+        ({}, "http://file:4318"),
+    ],
+)
+def test_load_config_otel_endpoint_env_overrides_file(tmp_path, monkeypatch, env, expected):
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", raising=False)
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(yaml.dump({"observability": {"otel_endpoint": "http://file:4318"}}))
+    with patch.dict("os.environ", env):
+        cfg = load_config(config_path=config_file)
+    assert cfg.observability.otel_endpoint == expected
+
+
 def test_load_config_filters_empty_client_entries(monkeypatch):
     monkeypatch.setenv("KUBEFLOW_MCP_CLIENTS", "trainer, ,optimizer,,")
     with patch("kubeflow_mcp.core.config._find_config_file", return_value=None):
