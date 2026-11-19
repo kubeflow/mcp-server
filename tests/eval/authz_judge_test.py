@@ -106,6 +106,22 @@ async def test_allowed_caller_is_refused_in_another_namespace(k8s, rbac):
     assert k8s.calls == []
 
 
+@pytest.mark.parametrize("mode", ["progressive", "semantic"])
+async def test_hidden_tool_is_not_checked(mode, k8s, rbac):
+    """A tool the persona hides answers "not available"; its permissions stay private."""
+    with patch("kubeflow_mcp.core.authz._verified_claims", lambda: {"sub": "bob"}):
+        server = create_server(
+            clients=CLIENTS,
+            persona="readonly",
+            mode=mode,
+            auth_provider=JWTVerifier(jwks_uri="https://issuer.invalid/jwks.json"),
+            authz=SAR,
+        )
+    result = await _call(server, "delete_training_job", DELETE, mode)
+    assert "missing_permissions" not in str(payload(result))
+    assert rbac.reviews == [] and k8s.calls == []
+
+
 async def test_call_without_a_verified_user_is_refused(k8s, rbac):
     result = await _call(_server(None), "list_training_jobs", {"namespace": "team-a"}, "full")
     assert payload(result).get("error_code") == "PERMISSION_DENIED"

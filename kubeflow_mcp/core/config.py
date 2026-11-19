@@ -37,6 +37,12 @@ Example config file (~/.kubeflow-mcp.yaml):
             # issuer: https://auth.example.com
             # audience: kubeflow-mcp
 
+        authz:                        # per-caller authorization, needs JWT auth
+            mode: sar                 # none (default) or sar
+            # user_claim: sub
+            # groups_claim: groups
+            # cache_ttl: 30
+
         resilience:
             rate_limit: 10.0
             rate_capacity: 20.0

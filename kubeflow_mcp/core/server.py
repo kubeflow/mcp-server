@@ -495,11 +495,6 @@ def create_server(  # noqa: C901
             clients_ready = False
             logger.warning(f"Failed to import client '{client_name}': {e}")
 
-    # Built before anything else so a setup that cannot authorize fails at startup.
-    authz_middleware = None
-    if authz is not None and authz.mode == "sar":
-        authz_middleware = build_authz_middleware(authz, loaded_modules, auth_provider)
-
     # Merge tool metadata from client modules
     all_descriptions: dict[str, str] = {}
     all_annotations: dict[str, dict] = {}
@@ -549,6 +544,13 @@ def create_server(  # noqa: C901
     instructions = _build_server_instructions(
         loaded_modules, persona, instruction_tier, final_allowed, mode
     )
+    # Only registered tools are checked: a hidden tool must answer "not available",
+    # not reveal what it would need. Raises here, at startup, without JWT auth.
+    authz_middleware = None
+    if authz is not None and authz.mode == "sar":
+        authz_middleware = build_authz_middleware(
+            authz, loaded_modules, auth_provider, final_allowed
+        )
     mcp_kwargs: dict[str, Any] = {"instructions": instructions}
     if auth_provider is not None:
         mcp_kwargs["auth"] = auth_provider

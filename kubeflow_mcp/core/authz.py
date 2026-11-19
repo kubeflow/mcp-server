@@ -30,7 +30,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -48,6 +48,10 @@ logger = logging.getLogger(__name__)
 # Without a namespace argument these tools find their namespace themselves (the
 # controller's), so the check cannot know it in advance and asks cluster-wide instead.
 _SELF_RESOLVED_NAMESPACE = {"inspect_controller"}
+
+# Callers choose namespace strings, so the cache is bounded: expired entries go first,
+# then everything if a burst of fresh ones still exceeds the cap.
+MAX_CACHE_ENTRIES = 10_000
 
 # A permission to check, and the namespace to check it in (None: cluster-wide).
 Check = tuple[ToolPermission, str | None]
@@ -71,9 +75,14 @@ def identity_from_claims(claims: Mapping[str, Any], config: AuthzConfig) -> Call
     groups = claims.get(config.groups_claim) or []
     if isinstance(groups, str):
         groups = [groups]
+    # The API server adds this group to every authenticated request, but a
+    # SubjectAccessReview only knows the groups it is sent.
     return CallerIdentity(
         user=config.username_prefix + user,
-        groups=tuple(config.groups_prefix + g for g in groups if isinstance(g, str) and g),
+        groups=(
+            *(config.groups_prefix + g for g in groups if isinstance(g, str) and g),
+            "system:authenticated",
+        ),
     )
 
 
@@ -141,8 +150,15 @@ class SubjectAccessReviewer:
         allowed = self._ask(identity, p, namespace)
         if self._ttl > 0:
             with self._lock:
+                if len(self._cache) >= MAX_CACHE_ENTRIES:
+                    self._evict(now)
                 self._cache[key] = (now, allowed)
         return allowed
+
+    def _evict(self, now: float) -> None:
+        self._cache = {k: v for k, v in self._cache.items() if now - v[0] < self._ttl}
+        if len(self._cache) >= MAX_CACHE_ENTRIES:
+            self._cache.clear()
 
     def _ask(self, identity: CallerIdentity, p: ToolPermission, namespace: str | None) -> bool:
         from kubernetes import client
@@ -226,11 +242,14 @@ class SarAuthorizationMiddleware(Middleware):
         try:
             missing = await anyio.to_thread.run_sync(self._check, tool, arguments, identity)
         except AuthzError as e:
-            logger.warning("authz_unavailable", extra={"tool": tool, "error": str(e)})
+            logger.warning(
+                "authz_unavailable", extra={"audit": True, "tool": tool, "error": str(e)}
+            )
             return _refuse(f"Cannot authorize '{tool}': {e}")
         if missing:
             logger.info(
-                "authz_denied", extra={"tool": tool, "user": identity.user, "missing": missing}
+                "authz_denied",
+                extra={"audit": True, "tool": tool, "user": identity.user, "missing": missing},
             )
             return _refuse(
                 f"'{identity.user}' may not call '{tool}' here: cannot {'; cannot '.join(missing)}",
@@ -279,7 +298,10 @@ def _verified_claims() -> Mapping[str, Any] | None:
 
 
 def build_authz_middleware(
-    config: AuthzConfig, loaded_modules: Mapping[str, Any], auth_provider: Any
+    config: AuthzConfig,
+    loaded_modules: Mapping[str, Any],
+    auth_provider: Any,
+    registered: Collection[str],
 ) -> SarAuthorizationMiddleware:
     """Build the middleware for the loaded clients; refuse a setup that cannot work.
 
@@ -304,6 +326,8 @@ def build_authz_middleware(
     ]
     for client, table in [*tables, ("health", HEALTH_TOOL_PERMISSIONS)]:
         for tool, declared in table.items():
+            if tool not in registered:
+                continue
             permissions[tool] = declared
             if client in resolvers:
                 tool_resolvers[tool] = resolvers[client]
