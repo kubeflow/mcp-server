@@ -174,6 +174,10 @@ def serve(
     configure_resilience(
         rate_limit=cfg.resilience.rate_limit,
         rate_capacity=cfg.resilience.rate_capacity,
+        per_user_rate_limit=cfg.resilience.per_user_rate_limit,
+        per_user_rate_capacity=cfg.resilience.per_user_rate_capacity,
+        user_bucket_ttl=cfg.resilience.user_bucket_ttl,
+        max_user_buckets=cfg.resilience.max_user_buckets,
     )
     configure_circuit_breaker(
         failure_threshold=cfg.resilience.cb_failure_threshold,

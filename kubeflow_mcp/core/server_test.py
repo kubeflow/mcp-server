@@ -30,11 +30,19 @@ from fastmcp import Client
 
 from kubeflow_mcp import __version__
 from kubeflow_mcp.common import utils as mcp_utils
-from kubeflow_mcp.common.constants import TOOL_NEXT_HINTS, TOOL_TO_PHASE
+from kubeflow_mcp.common.constants import TOOL_NEXT_HINTS, TOOL_TO_PHASE, ErrorCode
 from kubeflow_mcp.common.types import PreviewResponse, ToolResponse
+from kubeflow_mcp.core.middleware import _user_id_var
 from kubeflow_mcp.core.policy import get_effective_persona, set_effective_persona
 from kubeflow_mcp.core.resilience import reset_breakers
-from kubeflow_mcp.core.server import _inject_meta, create_server
+from kubeflow_mcp.core.server import (
+    _audit_wrap,
+    _inject_meta,
+    configure_resilience,
+    create_server,
+    get_rate_limiter,
+    reset_rate_limiter,
+)
 from kubeflow_mcp.trainer import CLIENT_TOOL_ANNOTATIONS, CLIENT_TOOL_DESCRIPTIONS
 
 
@@ -485,3 +493,87 @@ async def test_confirm_gate_matches_full_mode_in_dynamic_modes(k8s_writes, tool)
         set_effective_persona(previous)
 
     assert mismatches == {}
+
+
+class TestServerRateLimiting:
+    @pytest.fixture(autouse=True)
+    def clean_limiter(self):
+        reset_rate_limiter()
+        yield
+        reset_rate_limiter()
+
+    def test_global_rate_limiter_throttles(self):
+        configure_resilience(rate_limit=1.0, rate_capacity=1.0)
+        assert get_rate_limiter() is not None
+
+        def dummy_tool() -> dict:
+            return {"data": "ok"}
+
+        wrapped = _audit_wrap(dummy_tool)
+
+        # First call succeeds
+        res1 = wrapped()
+        assert res1 == {"data": "ok"}
+
+        # Second call is rate-limited
+        res2 = wrapped()
+        assert res2["error_code"] == ErrorCode.RATE_LIMITED
+        assert "Rate limit exceeded" in res2["error"]
+
+    def test_per_user_rate_limiter_isolates_users(self):
+        configure_resilience(
+            rate_limit=10.0,
+            rate_capacity=10.0,
+            per_user_rate_limit=1.0,
+            per_user_rate_capacity=1.0,
+        )
+
+        def dummy_tool() -> dict:
+            return {"data": "ok"}
+
+        wrapped = _audit_wrap(dummy_tool)
+
+        token_a = _user_id_var.set("user_alice")
+        try:
+            assert wrapped() == {"data": "ok"}
+            # user_alice exhausted
+            assert wrapped()["error_code"] == ErrorCode.RATE_LIMITED
+        finally:
+            _user_id_var.reset(token_a)
+
+        token_b = _user_id_var.set("user_bob")
+        try:
+            # user_bob is completely unaffected by user_alice's throttle
+            assert wrapped() == {"data": "ok"}
+            assert wrapped()["error_code"] == ErrorCode.RATE_LIMITED
+        finally:
+            _user_id_var.reset(token_b)
+
+    def test_rate_limiter_sets_span_attributes(self):
+        configure_resilience(
+            rate_limit=1.0,
+            rate_capacity=1.0,
+            per_user_rate_limit=1.0,
+            per_user_rate_capacity=1.0,
+        )
+
+        def dummy_tool() -> dict:
+            return {"data": "ok"}
+
+        span_mock = mock.MagicMock()
+        tracer_mock = mock.MagicMock()
+        tracer_mock.start_as_current_span.return_value.__enter__.return_value = span_mock
+
+        with mock.patch("kubeflow_mcp.core.server.get_tracer", return_value=tracer_mock):
+            wrapped = _audit_wrap(dummy_tool)
+
+            token = _user_id_var.set("user_charlie")
+            try:
+                wrapped()  # Exhaust user_charlie
+
+                res = wrapped()
+                assert res["error_code"] == ErrorCode.RATE_LIMITED
+                span_mock.set_attribute.assert_any_call("rate_limit.user", "user_charlie")
+                span_mock.set_attribute.assert_any_call("tool.success", False)
+            finally:
+                _user_id_var.reset(token)

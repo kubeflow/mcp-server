@@ -139,6 +139,22 @@ class ResilienceConfig(BaseModel):
 
     rate_limit: float = Field(default=10.0, gt=0, description="Requests/second refill rate")
     rate_capacity: float = Field(default=20.0, gt=0, description="Max burst capacity")
+    per_user_rate_limit: float | None = Field(
+        default=None,
+        gt=0,
+        description="Per-user requests/second refill rate (bucketed by sub claim)",
+    )
+    per_user_rate_capacity: float | None = Field(
+        default=None, gt=0, description="Per-user max burst capacity"
+    )
+    user_bucket_ttl: float = Field(
+        default=300.0,
+        gt=0,
+        description="Seconds of inactivity before an idle user bucket is evicted",
+    )
+    max_user_buckets: int = Field(
+        default=10000, gt=0, description="Maximum number of active user buckets to track in memory"
+    )
     cb_failure_threshold: int = Field(default=5, gt=0, description="Failures before circuit opens")
     cb_recovery_timeout: float = Field(
         default=30.0, ge=0, description="Seconds before half-open retry"
@@ -338,12 +354,36 @@ def load_config(config_path: Path | None = None) -> Config:
     )
 
     resilience_file = file_config.get("resilience", {})
+    per_user_rate = os.getenv("KUBEFLOW_MCP_PER_USER_RATE_LIMIT")
+    if per_user_rate is None:
+        per_user_rate = resilience_file.get("per_user_rate_limit")
+
+    per_user_capacity = os.getenv("KUBEFLOW_MCP_PER_USER_RATE_CAPACITY")
+    if per_user_capacity is None:
+        per_user_capacity = resilience_file.get("per_user_rate_capacity")
+
     resilience = ResilienceConfig(
         rate_limit=float(
             os.getenv("KUBEFLOW_MCP_RATE_LIMIT", resilience_file.get("rate_limit", 10.0))
         ),
         rate_capacity=float(
             os.getenv("KUBEFLOW_MCP_RATE_CAPACITY", resilience_file.get("rate_capacity", 20.0))
+        ),
+        per_user_rate_limit=float(per_user_rate) if per_user_rate is not None else None,
+        per_user_rate_capacity=(
+            float(per_user_capacity) if per_user_capacity is not None else None
+        ),
+        user_bucket_ttl=float(
+            os.getenv(
+                "KUBEFLOW_MCP_USER_BUCKET_TTL",
+                resilience_file.get("user_bucket_ttl", 300.0),
+            )
+        ),
+        max_user_buckets=int(
+            os.getenv(
+                "KUBEFLOW_MCP_MAX_USER_BUCKETS",
+                resilience_file.get("max_user_buckets", 10000),
+            )
         ),
         cb_failure_threshold=int(
             os.getenv(

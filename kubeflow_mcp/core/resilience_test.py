@@ -27,6 +27,7 @@ from kubeflow_mcp.core.resilience import (
     CircuitState,
     RateLimiter,
     SessionManager,
+    UserRateLimiter,
     configure_circuit_breaker,
     get_breaker,
     reset_breakers,
@@ -525,3 +526,178 @@ class TestSessionManager:
     def test_not_stale_when_empty(self):
         sm = SessionManager()
         assert sm.is_stale() is False
+
+
+# ─── UserRateLimiter ────────────────────────────────────────────────────────
+
+
+class TestUserRateLimiter:
+    def test_independent_user_buckets(self, clock):
+        """User A exhausting tokens must not impact User B."""
+        limiter = UserRateLimiter(user_rate=1.0, user_capacity=2.0)
+
+        assert limiter.acquire(user_id="user_a") is True
+        assert limiter.acquire(user_id="user_a") is True
+        assert limiter.acquire(user_id="user_a") is False
+
+        # User B still has full capacity
+        assert limiter.acquire(user_id="user_b") is True
+        assert limiter.acquire(user_id="user_b") is True
+        assert limiter.acquire(user_id="user_b") is False
+
+    def test_anonymous_fallback(self):
+        """None, empty, or whitespace user_id falls back to __anonymous__ bucket."""
+        limiter = UserRateLimiter(user_rate=1.0, user_capacity=1.0)
+
+        assert limiter.acquire(user_id=None) is True
+        assert limiter.acquire(user_id="") is False
+        assert limiter.acquire(user_id="   ") is False
+        assert limiter.active_user_count() == 1
+
+    def test_tokens_refill_per_user(self, clock):
+        """Tokens refill over time per user independently."""
+        limiter = UserRateLimiter(user_rate=10.0, user_capacity=2.0)
+
+        assert limiter.acquire(tokens=2.0, user_id="user_a") is True
+        assert limiter.acquire(tokens=1.0, user_id="user_a") is False
+
+        # Advance clock by 0.1s (1 token at 10 tokens/sec)
+        clock(0.1)
+        assert limiter.acquire(tokens=1.0, user_id="user_a") is True
+        assert limiter.acquire(tokens=1.0, user_id="user_a") is False
+
+    def test_global_ceiling_enforcement(self):
+        """Global limit blocks calls when the server-wide capacity is exhausted."""
+        limiter = UserRateLimiter(
+            user_rate=10.0,
+            user_capacity=10.0,
+            global_rate=1.0,
+            global_capacity=2.0,
+        )
+
+        assert limiter.acquire(user_id="user_1") is True
+        assert limiter.acquire(user_id="user_2") is True
+        # Global ceiling reached
+        assert limiter.acquire(user_id="user_3") is False
+        assert limiter.acquire(user_id="user_1") is False
+
+    def test_global_token_refund_when_user_bucket_denies(self):
+        """If user bucket denies, acquired global tokens are refunded."""
+        limiter = UserRateLimiter(
+            user_rate=1.0,
+            user_capacity=1.0,
+            global_rate=10.0,
+            global_capacity=10.0,
+        )
+
+        assert limiter.acquire(user_id="user_a") is True
+        # user_a is now exhausted, but global still had capacity
+        assert limiter.acquire(user_id="user_a") is False
+
+        # user_b should still be able to acquire from global
+        assert limiter.acquire(user_id="user_b") is True
+
+    @pytest.mark.parametrize(
+        ("kwargs", "err"),
+        [
+            ({"user_rate": 0.0}, "user_rate must be greater than zero"),
+            ({"user_rate": -1.0}, "user_rate must be greater than zero"),
+            ({"user_capacity": 0.0}, "user_capacity must be greater than zero"),
+            ({"user_capacity": -2.0}, "user_capacity must be greater than zero"),
+            ({"bucket_ttl": 0.0}, "bucket_ttl must be greater than zero"),
+            ({"max_buckets": 0}, "max_buckets must be greater than zero"),
+            ({"global_rate": 0.0}, "global_rate must be greater than zero"),
+            (
+                {"global_rate": 5.0, "global_capacity": 0.0},
+                "global_capacity must be greater than zero",
+            ),
+        ],
+    )
+    def test_rejects_invalid_configuration(self, kwargs, err):
+        with pytest.raises(ValueError, match=err):
+            UserRateLimiter(**kwargs)
+
+    @pytest.mark.parametrize("tokens", [0.0, -1.0])
+    def test_acquire_rejects_non_positive_tokens(self, tokens):
+        limiter = UserRateLimiter(user_rate=10.0, user_capacity=5.0)
+        with pytest.raises(ValueError, match="tokens must be greater than zero"):
+            limiter.acquire(tokens=tokens)
+
+    def test_ttl_eviction(self, clock):
+        """Inactive user buckets are evicted after bucket_ttl."""
+        limiter = UserRateLimiter(user_rate=1.0, user_capacity=5.0, bucket_ttl=10.0)
+
+        limiter.acquire(user_id="user_1")
+        limiter.acquire(user_id="user_2")
+        assert limiter.active_user_count() == 2
+
+        # Advance clock by 11 seconds
+        clock(11.0)
+        assert limiter.cleanup_expired() == 2
+        assert limiter.active_user_count() == 0
+
+    def test_lru_eviction(self, clock):
+        """When max_buckets is exceeded, the least recently used bucket is evicted."""
+        limiter = UserRateLimiter(
+            user_rate=1.0,
+            user_capacity=1.0,
+            max_buckets=2,
+            bucket_ttl=100.0,
+        )
+
+        limiter.acquire(user_id="user_1")
+        clock(1.0)
+        limiter.acquire(user_id="user_2")
+        clock(1.0)
+        assert limiter.active_user_count() == 2
+
+        # Touch user_1 so user_2 becomes the oldest
+        limiter.acquire(user_id="user_1")
+        clock(1.0)
+
+        # Adding user_3 should evict user_2 (oldest access)
+        limiter.acquire(user_id="user_3")
+        assert limiter.active_user_count() == 2
+
+        with limiter._lock:
+            assert "user_1" in limiter._buckets
+            assert "user_3" in limiter._buckets
+            assert "user_2" not in limiter._buckets
+
+    def test_reset(self):
+        """Reset clears all user buckets and restores global tokens."""
+        limiter = UserRateLimiter(
+            user_rate=1.0,
+            user_capacity=1.0,
+            global_rate=5.0,
+            global_capacity=5.0,
+        )
+        limiter.acquire(user_id="user_1")
+        limiter.acquire(user_id="user_2")
+        assert limiter.active_user_count() == 2
+
+        limiter.reset()
+        assert limiter.active_user_count() == 0
+
+    def test_concurrent_multi_user_access(self):
+        """Thread safety under concurrent acquisitions across multiple users."""
+        import threading
+
+        limiter = UserRateLimiter(user_rate=1000.0, user_capacity=100.0)
+        errors: list[Exception] = []
+
+        def worker(uid: str):
+            try:
+                for _ in range(50):
+                    limiter.acquire(user_id=uid)
+            except Exception as e:
+                errors.append(e)
+
+        threads = [threading.Thread(target=worker, args=(f"user_{i % 5}",)) for i in range(20)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors, f"Concurrent acquisition raised errors: {errors}"
+        assert limiter.active_user_count() == 5
