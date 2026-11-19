@@ -14,6 +14,10 @@
 
 """Trainer-specific constants."""
 
+# Bound cluster-wide pod scans used for GPU availability estimates.
+GPU_POD_PAGE_SIZE = 500
+MAX_GPU_POD_PAGES = 20
+
 MAX_DIAGNOSTIC_PODS = 32
 MAX_DIAGNOSTIC_CHARS = 16000
 MAX_DIAGNOSTIC_MESSAGE_CHARS = 1000

@@ -18,6 +18,8 @@ import logging
 import re
 from typing import Any
 
+from kubernetes.utils.quantity import parse_quantity
+
 from kubeflow_mcp.common.constants import (
     KUBEFLOW_SDK_VERSION_SPEC,
     MIN_K8S_VERSION,
@@ -422,15 +424,68 @@ def check_compatibility() -> dict[str, Any]:
         ).model_dump()
 
 
+def _pod_gpu_request(pod: Any) -> int:
+    """Compute effective NVIDIA GPU requests, including init and restartable init containers."""
+
+    def requested(container: Any) -> int:
+        resources = container.resources
+        if resources is None:
+            return 0
+        return int(
+            parse_quantity(
+                (resources.requests or {}).get(
+                    "nvidia.com/gpu", (resources.limits or {}).get("nvidia.com/gpu", 0)
+                )
+            )
+        )
+
+    sidecars = peak = 0
+    for container in pod.spec.init_containers or []:
+        count = requested(container)
+        peak = max(peak, sidecars + count)
+        if container.restart_policy == "Always":
+            sidecars += count
+    return max(peak, sidecars + sum(requested(c) for c in pod.spec.containers)) + int(
+        (pod.spec.overhead or {}).get("nvidia.com/gpu", 0)
+    )
+
+
+def _get_gpu_allocations(api: Any) -> dict[str, int]:
+    """Aggregate complete pod pages; partial scans must not imply free GPUs."""
+    from kubeflow_mcp.common.utils import K8S_TIMEOUT
+    from kubeflow_mcp.trainer.constants import GPU_POD_PAGE_SIZE, MAX_GPU_POD_PAGES
+
+    allocated: dict[str, int] = {}
+    continuation = None
+    for _ in range(MAX_GPU_POD_PAGES):
+        page = api.list_pod_for_all_namespaces(
+            limit=GPU_POD_PAGE_SIZE,
+            _continue=continuation,
+            field_selector="status.phase!=Succeeded,status.phase!=Failed",
+            _request_timeout=K8S_TIMEOUT,
+        )
+        for pod in page.items:
+            if pod.spec.node_name and pod.status.phase not in ("Succeeded", "Failed"):
+                node = pod.spec.node_name
+                allocated[node] = allocated.get(node, 0) + _pod_gpu_request(pod)
+        continuation = getattr(page.metadata, "_continue", None)
+        if not continuation:
+            return allocated
+    raise RuntimeError("GPU allocation pod scan exceeded its page limit")
+
+
 def get_cluster_resources() -> dict[str, Any]:
-    """Check cluster GPU and compute availability.
+    """Check cluster GPU capacity and estimated unallocated GPUs.
 
     Call this before submitting training jobs to verify resources exist.
 
     Returns:
         dict: Response containing:
 
-        - ``gpu_total`` (int): Total GPUs across all nodes
+        - ``gpu_total`` (int): Allocatable GPU capacity across all nodes
+        - ``gpu_allocated`` / ``gpu_available``: GPU requests / remaining capacity,
+          or None when the cluster-wide pod scan is unavailable or incomplete
+        - ``availability_note``: Limits of the availability estimate
         - ``nodes_with_gpu`` (int): Number of nodes with GPUs
         - ``node_count`` (int): Total node count
         - ``nodes`` (list): Per-node details (name, memory, cpu, gpus)
@@ -440,7 +495,7 @@ def get_cluster_resources() -> dict[str, Any]:
         {"data": {"gpu_total": 4, "nodes_with_gpu": 2, ...}}
 
     Note:
-        Returns ``gpu_total=0`` if no GPUs available - LLM fine-tuning requires GPUs.
+        Free GPUs do not guarantee scheduling; affinity, taints and other requests also apply.
     """
     try:
         from kubeflow_mcp.common.utils import K8S_TIMEOUT, get_core_v1_api
@@ -466,9 +521,33 @@ def get_cluster_resources() -> dict[str, Any]:
 
             node_info.append(node_data)
 
+        allocated: dict[str, int] | None = {}
+        note = "Availability estimates unallocated NVIDIA GPU requests, not scheduler placement."
+        try:
+            allocated = _get_gpu_allocations(v1)
+        except Exception:
+            allocated = None
+            note = "GPU availability unknown: cluster-wide pod requests could not be fully read. gpu_total is capacity."
+        for info in node_info:
+            info["gpu_allocated"] = (
+                allocated.get(info["name"], 0) if allocated is not None else None
+            )
+            info["gpu_available"] = (
+                max(0, info.get("gpus", 0) - info["gpu_allocated"])
+                if allocated is not None
+                else None
+            )
+
         return ToolResponse(
             data={
                 "gpu_total": gpu_total,
+                "gpu_allocated": sum(n["gpu_allocated"] for n in node_info)
+                if allocated is not None
+                else None,
+                "gpu_available": sum(n["gpu_available"] for n in node_info)
+                if allocated is not None
+                else None,
+                "availability_note": note,
                 "nodes_with_gpu": sum(1 for n in node_info if n.get("gpus", 0) > 0),
                 "node_count": len(node_info),
                 "nodes": node_info,
@@ -693,7 +772,7 @@ def pre_flight(
 
     if has_torchtune and gpu_total > 0:
         tool_selection["recommended"] = "fine_tune"
-        tool_selection["reason"] = "torchtune runtime + GPUs available"
+        tool_selection["reason"] = "torchtune runtime + GPU capacity detected"
         next_steps.append("torchtune runtime available — fine_tune() is supported")
     elif has_torchtune and gpu_total == 0:
         tool_selection["recommended"] = "run_custom_training"

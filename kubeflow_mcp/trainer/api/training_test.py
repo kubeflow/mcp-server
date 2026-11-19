@@ -84,6 +84,9 @@ def _offline_hub(monkeypatch):
         "kubeflow_mcp.common.utils.get_trainer_effective_namespace",
         lambda namespace=None: namespace or "default",
     )
+    monkeypatch.setattr(
+        "kubeflow_mcp.trainer.api.planning.get_cluster_resources", MagicMock(return_value={})
+    )
 
 
 # ─── fine_tune validation ───────────────────────────────────────────────────
@@ -1620,3 +1623,247 @@ def test_admission_validation_distinguished_from_permissions(
     if expected == "VALIDATION_ERROR":
         assert result["error"] == message
         assert "service_account_name" not in result["hint"]
+
+
+@pytest.mark.parametrize(
+    "free,expected",
+    [
+        (1, "no node has that capacity"),
+        (None, "Free GPUs are unknown"),
+        (0, "cannot fit all requested workers"),
+    ],
+)
+def test_fine_tune_preview_inherits_resources_and_warns_per_pod_fit(free, expected):
+    from kubeflow_mcp.trainer.api.training import _fine_tune_resource_preview
+
+    api = MagicMock()
+    api.get_namespaced_custom_object.side_effect = ApiException(status=404)
+    api.get_cluster_custom_object.return_value = {
+        "spec": {
+            "template": {
+                "spec": {
+                    "replicatedJobs": [
+                        {
+                            "name": "node",
+                            "template": {
+                                "spec": {
+                                    "template": {
+                                        "spec": {
+                                            "containers": [
+                                                {
+                                                    "name": "node",
+                                                    "resources": {
+                                                        "requests": {"cpu": "4", "memory": "16Gi"},
+                                                        "limits": {"nvidia.com/gpu": "2"},
+                                                    },
+                                                }
+                                            ]
+                                        }
+                                    }
+                                }
+                            },
+                        }
+                    ]
+                }
+            }
+        }
+    }
+    cluster = {
+        "data": {
+            "gpu_total": 2,
+            "gpu_available": free,
+            "nodes": [{"gpus": 1, "gpu_available": free}, {"gpus": 1, "gpu_available": free}],
+        }
+    }
+    with (
+        patch("kubeflow_mcp.common.utils.get_custom_objects_api", return_value=api),
+    ):
+        # An explicit 1-GPU override fits capacity but availability can still be unknown.
+        result = _fine_tune_resource_preview(
+            "torchtune-qwen", "workloads", {"gpu": 1} if free != 1 else None, 1, cluster["data"]
+        )
+    assert result["effective_resources_per_node"]["cpu"] == "4"
+    assert result["effective_resources_per_node"]["nvidia.com/gpu"] == (1 if free != 1 else "2")
+    assert any(expected in warning for warning in result["resource_warnings"])
+    assert api.get_namespaced_custom_object.call_args.kwargs["namespace"] == "workloads"
+
+
+def test_resource_preview_keeps_explicit_requests_when_runtime_unreadable():
+    from kubeflow_mcp.trainer.api.training import _fine_tune_resource_preview
+
+    api = MagicMock()
+    api.get_namespaced_custom_object.side_effect = ApiException(status=403)
+    with patch("kubeflow_mcp.common.utils.get_custom_objects_api", return_value=api):
+        result = _fine_tune_resource_preview("torchtune-qwen", "workloads", {"cpu": "2"}, 1, {})
+    assert result["effective_resources_per_node"] == {"cpu": "2"}
+    assert "incomplete" in result["resource_warnings"][0]
+    api.get_cluster_custom_object.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "resources,expected",
+    [
+        ({"GPU": 1}, {"nvidia.com/gpu": 1}),
+        ({"nvidia.com/gpu": 1}, {"nvidia.com/gpu": 1}),
+        (
+            {"gpu": 1, "CPU": "2", "Memory": "8Gi", "storage": "10Gi"},
+            {"nvidia.com/gpu": 1, "cpu": "2", "memory": "8Gi", "ephemeral-storage": "10Gi"},
+        ),
+    ],
+)
+def test_fine_tune_preview_matches_sdk_resources_and_inspects_cluster_once(resources, expected):
+    pod_spec = {
+        "containers": [
+            {
+                "name": "node",
+                "resources": {
+                    "requests": {"cpu": "4"},
+                    "limits": {"nvidia.com/gpu": "2"},
+                },
+            }
+        ]
+    }
+    job = {"name": "node", "template": {"spec": {"template": {"spec": pod_spec}}}}
+    api = MagicMock()
+    api.get_namespaced_custom_object.return_value = {
+        "spec": {
+            "template": {
+                "spec": {"replicatedJobs": [job]},
+            }
+        }
+    }
+    snapshot = {
+        "gpu_total": 2,
+        "gpu_available": 2,
+        "nodes": [
+            {"gpus": 1, "gpu_available": 1},
+            {"gpus": 1, "gpu_available": 1},
+        ],
+    }
+    with (
+        patch(PATCH_NS_CHECK, return_value=None),
+        patch(PATCH_CLIENT) as client,
+        patch("kubeflow_mcp.common.utils.get_custom_objects_api", return_value=api),
+        patch(
+            "kubeflow_mcp.trainer.api.planning.get_cluster_resources",
+            return_value={"data": snapshot},
+        ) as inspect,
+    ):
+        result = fine_tune(
+            "hf://org/model",
+            "hf://org/dataset",
+            runtime="torchtune-test",
+            namespace="workloads",
+            resources_per_node=resources,
+        )
+    assert result["status"] == "preview"
+    effective = result["config"]["effective_resources_per_node"]
+    assert expected.items() <= effective.items()
+    assert "GPU" not in effective
+    assert "CPU" not in effective
+    assert not any("no node has that capacity" in w for w in result["config"]["resource_warnings"])
+    assert result["config"]["resources_per_node"] == resources
+    inspect.assert_called_once_with()
+    client.assert_not_called()
+
+
+def test_fine_tune_zero_gpu_snapshot_blocks_before_runtime_inspection():
+    with (
+        patch(PATCH_NS_CHECK, return_value=None),
+        patch("kubeflow_mcp.common.utils.get_custom_objects_api") as api,
+        patch(
+            "kubeflow_mcp.trainer.api.planning.get_cluster_resources",
+            return_value={"data": {"gpu_total": 0}},
+        ) as inspect,
+    ):
+        result = fine_tune("hf://org/model", "hf://org/dataset")
+    assert result["error_code"] == "VALIDATION_ERROR"
+    assert "No GPUs detected" in result["error"]
+    inspect.assert_called_once_with()
+    api.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "failure", [{"success": False, "error": "Unavailable"}, RuntimeError("Unavailable")]
+)
+def test_fine_tune_preview_preserves_unknown_availability_on_cluster_failure(failure):
+    with (
+        patch(PATCH_NS_CHECK, return_value=None),
+        patch("kubeflow_mcp.trainer.api.planning.get_cluster_resources") as inspect,
+    ):
+        if isinstance(failure, Exception):
+            inspect.side_effect = failure
+        else:
+            inspect.return_value = failure
+        result = fine_tune("hf://org/model", "hf://org/dataset", resources_per_node={"GPU": 1})
+    assert result["status"] == "preview"
+    assert any("Free GPUs are unknown" in w for w in result["config"]["resource_warnings"])
+    inspect.assert_called_once_with()
+
+
+def test_fine_tune_healthy_resource_preview_has_no_warnings() -> None:
+    from kubeflow_mcp.trainer.api.training import _fine_tune_resource_preview
+
+    pod = {"containers": [{"name": "node", "resources": {"requests": {"nvidia.com/gpu": "1"}}}]}
+    cluster = {"gpu_available": 2, "nodes": [{"gpus": 2, "gpu_available": 2}]}
+    with patch("kubeflow_mcp.trainer.api.training._get_runtime_node_spec", return_value=pod):
+        result = _fine_tune_resource_preview("torchtune", "workloads", None, 1, cluster)
+    assert result["effective_resources_per_node"] == {"nvidia.com/gpu": "1"}
+    assert result["resource_warnings"] == []
+
+
+@pytest.mark.parametrize(
+    "resources,runtime_gpus,warned",
+    [
+        ({"cpu": "8", "memory": "32Gi"}, 2, True),
+        ({"memory": "32Gi"}, 2, True),
+        ({"CPU": "8"}, 2, True),
+        ({"gpu": 2, "cpu": "8"}, 2, False),
+        ({"GPU": 2}, 2, False),
+        ({"nvidia.com/gpu": 2}, 2, False),
+        ({"mig-1g.5gb": 1}, 2, False),
+        ({"memory": "32Gi"}, 0, False),
+        (None, 2, False),
+    ],
+)
+def test_preview_warns_when_overrides_omit_inherited_gpus(
+    resources: dict | None, runtime_gpus: int, warned: bool
+) -> None:
+    pod = {
+        "containers": [
+            {
+                "name": "node",
+                "resources": {"limits": {"nvidia.com/gpu": str(runtime_gpus)}},
+            }
+        ]
+    }
+    cluster = {
+        "data": {
+            "gpu_total": 2,
+            "gpu_available": 2,
+            "nodes": [{"gpus": 2, "gpu_available": 2}],
+        }
+    }
+    original = dict(resources) if resources is not None else None
+    with (
+        patch(PATCH_NS_CHECK, return_value=None),
+        patch(PATCH_CLIENT) as sdk,
+        patch("kubeflow_mcp.trainer.api.training._get_runtime_node_spec", return_value=pod),
+        patch(
+            "kubeflow_mcp.trainer.api.planning.get_cluster_resources", return_value=cluster
+        ) as inspect,
+    ):
+        result = fine_tune(
+            "hf://org/model",
+            "hf://org/dataset",
+            runtime="torchtune-test",
+            resources_per_node=resources,
+        )
+    assert result["status"] == "preview"
+    config = result["config"]
+    assert any("Set gpu explicitly" in w for w in config["resource_warnings"]) == warned
+    assert int(config["effective_resources_per_node"]["nvidia.com/gpu"]) == runtime_gpus
+    assert config.get("resources_per_node") == original
+    assert resources == original
+    inspect.assert_called_once_with()
+    sdk.assert_not_called()
