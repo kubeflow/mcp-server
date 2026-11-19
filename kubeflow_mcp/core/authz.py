@@ -249,7 +249,12 @@ class SarAuthorizationMiddleware(Middleware):
         if missing:
             logger.info(
                 "authz_denied",
-                extra={"audit": True, "tool": tool, "user": identity.user, "missing": missing},
+                extra={
+                    "audit": True,
+                    "tool": tool,
+                    "user": identity.user,
+                    "missing_permissions": missing,
+                },
             )
             return _refuse(
                 f"'{identity.user}' may not call '{tool}' here: cannot {'; cannot '.join(missing)}",
