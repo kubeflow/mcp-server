@@ -524,3 +524,45 @@ async def test_confirm_gate_matches_full_mode_in_dynamic_modes(k8s_writes, tool)
         set_effective_persona(previous)
 
     assert mismatches == {}
+
+
+async def _instructions_and_tools(mode: str, tier: str = "full") -> tuple[str, set[str]]:
+    previous = get_effective_persona()
+    try:
+        server = create_server(persona="platform-admin", mode=mode, instruction_tier=tier)
+        async with Client(server) as client:
+            names = {tool.name for tool in await client.list_tools()}
+            return client.instructions or "", names
+    finally:
+        set_effective_persona(previous)
+
+
+@pytest.mark.parametrize("tier", ["full", "compact", "minimal"])
+@pytest.mark.parametrize(
+    ("mode", "meta_tools"),
+    [
+        ("progressive", ["list_tools", "describe_tools", "execute_tool"]),
+        ("semantic", ["find_tools", "execute_tool"]),
+    ],
+)
+async def test_dynamic_mode_instructions_explain_tool_access(mode, meta_tools, tier):
+    """Only meta-tools are registered, so the instructions must say how to reach the rest."""
+    instructions, registered = await _instructions_and_tools(mode, tier)
+
+    assert registered == set(meta_tools)
+    assert f"TOOL ACCESS ({mode} mode)" in instructions
+    for name in meta_tools:
+        assert f"{name}(" in instructions
+
+
+async def test_semantic_mode_instructions_skip_progressive_meta_tools():
+    instructions, _ = await _instructions_and_tools("semantic")
+
+    assert "list_tools(" not in instructions
+    assert "describe_tools(" not in instructions
+
+
+async def test_full_mode_instructions_have_no_tool_access_block():
+    instructions, _ = await _instructions_and_tools("full")
+
+    assert "TOOL ACCESS" not in instructions
