@@ -213,6 +213,7 @@ Custom personas can also be defined in `~/.kf-mcp-policy.yaml` (see [Architectur
 | `--instruction-tier` | `full` \| `compact` \| `minimal` | Agent instruction verbosity |
 | `--transport` | `stdio` \| `http` *(default: `stdio`)* | Transport protocol (`sse` is deprecated) |
 | `--auth-token` | `<token>` | Bearer token for HTTP authentication |
+| `--authz` | `none` \| `sar` | `sar` checks each tool call against the caller's own Kubernetes RBAC (needs JWT auth) |
 | `--otel-endpoint` | `<url>` | Optional OTLP HTTP endpoint for OpenTelemetry tracing |
 | `--log-level` | `DEBUG` \| `INFO` \| `WARNING` \| `ERROR` | Server log verbosity |
 | `--log-format` | `console` \| `json` | Auto-detected if omitted |
@@ -231,6 +232,7 @@ Custom personas can also be defined in `~/.kf-mcp-policy.yaml` (see [Architectur
 | `KUBEFLOW_MCP_JWKS_URI` | _(none)_ | JWKS endpoint for JWT verification (production) |
 | `KUBEFLOW_MCP_JWT_ISSUER` | _(none)_ | Expected JWT issuer (required with `KUBEFLOW_MCP_JWKS_URI`) |
 | `KUBEFLOW_MCP_JWT_AUDIENCE` | _(none)_ | Expected JWT audience (required with `KUBEFLOW_MCP_JWKS_URI`) |
+| `KUBEFLOW_MCP_AUTHZ` | `none` | `sar` checks each tool call as the caller (needs JWT auth) |
 | `KUBEFLOW_MCP_ALLOWED_HOSTS` | _(loopback)_ | Allowed `Host` headers for DNS rebinding protection |
 | `KUBEFLOW_MCP_ALLOWED_ORIGINS` | _(loopback)_ | Allowed `Origin` headers |
 | `KUBEFLOW_MCP_DNS_REBINDING_PROTECTION` | `true` | Set `false` to disable Host/Origin checks (not recommended) |
@@ -241,6 +243,8 @@ Custom personas can also be defined in `~/.kf-mcp-policy.yaml` (see [Architectur
 
 `KUBEFLOW_MCP_JWT_ISSUER` and `KUBEFLOW_MCP_JWT_AUDIENCE` are required with `KUBEFLOW_MCP_JWKS_URI`; the server refuses to start without them.
 Without `--auth-token` or JWT settings on `--transport http`, the server logs a warning that the endpoint is open.
+
+With JWT auth, `--authz sar` also checks every tool call against the **caller's** Kubernetes RBAC with a `SubjectAccessReview`, and refuses it with the missing permissions if the caller may not make it. See [Per-caller authorization](ARCHITECTURE.md#per-caller-authorization---authz-sar).
 
 </details>
 

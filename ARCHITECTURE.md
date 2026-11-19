@@ -214,13 +214,13 @@ The tool accepts a Python script string, wraps it inside `def train():`, and cal
 
 #### 3. Identity — Per-User Mapping
 
-**Severity: Medium** | **Status: Open, tracked in [ROADMAP.md](ROADMAP.md) Step 3**
+**Severity: Medium** | **Status: Opt-in mitigation (`--authz sar`, [#565](https://github.com/kubeflow/mcp-server/issues/565))**
 
 `core/auth.py` implements HTTP-layer authentication (API key via `--auth-token`, JWT/OIDC via `KUBEFLOW_MCP_JWKS_URI` with a required issuer and audience). However, authenticated identities are not yet mapped to distinct Kubernetes identities. All tool calls run under whatever Kubeconfig the process was started with.
 
 **Impact:** In multi-user deployments, all users share the same Kubernetes identity. There is no per-user RBAC enforcement at the MCP layer (the auth layer verifies *who* is calling, but cannot scope *what* they can do beyond persona-level filtering).
 
-**Recommendation:** For single-user local development (stdio), this is acceptable — the user's own Kubeconfig is used. For multi-user HTTP deployments, configure `--auth-token` or JWT and enforce identity at the ingress/gateway layer until per-user Kubernetes impersonation is wired (Step 3).
+**Recommendation:** For single-user local development (stdio), this is acceptable — the user's own Kubeconfig is used. For multi-user HTTP deployments, configure JWT auth and turn on [per-caller authorization](#per-caller-authorization---authz-sar), so each call is checked against the caller's own Kubernetes RBAC. Calls still run as the server's account, so that account bounds what anyone can do.
 
 ### Recommended Deployment Practices
 
@@ -342,6 +342,51 @@ policy:
     - team-b
 ```
 
+#### Per-caller authorization (`--authz sar`)
+
+With `--authz sar` (or `KUBEFLOW_MCP_AUTHZ=sar`, or `authz.mode: sar` in the config file)
+the server checks every tool call **as the caller** before it runs. For each Kubernetes
+request the tool declares in `CLIENT_TOOL_PERMISSIONS`, it sends a `SubjectAccessReview`
+asking whether the caller may make it, and refuses the call with `PERMISSION_DENIED` and the
+missing permissions if not. Calls that pass still run as the server's account, so this only
+narrows what a caller can do.
+
+- **Caller.** User and groups come from the verified JWT: claims `sub` and `groups` by
+  default (`authz.user_claim`, `authz.groups_claim`), with optional `authz.username_prefix` /
+  `authz.groups_prefix` to match the API server's `--oidc-username-prefix` /
+  `--oidc-groups-prefix`, plus `system:authenticated`. The mode needs JWT auth: the server
+  refuses to start with it under stdio, a shared API key, or no auth.
+- **What is checked.** Every declared permission of the call, reads included, in the
+  namespace the tool will use. Permissions with `when` count only when that argument is set
+  (`get_runtime`'s Pod rights only with `include_packages=True`). `inspect_controller` without
+  `namespace=` is checked cluster-wide, since it finds the controller's namespace itself.
+- **Fails closed.** No verified user, a review that errors or times out, or a namespace that
+  cannot be resolved refuses the call.
+- **Cache.** A decision is reused for the same caller and permission for `authz.cache_ttl`
+  seconds (default 30, `0` turns it off), so an RBAC change can take that long to apply.
+- **Audit.** Refusals are logged as `authz_denied` / `authz_unavailable` events with
+  `"audit": true`, the user and the missing permissions.
+
+The server's own account needs one more rule:
+
+```yaml
+- apiGroups: ["authorization.k8s.io"]
+  resources: ["subjectaccessreviews"]
+  verbs: ["create"]
+```
+
+This lets the server ask about any user's permissions, which is far less than the write
+access it already holds. The people calling the server need ordinary Roles for what they do,
+for example `delete` on `trainjobs` in their team's namespace.
+
+**Limits.**
+
+- A review answers what RBAC (or the configured authorizer) allows. Admission webhooks and
+  policies can still refuse a write later, and those errors are reported as today.
+- Pipelines tools call the Kubeflow Pipelines API server, which authorizes them itself; only
+  `get_pipeline_logs`' pod-log read is checked here.
+- Personas and the namespace policy (`policy.namespaces`) still apply: a call must pass all of them.
+
 ### Resilience
 
 All tool calls pass through a rate limiter and per-tool circuit breakers:
@@ -359,6 +404,7 @@ For production deployments:
 - [ ] For HTTP transport: set `--auth-token` (dev) or `KUBEFLOW_MCP_JWKS_URI` + `KUBEFLOW_MCP_JWT_ISSUER` + `KUBEFLOW_MCP_JWT_AUDIENCE` (production JWT; all three are required, and the audience should be one that only this server's tokens carry) — the server warns if HTTP runs without auth
 - [ ] Use stdio transport for local dev; place HTTP behind an authenticated reverse proxy for additional defense-in-depth
 - [ ] Bind the MCP server ServiceAccount to the minimum ClusterRole above
+- [ ] For multi-user HTTP deployments with JWT auth, enable `--authz sar` so calls are checked against each caller's own RBAC, and add `create` on `subjectaccessreviews` to the server's role
 - [ ] Do not grant `run_custom_training` access to untrusted users
 - [ ] Restrict which ServiceAccounts training jobs may use with an admission policy (Kubernetes RBAC alone does not limit `serviceAccountName`). Training tools only check the `service_account_name` syntax. The policy must match **TrainJobs** and deny with **403**: a ValidatingAdmissionPolicy needs `reason: Forbidden` (it returns 422 by default), and a webhook must set status code 403 (it returns 400 if unset). Only a 403 is returned as `PERMISSION_DENIED`; other denials come back as `SDK_ERROR`. A Pod-level policy is not enough, since it only rejects the Pod later in the Job controller (a `FailedCreate` event), after the tool has already reported success
 - [ ] Keep log level at INFO or above in production (DEBUG exposes stack traces in error responses)
