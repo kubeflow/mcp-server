@@ -132,6 +132,35 @@ class TestOptimizeRemainsUnusable:
         assert "func_args" not in fields
 
 
+class TestReadersRemainLimited:
+    """Document *why* every optimizer reader goes to Katib's resources directly.
+
+    Revisit triggers, as above: if one starts failing, the SDK's readers may now
+    describe every experiment the creation tools can make, and moving the
+    readers back onto ``OptimizerClient`` should be reconsidered.
+    """
+
+    def test_algorithm_reader_still_knows_only_random_and_grid(self):
+        """get_job() converts the algorithm through this registry and raises for
+        anything else, so a Bayesian or TPE experiment cannot be read."""
+        from kubeflow.optimizer.types.algorithm_types import ALGORITHM_REGISTRY
+
+        from kubeflow_mcp.optimizer.api.optimization import ALGORITHMS
+
+        assert set(ALGORITHM_REGISTRY) == {"random", "grid"}
+        assert set(ALGORITHMS) - set(ALGORITHM_REGISTRY), "creation offers more algorithms"
+
+    def test_trials_are_still_read_as_trainjobs(self):
+        """Every trial read resolves a TrainJob named after the trial, so a
+        batch/v1 Job trial fails (and was reported as a missing experiment)."""
+        import dataclasses
+
+        from kubeflow.optimizer.types.optimization_types import Trial
+
+        fields = {f.name for f in dataclasses.fields(Trial)}
+        assert "trainjob" in fields
+
+
 class TestOptimizerTypeImports:
     """Verify SDK types used by MCP tools are importable."""
 

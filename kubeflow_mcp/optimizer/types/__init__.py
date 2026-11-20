@@ -14,13 +14,18 @@
 
 """Optimizer-specific type helpers.
 
-Serializers that convert kubeflow.optimizer SDK dataclasses
-(``OptimizationJob``, ``Trial``, ``Result``, ``Metric``, ``Objective``,
-search-space objects, ``Event``) into plain JSON-serializable dicts for
+Serializers that turn Katib's own resources (Experiment, Trial and Suggestion
+custom resources, and Kubernetes events) into plain JSON-serializable dicts for
 MCP tool responses.
 
-Kept here (rather than inline in api/*.py) so discovery and monitoring
-tools produce identical field names for the same SDK objects.
+They read the custom resources rather than the SDK's ``OptimizationJob``
+dataclasses because the SDK can only describe experiments it could have
+created itself: its reader rejects every algorithm but random and grid, and
+assumes each trial runs a TrainJob. The resources describe every algorithm and
+workload kind the creation tools accept.
+
+Kept here (rather than inline in api/*.py) so discovery, monitoring and
+lifecycle tools produce identical field names for the same resource.
 """
 
 from typing import Any
@@ -37,18 +42,34 @@ from kubeflow_mcp.optimizer.constants import (
 # SDK reports the resulting job status as "Complete".
 _CR_CONDITION_SUCCEEDED = "Succeeded"
 
-# Trial status comes from the Trial's underlying TrainJob (``trial.trainjob.status``),
-# so these are TrainJob statuses — not the OptimizationJob statuses in
-# optimizer/constants. ``POD_SUCCEEDED`` is tolerated defensively because pod-level
-# phase and TrainJob completion are reported with different words.
-_SUCCESS_STATUSES = {JobStatus.COMPLETE, JobStatus.POD_SUCCEEDED}
-_FAILED_STATUSES = {JobStatus.FAILED}
-_RUNNING_STATUSES = {JobStatus.RUNNING}
+# Trial states, from the Trial CR's true conditions, checked in this order:
+# Katib leaves earlier conditions in place as a trial progresses, so a finished
+# trial still carries Created and may carry Running. A succeeded trial is
+# reported as "Complete", the word the trial status filter and the TrainJob tools
+# already use, so a filter written for one client works for the other.
+_TRIAL_STATES: tuple[tuple[str, str], ...] = (
+    ("EarlyStopped", "EarlyStopped"),
+    ("Succeeded", JobStatus.COMPLETE),
+    ("Failed", JobStatus.FAILED),
+    ("Killed", "Killed"),
+    ("MetricsUnavailable", "MetricsUnavailable"),
+    ("Running", JobStatus.RUNNING),
+    ("Created", JobStatus.CREATED),
+)
+TRIAL_SUCCEEDED = JobStatus.COMPLETE
+# Katib counts a trial as active (it occupies a parallelTrialCount slot) until
+# it reaches one of the terminal conditions above.
+ACTIVE_TRIAL_STATES = frozenset({JobStatus.CREATED, JobStatus.RUNNING})
 
-
-def _enum_value(value: Any) -> Any:
-    """Return ``value.value`` for enums, otherwise the value unchanged."""
-    return getattr(value, "value", value)
+# trial status -> the response counter it feeds
+_TRIAL_STATE_COUNTERS = {
+    JobStatus.RUNNING: "running_trials",
+    TRIAL_SUCCEEDED: "succeeded_trials",
+    JobStatus.FAILED: "failed_trials",
+    JobStatus.CREATED: "pending_trials",
+    "Killed": "killed_trials",
+    "EarlyStopped": "early_stopped_trials",
+}
 
 
 def _isoformat(value: Any) -> str | None:
@@ -60,168 +81,139 @@ def _isoformat(value: Any) -> str | None:
     return str(value)
 
 
-def metric_to_dict(metric: Any) -> dict[str, Any]:
-    """Serialize an optimizer ``Metric`` (name, min, max, latest)."""
-    return {
-        "name": getattr(metric, "name", None),
-        "min": getattr(metric, "min", None),
-        "max": getattr(metric, "max", None),
-        "latest": getattr(metric, "latest", None),
-    }
+def _true_conditions(status: dict[str, Any]) -> set[str]:
+    """Types of the conditions currently ``True`` on a CR status."""
+    return {c.get("type") for c in (status.get("conditions") or []) if c.get("status") == "True"}
 
 
-def metrics_to_list(metrics: Any) -> list[dict[str, Any]]:
-    """Serialize a list of ``Metric`` objects."""
-    return [metric_to_dict(m) for m in (metrics or [])]
-
-
-def trial_status(trial: Any) -> str:
-    """Derive a trial's status from its underlying TrainJob.
-
-    The optimizer ``Trial`` dataclass has no status field of its own; the
-    execution state lives on ``trial.trainjob.status``.
-    """
-    trainjob = getattr(trial, "trainjob", None)
-    return getattr(trainjob, "status", None) or "Unknown"
-
-
-def trial_to_dict(trial: Any) -> dict[str, Any]:
-    """Serialize an optimizer ``Trial`` (name, parameters, metrics, status)."""
-    trainjob = getattr(trial, "trainjob", None)
-    return {
-        "name": getattr(trial, "name", None),
-        "status": trial_status(trial),
-        "parameters": dict(getattr(trial, "parameters", {}) or {}),
-        "metrics": metrics_to_list(getattr(trial, "metrics", None)),
-        "trainjob": getattr(trainjob, "name", None),
-    }
-
-
-def objective_to_dict(objective: Any) -> dict[str, Any]:
-    """Serialize an ``Objective`` (metric + direction enum)."""
-    return {
-        "metric": getattr(objective, "metric", None),
-        "direction": _enum_value(getattr(objective, "direction", None)),
-    }
-
-
-def search_space_entry_to_dict(space: Any) -> dict[str, Any]:
-    """Serialize a single search-space entry.
-
-    Handles both ``ContinuousSearchSpace`` (min/max/distribution) and
-    ``CategoricalSearchSpace`` (choices).
-    """
-    if hasattr(space, "choices"):
-        return {"type": "categorical", "choices": list(space.choices or [])}
-    if hasattr(space, "min") and hasattr(space, "max"):
-        return {
-            "type": "continuous",
-            "min": space.min,
-            "max": space.max,
-            "distribution": _enum_value(getattr(space, "distribution", None)),
+def metrics_from_observation(observation: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Serialize ``observation.metrics`` from a Trial or the optimal trial."""
+    return [
+        {
+            "name": m.get("name"),
+            "min": m.get("min"),
+            "max": m.get("max"),
+            "latest": m.get("latest"),
         }
-    return {"type": "unknown", "value": str(space)}
+        for m in ((observation or {}).get("metrics") or [])
+    ]
 
 
-def search_space_to_dict(search_space: Any) -> dict[str, Any]:
-    """Serialize the ``dict[str, SearchSpace]`` map on an OptimizationJob."""
-    if not search_space:
-        return {}
-    return {name: search_space_entry_to_dict(space) for name, space in search_space.items()}
+def parameters_from_assignments(assignments: list[dict[str, Any]] | None) -> dict[str, Any]:
+    """Serialize ``parameterAssignments`` (Katib stores every value as a string)."""
+    return {pa.get("name"): pa.get("value") for pa in (assignments or []) if pa.get("name")}
 
 
-def algorithm_to_dict(algorithm: Any) -> dict[str, Any]:
-    """Serialize an algorithm object (RandomSearch / GridSearch)."""
-    if algorithm is None:
-        return {}
-    data: dict[str, Any] = {"name": type(algorithm).__name__}
-    random_state = getattr(algorithm, "random_state", None)
-    if random_state is not None:
-        data["random_state"] = random_state
-    return data
+def trial_status(trial: dict[str, Any]) -> str:
+    """Derive a trial's state from the Trial CR's conditions."""
+    true = _true_conditions(trial.get("status") or {})
+    for condition, state in _TRIAL_STATES:
+        if condition in true:
+            return state
+    return "Unknown"
 
 
-def trial_counts_from_job(job: Any) -> dict[str, int]:
-    """Aggregate trial counts by status for an OptimizationJob."""
-    trials = getattr(job, "trials", None) or []
-    running = succeeded = failed = 0
+def trial_to_dict(trial: dict[str, Any]) -> dict[str, Any]:
+    """Serialize a Trial CR (name, status, parameters, metrics, workload).
+
+    ``trainjob`` names the trial's TrainJob when it runs one and is ``None``
+    otherwise; ``workload_kind`` says what it runs (a TrainJob, a batch/v1 Job,
+    ...), which is what logs and events resolve against.
+    """
+    metadata = trial.get("metadata") or {}
+    spec = trial.get("spec") or {}
+    kind = (spec.get("runSpec") or {}).get("kind")
+    name = metadata.get("name")
+    return {
+        "name": name,
+        "status": trial_status(trial),
+        "parameters": parameters_from_assignments(spec.get("parameterAssignments")),
+        "metrics": metrics_from_observation((trial.get("status") or {}).get("observation")),
+        # Katib names a trial's workload after the trial.
+        "trainjob": name if kind == "TrainJob" else None,
+        "workload_kind": kind,
+        "creation_timestamp": metadata.get("creationTimestamp"),
+    }
+
+
+def trial_counts_from_trials(trials: list[dict[str, Any]]) -> dict[str, int]:
+    """Count serialized trials by state, with the same keys as the CR counters."""
+    counts = {"total_trials": len(trials), **dict.fromkeys(_TRIAL_STATE_COUNTERS.values(), 0)}
     for trial in trials:
-        status = trial_status(trial)
-        if status in _SUCCESS_STATUSES:
-            succeeded += 1
-        elif status in _FAILED_STATUSES:
-            failed += 1
-        elif status in _RUNNING_STATUSES:
-            running += 1
-    return {
-        "total_trials": len(trials),
-        "running_trials": running,
-        "succeeded_trials": succeeded,
-        "failed_trials": failed,
+        key = _TRIAL_STATE_COUNTERS.get(trial.get("status"))
+        if key:
+            counts[key] += 1
+    return counts
+
+
+def _search_space_entry(parameter: dict[str, Any]) -> dict[str, Any]:
+    """Serialize one ``spec.parameters`` entry as Katib defines it."""
+    feasible = parameter.get("feasibleSpace") or {}
+    entry: dict[str, Any] = {"type": parameter.get("parameterType")}
+    if feasible.get("list") is not None:
+        entry["choices"] = list(feasible["list"])
+    for key in ("min", "max", "step", "distribution"):
+        if feasible.get(key) is not None:
+            entry[key] = feasible[key]
+    return entry
+
+
+def experiment_to_dict(experiment: dict[str, Any]) -> dict[str, Any]:
+    """Serialize an Experiment CR to full detail (for get views).
+
+    Everything comes from the one resource, so the phase, the counters, the
+    conditions and the best trial cannot disagree with each other.
+    """
+    spec = experiment.get("spec") or {}
+    status = experiment.get("status") or {}
+    objective = spec.get("objective") or {}
+    algorithm = spec.get("algorithm") or {}
+
+    data = experiment_summary_from_cr(experiment)
+    data["objectives"] = [
+        {"metric": objective.get("objectiveMetricName"), "direction": objective.get("type")}
+    ]
+    if objective.get("goal") is not None:
+        data["objectives"][0]["goal"] = objective["goal"]
+    data["algorithm"] = {
+        "name": algorithm.get("algorithmName"),
+        "settings": {
+            s.get("name"): s.get("value") for s in (algorithm.get("algorithmSettings") or [])
+        },
     }
-
-
-def trial_config_to_dict(trial_config: Any) -> dict[str, Any]:
-    """Serialize a ``TrialConfig`` (num_trials, parallel_trials, max_failed_trials)."""
-    if trial_config is None:
-        return {}
-    return {
-        "num_trials": getattr(trial_config, "num_trials", None),
-        "parallel_trials": getattr(trial_config, "parallel_trials", None),
-        "max_failed_trials": getattr(trial_config, "max_failed_trials", None),
+    data["search_space"] = {
+        p.get("name"): _search_space_entry(p) for p in (spec.get("parameters") or [])
     }
-
-
-def experiment_summary(job: Any) -> dict[str, Any]:
-    """Serialize an OptimizationJob to a compact summary (for list views)."""
-    data: dict[str, Any] = {
-        "name": getattr(job, "name", None),
-        "status": getattr(job, "status", None) or "Unknown",
-        "creation_timestamp": _isoformat(getattr(job, "creation_timestamp", None)),
+    data["trial_config"] = {
+        "num_trials": spec.get("maxTrialCount"),
+        "parallel_trials": spec.get("parallelTrialCount"),
+        "max_failed_trials": spec.get("maxFailedTrialCount"),
     }
-    data.update(trial_counts_from_job(job))
+    data["conditions"] = conditions_to_list(status)
+    data["best_trial"] = optimal_trial_to_dict(status)
+    data["early_stopping"] = early_stopping_to_dict(spec)
     return data
-
-
-def experiment_to_dict(job: Any) -> dict[str, Any]:
-    """Serialize an OptimizationJob to full detail (for get views)."""
-    data = experiment_summary(job)
-    data["objectives"] = [objective_to_dict(o) for o in (getattr(job, "objectives", None) or [])]
-    data["algorithm"] = algorithm_to_dict(getattr(job, "algorithm", None))
-    data["search_space"] = search_space_to_dict(getattr(job, "search_space", None))
-    data["trial_config"] = trial_config_to_dict(getattr(job, "trial_config", None))
-    return data
-
-
-def result_to_dict(result: Any) -> dict[str, Any] | None:
-    """Serialize a ``Result`` (best parameters + metrics), or None."""
-    if result is None:
-        return None
-    return {
-        "parameters": dict(getattr(result, "parameters", {}) or {}),
-        "metrics": metrics_to_list(getattr(result, "metrics", None)),
-    }
 
 
 def event_to_dict(event: Any) -> dict[str, Any]:
-    """Serialize a trainer/optimizer ``Event`` object."""
+    """Serialize a Kubernetes ``CoreV1Event``."""
+    involved = getattr(event, "involved_object", None)
+    when = (
+        getattr(event, "last_timestamp", None)
+        or getattr(event, "event_time", None)
+        or getattr(event, "first_timestamp", None)
+    )
     return {
-        "involved_object_kind": getattr(event, "involved_object_kind", "") or "",
-        "involved_object_name": getattr(event, "involved_object_name", "") or "",
+        "type": getattr(event, "type", "") or "",
+        "involved_object_kind": getattr(involved, "kind", "") or "",
+        "involved_object_name": getattr(involved, "name", "") or "",
         "reason": getattr(event, "reason", "") or "",
         "message": getattr(event, "message", "") or "",
-        "event_time": _isoformat(getattr(event, "event_time", None)) or "",
+        "event_time": _isoformat(when) or "",
     }
 
 
-def is_success_status(status: str | None) -> bool:
-    """Return True if a status string denotes a successful/complete trial."""
-    return status in _SUCCESS_STATUSES
-
-
-# ─── Experiment CR (raw) ───────────────────────────────────────────────────
-# OptimizationJob does not expose conditions, the current optimal trial, or the
-# early-stopping spec, so these read the Experiment custom resource directly.
+# ─── Experiment CR ─────────────────────────────────────────────────────────
 # Field names follow the v1beta1 wire format (camelCase) as generated in
 # kubeflow_katib_api.models.
 
@@ -293,20 +285,8 @@ def optimal_trial_to_dict(status: dict[str, Any]) -> dict[str, Any] | None:
         return None
     return {
         "name": name,
-        "parameters": {
-            pa.get("name"): pa.get("value")
-            for pa in (optimal.get("parameterAssignments") or [])
-            if pa.get("name") is not None
-        },
-        "metrics": [
-            {
-                "name": m.get("name"),
-                "min": m.get("min"),
-                "max": m.get("max"),
-                "latest": m.get("latest"),
-            }
-            for m in ((optimal.get("observation") or {}).get("metrics") or [])
-        ],
+        "parameters": parameters_from_assignments(optimal.get("parameterAssignments")),
+        "metrics": metrics_from_observation(optimal.get("observation")),
     }
 
 

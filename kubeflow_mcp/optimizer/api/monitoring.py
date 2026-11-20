@@ -14,16 +14,19 @@
 
 """Monitoring tools for Katib experiment tracking and debugging.
 
-SDK methods used:
-    - OptimizerClient.get_job()                → get_hpo_experiment_trials
-    - OptimizerClient.get_best_results()       → get_best_trial
-    - OptimizerClient.wait_for_job_status()    → wait_for_hpo_experiment
-    - OptimizerClient.get_job_logs()           → get_hpo_experiment_trial_logs
-    - OptimizerClient.get_job_events()         → get_hpo_experiment_events
-    - CustomObjectsApi                         → get_suggestion (no SDK method)
+Every tool reads Katib's custom resources and the trial pods directly (see
+``optimizer/api/_katib.py`` for why the SDK's ``OptimizerClient`` readers are
+not used):
+
+    - Experiment CR       → get_best_trial, wait_for_hpo_experiment
+    - Trial CRs           → get_hpo_experiment_trials
+    - Trial pod logs      → get_hpo_experiment_trial_logs
+    - Namespace events    → get_hpo_experiment_events
+    - Suggestion CR       → get_suggestion
 """
 
 import logging
+import time
 from typing import Any
 
 from kubeflow_mcp.common.constants import ErrorCode
@@ -32,13 +35,13 @@ from kubeflow_mcp.common.types import ToolError, ToolResponse
 from kubeflow_mcp.common.utils import (
     K8S_TIMEOUT,
     get_custom_objects_api,
-    get_optimizer_client_for_namespace,
     get_optimizer_effective_namespace,
 )
 from kubeflow_mcp.core.security import (
     truncate_log_output,
     validate_k8s_name,
 )
+from kubeflow_mcp.optimizer.api import _katib
 from kubeflow_mcp.optimizer.api._common import (
     DEFAULT_LIST_LIMIT,
     check_optimizer_namespace,
@@ -56,17 +59,23 @@ from kubeflow_mcp.optimizer.constants import (
 )
 from kubeflow_mcp.optimizer.types import (
     event_to_dict,
-    result_to_dict,
+    experiment_summary_from_cr,
+    optimal_trial_to_dict,
     suggestion_to_dict,
-    trial_counts_from_job,
+    trial_counts_from_trials,
     trial_to_dict,
 )
 
 logger = logging.getLogger(__name__)
 
 MAX_LOG_LINES = 1000
+# Upper bound on the bytes the API server sends for one log read, so a trial
+# that logs very long lines cannot make the server hold an unbounded response.
+# The reply itself is truncated further by truncate_log_output.
+MAX_LOG_BYTES = 1024 * 1024
 MAX_WAIT_TIMEOUT = 3600
 MIN_POLLING_INTERVAL = 5
+_TERMINAL_PHASES = frozenset({OPTIMIZATION_JOB_COMPLETE, OPTIMIZATION_JOB_FAILED})
 
 
 def get_hpo_experiment_trials(
@@ -77,12 +86,13 @@ def get_hpo_experiment_trials(
 ) -> dict[str, Any]:
     """List trials for a Katib experiment with optional status filter.
 
-    Trials are read from ``OptimizerClient.get_job().trials``.
+    Trials are read from the experiment's Trial CRs, oldest first.
 
     Args:
         name: Experiment name.
         namespace: K8s namespace. Uses default from kubeconfig when omitted.
-        status: Optional status filter (e.g. Running, Complete, Failed).
+        status: Optional status filter: Created, Running, Complete (alias
+            Succeeded), Failed, Killed, EarlyStopped or MetricsUnavailable.
         limit: Maximum trials to return. Defaults to 50, capped at 500.
 
     Returns:
@@ -102,20 +112,21 @@ def get_hpo_experiment_trials(
         return limit_err.model_dump()
 
     try:
-        client = get_optimizer_client_for_namespace(namespace)
-        job = client.get_job(name=name)
-
-        trials = [trial_to_dict(t) for t in (getattr(job, "trials", None) or [])]
+        ns = get_optimizer_effective_namespace(namespace)
+        # Read the experiment first so a missing one is not reported as empty.
+        _katib.read_experiment(name, ns)
+        all_trials = [trial_to_dict(t) for t in _katib.list_trials(name, ns)]
+        trials = all_trials
         if status:
             want = resolve_status_filter(status)
-            trials = [t for t in trials if t.get("status") == want]
+            trials = [t for t in all_trials if t.get("status") == want]
 
         data: dict[str, Any] = {
             "experiment": name,
             "trials": trials[:limit],
             "total": len(trials),
+            "summary": trial_counts_from_trials(all_trials),
         }
-        data["summary"] = trial_counts_from_job(job)
         return ToolResponse(data=data).model_dump()
 
     except Exception as e:
@@ -128,7 +139,8 @@ def get_best_trial(
 ) -> dict[str, Any]:
     """Get the best trial with optimal hyperparameters and metrics.
 
-    Uses ``OptimizerClient.get_best_results()``.
+    Reads ``status.currentOptimalTrial`` from the Experiment CR, which Katib
+    keeps up to date for every algorithm and workload kind.
 
     Args:
         name: Experiment name.
@@ -147,10 +159,9 @@ def get_best_trial(
         return ns_err.model_dump()
 
     try:
-        client = get_optimizer_client_for_namespace(namespace)
-        result = client.get_best_results(name=name)
-
-        best = result_to_dict(result)
+        ns = get_optimizer_effective_namespace(namespace)
+        experiment = _katib.read_experiment(name, ns)
+        best = optimal_trial_to_dict(experiment.get("status") or {})
         if best is None:
             return ToolResponse(
                 data={
@@ -163,6 +174,7 @@ def get_best_trial(
         return ToolResponse(
             data={
                 "experiment": name,
+                "trial": best["name"],
                 "parameters": best["parameters"],
                 "metrics": best["metrics"],
                 "next_steps": [
@@ -229,8 +241,8 @@ def wait_for_hpo_experiment(
 ) -> dict[str, Any]:
     """Block until experiment reaches terminal status (Complete/Failed).
 
-    Uses ``OptimizerClient.wait_for_job_status()``. Timeout is capped at 3600
-    seconds and the polling interval has a minimum of 5 seconds.
+    Polls the Experiment CR's phase. Timeout is capped at 3600 seconds and the
+    polling interval has a minimum of 5 seconds.
 
     Args:
         name: Experiment name.
@@ -263,8 +275,8 @@ def wait_for_hpo_experiment(
         ).model_dump()
 
     timeout_seconds = min(timeout_seconds, MAX_WAIT_TIMEOUT)
-    # The SDK raises ValueError for this since 0.5.0; reject it here so it is a
-    # validation error rather than an opaque SDK failure, matching wait_for_training.
+    # An interval at or above the timeout would poll once and give up, which
+    # matches wait_for_training's rule and the SDK's own.
     if polling_interval >= timeout_seconds:
         return ToolError(
             error=(
@@ -275,29 +287,29 @@ def wait_for_hpo_experiment(
         ).model_dump()
 
     try:
-        client = get_optimizer_client_for_namespace(namespace)
-        job = client.wait_for_job_status(
-            name=name,
-            status={OPTIMIZATION_JOB_COMPLETE, OPTIMIZATION_JOB_FAILED},
-            timeout=timeout_seconds,
-            polling_interval=polling_interval,
-        )
+        ns = get_optimizer_effective_namespace(namespace)
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            summary = experiment_summary_from_cr(_katib.read_experiment(name, ns))
+            if summary["status"] in _TERMINAL_PHASES:
+                summary.pop("name")
+                summary.pop("creation_timestamp")
+                return ToolResponse(
+                    data={
+                        "experiment": name,
+                        "reached": True,
+                        "message": f"Experiment reached '{summary['status']}'",
+                        **summary,
+                    }
+                ).model_dump()
+            if time.monotonic() + polling_interval > deadline:
+                break
+            time.sleep(polling_interval)
 
-        final_status = getattr(job, "status", None) or "Unknown"
-        data: dict[str, Any] = {
-            "experiment": name,
-            "status": final_status,
-            "reached": True,
-            "message": f"Experiment reached '{final_status}'",
-        }
-        data.update(trial_counts_from_job(job))
-        return ToolResponse(data=data).model_dump()
-
-    except TimeoutError:
         return ToolResponse(
             data={
                 "experiment": name,
-                "status": "Unknown",
+                "status": summary["status"],
                 "reached": False,
                 "message": f"Timeout after {timeout_seconds}s",
                 "hint": "Use get_hpo_experiment_events() to check for scheduling issues",
@@ -314,8 +326,10 @@ def get_hpo_experiment_trial_logs(
 ) -> dict[str, Any]:
     """Get pod logs from an experiment trial.
 
-    Uses ``OptimizerClient.get_job_logs()``. If no trial is specified, the SDK
-    returns logs from the current best trial.
+    Works for any trial workload kind: the trial's pods are found by Katib's
+    trial label (or the workload's own label without metrics-collector
+    injection). The last ``1000`` lines are read, bounded on the API server.
+    If no trial is specified, the current best trial is used, else the oldest.
 
     Args:
         name: Experiment name.
@@ -323,7 +337,8 @@ def get_hpo_experiment_trial_logs(
         namespace: K8s namespace. Uses default from kubeconfig when omitted.
 
     Returns:
-        dict: Response containing ``logs``, ``trial`` name, and ``failure_hint``.
+        dict: Response containing ``logs``, the ``trial``, ``pod`` and
+        ``container`` they came from, and ``failure_hint`` when one matches.
 
     Raises:
         ToolError: If experiment not found (``RESOURCE_NOT_FOUND``).
@@ -341,17 +356,50 @@ def get_hpo_experiment_trial_logs(
         return ns_err.model_dump()
 
     try:
-        client = get_optimizer_client_for_namespace(namespace)
-        log_lines = list(client.get_job_logs(name=name, trial_name=trial, follow=False))
-        if len(log_lines) > MAX_LOG_LINES:
-            log_lines = log_lines[-MAX_LOG_LINES:]
+        ns = get_optimizer_effective_namespace(namespace)
+        experiment = _katib.read_experiment(name, ns)
+        trials = _katib.list_trials(name, ns)
+        selected = _select_trial(trials, trial, experiment)
+        if selected is None:
+            if trial is not None:
+                return ToolError(
+                    error=f"Trial '{trial}' not found in experiment '{name}'",
+                    error_code=ErrorCode.RESOURCE_NOT_FOUND,
+                    hint=f"Use get_hpo_experiment_trials('{name}') to list trials",
+                ).model_dump()
+            return ToolResponse(
+                data={
+                    "experiment": name,
+                    "trial": None,
+                    "logs": "",
+                    "lines": 0,
+                    "message": "Experiment has no trials yet",
+                }
+            ).model_dump()
 
-        logs = "\n".join(log_lines)
+        trial_name = selected["metadata"]["name"]
+        source = _katib.pick_log_source(selected, _katib.find_trial_pods(selected, ns))
+        if source is None:
+            return ToolResponse(
+                data={
+                    "experiment": name,
+                    "trial": trial_name,
+                    "logs": "",
+                    "lines": 0,
+                    "message": f"No pods found for trial '{trial_name}'",
+                    "hint": f"Check get_hpo_experiment_events('{name}') for scheduling issues",
+                }
+            ).model_dump()
+
+        pod, container = source
+        logs = _katib.read_pod_log(pod, container, ns, MAX_LOG_LINES, MAX_LOG_BYTES) or ""
         sanitized = truncate_log_output(logs)
 
         data: dict[str, Any] = {
             "experiment": name,
-            "trial": trial,
+            "trial": trial_name,
+            "pod": pod.metadata.name,
+            "container": container,
             "logs": sanitized,
             "lines": len(sanitized.split("\n")) if sanitized else 0,
         }
@@ -377,7 +425,10 @@ def get_hpo_experiment_events(
 ) -> dict[str, Any]:
     """Get K8s events for a Katib experiment.
 
-    Uses ``OptimizerClient.get_job_events()``.
+    Covers the Experiment and its Suggestion, every Trial and its workload
+    (which shares the trial's name), and the experiment's pods, where
+    scheduling and image-pull failures are reported. When there are more than
+    ``limit``, the most recent are returned.
 
     Args:
         name: Experiment name.
@@ -385,8 +436,9 @@ def get_hpo_experiment_events(
         limit: Maximum events to return. Defaults to 50, capped at 500.
 
     Returns:
-        dict: Response containing ``events`` (up to ``limit``) with type,
-        reason, message and timestamp, plus the ``total`` found.
+        dict: Response containing ``events`` (up to ``limit``, oldest first)
+        with type, involved object, reason, message and timestamp, plus the
+        ``total`` found.
     """
     name_err = validate_k8s_name(name)
     if name_err is not None:
@@ -401,13 +453,33 @@ def get_hpo_experiment_events(
         return limit_err.model_dump()
 
     try:
-        client = get_optimizer_client_for_namespace(namespace)
-        events = client.get_job_events(name=name)
+        ns = get_optimizer_effective_namespace(namespace)
+        _katib.read_experiment(name, ns)
+        names = {name}
+        names |= {(t.get("metadata") or {}).get("name") for t in _katib.list_trials(name, ns)}
+        names |= {p.metadata.name for p in _katib.list_experiment_pods(name, ns)}
 
-        event_list = [event_to_dict(e) for e in events[:limit]]
+        events = sorted(
+            (event_to_dict(e) for e in _katib.list_events_for(names, ns)),
+            key=lambda e: e["event_time"],
+        )
+        # Keep the most recent ones when limiting: those explain the current state.
         return ToolResponse(
-            data={"experiment": name, "events": event_list, "total": len(events)}
+            data={"experiment": name, "events": events[-limit:], "total": len(events)}
         ).model_dump()
 
     except Exception as e:
         return experiment_error(e, name).model_dump()
+
+
+def _select_trial(
+    trials: list[dict[str, Any]], requested: str | None, experiment: dict[str, Any]
+) -> dict[str, Any] | None:
+    """The trial to read logs from: the requested one, else the best, else the oldest."""
+    by_name = {(t.get("metadata") or {}).get("name"): t for t in trials}
+    if requested is not None:
+        return by_name.get(requested)
+    best = optimal_trial_to_dict(experiment.get("status") or {})
+    if best is not None and best["name"] in by_name:
+        return by_name[best["name"]]
+    return trials[0] if trials else None

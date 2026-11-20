@@ -1,4 +1,4 @@
-# Copyright The Kubeflow Authors
+# Copyright The Kubeflow Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,164 +12,119 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for optimizer SDK→dict serializers."""
+"""Unit tests for the optimizer serializers (Katib custom resources -> dicts)."""
 
 from datetime import datetime, timezone
-from enum import Enum
 from types import SimpleNamespace
 
+import pytest
+
 from kubeflow_mcp.optimizer import types as ser
+from kubeflow_mcp.optimizer.conftest import experiment_cr, metric, trial_cr
 
 
-class _Direction(Enum):
-    MAXIMIZE = "maximize"
+@pytest.mark.parametrize(
+    "state",
+    ["Created", "Running", "Complete", "Failed", "Killed", "EarlyStopped", "MetricsUnavailable"],
+)
+def test_trial_status_reads_the_trial_conditions(state):
+    assert ser.trial_status(trial_cr("t", state)) == state
 
 
-def _metric(name="acc", latest="0.9"):
-    return SimpleNamespace(name=name, min="0.5", max="0.9", latest=latest)
+def test_trial_status_prefers_the_terminal_condition():
+    """Katib keeps Running set alongside a later terminal condition."""
+    trial = trial_cr("t", "Running")
+    trial["status"]["conditions"].append({"type": "Succeeded", "status": "True"})
+    assert ser.trial_status(trial) == "Complete"
 
 
-def _trial(name, status="Complete"):
-    return SimpleNamespace(
-        name=name,
-        parameters={"lr": "0.01"},
-        trainjob=SimpleNamespace(name=f"{name}-job", status=status),
-        metrics=[_metric()],
+def test_trial_status_ignores_false_conditions_and_unknown_shapes():
+    trial = trial_cr("t", "Running")
+    trial["status"]["conditions"] = [{"type": "Running", "status": "False"}]
+    assert ser.trial_status(trial) == "Unknown"
+    assert ser.trial_status({}) == "Unknown"
+
+
+@pytest.mark.parametrize(("kind", "trainjob"), [("TrainJob", "t1"), ("Job", None)])
+def test_trial_to_dict(kind, trainjob):
+    data = ser.trial_to_dict(
+        trial_cr("t1", "Complete", kind=kind, params={"lr": "0.02"}, metrics=[metric()])
     )
-
-
-def test_metric_to_dict():
-    assert ser.metric_to_dict(_metric()) == {
-        "name": "acc",
-        "min": "0.5",
-        "max": "0.9",
-        "latest": "0.9",
+    assert data == {
+        "name": "t1",
+        "status": "Complete",
+        "parameters": {"lr": "0.02"},
+        "metrics": [{"name": "accuracy", "min": "0.5", "max": "0.95", "latest": "0.95"}],
+        "trainjob": trainjob,
+        "workload_kind": kind,
+        "creation_timestamp": "2026-11-01T00:00:01Z",
     }
 
 
-def test_trial_status_from_trainjob():
-    assert ser.trial_status(_trial("t1", "Running")) == "Running"
-    # Missing trainjob → Unknown, not a crash.
-    assert ser.trial_status(SimpleNamespace(trainjob=None)) == "Unknown"
-
-
-def test_trial_to_dict():
-    d = ser.trial_to_dict(_trial("t1", "Complete"))
-    assert d["name"] == "t1"
-    assert d["status"] == "Complete"
-    assert d["parameters"] == {"lr": "0.01"}
-    assert d["trainjob"] == "t1-job"
-    assert d["metrics"][0]["name"] == "acc"
-
-
-def test_objective_to_dict_unwraps_enum():
-    obj = SimpleNamespace(metric="accuracy", direction=_Direction.MAXIMIZE)
-    assert ser.objective_to_dict(obj) == {"metric": "accuracy", "direction": "maximize"}
-
-
-def test_search_space_continuous():
-    space = SimpleNamespace(min=0.001, max=0.1, distribution=SimpleNamespace(value="uniform"))
-    out = ser.search_space_entry_to_dict(space)
-    assert out == {"type": "continuous", "min": 0.001, "max": 0.1, "distribution": "uniform"}
-
-
-def test_search_space_categorical():
-    space = SimpleNamespace(choices=[16, 32, 64])
-    assert ser.search_space_entry_to_dict(space) == {
-        "type": "categorical",
-        "choices": [16, 32, 64],
-    }
-
-
-def test_search_space_to_dict_map():
-    spaces = {"lr": SimpleNamespace(choices=[1, 2])}
-    assert ser.search_space_to_dict(spaces) == {"lr": {"type": "categorical", "choices": [1, 2]}}
-    assert ser.search_space_to_dict(None) == {}
-
-
-def test_algorithm_to_dict():
-    assert ser.algorithm_to_dict(SimpleNamespace(random_state=42)) == {
-        "name": "SimpleNamespace",
-        "random_state": 42,
-    }
-    # random_state None is omitted.
-    assert ser.algorithm_to_dict(SimpleNamespace(random_state=None)) == {"name": "SimpleNamespace"}
-    assert ser.algorithm_to_dict(None) == {}
-
-
-def test_trial_counts():
-    job = SimpleNamespace(
-        trials=[
-            _trial("a", "Complete"),
-            _trial("b", "Running"),
-            _trial("c", "Failed"),
-            _trial("d", "Created"),  # neither running/succeeded/failed
-        ]
-    )
-    assert ser.trial_counts_from_job(job) == {
+def test_trial_counts_from_trials_match_the_cr_counter_keys():
+    trials = [
+        ser.trial_to_dict(trial_cr(n, s))
+        for n, s in [("a", "Complete"), ("b", "Running"), ("c", "Created"), ("d", "Killed")]
+    ]
+    counts = ser.trial_counts_from_trials(trials)
+    assert counts == {
         "total_trials": 4,
         "running_trials": 1,
         "succeeded_trials": 1,
-        "failed_trials": 1,
+        "failed_trials": 0,
+        "pending_trials": 1,
+        "killed_trials": 1,
+        "early_stopped_trials": 0,
     }
+    cr_keys = set(ser.trial_counts_from_cr({f: 1 for f in ser._CR_TRIAL_COUNTERS}))
+    assert set(counts) == cr_keys
 
 
-def test_trial_config_to_dict():
-    tc = SimpleNamespace(num_trials=10, parallel_trials=2, max_failed_trials=3)
-    assert ser.trial_config_to_dict(tc) == {
-        "num_trials": 10,
-        "parallel_trials": 2,
-        "max_failed_trials": 3,
-    }
-    assert ser.trial_config_to_dict(None) == {}
-
-
-def test_experiment_summary_and_full():
-    job = SimpleNamespace(
-        name="exp",
-        status="Running",
-        creation_timestamp=datetime(2026, 7, 21, tzinfo=timezone.utc),
-        trials=[_trial("t1")],
-        objectives=[SimpleNamespace(metric="acc", direction=_Direction.MAXIMIZE)],
-        algorithm=SimpleNamespace(random_state=None),
-        search_space={},
-        trial_config=SimpleNamespace(num_trials=1, parallel_trials=1, max_failed_trials=None),
+def test_experiment_to_dict_covers_spec_and_status():
+    cr = experiment_cr(
+        algorithm="tpe",
+        max_failed=3,
+        status={"trials": 2, "trialsSucceeded": 2},
     )
-    summary = ser.experiment_summary(job)
-    assert summary["name"] == "exp"
-    assert summary["total_trials"] == 1
-    assert summary["creation_timestamp"].startswith("2026-07-21")
+    cr["spec"]["algorithm"]["algorithmSettings"] = [{"name": "n_startup_trials", "value": "5"}]
+    cr["spec"]["objective"]["goal"] = 0.99
+    cr["spec"]["parameters"].append(
+        {"name": "opt", "parameterType": "categorical", "feasibleSpace": {"list": ["sgd", "adam"]}}
+    )
 
-    full = ser.experiment_to_dict(job)
-    assert full["objectives"][0]["direction"] == "maximize"
-    assert "trial_config" in full
-    assert "search_space" in full
+    data = ser.experiment_to_dict(cr)
+
+    assert data["name"] == "exp-1"
+    assert data["status"] == "Created"
+    assert data["objectives"] == [{"metric": "accuracy", "direction": "maximize", "goal": 0.99}]
+    assert data["algorithm"] == {"name": "tpe", "settings": {"n_startup_trials": "5"}}
+    assert data["search_space"]["opt"] == {"type": "categorical", "choices": ["sgd", "adam"]}
+    assert data["trial_config"] == {"num_trials": 10, "parallel_trials": 2, "max_failed_trials": 3}
+    assert data["succeeded_trials"] == 2
+    assert data["best_trial"] is None
+    assert data["early_stopping"] is None
 
 
-def test_result_to_dict():
-    assert ser.result_to_dict(None) is None
-    result = SimpleNamespace(parameters={"lr": "0.01"}, metrics=[_metric()])
-    out = ser.result_to_dict(result)
-    assert out["parameters"] == {"lr": "0.01"}
-    assert out["metrics"][0]["name"] == "acc"
-
-
-def test_event_to_dict():
+def test_event_to_dict_prefers_the_latest_timestamp():
+    when = datetime(2026, 11, 1, tzinfo=timezone.utc)
     ev = SimpleNamespace(
-        involved_object_kind="Pod",
-        involved_object_name="exp-trial-0",
-        reason="Scheduled",
-        message="assigned",
-        event_time=datetime(2026, 7, 21, tzinfo=timezone.utc),
+        type="Warning",
+        involved_object=SimpleNamespace(kind="Pod", name="p"),
+        reason="BackOff",
+        message="Back-off restarting",
+        last_timestamp=when,
+        event_time=None,
+        first_timestamp=datetime(2026, 10, 1, tzinfo=timezone.utc),
     )
-    out = ser.event_to_dict(ev)
-    assert out["involved_object_kind"] == "Pod"
-    assert out["reason"] == "Scheduled"
-    assert out["event_time"].startswith("2026-07-21")
+    assert ser.event_to_dict(ev) == {
+        "type": "Warning",
+        "involved_object_kind": "Pod",
+        "involved_object_name": "p",
+        "reason": "BackOff",
+        "message": "Back-off restarting",
+        "event_time": when.isoformat(),
+    }
 
 
-def test_is_success_status():
-    assert ser.is_success_status("Complete") is True
-    assert ser.is_success_status("Succeeded") is True
-    assert ser.is_success_status("Failed") is False
-    assert ser.is_success_status(None) is False
+def test_event_to_dict_tolerates_missing_fields():
+    assert ser.event_to_dict(SimpleNamespace())["event_time"] == ""
