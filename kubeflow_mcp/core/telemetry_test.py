@@ -164,6 +164,59 @@ def test_setup_tracing_configures_provider_when_available(monkeypatch: pytest.Mo
     assert telemetry.get_tracer("unit") == "tracer:unit"
 
 
+@pytest.mark.parametrize(
+    ("env", "expected"),
+    [
+        ({}, "kubeflow-mcp"),
+        ({"OTEL_SERVICE_NAME": "kf-mcp-prod"}, "kf-mcp-prod"),
+        ({"OTEL_RESOURCE_ATTRIBUTES": "service.name=kf-mcp-attrs"}, "kf-mcp-attrs"),
+        (
+            {
+                "OTEL_SERVICE_NAME": "kf-mcp-prod",
+                "OTEL_RESOURCE_ATTRIBUTES": "service.name=kf-mcp-attrs",
+            },
+            "kf-mcp-prod",
+        ),
+    ],
+    ids=["default", "service-name-env", "resource-attributes-env", "service-name-env-wins"],
+)
+def test_setup_tracing_service_name_from_env(
+    monkeypatch: pytest.MonkeyPatch, env: dict[str, str], expected: str
+) -> None:
+    pytest.importorskip("opentelemetry.sdk")
+    calls: dict[str, object] = {}
+
+    class _FakeProvider:
+        def __init__(self, resource: object) -> None:
+            calls["resource"] = resource
+
+        def add_span_processor(self, processor: object) -> None:
+            pass
+
+        def shutdown(self) -> None:
+            pass
+
+    fake_trace = SimpleNamespace(
+        set_tracer_provider=lambda _provider: None,
+        get_tracer_provider=lambda: object(),
+    )
+
+    monkeypatch.delenv("OTEL_SERVICE_NAME", raising=False)
+    monkeypatch.delenv("OTEL_RESOURCE_ATTRIBUTES", raising=False)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(telemetry, "_tracing_initialized", False)
+    monkeypatch.setattr(telemetry, "_configured_endpoint", None, raising=False)
+    monkeypatch.setattr(telemetry, "TracerProvider", _FakeProvider, raising=False)
+    monkeypatch.setattr(telemetry, "BatchSpanProcessor", lambda *_a, **_k: None, raising=False)
+    monkeypatch.setattr(telemetry, "OTLPSpanExporter", lambda **_k: None, raising=False)
+    monkeypatch.setattr(telemetry, "_otel_trace", fake_trace, raising=False)
+    monkeypatch.setattr(telemetry.atexit, "register", lambda _fn: None)
+
+    assert telemetry.setup_tracing("http://collector:4318/v1/traces", "kubeflow-mcp") is True
+    assert calls["resource"].attributes["service.name"] == expected
+
+
 def test_setup_tracing_sets_exporter_timeout_in_seconds(monkeypatch: pytest.MonkeyPatch) -> None:
     """OTLPSpanExporter takes seconds; only BatchSpanProcessor takes milliseconds."""
     calls: dict[str, object] = {}
