@@ -17,7 +17,13 @@
 import pytest
 
 from kubeflow_mcp.pipelines import TOOLS
-from kubeflow_mcp.pipelines.conftest import RUN_ID, make_pipeline, make_run
+from kubeflow_mcp.pipelines.conftest import (
+    PIPELINE_CODE,
+    RUN_ID,
+    make_experiment,
+    make_pipeline,
+    make_run,
+)
 
 # Minimal valid arguments per tool, so each call reaches the namespace check.
 CALLS = {
@@ -29,6 +35,12 @@ CALLS = {
     "create_pipeline_run": {"pipeline": "churn-prediction"},
     "stop_pipeline_run": {"run_id": RUN_ID},
     "retry_pipeline_run": {"run_id": RUN_ID},
+    "list_experiments": {},
+    "get_experiment": {"name": "churn"},
+    "create_experiment": {"name": "churn"},
+    "delete_experiment": {"name": "churn"},
+    "create_pipeline": {"name": "churn-prediction", "pipeline_code": PIPELINE_CODE},
+    "delete_pipeline": {"name": "churn-prediction"},
 }
 TOOLS_BY_NAME = {t.__name__: t for t in TOOLS}
 
@@ -42,6 +54,7 @@ def allowlist(kfp_client, monkeypatch):
     monkeypatch.setattr("kubeflow_mcp.core.policy.get_allowed_namespaces", lambda: ["team-a"])
     kfp_client.get_pipeline.return_value = make_pipeline()
     kfp_client.get_run.return_value = make_run("FAILED")
+    kfp_client.get_experiment.return_value = make_experiment()
     return kfp_client
 
 

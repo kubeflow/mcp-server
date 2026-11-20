@@ -23,10 +23,21 @@ See also: [CONVENTIONS.md](../CONVENTIONS.md) for module layout and naming,
 | `create_pipeline_run` | data-scientist | yes | n/a (creates; KFP runs take no labels) | `PreviewResponse` | no |
 | `stop_pipeline_run` | ml-engineer | yes | no: KFP runs carry no MCP label | `PreviewResponse` | yes |
 | `retry_pipeline_run` | ml-engineer | yes | no: KFP runs carry no MCP label | `PreviewResponse` | no |
+| `create_experiment` | data-scientist | yes | n/a (creates; returns an existing one unchanged) | `PreviewResponse` | no |
+| `delete_experiment` | platform-admin | yes | no: KFP experiments carry no MCP label | `PreviewResponse` | yes |
+| `create_pipeline` | ml-engineer | yes | no: an existing name gets a new version | `PreviewResponse` | no |
+| `delete_pipeline` | platform-admin | yes | no: KFP pipelines carry no MCP label | `PreviewResponse` | yes |
 
 KFP runs have no labels the server can set, so `stop_pipeline_run` and `retry_pipeline_run`
 cannot check MCP ownership. They sit at `ml-engineer` instead of `data-scientist`, and their
 previews say they act on any run in the namespace.
+
+`create_pipeline` compiles agent-written code, and KFP runs the `@dsl.pipeline` body
+while compiling. The tool checks the code's AST before anything runs (only `kfp` /
+`typing` imports, literal constants, components and component calls in the pipeline
+body), compiles in a separate `python -I` process with a stripped environment and a
+timeout, and only then uploads. It sits at `ml-engineer` because a name that already
+exists gets a new version, whoever registered it.
 
 ## Order of checks
 

@@ -235,46 +235,41 @@ only part of [#5](https://github.com/kubeflow/mcp-server/issues/5).
 
 ### Pipelines client
 
-Enable with `--clients trainer,pipelines`. Wraps `kubeflow.pipelines.PipelinesClient`.
+Enable with `--clients pipelines` (add `trainer` for the training tools too) and install
+the `pipelines` extra on the server host (it brings `kfp`):
+
+```bash
+pip install "kubeflow-mcp[pipelines]"
+```
+
+Wraps `kubeflow.pipelines.PipelinesClient`. The cluster needs Kubeflow Pipelines;
+Kubeflow Trainer is only needed when a pipeline step creates a `TrainJob`.
 
 | Phase | Tools | Description |
 |-------|-------|-------------|
-| Discovery | `list_pipelines`, `get_pipeline` | Browse registered pipelines and their versions |
+| Discovery | `list_pipelines`, `get_pipeline`, `list_experiments`, `get_experiment` | Browse registered pipelines, their versions and experiments |
+| Authoring | `create_pipeline`, `delete_pipeline` | Register a pipeline from KFP v2 Python code, or delete a pipeline or one version (preview first) |
 | Monitoring | `list_pipeline_runs`, `get_pipeline_run`, `get_pipeline_logs` | Follow runs, read task pod logs |
-| Runs | `create_pipeline_run`, `stop_pipeline_run`, `retry_pipeline_run` | Start, stop or retry runs (preview first) |
+| Runs | `create_pipeline_run`, `stop_pipeline_run`, `retry_pipeline_run`, `create_experiment`, `delete_experiment` | Start, stop or retry runs; manage experiments (preview first) |
 
-Requires `kfp` on the server host. Upstream `kfp` 2.x pins `kubernetes<31`
-([kubeflow/pipelines#13390](https://github.com/kubeflow/pipelines/issues/13390)), which
-cannot coexist with the `kubernetes>=35` client this repository's own development and
-test environments resolve, so `kfp` is not installed by default and not part of the
-`all` extra. Use a pip environment for the server host and install the Kubeflow SDK's
-`pipelines` extra in the same resolution as the MCP server:
+With these tools an agent can go from "train this model on this dataset" to a running
+pipeline: it writes the KFP code, `create_pipeline` checks it, compiles it to pipeline
+YAML and registers it, and `create_pipeline_run` starts it. The compile runs in a
+separate Python process on the server host. Because KFP runs the `@dsl.pipeline` body
+while compiling, `create_pipeline` only accepts a restricted shape there (component
+calls, task options and `dsl` / `kfp.kubernetes` helpers); component bodies run in the
+cluster and are not restricted. See `pipelines://guides/authoring`.
 
-```bash
-pip install kubeflow-mcp 'kubeflow[pipelines]'
-# or from a checkout of this repository:
-pip install . 'kubeflow[pipelines]'
-```
-
-pip then resolves the `kubernetes` python client to a `kfp`-compatible release (`<31`);
-the Kubeflow SDK itself accepts any `>=27.2,<36`. If pip prints a warning that a
+Installing the extra pins the `kubernetes` Python client to a `kfp`-compatible release
+(`<31`); the Kubeflow SDK accepts any `>=27.2,<36`. If pip prints a warning that a
 `kubeflow` release "does not provide the extra 'pipelines'", the resolution picked an
 older `kubeflow-mcp` (the `0.1.x` releases pin `kubeflow==0.4.0`, which has no
-`pipelines` extra) and `kfp` was skipped: upgrade `kubeflow-mcp` to `>=0.2.x` and
-re-install.
-
-Validate the real SDK contracts in the environment where `kfp` is installed,
-from a checkout of this repository:
-
-```bash
-pip install pytest
-python -m pytest kubeflow_mcp/pipelines/api/sdk_contracts_test.py
-```
+`pipelines` extra): upgrade `kubeflow-mcp` to `>=0.2.x` and re-install.
 
 Set `KUBEFLOW_MCP_PIPELINES_URL`, `KUBEFLOW_MCP_PIPELINES_TOKEN` or
-`KUBEFLOW_MCP_PIPELINES_NAMESPACE` when the defaults do not fit. Only registered pipelines
-can be run, by name. Stop and retry need the `ml-engineer` persona because KFP runs carry
-no MCP ownership label.
+`KUBEFLOW_MCP_PIPELINES_NAMESPACE` when the defaults do not fit. Stop, retry and
+`create_pipeline` need the `ml-engineer` persona because KFP runs and pipelines carry no
+MCP ownership label; `delete_experiment` and `delete_pipeline` are `platform-admin` only.
 
 
 ### Requirements
@@ -414,3 +409,11 @@ make inspector TRANSPORT=sse      # Inspector + SSE (deprecated; start server se
 ## License
 
 Apache License 2.0 — see [LICENSE](LICENSE).
+
+## ✨ Contributors
+
+We couldn't have done it without these incredible people:
+
+<a href="https://github.com/kubeflow/mcp-server/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=kubeflow/mcp-server" />
+</a>
