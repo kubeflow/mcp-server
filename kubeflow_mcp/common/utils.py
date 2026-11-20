@@ -370,38 +370,13 @@ def get_trainer_ownership(name: str, namespace: str) -> str | None:
 def get_optimizer_client() -> Any:
     """Get or create OptimizerClient singleton.
 
-    Uses default KubernetesBackendConfig with current kubeconfig context.
+    Uses default KubernetesBackendConfig with current kubeconfig context. The
+    optimizer tools read and write Katib resources directly; the client is kept
+    so the default namespace resolves exactly as the SDK resolves it.
     """
     from kubeflow.optimizer import OptimizerClient
 
     return OptimizerClient()
-
-
-_optimizer_ns_client_cache: dict[str, Any] = {}
-_optimizer_ns_client_lock = threading.Lock()
-
-
-def get_optimizer_client_for_namespace(namespace: str | None = None) -> Any:
-    """Return an OptimizerClient targeting the given namespace.
-
-    When *namespace* is ``None`` the shared singleton (default kubeconfig
-    namespace) is returned.  When a namespace is explicitly provided a
-    cached ``OptimizerClient`` scoped to that namespace is returned.
-    """
-    if namespace is None:
-        return get_optimizer_client()
-    with _optimizer_ns_client_lock:
-        if namespace in _optimizer_ns_client_cache:
-            return _optimizer_ns_client_cache[namespace]
-        from kubeflow.common.types import KubernetesBackendConfig
-        from kubeflow.optimizer import OptimizerClient
-
-        client = OptimizerClient(backend_config=KubernetesBackendConfig(namespace=namespace))
-        if len(_optimizer_ns_client_cache) >= _NS_CLIENT_CACHE_MAX:
-            oldest = next(iter(_optimizer_ns_client_cache))
-            del _optimizer_ns_client_cache[oldest]
-        _optimizer_ns_client_cache[namespace] = client
-        return client
 
 
 def get_optimizer_effective_namespace(namespace: str | None = None) -> str:
@@ -612,8 +587,6 @@ def reset_clients() -> None:
     _get_api_client.cache_clear()
     with _ns_client_lock:
         _ns_client_cache.clear()
-    with _optimizer_ns_client_lock:
-        _optimizer_ns_client_cache.clear()
     with _spark_ns_client_lock:
         _spark_ns_client_cache.clear()
     with _pipelines_client_lock:

@@ -302,13 +302,28 @@ class TestAnnotationSemantics:
         assert ann["destructiveHint"] is True
         assert ann["idempotentHint"] is True
 
-    def test_update_experiment_not_destructive(self):
-        from kubeflow_mcp.optimizer import CLIENT_TOOL_ANNOTATIONS
+    def test_update_experiment_is_destructive(self):
+        """Lowering parallel_trial_count makes Katib delete trials, completed
+        ones included, so the tool must be treated as destructive."""
+        from kubeflow_mcp.optimizer import CLIENT_TOOL_ANNOTATIONS, CLIENT_TOOL_DESCRIPTIONS
 
         ann = CLIENT_TOOL_ANNOTATIONS["update_hpo_experiment"]
         assert ann["readOnlyHint"] is False
-        assert ann["destructiveHint"] is False
+        assert ann["destructiveHint"] is True
         assert ann["idempotentHint"] is True
+        assert CLIENT_TOOL_DESCRIPTIONS["update_hpo_experiment"].startswith("[DESTRUCTIVE]")
+        assert "update_hpo_experiment" in DESTRUCTIVE_TOOLS
+
+    def test_destructive_risk_policy_removes_both_lifecycle_tools(self):
+        """A policy denying risk:destructive must hide every optimizer tool that
+        can delete trials or experiments, and an unrestricted one must not."""
+        from kubeflow_mcp.core.policy import apply_policy_filters
+        from kubeflow_mcp.optimizer import TOOLS
+
+        names = {t.__name__ for t in TOOLS}
+        denied = apply_policy_filters(names, {"deny": ["risk:destructive"]})
+        assert names - denied == {"delete_hpo_experiment", "update_hpo_experiment"}
+        assert apply_policy_filters(names, {"allow": ["*"]}) == names
 
 
 class TestCrossClientHints:

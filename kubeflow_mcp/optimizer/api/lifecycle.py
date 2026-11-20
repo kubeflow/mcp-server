@@ -14,9 +14,16 @@
 
 """Lifecycle tools for Katib experiment management.
 
-SDK methods used:
-    - OptimizerClient.delete_job()                       → delete_hpo_experiment
-    - CustomObjectsApi.get/patch_namespaced_custom_object()  → update_hpo_experiment
+Both tools act on the Experiment CR through ``CustomObjectsApi`` with explicit
+request timeouts:
+
+    - delete_namespaced_custom_object()           → delete_hpo_experiment
+    - get/patch_namespaced_custom_object(), plus
+      the experiment's Trial CRs                  → update_hpo_experiment
+
+``OptimizerClient.delete_job()`` is not used because it sends no request
+timeout, so a confirmed delete could hang indefinitely on an unresponsive API
+server.
 """
 
 import logging
@@ -26,9 +33,11 @@ from kubeflow_mcp.common import utils as mcp_utils
 from kubeflow_mcp.common.constants import ErrorCode
 from kubeflow_mcp.common.types import PreviewResponse, ToolError, ToolResponse
 from kubeflow_mcp.core.security import validate_k8s_name
+from kubeflow_mcp.optimizer.api import _katib
 from kubeflow_mcp.optimizer.api._common import (
     check_optimizer_namespace,
     experiment_error,
+    is_conflict,
     require_mcp_ownership,
 )
 from kubeflow_mcp.optimizer.api.optimization import (
@@ -42,7 +51,7 @@ from kubeflow_mcp.optimizer.constants import (
     OPTIMIZATION_JOB_COMPLETE,
     OPTIMIZATION_JOB_FAILED,
 )
-from kubeflow_mcp.optimizer.types import experiment_phase
+from kubeflow_mcp.optimizer.types import ACTIVE_TRIAL_STATES, experiment_phase, trial_status
 
 logger = logging.getLogger(__name__)
 
@@ -146,29 +155,61 @@ def _katib_rule_violation(spec: dict[str, Any], status: dict[str, Any]) -> str |
     return None
 
 
-def _active_trials_deleted(patch: dict[str, int], status: dict[str, Any]) -> int:
-    """How many active trials Katib will delete when this patch is applied.
+def _trials_katib_will_delete(trials: list[dict[str, Any]], parallel: int) -> list[dict[str, Any]]:
+    """The trials Katib deletes after ``parallelTrialCount`` drops to ``parallel``.
 
-    When ``parallelTrialCount`` drops below the active (pending plus running)
-    trials, Katib's experiment controller deletes the excess straight away,
-    newest first. They are not allowed to finish, and the experiment does not
-    count them as killed, so their work is lost without a trace in its status.
+    Replays Katib's experiment controller (``ReconcileTrials`` and
+    ``deleteTrials``). Whenever more trials are active (pending or running) than
+    the parallelism allows, it deletes that excess from all of the experiment's
+    trials, newest first, whatever their state, and repeats on the next
+    reconcile until the active trials fit. A completed trial newer than a
+    running one is therefore deleted first, along with its results, and the
+    running one in a later round.
+
+    ``trials`` is oldest first, as :func:`_katib.list_trials` returns it. The
+    result is newest first, in the order Katib deletes them.
     """
-    parallel = patch.get("parallelTrialCount")
-    if parallel is None:
-        return 0
-    active = (status.get("trialsPending") or 0) + (status.get("trialsRunning") or 0)
-    return max(active - parallel, 0)
+    remaining = list(trials)
+    doomed: list[dict[str, Any]] = []
+    while True:
+        active = sum(trial_status(t) in ACTIVE_TRIAL_STATES for t in remaining)
+        excess = active - parallel
+        if excess <= 0:
+            return [
+                {"name": (t.get("metadata") or {}).get("name"), "status": trial_status(t)}
+                for t in doomed
+            ]
+        doomed.extend(reversed(remaining[-excess:]))
+        remaining = remaining[:-excess]
 
 
-def _deletion_warning(deleted: int) -> str:
-    """Sentence appended to update_hpo_experiment messages when trials will be lost."""
-    if not deleted:
+def _deletion_warning(lowering: bool, doomed: list[dict[str, Any]]) -> str:
+    """Sentence appended to update_hpo_experiment messages when parallelism drops.
+
+    Always present for a reduction, even when no trial is expected to go: the
+    count is an estimate from the trials at the time of the call, and a trial
+    Katib starts before the update lands could still be deleted.
+    """
+    if not lowering:
         return ""
-    noun = "trial" if deleted == 1 else "trials"
+    if not doomed:
+        return (
+            " Lowering parallel_trial_count makes Katib delete trials above the new "
+            "value without letting them finish; none would be deleted now, but a trial "
+            "started before the update applies could be."
+        )
+    listed = ", ".join(f"{t['name']} ({t['status']})" for t in doomed)
+    completed = sum(t["status"] not in ACTIVE_TRIAL_STATES for t in doomed)
+    note = (
+        f", including {completed} that already finished, whose results are lost"
+        if completed
+        else ""
+    )
     return (
-        f" Katib will delete {deleted} active {noun} (newest first) to meet the new "
-        "parallel_trial_count; their work is lost and they are not counted as killed."
+        " Lowering parallel_trial_count makes Katib delete trials newest first, whatever "
+        "their state, until the active ones fit, without letting them finish. Based on the "
+        f"trials now, it would delete {len(doomed)}: {listed}{note}. Deleted trials are not "
+        "counted as killed."
     )
 
 
@@ -177,7 +218,7 @@ def _update_response(
     namespace: str,
     changes: dict[str, dict[str, Any]],
     outcome: str,
-    active_trials_deleted: int = 0,
+    trials_to_delete: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Single response shape for every update_hpo_experiment outcome."""
     return ToolResponse(
@@ -185,7 +226,7 @@ def _update_response(
             "experiment": name,
             "namespace": namespace,
             "changes": changes,
-            "active_trials_deleted": active_trials_deleted,
+            "trials_to_delete": trials_to_delete or [],
             "message": f"Experiment '{name}' {outcome}",
         }
     ).model_dump()
@@ -238,8 +279,14 @@ def delete_hpo_experiment(
                 config={"experiment": name, "namespace": ns},
             ).model_dump()
 
-        client = mcp_utils.get_optimizer_client_for_namespace(namespace)
-        client.delete_job(name=name)
+        mcp_utils.get_custom_objects_api().delete_namespaced_custom_object(
+            group=KATIB_API_GROUP,
+            version=KATIB_API_VERSION,
+            namespace=ns,
+            plural=EXPERIMENT_PLURAL,
+            name=name,
+            _request_timeout=mcp_utils.K8S_WRITE_TIMEOUT,
+        )
 
         return ToolResponse(
             data={
@@ -266,11 +313,13 @@ def update_hpo_experiment(
     """Change a running experiment's concurrency or trial budget.
 
     These are the only fields Katib lets a live experiment change. Katib has no
-    pause: lowering ``parallel_trial_count`` limits how many trials run at once,
-    but Katib immediately deletes any active trials above the new value instead
-    of letting them finish, and the preview says how many. Raising
-    ``max_trial_count`` extends the experiment, and restarts a finished one whose
-    ``resumePolicy`` allows it. Edits Katib would reject are refused up front.
+    pause: lowering ``parallel_trial_count`` makes Katib delete trials, newest
+    first and whatever their state, until the active ones fit, without letting
+    them finish. The preview lists the trials that would go, by name and state.
+    Raising ``max_trial_count`` extends the experiment, and restarts a finished
+    one whose ``resumePolicy`` allows it. Edits Katib would reject are refused
+    up front, and the update is refused if the experiment changed after it was
+    read, so it never applies to a state the caller did not see.
 
     Requires ``confirmed=True``; the first call returns a preview of the change.
     Non-admin personas may only update experiments created through MCP.
@@ -287,7 +336,8 @@ def update_hpo_experiment(
     Returns:
         dict: Preview, or a response with ``experiment``, ``namespace``,
         ``changes`` mapping each changed parameter to ``{"from", "to"}``, and
-        ``active_trials_deleted``, the trials Katib deletes to apply it.
+        ``trials_to_delete``, the ``{"name", "status"}`` of each trial Katib is
+        expected to delete, estimated from the trials when the call ran.
 
     Raises:
         ToolError: If the experiment is not found or the edit is invalid.
@@ -349,8 +399,14 @@ def update_hpo_experiment(
             ).model_dump()
 
         summary = ", ".join(f"{p} {c['from']} -> {c['to']}" for p, c in changes.items())
-        deleted = _active_trials_deleted(patch, status)
-        warning = _deletion_warning(deleted)
+        new_parallel = patch.get("parallelTrialCount")
+        lowering = new_parallel is not None and new_parallel < (spec.get("parallelTrialCount") or 0)
+        doomed = (
+            _trials_katib_will_delete(_katib.list_trials(name, ns), new_parallel)
+            if lowering
+            else []
+        )
+        warning = _deletion_warning(lowering, doomed)
         if not confirmed:
             return PreviewResponse(
                 message=(
@@ -361,18 +417,37 @@ def update_hpo_experiment(
                     "experiment": name,
                     "namespace": ns,
                     "changes": changes,
-                    "active_trials_deleted": deleted,
+                    "trials_to_delete": doomed,
                 },
             ).model_dump()
 
-        api.patch_namespaced_custom_object(
-            **target_ref,
-            body={"spec": patch},
-            # Patching an Experiment is admitted by the same webhooks as a
-            # create, so it gets the write budget rather than the read timeout.
-            _request_timeout=mcp_utils.K8S_WRITE_TIMEOUT,
-        )
-        return _update_response(name, ns, changes, f"updated ({summary}).{warning}", deleted)
+        body: dict[str, Any] = {"spec": patch}
+        resource_version = (current.get("metadata") or {}).get("resourceVersion")
+        if resource_version:
+            # Precondition: the API server rejects the patch with 409 if the
+            # experiment changed since it was read, so the rule checks and the
+            # trial list above always describe the state being changed.
+            body["metadata"] = {"resourceVersion": resource_version}
+        try:
+            api.patch_namespaced_custom_object(
+                **target_ref,
+                body=body,
+                # Patching an Experiment is admitted by the same webhooks as a
+                # create, so it gets the write budget rather than the read timeout.
+                _request_timeout=mcp_utils.K8S_WRITE_TIMEOUT,
+            )
+        except Exception as e:
+            if not is_conflict(e):
+                raise
+            return ToolError(
+                error=(
+                    f"Experiment '{name}' changed while this update was being applied; "
+                    "nothing was changed"
+                ),
+                error_code=ErrorCode.VALIDATION_ERROR,
+                hint="Call update_hpo_experiment again to re-check its current state.",
+            ).model_dump()
+        return _update_response(name, ns, changes, f"updated ({summary}).{warning}", doomed)
 
     except Exception as e:
         logger.warning("update_hpo_experiment(%s) failed: %s", name, e, exc_info=True)

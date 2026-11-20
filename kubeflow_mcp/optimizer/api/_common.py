@@ -152,6 +152,11 @@ def _is_webhook_unavailable(exc: Exception) -> bool:
     return "failed calling webhook" in message and KATIB_API_GROUP in message
 
 
+def is_conflict(exc: Exception) -> bool:
+    """Whether the API server answered 409 Conflict, directly or via the cause chain."""
+    return _api_status(exc) == 409
+
+
 def resource_error(exc: Exception, name: str, kind: str = "Experiment") -> ToolError:
     """Map an exception raised by the SDK or K8s API onto a ``ToolError``.
 
@@ -174,7 +179,7 @@ def resource_error(exc: Exception, name: str, kind: str = "Experiment") -> ToolE
                 else "A Suggestion is created once an experiment starts running."
             ),
         )
-    if _api_status(exc) == 409:
+    if is_conflict(exc):
         # A name collision is caller-fixable, so report it as a validation
         # error: SDK_ERROR would also count as an infrastructure failure and
         # needlessly trip the circuit breaker for this tool.
