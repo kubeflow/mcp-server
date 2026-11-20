@@ -15,6 +15,7 @@
 from fastmcp import FastMCP
 from starlette.testclient import TestClient
 
+from kubeflow_mcp import __version__
 from kubeflow_mcp.core.http_edge import register_probe_routes
 from kubeflow_mcp.core.server import create_server
 
@@ -86,4 +87,36 @@ def test_probes_remain_available_when_mcp_auth_is_enabled() -> None:
 
     assert health_response.status_code == 200
     assert ready_response.status_code == 200
+    assert mcp_response.status_code == 401
+
+
+def test_server_card_reports_metadata() -> None:
+    mcp = create_server(persona="platform-admin", mode="progressive")
+    with TestClient(mcp.http_app(transport="streamable-http")) as client:
+        response = client.get("/.well-known/mcp.json")
+
+    assert response.status_code == 200
+    card = response.json()
+    assert card["name"] == "io.github.kubeflow/mcp-server"
+    assert card["title"] == "Kubeflow MCP Server"
+    assert card["version"] == __version__
+    assert card["transport"]["type"] == "streamable-http"
+    assert card["transport"]["endpoint"] == "/mcp"
+    assert card["metadata"]["persona"] == "platform-admin"
+    assert card["metadata"]["mode"] == "progressive"
+    assert "trainer" in card["metadata"]["clients"]
+    assert card["capabilities"]["tools"] is True
+    assert card["capabilities"]["resources"] is True
+
+
+def test_server_card_remains_available_when_auth_is_enabled() -> None:
+    from kubeflow_mcp.core.auth import APIKeyVerifier
+
+    auth = APIKeyVerifier(expected_token="secret")
+    mcp = create_server(persona="readonly", auth_provider=auth)
+    with TestClient(mcp.http_app(transport="streamable-http")) as client:
+        card_response = client.get("/.well-known/mcp.json")
+        mcp_response = client.post("/mcp")
+
+    assert card_response.status_code == 200
     assert mcp_response.status_code == 401
