@@ -392,7 +392,7 @@ PLATFORM:
 - If pre_flight() returns platform=openshift, ALWAYS pass emptyDir volumes for /.local, /.cache, /tmp — without these, jobs fail on read-only filesystem. Read trainer://guides/platform-fixes for copy-paste JSON
 - fine_tune() automatically sets HF_HOME=/workspace/.hf on all pods (node + initializers) to avoid PermissionError on /.cache under restricted SCC
 - OpenShift packages restriction: if platform=openshift, do NOT use the packages parameter in run_custom_training() as the pre-script pip install step will fail with PermissionError on /.local. Instead, install packages inside your training script to /workspace/lib using subprocess and append to sys.path
-- Gated HuggingFace models require hf_token parameter
+- Gated HuggingFace models need a token: pass hf_token_secret (fine_tune) or secret_env (run_*) to read it from a Secret
 - Training jobs consume GPU resources — be conservative with num_nodes
 - Use get_training_events() to debug stuck/failed jobs. Read trainer://guides/troubleshooting for error-to-fix tables""",
     },

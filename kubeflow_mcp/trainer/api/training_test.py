@@ -33,8 +33,10 @@ from kubeflow_mcp.trainer.api.training import (
     _forwarded_train_args,
     _has_required_params,
     _has_train_call,
+    _inject_secret_refs,
     _inject_trainer_hf_home,
     _make_train_func,
+    _SecretRefs,
     _should_apply_hf_dataset_workaround,
     _uncalled_train_call,
     _validate_resources_per_node,
@@ -1867,3 +1869,310 @@ def test_preview_warns_when_overrides_omit_inherited_gpus(
     assert resources == original
     inspect.assert_called_once_with()
     sdk.assert_not_called()
+
+
+# ─── Credentials from Secrets ───────────────────────────────────────────────
+
+
+def _secret_backend(trainer_type, runtime_name):
+    """Real SDK backend with a mocked API, so tests see the TrainJob that would be created."""
+    from kubeflow.trainer.backends.kubernetes.backend import KubernetesBackend
+    from kubeflow.trainer.types import types as sdk_types
+
+    runtime_trainer = sdk_types.RuntimeTrainer(
+        trainer_type=trainer_type, framework="torch", image="test:latest"
+    )
+    runtime_trainer.set_command(("torchrun",))
+    backend = KubernetesBackend.__new__(KubernetesBackend)
+    backend.namespace = "default"
+    backend.custom_api = MagicMock()
+    backend.get_runtime = MagicMock(
+        return_value=sdk_types.Runtime(
+            name=runtime_name,
+            trainer=runtime_trainer,
+            kind=sdk_types.RuntimeKind.CLUSTER_TRAINING_RUNTIME,
+        )
+    )
+    return backend
+
+
+def _created_train_job(backend) -> dict:
+    backend.custom_api.create_namespaced_custom_object.assert_called_once()
+    return backend.custom_api.create_namespaced_custom_object.call_args[0][4]
+
+
+def _env(entries: list[dict] | None) -> dict[str, dict]:
+    return {e["name"]: e for e in entries or []}
+
+
+_HF_REF = {"name": "hf-creds", "key": "token"}
+_HF_SECRET_ENV = {"valueFrom": {"secretKeyRef": {"name": "hf-creds", "key": "token"}}}
+
+
+def _sdk_builders():
+    import kubeflow.trainer.backends.kubernetes.utils as k8s_utils
+
+    return [
+        getattr(k8s_utils, n)
+        for n in (
+            "get_model_initializer",
+            "get_dataset_initializer",
+            "get_trainer_cr_from_custom_trainer",
+        )
+    ]
+
+
+@patch("kubeflow_mcp.trainer.api.training._check_hf_repos_exist", return_value=None)
+@patch(PATCH_NS_CHECK, return_value=None)
+def test_fine_tune_hf_token_secret_reaches_both_initializers(_ns, _hf):
+    from kubeflow.trainer.types.types import TrainerType
+
+    backend = _secret_backend(TrainerType.BUILTIN_TRAINER, "torchtune-llama3.2-1b")
+    builders = _sdk_builders()
+    with patch(PATCH_CLIENT, return_value=backend):
+        result = fine_tune(
+            model="hf://meta-llama/Llama-3.2-1B",
+            dataset="hf://tatsu-lab/alpaca",
+            runtime="torchtune-llama3.2-1b",
+            hf_token_secret=_HF_REF,
+            confirmed=True,
+        )
+
+    assert result["success"] is True, result
+    initializer = _created_train_job(backend)["spec"]["initializer"]
+    for source in ("model", "dataset"):
+        env = _env(initializer[source]["env"])
+        assert env["ACCESS_TOKEN"] == {"name": "ACCESS_TOKEN", **_HF_SECRET_ENV}
+        assert env["HF_HOME"]["value"] == "/workspace/.hf"
+    assert _sdk_builders() == builders, "SDK builders were not restored"
+
+
+@patch("kubeflow_mcp.trainer.api.training._check_hf_repos_exist", return_value=None)
+@patch(PATCH_NS_CHECK, return_value=None)
+def test_fine_tune_mixed_sources_get_matching_secret_refs(_ns, _hf):
+    from kubeflow.trainer.types.types import TrainerType
+
+    backend = _secret_backend(TrainerType.BUILTIN_TRAINER, "torchtune-llama3.2-1b")
+    with patch(PATCH_CLIENT, return_value=backend):
+        result = fine_tune(
+            model="hf://meta-llama/Llama-3.2-1B",
+            dataset="s3://bucket/data",
+            runtime="torchtune-llama3.2-1b",
+            hf_token_secret=_HF_REF,
+            s3_credentials_secret="s3-creds",
+            confirmed=True,
+        )
+
+    assert result["success"] is True, result
+    initializer = _created_train_job(backend)["spec"]["initializer"]
+    assert "ACCESS_TOKEN" in _env(initializer["model"]["env"])
+    assert "secretRef" not in initializer["model"]
+    assert initializer["dataset"]["secretRef"] == {"name": "s3-creds"}
+    dataset_env = _env(initializer["dataset"].get("env"))
+    assert not {"ACCESS_TOKEN", "ACCESS_KEY_ID", "SECRET_ACCESS_KEY"} & set(dataset_env)
+
+
+@pytest.mark.parametrize("tool", ["run_container_training", "run_custom_training"])
+@patch(PATCH_NS_CHECK, return_value=None)
+def test_run_training_secret_env_reaches_trainer_env(_ns, tool):
+    from kubeflow.trainer.types.types import TrainerType
+
+    backend = _secret_backend(TrainerType.CUSTOM_TRAINER, "torch-distributed")
+    common = {
+        "gpu_per_node": 0,
+        "env": {"LOG_LEVEL": "info"},
+        "secret_env": {"HF_TOKEN": _HF_REF},
+        "confirmed": True,
+    }
+    with (
+        patch(PATCH_CLIENT, return_value=backend),
+        patch(
+            "kubeflow_mcp.trainer.api.training._ensure_workspace",
+            side_effect=lambda v, m, **_: (v, m),
+        ),
+    ):
+        if tool == "run_container_training":
+            result = run_container_training(image="busybox:1.36", **common)
+        else:
+            result = run_custom_training(script="print('hi')", **common)
+
+    assert result["success"] is True, result
+    env = _env(_created_train_job(backend)["spec"]["trainer"]["env"])
+    assert env["HF_TOKEN"] == {"name": "HF_TOKEN", **_HF_SECRET_ENV}
+    assert env["LOG_LEVEL"] == {"name": "LOG_LEVEL", "value": "info"}
+
+
+def _ft(**kwargs):
+    return {"model": "hf://org/model", "dataset": "hf://org/data", **kwargs}
+
+
+@pytest.mark.parametrize(
+    "kwargs, message",
+    [
+        (_ft(hf_token="x", hf_token_secret=_HF_REF), "not both"),
+        (_ft(model="s3://b/m", dataset="s3://b/d", hf_token_secret=_HF_REF), "non-s3://"),
+        (_ft(s3_credentials_secret="s3-creds"), "s3://"),
+        (
+            _ft(dataset="s3://b/d", s3_access_key_id="AKID", s3_credentials_secret="s3-creds"),
+            "not both",
+        ),
+        (_ft(dataset="s3://b/d", s3_credentials_secret="Bad_Name"), "s3_credentials_secret"),
+        (_ft(hf_token_secret={"name": "hf-creds"}), "must be"),
+        (_ft(hf_token_secret={"name": "hf-creds", "key": ".."}), "not a valid Secret key"),
+        (_ft(hf_token_secret={"name": "hf-creds", "key": "a/b"}), "not a valid Secret key"),
+        (_ft(hf_token_secret={"name": "-bad-", "key": "token"}), "hf_token_secret.name"),
+    ],
+)
+def test_fine_tune_rejects_bad_credential_secrets(kwargs, message):
+    with patch(PATCH_NS_CHECK) as ns_check:
+        result = fine_tune(**kwargs)
+
+    assert result["success"] is False
+    assert result["error_code"] == "VALIDATION_ERROR"
+    assert message in result["error"]
+    ns_check.assert_not_called()
+
+
+@pytest.mark.parametrize("tool", [run_container_training, run_custom_training])
+@pytest.mark.parametrize(
+    "kwargs, message",
+    [
+        ({"env": {"HF_TOKEN": "x"}, "secret_env": {"HF_TOKEN": _HF_REF}}, "not both"),
+        ({"secret_env": {"1BAD": _HF_REF}}, "not a valid env var name"),
+        ({"secret_env": {"HF_TOKEN": {"name": "hf-creds"}}}, "must be"),
+        ({"secret_env": {"HF_TOKEN": "hf-creds"}}, "must be"),
+    ],
+)
+def test_run_training_rejects_bad_secret_env(tool, kwargs, message):
+    first = {"image": "busybox:1.36"} if tool is run_container_training else {"script": "pass"}
+    with patch(PATCH_NS_CHECK) as ns_check:
+        result = tool(**first, **kwargs)
+
+    assert result["success"] is False
+    assert result["error_code"] == "VALIDATION_ERROR"
+    assert message in result["error"]
+    ns_check.assert_not_called()
+
+
+@patch(PATCH_GPU_CHECK, return_value=None)
+@patch(PATCH_NS_CHECK, return_value=None)
+def test_fine_tune_preview_shows_refs_and_warns_on_inline_credentials(_ns, _gpu):
+    with patch("kubeflow_mcp.trainer.api.planning.get_cluster_resources", return_value={}):
+        with_ref = fine_tune(**_ft(runtime="torchtune-llama3.2-1b", hf_token_secret=_HF_REF))
+        inline = fine_tune(**_ft(runtime="torchtune-llama3.2-1b", hf_token="hf_secret"))
+
+    assert with_ref["status"] == "preview"
+    assert with_ref["config"]["hf_token_secret"] == _HF_REF
+    assert "credential_warning" not in with_ref["config"]
+    assert "hf_token" in inline["config"]["credential_warning"]
+    assert "hf_secret" not in str(inline)
+
+
+@patch(PATCH_NS_CHECK, return_value=None)
+def test_run_container_training_preview_shows_secret_env_and_warns_on_inline(_ns):
+    result = run_container_training(
+        image="busybox:1.36",
+        env={"API_TOKEN": "tok-123", "LOG_LEVEL": "info"},
+        secret_env={"HF_TOKEN": _HF_REF},
+    )
+
+    assert result["status"] == "preview"
+    assert result["config"]["secret_env"] == {"HF_TOKEN": _HF_REF}
+    assert "API_TOKEN" in result["config"]["credential_warning"]
+    assert "LOG_LEVEL" not in result["config"]["credential_warning"]
+    assert "tok-123" not in str(result)
+
+
+@patch(PATCH_GPU_CHECK, return_value=None)
+@patch(PATCH_NS_CHECK, return_value=None)
+def test_fine_tune_treats_empty_inline_credentials_as_unset(_ns, _gpu):
+    with patch("kubeflow_mcp.trainer.api.planning.get_cluster_resources", return_value={}):
+        result = fine_tune(
+            **_ft(
+                dataset="s3://b/d",
+                runtime="torchtune-llama3.2-1b",
+                hf_token="",
+                hf_token_secret=_HF_REF,
+                s3_access_key_id="",
+                s3_credentials_secret="s3-creds",
+            )
+        )
+
+    assert result["status"] == "preview", result
+    assert "credential_warning" not in result["config"]
+
+
+def test_inject_secret_refs_none_leaves_sdk_untouched():
+    builders = _sdk_builders()
+    with _inject_secret_refs(None):
+        assert _sdk_builders() == builders
+
+
+def test_inject_secret_refs_replaces_plain_access_token_and_restores_on_error():
+    import kubeflow.trainer.backends.kubernetes.utils as k8s_utils
+    from kubeflow.trainer.types.types import HuggingFaceModelInitializer
+
+    builders = _sdk_builders()
+    with pytest.raises(RuntimeError, match="boom"):
+        with _inject_secret_refs(_SecretRefs(hf_token=_HF_REF)):
+            cr = k8s_utils.get_model_initializer(
+                HuggingFaceModelInitializer(storage_uri="hf://org/m", access_token="")
+            )
+            raise RuntimeError("boom")
+
+    tokens = [e for e in cr.env if e.name == "ACCESS_TOKEN"]
+    assert len(tokens) == 1
+    assert tokens[0].value is None
+    assert tokens[0].value_from.secret_key_ref.name == "hf-creds"
+    assert _sdk_builders() == builders
+
+
+def test_inject_secret_refs_concurrent_calls_stay_isolated():
+    import kubeflow.trainer.backends.kubernetes.utils as k8s_utils
+    from kubeflow.trainer.types.types import HuggingFaceModelInitializer
+
+    builders = _sdk_builders()
+    barrier = threading.Barrier(3)
+    built = threading.Barrier(3)
+    results: dict[str, list[str]] = {}
+    errors: list[str] = []
+
+    def build(label: str) -> None:
+        cr = k8s_utils.get_model_initializer(HuggingFaceModelInitializer(storage_uri="hf://o/m"))
+        results[label] = [
+            e.value_from.secret_key_ref.name
+            for e in cr.env or []
+            if e.name == "ACCESS_TOKEN" and e.value_from
+        ]
+
+    def with_refs(secret: str) -> None:
+        try:
+            with _inject_secret_refs(_SecretRefs(hf_token={"name": secret, "key": "token"})):
+                barrier.wait(timeout=5.0)
+                build(secret)
+                built.wait(timeout=5.0)
+        except Exception as exc:
+            errors.append(repr(exc))
+
+    def without_refs() -> None:
+        try:
+            barrier.wait(timeout=5.0)
+            build("none")
+            built.wait(timeout=5.0)
+        except Exception as exc:
+            errors.append(repr(exc))
+
+    threads = [
+        threading.Thread(target=with_refs, args=("secret-a",)),
+        threading.Thread(target=with_refs, args=("secret-b",)),
+        threading.Thread(target=without_refs),
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10.0)
+        assert not t.is_alive()
+
+    assert not errors, errors
+    assert results == {"secret-a": ["secret-a"], "secret-b": ["secret-b"], "none": []}
+    assert _sdk_builders() == builders

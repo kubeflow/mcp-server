@@ -247,6 +247,25 @@ class TestSDKAPISignatures:
         assert "trainer" in params
         assert "options" in params
 
+    def test_builders_wrapped_for_secret_refs(self):
+        """_inject_secret_refs wraps these builders and edits the CRs they return."""
+        from kubeflow.trainer.backends.kubernetes import utils as k8s_utils
+        from kubeflow_trainer_api import models
+
+        from kubeflow_mcp.trainer.api.training import _SECRET_REF_WRAPPERS
+
+        for name in _SECRET_REF_WRAPPERS:
+            assert callable(getattr(k8s_utils, name, None)), name
+        assert list(inspect.signature(k8s_utils.get_model_initializer).parameters) == ["model"]
+        assert list(inspect.signature(k8s_utils.get_dataset_initializer).parameters) == ["dataset"]
+        assert list(inspect.signature(k8s_utils.get_trainer_cr_from_custom_trainer).parameters) == [
+            "runtime",
+            "trainer",
+        ]
+        assert "secret_ref" in models.TrainerV1alpha1ModelInitializer.model_fields
+        assert "secret_ref" in models.TrainerV1alpha1DatasetInitializer.model_fields
+        assert "value_from" in models.IoK8sApiCoreV1EnvVar.model_fields
+
     def test_trainer_client_train_accepts_string_runtime(self):
         """Verify train() accepts runtime as string (not just Runtime object)."""
         hints = get_type_hints(TrainerClient.train)
