@@ -155,7 +155,7 @@ class TestModuleExports:
         assert PHASE_TO_SECTION["optimizer_discovery"] is None
         assert PHASE_TO_SECTION["optimizer_optimization"] == "optimizer_optimization"
         assert PHASE_TO_SECTION["optimizer_monitoring"] == "optimizer_monitoring"
-        assert PHASE_TO_SECTION["optimizer_lifecycle"] == "optimizer_monitoring"
+        assert PHASE_TO_SECTION["optimizer_lifecycle"] == "optimizer_lifecycle"
 
 
 class TestToolPhaseRegistration:
