@@ -37,6 +37,12 @@ Example config file (~/.kubeflow-mcp.yaml):
             # issuer: https://auth.example.com
             # audience: kubeflow-mcp
 
+        authz:                        # per-caller authorization, needs JWT auth
+            mode: sar                 # none (default) or sar
+            # user_claim: sub
+            # groups_claim: groups
+            # cache_ttl: 30
+
         resilience:
             rate_limit: 10.0
             rate_capacity: 20.0
@@ -62,7 +68,7 @@ import os
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +119,27 @@ class AuthConfig(BaseModel):
     jwks_uri: str | None = Field(default=None)
     issuer: str | None = Field(default=None)
     audience: str | None = Field(default=None)
+
+
+class AuthzConfig(BaseModel):
+    """Per-caller authorization with Kubernetes SubjectAccessReview (#565).
+
+    With ``mode="sar"`` every tool call is checked as the caller before it runs, so a
+    caller can only do what their own Kubernetes RBAC allows. Needs JWT auth: the
+    caller's user and groups come from the verified token's claims. The prefixes match
+    the API server's ``--oidc-username-prefix`` / ``--oidc-groups-prefix``.
+    """
+
+    # A misspelt key would silently keep a default, so unknown keys are an error.
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["none", "sar"] = Field(default="none")
+    user_claim: str = Field(default="sub")
+    groups_claim: str = Field(default="groups")
+    username_prefix: str = Field(default="")
+    groups_prefix: str = Field(default="")
+    # Seconds a decision is reused for the same caller and permission; 0 turns it off.
+    cache_ttl: float = Field(default=30.0, ge=0)
 
 
 class SecurityConfig(BaseModel):
@@ -170,6 +197,7 @@ class Config(BaseModel):
 
     server: ServerConfig = Field(default_factory=ServerConfig)
     auth: AuthConfig = Field(default_factory=AuthConfig)
+    authz: AuthzConfig = Field(default_factory=AuthzConfig)
     security: SecurityConfig = Field(default_factory=SecurityConfig)
     resilience: ResilienceConfig = Field(default_factory=ResilienceConfig)
     trainer: TrainerConfig = Field(default_factory=TrainerConfig)
@@ -314,6 +342,17 @@ def load_config(config_path: Path | None = None) -> Config:
         audience=os.getenv("KUBEFLOW_MCP_JWT_AUDIENCE", auth_file.get("audience")),
     )
 
+    authz_file = file_config.get("authz", {}) or {}
+    try:
+        authz = AuthzConfig(
+            **{
+                **authz_file,
+                "mode": os.getenv("KUBEFLOW_MCP_AUTHZ", authz_file.get("mode", "none")),
+            }
+        )
+    except ValidationError as e:
+        raise ValueError(f"Invalid authz config: {e}") from e
+
     security_file = file_config.get("security", {})
 
     def _csv_env(name: str, file_default: list[str]) -> list[str]:
@@ -362,6 +401,7 @@ def load_config(config_path: Path | None = None) -> Config:
     return Config(
         server=server,
         auth=auth,
+        authz=authz,
         security=security,
         resilience=resilience,
         trainer=trainer,

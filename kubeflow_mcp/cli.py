@@ -96,6 +96,14 @@ def cli() -> None:
     "Ignored for stdio transport.",
 )
 @click.option(
+    "--authz",
+    type=click.Choice(["none", "sar"]),
+    default=None,
+    help="Per-caller authorization. 'sar' checks every tool call as the caller with a "
+    "Kubernetes SubjectAccessReview (needs JWT auth). "
+    "Falls back to KUBEFLOW_MCP_AUTHZ env var, config file, then 'none'.",
+)
+@click.option(
     "--otel-endpoint",
     default=None,
     help="OpenTelemetry OTLP HTTP endpoint for tracing. "
@@ -111,6 +119,7 @@ def serve(
     instruction_tier: str | None,
     no_banner: bool,
     auth_token: str | None,
+    authz: str | None,
     otel_endpoint: str | None,
 ) -> None:
     """Start the MCP server.
@@ -153,6 +162,8 @@ def serve(
         cfg.auth.auth_token = auth_token
     if otel_endpoint:
         cfg.observability.otel_endpoint = otel_endpoint
+    if authz:
+        cfg.authz.mode = authz
 
     try:
         logger = setup_logging(level=log_level, format=log_format)
@@ -215,13 +226,18 @@ def serve(
     client_list = [c.strip() for c in clients.split(",") if c.strip()]
     if not client_list:
         raise click.ClickException("at least one client must be specified")
-    server = create_server(
-        clients=client_list,
-        persona=persona,
-        mode=mode,
-        instruction_tier=instruction_tier,
-        auth_provider=auth_provider,
-    )
+    try:
+        server = create_server(
+            clients=client_list,
+            persona=persona,
+            mode=mode,
+            instruction_tier=instruction_tier,
+            auth_provider=auth_provider,
+            # Only when on, so the default call is unchanged.
+            **({"authz": cfg.authz} if cfg.authz.mode == "sar" else {}),
+        )
+    except ValueError as e:
+        raise click.ClickException(str(e)) from e
 
     show_banner = not no_banner
     if transport == "stdio":

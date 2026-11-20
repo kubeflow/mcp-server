@@ -179,6 +179,22 @@ class TestStructuredFormatterRedaction:
         assert output["success"] is True
         assert output["duration_ms"] == 42
 
+    def test_authz_refusal_keeps_who_and_what(self):
+        formatter = StructuredFormatter()
+        record = self._make_record(
+            audit=True,
+            tool="delete_training_job",
+            user="bob",
+            missing_permissions=["delete trainjobs.trainer.kubeflow.org in namespace 'team-a'"],
+        )
+
+        output = json.loads(formatter.format(record))
+
+        assert output["user"] == "bob"
+        assert output["missing_permissions"] == [
+            "delete trainjobs.trainer.kubeflow.org in namespace 'team-a'"
+        ]
+
     def test_no_context_omits_context_key(self):
         formatter = StructuredFormatter()
         record = self._make_record()

@@ -622,3 +622,25 @@ def test_clients_help_lists_pipelines_with_spacing():
     result = CliRunner().invoke(cli, ["serve", "--help"], terminal_width=200)
 
     assert "(trainer, spark, pipelines, optimizer, hub). Falls back" in result.output
+
+
+def test_serve_authz_flag_reaches_create_server():
+    mock_server, mock_create_server, modules_patch = _make_serve_mocks()
+
+    with patch.dict(sys.modules, modules_patch):
+        CliRunner().invoke(cli, ["serve", "--authz", "sar"])
+
+    assert mock_create_server.call_args.kwargs["authz"].mode == "sar"
+
+
+def test_serve_reports_an_authz_setup_error_without_traceback():
+    """create_server refuses 'sar' without JWT auth; serve says why and exits."""
+    _, mock_create_server, modules_patch = _make_serve_mocks()
+    mock_create_server.side_effect = ValueError("authz mode 'sar' needs JWT auth")
+
+    with patch.dict(sys.modules, modules_patch):
+        result = CliRunner().invoke(cli, ["serve", "--authz", "sar"])
+
+    assert result.exit_code != 0
+    assert "needs JWT auth" in result.output
+    assert not isinstance(result.exception, ValueError)
