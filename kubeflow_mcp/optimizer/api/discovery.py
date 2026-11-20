@@ -14,16 +14,10 @@
 
 """Discovery tools for Katib experiments, trials, and suggestions.
 
-SDK methods used:
-    - OptimizerClient.get_job()      → get_hpo_experiment, get_trial,
-                                       get_successful_trials
-    - CustomObjectsApi               → list_hpo_experiments, get_hpo_experiment_status,
-                                       list_suggestions
-
-``list_hpo_experiments`` reads the Experiment list directly rather than through
-``OptimizerClient.list_jobs()``: the SDK resolves every trial's TrainJob
-individually, so listing a namespace costs one call per trial while a summary
-needs only fields the Experiment CR already carries.
+Every tool reads Katib's custom resources through ``CustomObjectsApi``:
+Experiments, Trials and Suggestions. The SDK's ``OptimizerClient`` readers are
+not used because they only describe experiments using the random or grid
+algorithm with TrainJob trials (see ``optimizer/api/_katib.py``).
 """
 
 import logging
@@ -34,10 +28,10 @@ from kubeflow_mcp.common.types import ToolError, ToolResponse
 from kubeflow_mcp.common.utils import (
     K8S_TIMEOUT,
     get_custom_objects_api,
-    get_optimizer_client_for_namespace,
     get_optimizer_effective_namespace,
 )
 from kubeflow_mcp.core.security import validate_k8s_name
+from kubeflow_mcp.optimizer.api import _katib
 from kubeflow_mcp.optimizer.api._common import (
     DEFAULT_LIST_LIMIT,
     check_optimizer_namespace,
@@ -53,13 +47,10 @@ from kubeflow_mcp.optimizer.constants import (
     SUGGESTION_PLURAL,
 )
 from kubeflow_mcp.optimizer.types import (
-    conditions_to_list,
-    early_stopping_to_dict,
+    TRIAL_SUCCEEDED,
     experiment_phase,
     experiment_summary_from_cr,
     experiment_to_dict,
-    is_success_status,
-    optimal_trial_to_dict,
     suggestion_to_dict,
     trial_counts_from_cr,
     trial_to_dict,
@@ -124,9 +115,10 @@ def get_hpo_experiment(
 ) -> dict[str, Any]:
     """Get full details of a Katib optimization experiment.
 
-    Combines the SDK's view (search space, algorithm, objectives, trial config,
-    embedded trials) with fields only the Experiment CR carries: ``conditions``,
-    ``best_trial``, ``early_stopping``, the phase, and the trial counters.
+    Reads the Experiment CR (search space, algorithm, objectives, trial config,
+    ``conditions``, ``best_trial``, ``early_stopping``, phase and trial
+    counters) and its Trial CRs, so it works for every algorithm and trial
+    workload kind.
 
     Args:
         name: Experiment name.
@@ -139,9 +131,7 @@ def get_hpo_experiment(
         dict: Response containing ``name``, ``status``, ``creation_timestamp``,
         ``objectives``, ``algorithm``, ``search_space``, ``trial_config``,
         ``trials`` (up to ``limit``), ``trials_truncated``, ``conditions``,
-        ``best_trial``, ``early_stopping`` and the CR trial counters. When the
-        CR read fails, the CR-sourced keys are replaced by
-        ``detail_unavailable: True`` and the SDK-derived values remain.
+        ``best_trial``, ``early_stopping`` and the CR trial counters.
 
     Raises:
         ToolError: If experiment not found (``RESOURCE_NOT_FOUND``).
@@ -159,14 +149,11 @@ def get_hpo_experiment(
         return limit_err.model_dump()
 
     try:
-        client = get_optimizer_client_for_namespace(namespace)
-        job = client.get_job(name=name)
-
-        data = experiment_to_dict(job)
-        trials = getattr(job, "trials", None) or []
+        ns = get_optimizer_effective_namespace(namespace)
+        data = experiment_to_dict(_katib.read_experiment(name, ns))
+        trials = _katib.list_trials(name, ns)
         data["trials"] = [trial_to_dict(t) for t in trials[:limit]]
         data["trials_truncated"] = len(trials) > limit
-        data.update(_experiment_cr_detail(name, namespace))
         return ToolResponse(data=data).model_dump()
 
     except Exception as e:
@@ -179,11 +166,9 @@ def get_hpo_experiment_status(
 ) -> dict[str, Any]:
     """Lightweight status-only check for an experiment.
 
-    Reads the Experiment CR directly rather than going through
-    ``OptimizerClient.get_job()``, which additionally resolves every trial's
-    TrainJob. That makes this both cheaper than ``get_hpo_experiment()`` and
-    consistent with it: both report the CR's own counters, including
-    ``early_stopped_trials``, which the SDK's trial view cannot express.
+    Reads only the Experiment CR, so it is cheaper than ``get_hpo_experiment()``
+    while reporting the same phase and counters, including
+    ``early_stopped_trials``.
 
     Args:
         name: Experiment name.
@@ -204,7 +189,7 @@ def get_hpo_experiment_status(
         return ns_err.model_dump()
 
     try:
-        obj = _read_experiment_cr(name, namespace)
+        obj = _katib.read_experiment(name, get_optimizer_effective_namespace(namespace))
         status = obj.get("status") or {}
 
         data: dict[str, Any] = {
@@ -225,8 +210,7 @@ def get_trial(
 ) -> dict[str, Any]:
     """Get details of a specific trial within an experiment.
 
-    Returns trial parameters, metrics, and status for debugging. The trial is
-    located within ``OptimizerClient.get_job().trials``.
+    Returns trial parameters, metrics, status and workload kind for debugging.
 
     Args:
         name: Experiment name. Every optimizer tool takes the experiment as
@@ -252,11 +236,12 @@ def get_trial(
         return ns_err.model_dump()
 
     try:
-        client = get_optimizer_client_for_namespace(namespace)
-        job = client.get_job(name=name)
-
-        for candidate in getattr(job, "trials", None) or []:
-            if getattr(candidate, "name", None) == trial:
+        ns = get_optimizer_effective_namespace(namespace)
+        # Read the experiment first so a missing experiment is reported as
+        # such, rather than as a missing trial.
+        _katib.read_experiment(name, ns)
+        for candidate in _katib.list_trials(name, ns):
+            if (candidate.get("metadata") or {}).get("name") == trial:
                 data = trial_to_dict(candidate)
                 data["experiment"] = name
                 return ToolResponse(data=data).model_dump()
@@ -278,8 +263,8 @@ def get_successful_trials(
 ) -> dict[str, Any]:
     """Get successful trials with hyperparameters and metrics.
 
-    Returns only trials whose status denotes success, for comparison. Useful
-    for finding the best hyperparameter combinations.
+    Returns only trials Katib marked Succeeded (status ``Complete``), for
+    comparison. Useful for finding the best hyperparameter combinations.
 
     Args:
         name: Experiment name.
@@ -303,14 +288,10 @@ def get_successful_trials(
         return limit_err.model_dump()
 
     try:
-        client = get_optimizer_client_for_namespace(namespace)
-        job = client.get_job(name=name)
-
-        successful = [
-            trial_to_dict(t)
-            for t in (getattr(job, "trials", None) or [])
-            if is_success_status(getattr(getattr(t, "trainjob", None), "status", None))
-        ]
+        ns = get_optimizer_effective_namespace(namespace)
+        _katib.read_experiment(name, ns)
+        trials = [trial_to_dict(t) for t in _katib.list_trials(name, ns)]
+        successful = [t for t in trials if t["status"] == TRIAL_SUCCEEDED]
         return ToolResponse(
             data={"experiment": name, "trials": successful[:limit], "total": len(successful)}
         ).model_dump()
@@ -367,52 +348,3 @@ def list_suggestions(
 
     except Exception as e:
         return collection_error(e).model_dump()
-
-
-def _read_experiment_cr(name: str, namespace: str | None) -> dict[str, Any]:
-    """Fetch the raw Experiment custom resource.
-
-    Raises whatever the Kubernetes client raises; callers decide whether that is
-    fatal (``get_hpo_experiment_status``) or merely degrades the response
-    (``get_hpo_experiment``).
-    """
-    ns = get_optimizer_effective_namespace(namespace)
-    return get_custom_objects_api().get_namespaced_custom_object(
-        group=KATIB_API_GROUP,
-        version=KATIB_API_VERSION,
-        namespace=ns,
-        plural=EXPERIMENT_PLURAL,
-        name=name,
-        _request_timeout=K8S_TIMEOUT,
-    )
-
-
-def _experiment_cr_detail(name: str, namespace: str | None) -> dict[str, Any]:
-    """Read the fields ``OptimizationJob`` omits straight from the Experiment CR.
-
-    Supplies ``conditions`` (why an experiment failed), ``best_trial`` and
-    ``early_stopping``, plus authoritative trial counts — Katib tracks
-    early-stopped trials here, and that state never reaches the TrainJob the
-    SDK derives its trial view from.
-
-    Best-effort: this is supplementary detail, so a failure here degrades the
-    response rather than failing the whole call.
-    """
-    try:
-        obj = _read_experiment_cr(name, namespace)
-    except Exception as e:
-        logger.debug("get_hpo_experiment(%s): CR detail unavailable: %s", name, e)
-        return {"detail_unavailable": True}
-
-    status = obj.get("status") or {}
-    detail: dict[str, Any] = {
-        "conditions": conditions_to_list(status),
-        "best_trial": optimal_trial_to_dict(status),
-        "early_stopping": early_stopping_to_dict(obj.get("spec") or {}),
-        # Derive the phase from the same source get_hpo_experiment_status uses, so
-        # the two tools cannot disagree about a single experiment.
-        "status": experiment_phase(status),
-    }
-    # CR counters are authoritative; they supersede the SDK-derived ones.
-    detail.update(trial_counts_from_cr(status))
-    return detail

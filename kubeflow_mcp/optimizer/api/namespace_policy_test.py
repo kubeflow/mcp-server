@@ -160,7 +160,28 @@ _TOOL_KWARGS: dict[str, dict] = {
         "confirmed": True,
     },
     "create_hpo_experiment_from_spec": {
-        "spec": {"metadata": {"name": "exp"}},
+        # A complete manifest, so the sweep exercises the namespace check rather
+        # than stopping at input validation.
+        "spec": {
+            "apiVersion": "kubeflow.org/v1beta1",
+            "kind": "Experiment",
+            "metadata": {"name": "exp"},
+            "spec": {
+                "objective": {"type": "maximize", "objectiveMetricName": "acc"},
+                "algorithm": {"algorithmName": "random"},
+                "parameters": [
+                    {
+                        "name": "lr",
+                        "parameterType": "double",
+                        "feasibleSpace": {"min": "0.1", "max": "1"},
+                    }
+                ],
+                "trialTemplate": {
+                    "primaryContainerName": "node",
+                    "trialSpec": {"kind": "TrainJob"},
+                },
+            },
+        },
         "confirmed": True,
     },
 }
@@ -193,34 +214,25 @@ def test_every_tool_is_covered_by_the_sweep():
         if callable(tool) and getattr(tool, "__name__", None) in _TOOL_KWARGS
     ],
 )
-def test_every_tool_enforces_the_allowlist(tool, kwargs):
+def test_every_tool_enforces_the_allowlist(katib, tool, kwargs):
     """No optimizer tool may reach the cluster when the resolved namespace is
-    outside the allowlist."""
-    client = MagicMock()
-    api = MagicMock()
+    outside the allowlist.
+
+    The fake resolves the optimizer's default namespace to ``kubeflow``, outside
+    the allowlist, while the trainer's resolves inside it, so a tool checking the
+    trainer's default instead of its own would pass and be caught here.
+    """
     with (
         patch(_POLICY, return_value=["team-a"]),
-        patch(_TRAINER_NS, return_value="team-a"),  # would pass the old check
-        patch(_OPTIMIZER_NS, return_value="team-b"),  # but this is the real target
-        patch("kubeflow_mcp.common.utils.get_optimizer_client_for_namespace", return_value=client),
-        patch("kubeflow_mcp.common.utils.get_custom_objects_api", return_value=api),
-        patch(
-            "kubeflow_mcp.optimizer.api.discovery.get_optimizer_client_for_namespace",
-            return_value=client,
-        ),
-        patch("kubeflow_mcp.optimizer.api.discovery.get_custom_objects_api", return_value=api),
-        patch(
-            "kubeflow_mcp.optimizer.api.monitoring.get_optimizer_client_for_namespace",
-            return_value=client,
-        ),
-        patch("kubeflow_mcp.optimizer.api.monitoring.get_custom_objects_api", return_value=api),
+        patch(_TRAINER_NS, return_value="team-a"),
     ):
         result = tool(**kwargs)
 
     assert result["success"] is False, f"{tool.__name__} did not deny"
     assert result["error_code"] == "PERMISSION_DENIED", f"{tool.__name__} wrong error"
-    client.assert_not_called()
-    api.assert_not_called()
+    # Any request at all, not only a call of the client itself, is a leak.
+    assert katib.custom.calls == [], f"{tool.__name__} reached CustomObjectsApi"
+    assert katib.core.calls == [], f"{tool.__name__} reached CoreV1Api"
 
 
 @pytest.mark.parametrize(

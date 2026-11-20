@@ -29,9 +29,22 @@ KATIB_API_VERSION = sdk_constants.VERSION  # "v1beta1"
 EXPERIMENT_PLURAL = sdk_constants.EXPERIMENT_PLURAL  # "experiments"
 EXPERIMENT_KIND = sdk_constants.EXPERIMENT_KIND  # "Experiment"
 
+TRIAL_PLURAL = sdk_constants.TRIAL_PLURAL  # "trials"
+TRIAL_KIND = sdk_constants.TRIAL_KIND  # "Trial"
+# Katib labels each Trial with its experiment, and its pod webhook copies the
+# Trial's labels onto every trial pod, whatever the workload kind.
+EXPERIMENT_LABEL = sdk_constants.EXPERIMENT_LABEL  # "katib.kubeflow.org/experiment"
+# The sidecar that receives a trial's stdout when Katib's StdOut metrics
+# collector redirects the primary container's output to a file.
+METRICS_COLLECTOR_CONTAINER = sdk_constants.METRICS_COLLECTOR_CONTAINER
+
 # The SDK does not expose a Suggestion plural constant, so it is defined here.
 # Used for direct CustomObjectsApi access (list_suggestions, get_suggestion).
 SUGGESTION_PLURAL = "suggestions"
+
+# Katib's pod webhook adds this label, naming the trial, to every trial pod
+# (consts.LabelTrialName in Katib). The SDK has no constant for it.
+TRIAL_LABEL = "katib.kubeflow.org/trial"
 
 # Katib's integer parameter type. The SDK defines DOUBLE_PARAMETER and
 # CATEGORICAL_PARAMETERS but has no int equivalent, because its ``Search``

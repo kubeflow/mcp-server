@@ -305,14 +305,9 @@ SDK_COMPATIBILITY: dict[str, object] = {
         "optimizer": {
             "status": "implemented",
             "sdk_client": "kubeflow.optimizer.OptimizerClient",
-            "covered_methods": [
-                "get_job",
-                "delete_job",
-                "get_best_results",
-                "get_job_logs",
-                "get_job_events",
-                "wait_for_job_status",
-            ],
+            # Only the client's resolved default namespace is used. Every tool
+            # reads and writes Katib's resources directly; see uncovered_methods.
+            "covered_methods": [],
             "uncovered_methods": [
                 # optimize() requires TrainJobTemplate.trainer to be a CustomTrainer
                 # holding a live Python callable (func), which cannot cross the
@@ -321,20 +316,37 @@ SDK_COMPATIBILITY: dict[str, object] = {
                 # label are both unreachable through it. create_hpo_experiment
                 # builds the V1beta1Experiment CR directly instead.
                 "optimize",
-                # list_jobs() resolves every trial's TrainJob individually, so
-                # listing a namespace costs one API call per trial. A summary
-                # needs only fields the Experiment CR already carries, so
-                # list_hpo_experiments lists the CR directly instead.
+                # The readers below convert the algorithm through a registry that
+                # holds only random and grid, and resolve every trial as a TrainJob
+                # named after it. Experiments using any other algorithm, or a
+                # batch/v1 Job (or other) trial template, fail, so the tools read
+                # the Experiment and Trial CRs and the trial pods instead.
                 "list_jobs",
+                "get_job",
+                "get_best_results",
+                "get_job_logs",
+                "get_job_events",
+                "wait_for_job_status",
+                # Sends no request timeout, so a confirmed delete could hang.
+                "delete_job",
             ],
             "k8s_api_operations": [
                 "create_hpo_experiment (CustomObjectsApi create)",
                 "create_hpo_experiment_from_spec (CustomObjectsApi create)",
                 "list_hpo_experiments (CustomObjectsApi list)",
+                "get_hpo_experiment (CustomObjectsApi get + Trial list)",
                 "get_hpo_experiment_status (CustomObjectsApi get)",
+                "get_trial (CustomObjectsApi get + Trial list)",
+                "get_successful_trials (CustomObjectsApi get + Trial list)",
+                "get_hpo_experiment_trials (CustomObjectsApi get + Trial list)",
+                "get_best_trial (CustomObjectsApi get)",
+                "wait_for_hpo_experiment (CustomObjectsApi get, polled)",
+                "get_hpo_experiment_trial_logs (CoreV1Api pod list + bounded log read)",
+                "get_hpo_experiment_events (CoreV1Api event + pod list)",
                 "list_suggestions (CustomObjectsApi list)",
                 "get_suggestion (CustomObjectsApi get)",
-                "update_hpo_experiment (CustomObjectsApi get + patch)",
+                "update_hpo_experiment (CustomObjectsApi get + Trial list + patch)",
+                "delete_hpo_experiment (CustomObjectsApi delete)",
                 "katib_pre_flight (ApiextensionsV1Api + CoreV1Api)",
             ],
         },

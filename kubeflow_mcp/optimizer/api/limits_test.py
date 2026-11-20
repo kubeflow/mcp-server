@@ -19,37 +19,29 @@ every trial into the agent's context window. Every collection tool must bound
 what it returns while still reporting the true total.
 """
 
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from kubeflow_mcp.optimizer.api import discovery, monitoring
 from kubeflow_mcp.optimizer.api._common import DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT, clamp_limit
+from kubeflow_mcp.optimizer.conftest import event, experiment_cr, trial_cr
 
 _DISC = "kubeflow_mcp.optimizer.api.discovery"
-_MON = "kubeflow_mcp.optimizer.api.monitoring"
 
 
-def _trial(i):
-    return SimpleNamespace(
-        name=f"t{i}",
-        parameters={"lr": "0.01"},
-        trainjob=SimpleNamespace(name=f"t{i}-job", status="Complete"),
-        metrics=[],
-    )
-
-
-def _job(trial_count=0):
-    return SimpleNamespace(
-        name="exp",
-        status="Running",
-        creation_timestamp=None,
-        trials=[_trial(i) for i in range(trial_count)],
-        objectives=[],
-        algorithm=SimpleNamespace(random_state=None),
-        search_space={},
-        trial_config=SimpleNamespace(num_trials=1, parallel_trials=1, max_failed_trials=None),
+def _experiment_with_trials(katib, count, state="Complete"):
+    katib.add_experiment(experiment_cr("exp", status={"trials": count}))
+    katib.add_trials(
+        *(
+            trial_cr(
+                f"t{i:03d}",
+                state,
+                experiment="exp",
+                created=f"2026-11-01T00:{i // 60:02d}:{i % 60:02d}Z",
+            )
+            for i in range(count)
+        )
     )
 
 
@@ -87,30 +79,25 @@ def test_list_experiments_truncates_but_reports_true_total():
     assert result["data"]["total"] == 120
 
 
-def test_get_experiment_truncates_trials_and_flags_it():
-    client = MagicMock(get_job=MagicMock(return_value=_job(trial_count=120)))
-    with patch(f"{_DISC}.get_optimizer_client_for_namespace", return_value=client):
-        result = discovery.get_hpo_experiment("exp", limit=5)
-    data = result["data"]
+def test_get_experiment_truncates_trials_and_flags_it(katib):
+    _experiment_with_trials(katib, 120)
+    data = discovery.get_hpo_experiment("exp", limit=5)["data"]
     assert len(data["trials"]) == 5
     assert data["trials_truncated"] is True
-    # Counts are derived from the full set, not the truncated slice.
+    # Counts describe the whole experiment, not the truncated slice.
     assert data["total_trials"] == 120
 
 
-def test_get_experiment_does_not_flag_truncation_when_all_fit():
-    client = MagicMock(get_job=MagicMock(return_value=_job(trial_count=3)))
-    with patch(f"{_DISC}.get_optimizer_client_for_namespace", return_value=client):
-        result = discovery.get_hpo_experiment("exp", limit=50)
-    assert result["data"]["trials_truncated"] is False
+def test_get_experiment_does_not_flag_truncation_when_all_fit(katib):
+    _experiment_with_trials(katib, 3)
+    assert discovery.get_hpo_experiment("exp", limit=50)["data"]["trials_truncated"] is False
 
 
-def test_get_successful_trials_truncates():
-    client = MagicMock(get_job=MagicMock(return_value=_job(trial_count=80)))
-    with patch(f"{_DISC}.get_optimizer_client_for_namespace", return_value=client):
-        result = discovery.get_successful_trials("exp", limit=10)
-    assert len(result["data"]["trials"]) == 10
-    assert result["data"]["total"] == 80
+def test_get_successful_trials_truncates(katib):
+    _experiment_with_trials(katib, 80)
+    data = discovery.get_successful_trials("exp", limit=10)["data"]
+    assert len(data["trials"]) == 10
+    assert data["total"] == 80
 
 
 def test_list_suggestions_truncates():
@@ -127,32 +114,24 @@ def test_list_suggestions_truncates():
     assert result["data"]["total"] == 70
 
 
-def test_get_experiment_trials_truncates():
-    client = MagicMock(get_job=MagicMock(return_value=_job(trial_count=90)))
-    with patch(f"{_MON}.get_optimizer_client_for_namespace", return_value=client):
-        result = monitoring.get_hpo_experiment_trials("exp", limit=6)
-    assert len(result["data"]["trials"]) == 6
-    assert result["data"]["total"] == 90
+def test_get_experiment_trials_truncates(katib):
+    _experiment_with_trials(katib, 90)
+    data = monitoring.get_hpo_experiment_trials("exp", limit=6)["data"]
+    assert len(data["trials"]) == 6
+    assert data["total"] == 90
     # Summary counts still reflect every trial.
-    assert result["data"]["summary"]["total_trials"] == 90
+    assert data["summary"]["total_trials"] == 90
 
 
-def test_get_experiment_events_truncates():
-    events = [
-        SimpleNamespace(
-            involved_object_kind="Pod",
-            involved_object_name=f"p{i}",
-            reason="Scheduled",
-            message="m",
-            event_time=None,
-        )
+def test_get_experiment_events_truncates(katib):
+    katib.add_experiment(experiment_cr("exp"))
+    katib.core.events.extend(
+        event("exp", "Experiment", f"R{i}", f"2026-11-01T00:{i // 60:02d}:{i % 60:02d}Z")
         for i in range(75)
-    ]
-    client = MagicMock(get_job_events=MagicMock(return_value=events))
-    with patch(f"{_MON}.get_optimizer_client_for_namespace", return_value=client):
-        result = monitoring.get_hpo_experiment_events("exp", limit=3)
-    assert len(result["data"]["events"]) == 3
-    assert result["data"]["total"] == 75
+    )
+    data = monitoring.get_hpo_experiment_events("exp", limit=3)["data"]
+    assert len(data["events"]) == 3
+    assert data["total"] == 75
 
 
 @pytest.mark.parametrize(
