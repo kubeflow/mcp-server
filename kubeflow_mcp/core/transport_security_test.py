@@ -209,3 +209,19 @@ class TestLoadConfigSecurityEnvVars:
         monkeypatch.setenv("KUBEFLOW_MCP_DNS_REBINDING_PROTECTION", value)
         cfg = load_config()
         assert cfg.security.enable_dns_rebinding_protection is True
+
+
+@pytest.mark.asyncio
+async def test_non_http_scope_passes_through_uninspected():
+    """Non-HTTP scopes (e.g. websocket or lifespan) pass through without validation."""
+    called = False
+
+    async def fake_app(scope, receive, send):
+        nonlocal called
+        called = True
+
+    settings = build_transport_security_settings(SecurityConfig())
+    mw = DNSRebindingProtectionMiddleware(fake_app, settings)
+    scope = {"type": "websocket", "path": "/ws"}
+    await mw(scope, None, None)
+    assert called is True
