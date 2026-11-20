@@ -226,6 +226,37 @@ def check_run_namespace(client: Any, run: Any, namespace: str) -> ToolError | No
     return None
 
 
+def check_resource_namespace(obj: Any, namespace: str, kind: str) -> ToolError | None:
+    """Verify that an experiment or pipeline belongs to *namespace* (fail closed).
+
+    Multi-user KFP sets the namespace on namespaced objects. Standalone single-user KFP
+    (and a shared pipeline in multi-user KFP) leaves it empty; that is accepted only
+    when no namespace allowlist is configured, the same rule ``check_run_namespace``
+    applies to runs.
+    """
+    name = getattr(obj, "display_name", None)
+    obj_ns = getattr(obj, "namespace", None)
+    if not obj_ns:
+        if get_allowed_namespaces() is not None:
+            return ToolError(
+                error=f"{kind} '{name}' has no namespace and a namespace allowlist "
+                "is configured; cannot verify",
+                error_code=ErrorCode.PERMISSION_DENIED,
+            )
+        return None
+    if obj_ns != namespace:
+        return ToolError(
+            error=f"{kind} '{name}' is not in namespace '{namespace}'",
+            error_code=ErrorCode.PERMISSION_DENIED,
+        )
+    return None
+
+
+def check_experiment_namespace(experiment: Any, namespace: str) -> ToolError | None:
+    """Verify that an experiment belongs to *namespace* (fail closed)."""
+    return check_resource_namespace(experiment, namespace, "Experiment")
+
+
 def _http_status(exc: Exception) -> int | None:
     # kfp_server_api and kubernetes both raise an ``ApiException`` with an int status.
     # Matched by class name, including base classes, so this works without importing

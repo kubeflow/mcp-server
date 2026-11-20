@@ -16,6 +16,7 @@ classifiers = [
 ]
 dependencies = [
     "fastmcp==4.0.10",
+    "authlib>=1.9.0", # CVE-2026-96760
     "pydantic>=2.0",
     "pyyaml>=6.0",
     "click>=8.0",
@@ -26,7 +27,12 @@ dependencies = [
 [project.optional-dependencies]
 hub = ["kubeflow[hub]>=0.5.0,<0.6.0"]
 spark = ["kubeflow[spark]>=0.5.0,<0.6.0"]
-all = ["kubeflow[hub]>=0.5.0,<0.6.0", "kubeflow[spark]>=0.5.0,<0.6.0"]
+pipelines = ["kubeflow[pipelines]>=0.5.0,<0.6.0"]
+all = [
+    "kubeflow[hub]>=0.5.0,<0.6.0",
+    "kubeflow[spark]>=0.5.0,<0.6.0",
+    "kubeflow[pipelines]>=0.5.0,<0.6.0",
+]
 
 [dependency-groups]
 dev = [
@@ -91,7 +97,7 @@ constraint-dependencies = [
     "pip>=26.1.2",
     "pydantic-settings>=2.14.2",
     "python-multipart>=0.0.31",
-    "kubernetes>=35.0.0,<36.0.0",
+    "kubernetes>=27.2.0,<36.0.0",
 ]
 environments = [
     "python_version < '3.13'",

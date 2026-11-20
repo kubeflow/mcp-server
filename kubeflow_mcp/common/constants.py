@@ -130,10 +130,16 @@ TOOL_PHASES: dict[str, list[str]] = {
     "spark_monitoring": ["get_spark_session_logs"],
     # Pipelines client (kubeflow.pipelines.PipelinesClient). Prefixed so the phases
     # never merge into the trainer's instruction sections.
-    "pipelines_discovery": ["list_pipelines", "get_pipeline"],
+    "pipelines_discovery": ["list_pipelines", "get_pipeline", "list_experiments", "get_experiment"],
+    "pipelines_authoring": ["create_pipeline"],
     "pipelines_monitoring": ["list_pipeline_runs", "get_pipeline_run", "get_pipeline_logs"],
-    "pipelines_runs": ["create_pipeline_run"],
-    "pipelines_lifecycle": ["stop_pipeline_run", "retry_pipeline_run"],
+    "pipelines_runs": ["create_pipeline_run", "create_experiment"],
+    "pipelines_lifecycle": [
+        "stop_pipeline_run",
+        "retry_pipeline_run",
+        "delete_experiment",
+        "delete_pipeline",
+    ],
 }
 
 # Reverse mapping: tool name -> phase
@@ -213,6 +219,12 @@ TOOL_NEXT_HINTS: dict[str, str] = {
         "Confirm with get_pipeline_run(run_id) that it stopped ('canceled' or 'failed')"
     ),
     "retry_pipeline_run": "Follow the retried run with get_pipeline_run(run_id)",
+    "list_experiments": "Call get_experiment(name), or preview create_experiment(name) for a new one",
+    "get_experiment": "Preview a run in it with create_pipeline_run(pipeline, experiment=name)",
+    "create_experiment": "Preview a run in it with create_pipeline_run(pipeline, experiment=name)",
+    "delete_experiment": "Confirm removal with list_experiments()",
+    "create_pipeline": "Preview a run with create_pipeline_run(pipeline=name)",
+    "delete_pipeline": "Confirm the result with list_pipelines()",
 }
 
 
@@ -269,20 +281,22 @@ SDK_COMPATIBILITY: dict[str, object] = {
                 "get_run",
                 "run",
                 "get_experiment",
+                "list_experiments",
+                "create_experiment",
+                "delete_experiment",
+                "upload_pipeline",  # compiled YAML only; create_pipeline compiles the code itself
+                "delete_pipeline",
                 "_backend.run_api.run_service_terminate_run",
                 "_backend.run_api.run_service_retry_run",
                 "_backend.experiment_api.experiment_service_get_experiment",
             ],
             "uncovered_methods": [
-                "upload_pipeline",  # reads local files and takes code; register outside MCP
-                "delete_pipeline",
+                "upload_pipeline(callable)",  # would compile in-process; see create_pipeline
                 "wait_for_run_status",  # blocks; agents poll get_pipeline_run instead
                 "list_pipeline_versions(page_token)",  # get_pipeline returns the first page
-                "create_experiment",
-                "list_experiments",
-                "delete_experiment",
             ],
             "k8s_api_operations": [
+                "compile pipeline code (kfp.compiler.Compiler in a child interpreter)",
                 "retry run (kfp.Client run API, run_service_retry_run)",
                 "task pod logs (CoreV1Api read_namespaced_pod_log)",
             ],

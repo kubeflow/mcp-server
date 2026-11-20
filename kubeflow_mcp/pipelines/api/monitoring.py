@@ -15,6 +15,7 @@
 """Monitoring tools for Kubeflow Pipelines runs."""
 
 import logging
+import re
 from typing import Any
 
 from kubeflow_mcp.common.constants import ErrorCode
@@ -46,19 +47,44 @@ _STEP_CONTAINER = "main"
 # KFP annotates launcher (user step executor) pods with this runtime role.
 _LAUNCHER_ROLE = "launcher"
 _ROLE_ANNOTATION = "pipelines.kubeflow.org/runtime-role"
+# Argo records the node's full path, e.g. "wf(0).root(0).train-model(0).executor(0)".
+_NODE_NAME_ANNOTATION = "workflows.argoproj.io/node-name"
+_NODE_INDEX_RE = re.compile(r"\(\d+\)$")
 
 
-def _resolve_run_pods(run_id: str, run: Any, namespace: str) -> list[tuple[str | None, str]]:
+def _strip_index(name: str) -> str:
+    """Drop Argo's iteration suffix: ``train-model(0)`` -> ``train-model``."""
+    return _NODE_INDEX_RE.sub("", name)
+
+
+def _task_from_node_name(node_name: str | None) -> str | None:
+    """Return the user task a pod runs, from its Argo node path.
+
+    KFP records launcher pods under a task called ``executor``; the node path names
+    the task that owns it (``...train-model(0).executor(0)`` -> ``train-model``).
+    """
+    parts = [_strip_index(part) for part in (node_name or "").split(".") if part]
+    if not parts:
+        return None
+    if parts[-1] == "executor" and len(parts) > 1:
+        return parts[-2]
+    return parts[-1]
+
+
+def _resolve_run_pods(run_id: str, run: Any, namespace: str) -> list[tuple[str | None, str, bool]]:
     """Map a run's Argo node IDs to real K8s pod names.
 
     KFP v2 / Argo 3.4+ uses ``POD_NAMES=v2``, where the pod names include the
     template name and differ from the Argo node IDs stored in the run's task details.
     This function lists live pods by the ``pipeline/runid`` label and maps them back
-    to the run's recorded node IDs.
+    to the run's recorded node IDs, naming each live pod after the task its Argo node
+    path names (launcher pods are recorded under a task called ``executor``).
 
-    Returns ``(task_display_name, real_pod_name)`` pairs. Workload (launcher) pods
+    Returns ``(task_display_name, pod, missing)`` triples. Workload (launcher) pods
     come before internal pods (drivers, cleaned-up IDs), so a DAG's internal entries
-    never exhaust the read budget before the user's steps get read.
+    never exhaust the read budget before the user's steps get read. ``missing`` is
+    True for a recorded node no live pod of the run carries: once the run's pods
+    were listed, such a node is a cleaned-up pod or a DAG node with no pod at all.
     """
     node_entries = run_node_ids(run)
     if not node_entries:
@@ -78,8 +104,8 @@ def _resolve_run_pods(run_id: str, run: Any, namespace: str) -> list[tuple[str |
     # Index live pods by their Argo node ID annotation. A single node ID can map to
     # multiple pods (driver + launcher); keep the launcher apart so the user's step
     # executor wins over the internal driver when a node ID maps to both.
-    launcher_pods: dict[str, str] = {}
-    any_pods: dict[str, str] = {}
+    launcher_pods: dict[str, tuple[str, str | None]] = {}
+    any_pods: dict[str, tuple[str, str | None]] = {}
     for pod in getattr(pod_list, "items", []) or []:
         meta = getattr(pod, "metadata", None)
         if meta is None:
@@ -89,27 +115,29 @@ def _resolve_run_pods(run_id: str, run: Any, namespace: str) -> list[tuple[str |
             continue
         annotations = getattr(meta, "annotations", None) or {}
         node_id = annotations.get(ARGO_NODE_ID_ANNOTATION) or pod_name
-        role = annotations.get(_ROLE_ANNOTATION, "")
-        if role == _LAUNCHER_ROLE:
-            launcher_pods.setdefault(node_id, pod_name)
-        any_pods.setdefault(node_id, pod_name)
+        live = (pod_name, _task_from_node_name(annotations.get(_NODE_NAME_ANNOTATION)))
+        if annotations.get(_ROLE_ANNOTATION, "") == _LAUNCHER_ROLE:
+            launcher_pods.setdefault(node_id, live)
+        any_pods.setdefault(node_id, live)
+        any_pods.setdefault(pod_name, live)
 
-    workload: list[tuple[str | None, str]] = []
-    unresolved: list[tuple[str | None, str]] = []
-    internal: list[tuple[str | None, str]] = []
+    workload: list[tuple[str | None, str, bool]] = []
+    unresolved: list[tuple[str | None, str, bool]] = []
+    internal: list[tuple[str | None, str, bool]] = []
     for task_name, node_id in node_entries:
-        pod = launcher_pods.get(node_id)
-        if pod is not None:
-            workload.append((task_name, pod))
+        live = launcher_pods.get(node_id)
+        if live is not None:
+            workload.append((live[1] or task_name, live[0], False))
             continue
-        pod = any_pods.get(node_id)
-        if pod is not None:
-            internal.append((task_name, pod))
+        live = any_pods.get(node_id)
+        if live is not None:
+            internal.append((live[1] or task_name, live[0], False))
         else:
-            # No live pod carries this node ID (e.g. a cleaned-up driver pod). Keep
-            # the recorded ID so the read is reported as missing instead of being
-            # silently skipped.
-            unresolved.append((task_name, node_id))
+            # No live pod carries this node ID. Keep the recorded ID so it is reported
+            # instead of silently skipped. When the run's pods could be listed it is
+            # known to be gone; otherwise (older KFP, where recorded IDs are pod names)
+            # it is still read.
+            unresolved.append((task_name, node_id, bool(any_pods)))
     return [*workload, *unresolved, *internal]
 
 
@@ -255,6 +283,34 @@ def _read_pod_log(pod: str, namespace: str, tail_lines: int) -> str:
         )
 
 
+def _read_pod_logs(
+    pods: list[tuple[str | None, str, bool]], namespace: str, tail_lines: int
+) -> list[dict[str, Any]]:
+    """Read each pod's log tail, sharing the character budget among the pods read."""
+    # Entries already known to be gone take no share of the budget.
+    readable = sum(1 for _, _, missing in pods if not missing)
+    budget = MAX_LOG_CHARS // max(1, readable)
+    results: list[dict[str, Any]] = []
+    for name, pod, missing in pods:
+        entry: dict[str, Any] = {"task": name, "pod": pod}
+        if missing:
+            entry["error"] = "pod no longer exists"
+        elif validate_k8s_name(pod, "pod") is not None:
+            entry["error"] = "invalid pod name"
+        else:
+            try:
+                log = _read_pod_log(pod, namespace, tail_lines) or ""
+                entry["logs"] = truncate_log_output(log, budget)
+            except Exception as e:
+                status = getattr(e, "status", None)
+                entry["error"] = (
+                    "pod no longer exists" if status == 404 else f"could not read logs: {e}"
+                )
+                logger.debug("Reading logs of pod %s failed: %s", pod, e)
+        results.append(entry)
+    return results
+
+
 def get_pipeline_logs(
     run_id: str,
     task: str | None = None,
@@ -268,7 +324,8 @@ def get_pipeline_logs(
 
     Args:
         run_id: Run ID (a UUID).
-        task: Only pods of the task with this name. Reads up to 10 pods when omitted.
+        task: Only pods of the task with this name; ``train`` and ``train(0)`` both
+            match. Reads up to 10 pods when omitted.
         tail_lines: Last lines to read per pod, 1 to 1000. Defaults to 200.
         namespace: K8s namespace. Uses the configured default when omitted.
 
@@ -310,17 +367,22 @@ def get_pipeline_logs(
         all_pods = _resolve_run_pods(run_id, run, ns)
     except Exception as e:
         return pipelines_error(e, f"resolve pods for run '{run_id}'").model_dump()
-    task_names = sorted({name for name, _ in all_pods if name})
-    pods = [(name, pod) for name, pod in all_pods if task is None or name == task]
+    task_names = sorted({name for name, _, _ in all_pods if name})
+    wanted = _strip_index(task) if task is not None else None
+    pods = [
+        entry
+        for entry in all_pods
+        if wanted is None or (entry[0] is not None and _strip_index(entry[0]) == wanted)
+    ]
     # The same real pod can be recorded under more than one node entry (a task's own
     # entry and its parents child list); read each pod once.
     seen: set[str] = set()
-    deduped: list[tuple[str | None, str]] = []
-    for name, pod in pods:
-        if pod in seen:
+    deduped: list[tuple[str | None, str, bool]] = []
+    for entry in pods:
+        if entry[1] in seen:
             continue
-        seen.add(pod)
-        deduped.append((name, pod))
+        seen.add(entry[1])
+        deduped.append(entry)
     pods = deduped
     if task is not None and not pods:
         return ToolError(
@@ -329,29 +391,11 @@ def get_pipeline_logs(
             details={"tasks": task_names},
         ).model_dump()
 
-    budget = MAX_LOG_CHARS // max(1, min(len(pods), MAX_LOG_PODS))
-    results: list[dict[str, Any]] = []
-    for name, pod in pods[:MAX_LOG_PODS]:
-        entry: dict[str, Any] = {"task": name, "pod": pod}
-        if validate_k8s_name(pod, "pod") is not None:
-            entry["error"] = "invalid pod name"
-            results.append(entry)
-            continue
-        try:
-            entry["logs"] = truncate_log_output(_read_pod_log(pod, ns, tail_lines) or "", budget)
-        except Exception as e:
-            status = getattr(e, "status", None)
-            entry["error"] = (
-                "pod no longer exists" if status == 404 else f"could not read logs: {e}"
-            )
-            logger.debug("Reading logs of pod %s failed: %s", pod, e)
-        results.append(entry)
-
     return ToolResponse(
         data={
             "run_id": run_id,
             "state": run_to_dict(run).get("state"),
-            "pods": results,
+            "pods": _read_pod_logs(pods[:MAX_LOG_PODS], ns, tail_lines),
             "pods_truncated": len(pods) > MAX_LOG_PODS,
             "tasks": task_names,
         }
