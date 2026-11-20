@@ -354,12 +354,16 @@ narrows what a caller can do.
 - **Caller.** User and groups come from the verified JWT: claims `sub` and `groups` by
   default (`authz.user_claim`, `authz.groups_claim`), with optional `authz.username_prefix` /
   `authz.groups_prefix` to match the API server's `--oidc-username-prefix` /
-  `--oidc-groups-prefix`, plus `system:authenticated`. The mode needs JWT auth: the server
-  refuses to start with it under stdio, a shared API key, or no auth.
+  `--oidc-groups-prefix`, plus `system:authenticated`. Names Kubernetes reserves are never
+  taken from a token: a user starting with `system:` is refused and such groups are dropped,
+  so a token cannot claim `system:masters` or a ServiceAccount. The mode needs JWT auth: the
+  server refuses to start with it under stdio, a shared API key, or no auth.
 - **What is checked.** Every declared permission of the call, reads included, in the
   namespace the tool will use. Permissions with `when` count only when that argument is set
-  (`get_runtime`'s Pod rights only with `include_packages=True`). `inspect_controller` without
-  `namespace=` is checked cluster-wide, since it finds the controller's namespace itself.
+  (`get_runtime`'s Pod rights only with `include_packages=True`). A `namespace` argument must
+  be a valid name (`VALIDATION_ERROR` otherwise, before any check is sent).
+  `inspect_controller` without `namespace=` uses the configured controller namespace, and is
+  checked cluster-wide only when it has to search for the controller.
 - **Fails closed.** No verified user, a review that errors or times out, or a namespace that
   cannot be resolved refuses the call.
 - **Cache.** A decision is reused for the same caller and permission for `authz.cache_ttl`
