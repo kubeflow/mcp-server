@@ -29,7 +29,7 @@ from kubeflow_mcp.common.types import (
     exception_details,
     is_k8s_not_found,
 )
-from kubeflow_mcp.optimizer.api._common import api_message
+from kubeflow_mcp.optimizer.api._common import api_message, check_optimizer_namespace
 from kubeflow_mcp.optimizer.constants import (
     EXPERIMENT_CRD_NAME,
     EXPERIMENT_KIND,
@@ -91,8 +91,21 @@ def _check_experiment_crd() -> CheckResult:
     return CheckResult(info={"katib_crd_found": True, "katib_crd_versions": served})
 
 
+def _readiness_rank(pod: Any) -> int:
+    """0 for a Running and Ready pod, 1 for Running only, 2 otherwise."""
+    status = pod.status
+    if not status or status.phase != "Running":
+        return 2
+    statuses = getattr(status, "container_statuses", None) or []
+    return 0 if statuses and all(cs.ready for cs in statuses) else 1
+
+
 def _find_controller_pod() -> Any | None:
-    """Locate the Katib controller pod, preferring its conventional namespace."""
+    """Locate the Katib controller pod, preferring its conventional namespace.
+
+    During a rollout two controller pods can coexist, so the healthiest one is
+    reported rather than whichever the API listed first.
+    """
     core_api = mcp_utils.get_core_v1_api()
     pods = core_api.list_namespaced_pod(
         namespace=KATIB_CONTROLLER_NAMESPACE_DEFAULT,
@@ -104,7 +117,7 @@ def _find_controller_pod() -> Any | None:
             label_selector=KATIB_CONTROLLER_LABELS,
             _request_timeout=mcp_utils.K8S_TIMEOUT,
         )
-    return pods.items[0] if pods.items else None
+    return min(pods.items, key=_readiness_rank) if pods.items else None
 
 
 def _check_controller() -> CheckResult:
@@ -183,7 +196,19 @@ def _check_webhook() -> CheckResult:
     be created, which is the failure this check exists to catch.
 
     Uses a server-side dry run: admission runs in full, nothing is persisted.
+    The probe targets the default namespace, so it is skipped, with a warning,
+    when policy does not allow that namespace.
     """
+    ns_err = check_optimizer_namespace(None)
+    if ns_err is not None:
+        return CheckResult(
+            info={"webhook_reachable": None},
+            warnings=(
+                "Skipped the Katib admission webhook check: it dry-runs a create in the "
+                f"default namespace, which policy does not allow ({ns_err.error}).",
+            ),
+        )
+
     minimal = {
         "apiVersion": f"{KATIB_API_GROUP}/{KATIB_API_VERSION}",
         "kind": EXPERIMENT_KIND,
@@ -243,22 +268,25 @@ def _check_webhook() -> CheckResult:
 
 
 def _check_trainer() -> CheckResult:
-    """Report whether the trainer client is usable for cross-client workflows.
+    """Report whether the Trainer SDK client can be initialized.
 
-    Never a blocker: the optimizer is fully usable on its own.
+    This says whether the cluster and kubeconfig support the Trainer client, not
+    whether this server registered the trainer tools: that depends on
+    ``--clients``, which the agent can see from its own tool list. Never a
+    blocker: the optimizer is fully usable on its own.
     """
     try:
         mcp_utils.get_trainer_client()
     except Exception:
         return CheckResult(
-            info={"trainer_available": False},
+            info={"trainer_sdk_available": False},
             warnings=(
-                "Trainer client not available. Cross-client workflows "
-                "(optimize → train with best hyperparameters) require "
-                "--clients trainer,optimizer",
+                "The Trainer SDK client could not be initialized, so cross-client "
+                "workflows (optimize, then train with the best hyperparameters) are "
+                "unavailable.",
             ),
         )
-    return CheckResult(info={"trainer_available": True})
+    return CheckResult(info={"trainer_sdk_available": True})
 
 
 def katib_pre_flight() -> dict[str, Any]:
@@ -270,7 +298,8 @@ def katib_pre_flight() -> dict[str, Any]:
     2. The Katib controller pod is Running **and** passing readiness
     3. The API server can actually reach Katib's admission webhooks, without
        which every create is rejected however healthy the controller looks
-    4. Whether the trainer client is loaded, for cross-client workflows
+    4. Whether the Trainer SDK client can be initialized, for cross-client
+       workflows
 
     Call this FIRST before any optimizer operations. It never raises for an
     unhealthy cluster; problems are reported in ``blockers``.
@@ -279,7 +308,7 @@ def katib_pre_flight() -> dict[str, Any]:
         dict: Response containing ``ready`` (bool), ``blockers`` (issues that
         prevent use), ``warnings`` (non-blocking), ``katib_crd_found``,
         ``katib_crd_versions``, ``controller_status``, ``controller_ready``,
-        ``webhook_reachable`` and ``trainer_available``.
+        ``webhook_reachable`` and ``trainer_sdk_available``.
     """
     info: dict[str, Any] = {}
     blockers: list[str] = []
