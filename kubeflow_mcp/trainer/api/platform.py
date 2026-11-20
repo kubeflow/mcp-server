@@ -25,7 +25,13 @@ from kubeflow.trainer.constants import constants as trainer_constants
 
 from kubeflow_mcp.common import utils as mcp_utils
 from kubeflow_mcp.common.constants import ErrorCode
-from kubeflow_mcp.common.types import ToolError, ToolResponse, exception_details, is_k8s_not_found
+from kubeflow_mcp.common.types import (
+    ToolError,
+    ToolResponse,
+    exception_details,
+    is_k8s_not_found,
+    k8s_conflict_reason,
+)
 from kubeflow_mcp.core.security import (
     check_namespace_allowed,
     validate_namespace,
@@ -367,6 +373,24 @@ def _expand_named_lists(current: Any, patch: Any, key: str | None = None) -> Any
     return patch
 
 
+def _current_runtime_resource_version(name: str) -> str | None:
+    """Best-effort read of a runtime's resourceVersion for the patch preview."""
+    try:
+        api = mcp_utils.get_custom_objects_api()
+        runtime = api.get_cluster_custom_object(
+            group=trainer_constants.GROUP,
+            version=trainer_constants.VERSION,
+            plural="clustertrainingruntimes",
+            name=name,
+            _request_timeout=mcp_utils.K8S_TIMEOUT,
+        )
+        return runtime.get("metadata", {}).get("resourceVersion")
+    except Exception:
+        # The preview stays usable without it; the confirmed call reports real errors.
+        logger.debug("Could not read resourceVersion for %s", name, exc_info=True)
+        return None
+
+
 def patch_runtime(
     name: str,
     patch: dict[str, Any] | None = None,
@@ -386,6 +410,10 @@ def patch_runtime(
     (from the preview) to also reject changes made since that version. Top-level keys are restricted to ``spec`` and ``metadata``;
     deep structure is validated by the K8s API. Intended for platform-admin
     persona only.
+
+    The preview returns the runtime's current ``resource_version``. Put it in the
+    patch as ``metadata.resourceVersion`` to make the patch fail with ``CONFLICT``
+    instead of overwriting a change made by someone else in the meantime.
 
     Args:
         name: ClusterTrainingRuntime name.
@@ -414,15 +442,21 @@ def patch_runtime(
         ).model_dump()
 
     if not confirmed:
-        return ToolResponse(
-            data={
-                "action": "preview",
-                "runtime": name,
-                "patch": patch,
-                "message": "Set confirmed=True to apply this patch.",
-                "merge_semantics": _MERGE_SEMANTICS,
-            }
-        ).model_dump()
+        preview: dict[str, Any] = {
+            "action": "preview",
+            "runtime": name,
+            "patch": patch,
+            "message": "Set confirmed=True to apply this patch.",
+            "merge_semantics": _MERGE_SEMANTICS,
+        }
+        resource_version = _current_runtime_resource_version(name)
+        if resource_version:
+            preview["resource_version"] = resource_version
+            preview["hint"] = (
+                "To avoid overwriting a concurrent change, add "
+                f'"metadata": {{"resourceVersion": "{resource_version}"}} to the patch.'
+            )
+        return ToolResponse(data=preview).model_dump()
 
     try:
         api = mcp_utils.get_custom_objects_api()
@@ -464,15 +498,16 @@ def patch_runtime(
                 error=f"ClusterTrainingRuntime '{name}' not found",
                 error_code=ErrorCode.RESOURCE_NOT_FOUND,
             ).model_dump()
-        if getattr(e, "status", None) == 409:
+        if k8s_conflict_reason(e):
             return ToolError(
-                error=f"ClusterTrainingRuntime '{name}' changed while patching",
-                error_code=ErrorCode.KUBERNETES_ERROR,
-                details={
-                    **exception_details(e),
-                    "hint": "Another update landed after the runtime was read; "
-                    "re-run patch_runtime to merge against the latest version",
-                },
+                error=f"ClusterTrainingRuntime '{name}' changed since it was read",
+                error_code=ErrorCode.CONFLICT,
+                details=exception_details(e),
+                hint=(
+                    "Call patch_runtime with confirmed=False to get the current "
+                    "resource_version, check the latest spec, then retry with that "
+                    "metadata.resourceVersion."
+                ),
             ).model_dump()
         return ToolError(
             error=str(e),
@@ -556,6 +591,13 @@ def create_runtime(
 
     except Exception as e:
         logger.warning("create_runtime(%s) failed: %s", name, e, exc_info=True)
+        if k8s_conflict_reason(e):
+            return ToolError(
+                error=f"ClusterTrainingRuntime '{name}' already exists",
+                error_code=ErrorCode.CONFLICT,
+                details=exception_details(e),
+                hint="Use patch_runtime to change it, or create it under another name.",
+            ).model_dump()
         return ToolError(
             error=str(e),
             error_code=ErrorCode.KUBERNETES_ERROR,

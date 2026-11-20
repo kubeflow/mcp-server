@@ -44,7 +44,13 @@ from kubeflow_mcp.common.huggingface import (
     hub_confirms_missing,
     validate_hf_reference,
 )
-from kubeflow_mcp.common.types import PreviewResponse, ToolError, ToolResponse, is_k8s_not_found
+from kubeflow_mcp.common.types import (
+    PreviewResponse,
+    ToolError,
+    ToolResponse,
+    is_k8s_not_found,
+    k8s_conflict_reason,
+)
 from kubeflow_mcp.common.utils import (
     MCP_MANAGED_LABEL,
     MCP_MANAGED_VALUE,
@@ -462,6 +468,21 @@ def _sdk_error(e: Exception, hint: str | None = None) -> dict[str, Any]:
             hint=(
                 "The cluster denied this request. Check that you may create TrainJobs in "
                 "this namespace and use the requested service_account_name."
+            ),
+        ).model_dump()
+    # A 409 on submit means a TrainJob with this name already exists. Report it as a
+    # conflict the caller can fix, not as a transient SDK failure.
+    conflict = k8s_conflict_reason(e)
+    if conflict:
+        return ToolError(
+            error=str(e),
+            error_code=ErrorCode.CONFLICT,
+            details={**(details or {}), "reason": conflict},
+            hint=(
+                "A TrainJob with this name already exists in the namespace. Pick another "
+                "name, or delete the existing job with delete_training_job."
+                if conflict == "AlreadyExists"
+                else "The TrainJob changed while it was being updated. Read it again and retry."
             ),
         ).model_dump()
     return ToolError(
