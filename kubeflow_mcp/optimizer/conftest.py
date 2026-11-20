@@ -209,7 +209,11 @@ class FakeCustomObjects:
 
     def create_namespaced_custom_object(self, **kw: Any) -> dict[str, Any]:
         self.calls.append(("create", kw))
-        return kw["body"]
+        if kw.get("dry_run"):
+            return kw["body"]
+        stored = {**kw["body"], "status": {"conditions": []}}
+        self._store(kw["plural"])[stored["metadata"]["name"]] = stored
+        return stored
 
     def writes(self) -> list[tuple[str, dict[str, Any]]]:
         return [c for c in self.calls if c[0] in {"patch", "delete", "create"}]
