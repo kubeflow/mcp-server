@@ -19,15 +19,39 @@ knowledge_base:
   code_guidelines:
     enabled: true
     filePatterns:
-      - ".github/copilot-instructions.md"
+      - files: ".github/copilot-instructions.md"
+        applyTo: "**"
       - "AGENTS.md"
-      - "docs/CONVENTIONS.md"
+      - files: "docs/CONVENTIONS.md"
+        applyTo: "**"
+      - files: ".agents/skills/review-changes/agents/code-reviewer.md"
+        applyTo: "**"
+      - files: ".agents/skills/review-changes/agents/mcp-contract-reviewer.md"
+        applyTo: "kubeflow_mcp/**, tests/**"
+      - files: ".agents/skills/review-changes/agents/pr-test-analyzer.md"
+        applyTo: "**/*.py"
+      - files: ".agents/skills/review-changes/agents/silent-failure-hunter.md"
+        applyTo: "kubeflow_mcp/**/*.py, .github/scripts/*.py"
+      - files: ".agents/skills/review-changes/agents/comment-analyzer.md"
+        applyTo: "**"
+      - files: ".agents/skills/review-changes/agents/type-design-analyzer.md"
+        applyTo: "kubeflow_mcp/**/*.py"
 
 reviews:
+  profile: quiet
+  in_progress_fortune: false
+  high_level_summary_in_walkthrough: true
+
   auto_review:
+    base_branches:
+      - '^release-.+$'
     labels:
       - "!do-not-merge/work-in-progress"
       - "!do-not-merge/hold"
+
+  tools:
+    flake8:
+      enabled: false
 
   path_filters:
     - "!**/uv.lock"
