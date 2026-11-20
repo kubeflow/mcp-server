@@ -34,7 +34,8 @@ _log_buffer: deque[dict[str, Any]] = deque(maxlen=1000)
 
 # A key needs a real ``=`` or ``:`` after it, otherwise prose such as
 # ``bearer auth`` reads as a key and ordinary log lines get mangled.
-_REDACT_KEY = re.compile(r"(?<!\w)(\w+)\s*[=:]\s*")
+# Hyphens belong to the key so ``x-api-key: abc`` is judged as a whole, not as ``key``.
+_REDACT_KEY = re.compile(r"(?<![\w-])([\w-]+)\s*[=:]\s*")
 # Taking the scheme word too covers ``Authorization: Bearer <jwt>``.
 _REDACT_VALUE = re.compile(r"(?:(?:bearer|basic|digest|token)\s+)?\S+", re.IGNORECASE)
 
