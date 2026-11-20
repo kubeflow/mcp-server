@@ -22,8 +22,10 @@ from kubeflow_mcp.common.types import ToolPermission
 from kubeflow_mcp.core.authz import (
     AuthzError,
     CallerIdentity,
+    InvalidArguments,
     SarAuthorizationMiddleware,
     SubjectAccessReviewer,
+    _controller_namespace,
     describe,
     identity_from_claims,
     required_checks,
@@ -66,30 +68,52 @@ class TestIdentity:
         identity = identity_from_claims({"sub": "alice", "groups": ["team-a", 7, ""]}, config)
         assert identity == CallerIdentity("oidc:alice", ("oidc:team-a", "system:authenticated"))
 
+    def test_reserved_groups_are_dropped(self):
+        claims = {"sub": "mallory", "groups": ["system:masters", "team-a"]}
+        identity = identity_from_claims(claims, AuthzConfig(mode="sar"))
+        assert identity.groups == ("team-a", "system:authenticated")
+
+    def test_a_prefix_keeps_claims_out_of_reserved_names(self):
+        config = AuthzConfig(mode="sar", username_prefix="oidc:", groups_prefix="oidc:")
+        identity = identity_from_claims(
+            {"sub": "system:admin", "groups": ["system:masters"]}, config
+        )
+        assert identity == CallerIdentity(
+            "oidc:system:admin", ("oidc:system:masters", "system:authenticated")
+        )
+
     def test_custom_claims_and_single_group_string(self):
         config = AuthzConfig(mode="sar", user_claim="email", groups_claim="roles")
         identity = identity_from_claims({"email": "a@example.com", "roles": "admins"}, config)
         assert identity == CallerIdentity("a@example.com", ("admins", "system:authenticated"))
 
-    @pytest.mark.parametrize("claims", [{}, {"sub": ""}, {"sub": 42}, {"auth_method": "api_key"}])
+    @pytest.mark.parametrize(
+        "claims",
+        [
+            {},
+            {"sub": ""},
+            {"sub": 42},
+            {"auth_method": "api_key"},
+            {"sub": "system:admin"},
+            {"sub": "system:serviceaccount:kube-system:replicaset-controller"},
+        ],
+    )
     def test_no_usable_user_claim(self, claims):
         assert identity_from_claims(claims, AuthzConfig(mode="sar")) is None
 
 
 class TestRequiredChecks:
     def test_namespace_from_argument(self):
-        checks = required_checks("t", (DELETE_JOB,), {"namespace": "team-a"}, _default_namespace)
+        checks = required_checks((DELETE_JOB,), {"namespace": "team-a"}, _default_namespace)
         assert checks == [(DELETE_JOB, "team-a")]
 
     def test_default_namespace_when_omitted(self):
-        assert required_checks("t", (DELETE_JOB,), {}, _default_namespace) == [
-            (DELETE_JOB, "default")
-        ]
+        assert required_checks((DELETE_JOB,), {}, _default_namespace) == [(DELETE_JOB, "default")]
 
     def test_when_skips_until_the_argument_is_set(self):
         perms = (GET_JOB, CREATE_POD)
-        assert required_checks("t", perms, {}, _default_namespace) == [(GET_JOB, "default")]
-        assert required_checks("t", perms, {"include_packages": True}, _default_namespace) == [
+        assert required_checks(perms, {}, _default_namespace) == [(GET_JOB, "default")]
+        assert required_checks(perms, {"include_packages": True}, _default_namespace) == [
             (GET_JOB, "default"),
             (CREATE_POD, "default"),
         ]
@@ -98,19 +122,30 @@ class TestRequiredChecks:
         def unresolvable(namespace):
             raise AssertionError("not needed")
 
-        assert required_checks("t", (LIST_NODES,), {}, unresolvable) == [(LIST_NODES, None)]
+        assert required_checks((LIST_NODES,), {}, unresolvable) == [(LIST_NODES, None)]
 
-    def test_self_resolved_namespace_is_checked_cluster_wide(self):
-        assert required_checks("inspect_controller", (POD_LOG,), {}, _default_namespace) == [
-            (POD_LOG, None)
-        ]
-        assert required_checks(
-            "inspect_controller", (POD_LOG,), {"namespace": "kubeflow-system"}, _default_namespace
-        ) == [(POD_LOG, "kubeflow-system")]
+    def test_resolver_without_a_namespace_checks_cluster_wide(self):
+        assert required_checks((POD_LOG,), {}, lambda namespace: None) == [(POD_LOG, None)]
+
+    def test_controller_namespace_follows_the_tool(self, monkeypatch):
+        monkeypatch.setattr(
+            "kubeflow_mcp.trainer.api.platform._get_controller_namespace", lambda: None
+        )
+        assert _controller_namespace(None) is None
+        assert _controller_namespace("kubeflow-system") == "kubeflow-system"
+        monkeypatch.setattr(
+            "kubeflow_mcp.trainer.api.platform._get_controller_namespace", lambda: "trainer"
+        )
+        assert _controller_namespace(None) == "trainer"
+
+    @pytest.mark.parametrize("namespace", ["Team_A", "../kube-system", "a" * 64, ""])
+    def test_invalid_namespace_is_refused_before_any_review(self, namespace):
+        with pytest.raises(InvalidArguments):
+            required_checks((GET_JOB,), {"namespace": namespace}, _default_namespace)
 
     def test_non_string_namespace_is_refused(self):
-        with pytest.raises(ValueError):
-            required_checks("t", (GET_JOB,), {"namespace": ["a", "b"]}, _default_namespace)
+        with pytest.raises(InvalidArguments):
+            required_checks((GET_JOB,), {"namespace": ["a", "b"]}, _default_namespace)
 
 
 def test_describe_names_resource_like_kubectl():
@@ -176,6 +211,13 @@ class TestReviewer:
         assert len(api.reviews) == 1
         now[0] = 30.0
         reviewer.missing(ALICE, [(GET_JOB, "ns")])
+        assert len(api.reviews) == 2
+
+    def test_cache_is_per_group_set(self):
+        api = FakeAuthorizationApi()
+        reviewer = SubjectAccessReviewer(lambda: api, cache_ttl=30, clock=lambda: 0.0)
+        reviewer.missing(CallerIdentity("alice", ("team-a",)), [(GET_JOB, "ns")])
+        reviewer.missing(CallerIdentity("alice", ("team-b",)), [(GET_JOB, "ns")])
         assert len(api.reviews) == 2
 
     def test_cache_is_per_caller(self):
@@ -306,7 +348,7 @@ class TestMiddleware:
                 "delete_training_job", {"name": "j", "namespace": "team-a"}, raise_on_error=False
             )
         assert result.is_error and calls == []
-        assert "no verified 'sub' claim" in result.structured_content["error"]
+        assert "no usable verified 'sub' claim" in result.structured_content["error"]
 
     async def test_review_failure_refuses_the_call(self):
         calls = []
@@ -318,6 +360,42 @@ class TestMiddleware:
         assert result.is_error and calls == []
         assert result.structured_content["error_code"] == "PERMISSION_DENIED"
 
+    @pytest.mark.parametrize(
+        "arguments",
+        [
+            {"tool_name": ["delete_training_job"], "arguments": {}},
+            {"tool_name": "delete_training_job", "arguments": "name=j"},
+        ],
+    )
+    async def test_malformed_execute_tool_is_refused(self, arguments):
+        calls = []
+        mcp = _server(FakeAuthorizationApi(ALLOW_ALICE), {"sub": "alice"}, calls)
+        async with Client(mcp) as client:
+            result = await client.call_tool("execute_tool", arguments, raise_on_error=False)
+        assert result.is_error and calls == []
+        assert result.structured_content["error_code"] == "VALIDATION_ERROR"
+
+    async def test_invalid_namespace_is_a_validation_error_and_sends_no_review(self):
+        calls = []
+        api = FakeAuthorizationApi(ALLOW_ALICE)
+        mcp = _server(api, {"sub": "alice"}, calls)
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                "delete_training_job", {"name": "j", "namespace": "Team_A"}, raise_on_error=False
+            )
+        assert result.structured_content["error_code"] == "VALIDATION_ERROR"
+        assert calls == [] and api.reviews == []
+
+    async def test_reserved_user_is_refused(self):
+        calls = []
+        api = FakeAuthorizationApi({("system:admin", "delete", "trainjobs", "team-a")})
+        mcp = _server(api, {"sub": "system:admin"}, calls)
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                "delete_training_job", {"name": "j", "namespace": "team-a"}, raise_on_error=False
+            )
+        assert result.is_error and calls == [] and api.reviews == []
+
     async def test_bad_namespace_type_refuses_the_call(self):
         calls = []
         mcp = _server(FakeAuthorizationApi(ALLOW_ALICE), {"sub": "alice"}, calls)
@@ -328,3 +406,21 @@ class TestMiddleware:
                 raise_on_error=False,
             )
         assert result.is_error and calls == []
+
+
+def test_builder_maps_each_registered_tool_to_its_namespace_resolver():
+    from fastmcp.server.auth.providers.jwt import JWTVerifier
+
+    import kubeflow_mcp.trainer as trainer
+    from kubeflow_mcp.common import utils
+    from kubeflow_mcp.core.authz import build_authz_middleware
+
+    middleware = build_authz_middleware(
+        AuthzConfig(mode="sar"),
+        {"trainer": trainer},
+        JWTVerifier(jwks_uri="https://issuer.invalid/jwks.json"),
+        {"inspect_controller", "list_training_jobs"},
+    )
+    assert set(middleware._permissions) == {"inspect_controller", "list_training_jobs"}
+    assert middleware._resolvers["inspect_controller"] is _controller_namespace
+    assert middleware._resolvers["list_training_jobs"] is utils.get_trainer_effective_namespace

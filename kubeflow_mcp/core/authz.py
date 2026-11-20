@@ -42,12 +42,13 @@ from mcp.types import TextContent
 from kubeflow_mcp.common.constants import ErrorCode
 from kubeflow_mcp.common.types import ToolError, ToolPermission
 from kubeflow_mcp.core.config import AuthzConfig
+from kubeflow_mcp.core.security import validate_namespace
 
 logger = logging.getLogger(__name__)
 
-# Without a namespace argument these tools find their namespace themselves (the
-# controller's), so the check cannot know it in advance and asks cluster-wide instead.
-_SELF_RESOLVED_NAMESPACE = {"inspect_controller"}
+# Kubernetes reserves these names; a token claiming one could borrow a system
+# identity (system:masters, a kube-system ServiceAccount) instead of the caller's.
+_RESERVED_PREFIX = "system:"
 
 # Callers choose namespace strings, so the cache is bounded: expired entries go first,
 # then everything if a burst of fresh ones still exceeds the cap.
@@ -61,6 +62,10 @@ class AuthzError(Exception):
     """A decision could not be made, so the call is refused."""
 
 
+class InvalidArguments(ValueError):
+    """The call's arguments are malformed; refused before any review is sent."""
+
+
 @dataclass(frozen=True)
 class CallerIdentity:
     user: str
@@ -68,45 +73,58 @@ class CallerIdentity:
 
 
 def identity_from_claims(claims: Mapping[str, Any], config: AuthzConfig) -> CallerIdentity | None:
-    """Map verified token claims to the Kubernetes user and groups to ask about."""
+    """Map verified token claims to the Kubernetes user and groups to ask about.
+
+    Returns None when there is no usable user: missing, empty, or a reserved
+    ``system:`` name. Reserved group names are dropped.
+    """
     user = claims.get(config.user_claim)
     if not isinstance(user, str) or not user:
+        return None
+    user = config.username_prefix + user
+    if user.startswith(_RESERVED_PREFIX):
         return None
     groups = claims.get(config.groups_claim) or []
     if isinstance(groups, str):
         groups = [groups]
+    named = (config.groups_prefix + g for g in groups if isinstance(g, str) and g)
     # The API server adds this group to every authenticated request, but a
     # SubjectAccessReview only knows the groups it is sent.
     return CallerIdentity(
-        user=config.username_prefix + user,
+        user=user,
         groups=(
-            *(config.groups_prefix + g for g in groups if isinstance(g, str) and g),
+            *(g for g in named if not g.startswith(_RESERVED_PREFIX)),
             "system:authenticated",
         ),
     )
 
 
 def required_checks(
-    tool: str,
     permissions: tuple[ToolPermission, ...],
     arguments: Mapping[str, Any],
-    resolve_namespace: Callable[[str | None], str],
+    resolve_namespace: Callable[[str | None], str | None],
 ) -> list[Check]:
     """Return the permissions this call needs and the namespace of each.
 
     A permission with ``when`` is needed only if that argument is truthy in this call.
+    A resolver that returns None (the tool finds its namespace itself) means the
+    namespaced permissions are checked cluster-wide.
+
+    Raises:
+        InvalidArguments: the namespace argument is not a valid namespace name. The
+            middleware runs before the tool validates it, so it is checked here first.
     """
     needed = [p for p in permissions if p.when is None or arguments.get(p.when)]
     if not any(not p.cluster_wide for p in needed):
         return [(p, None) for p in needed]
     namespace = arguments.get("namespace")
-    # Middleware runs before argument validation, so never trust the type.
-    if namespace is not None and not isinstance(namespace, str):
-        raise ValueError("namespace must be a string")
-    if namespace is None and tool in _SELF_RESOLVED_NAMESPACE:
-        effective = None
-    else:
-        effective = resolve_namespace(namespace)
+    if namespace is not None:
+        if not isinstance(namespace, str):
+            raise InvalidArguments("namespace must be a string")
+        err = validate_namespace(namespace)
+        if err is not None:
+            raise InvalidArguments(err.error)
+    effective = resolve_namespace(namespace)
     return [(p, None if p.cluster_wide else effective) for p in needed]
 
 
@@ -191,10 +209,12 @@ class SubjectAccessReviewer:
         return bool(status.allowed) and not bool(status.denied)
 
 
-def _refuse(error: str, details: dict[str, Any] | None = None) -> ToolResult:
-    body = ToolError(
-        error=error, error_code=ErrorCode.PERMISSION_DENIED, details=details
-    ).model_dump()
+def _refuse(
+    error: str,
+    details: dict[str, Any] | None = None,
+    error_code: ErrorCode = ErrorCode.PERMISSION_DENIED,
+) -> ToolResult:
+    body = ToolError(error=error, error_code=error_code, details=details).model_dump()
     return ToolResult(
         content=[TextContent(type="text", text=error)],
         structured_content=body,
@@ -229,6 +249,12 @@ class SarAuthorizationMiddleware(Middleware):
         if tool == "execute_tool":
             tool = arguments.get("tool_name")
             arguments = arguments.get("arguments") or {}
+            # Malformed input must not slip past the check, so it is refused here.
+            if not isinstance(tool, str) or not isinstance(arguments, dict):
+                return _refuse(
+                    "execute_tool needs tool_name as a string and arguments as an object",
+                    error_code=ErrorCode.VALIDATION_ERROR,
+                )
         if tool not in self._permissions:
             return await call_next(context)
 
@@ -236,11 +262,13 @@ class SarAuthorizationMiddleware(Middleware):
         identity = identity_from_claims(claims or {}, self._config)
         if identity is None:
             return _refuse(
-                f"Cannot authorize '{tool}': the request carries no verified "
-                f"'{self._config.user_claim}' claim"
+                f"Cannot authorize '{tool}': the request carries no usable verified "
+                f"'{self._config.user_claim}' claim (missing, or a reserved 'system:' name)"
             )
         try:
             missing = await anyio.to_thread.run_sync(self._check, tool, arguments, identity)
+        except InvalidArguments as e:
+            return _refuse(str(e), error_code=ErrorCode.VALIDATION_ERROR)
         except AuthzError as e:
             logger.warning(
                 "authz_unavailable", extra={"audit": True, "tool": tool, "error": str(e)}
@@ -265,15 +293,13 @@ class SarAuthorizationMiddleware(Middleware):
     def _check(
         self, tool: str, arguments: Mapping[str, Any], identity: CallerIdentity
     ) -> list[str]:
-        resolver = self._resolvers.get(tool)
+        resolver = self._resolvers.get(tool) or _no_default_namespace
         try:
-            checks = required_checks(
-                tool, self._permissions[tool], arguments, resolver or _no_default_namespace
-            )
+            checks = required_checks(self._permissions[tool], arguments, resolver)
+        except InvalidArguments:
+            raise
         except Exception as e:
-            raise AuthzError(
-                f"cannot resolve the namespace ({e}); pass namespace= explicitly"
-            ) from e
+            raise AuthzError(f"cannot work out what this call needs ({e})") from e
         return self._reviewer.missing(identity, checks)
 
 
@@ -293,6 +319,14 @@ def _namespace_resolvers() -> dict[str, Callable[[str | None], str]]:
         # Health tools use the Trainer client's namespace.
         "health": utils.get_trainer_effective_namespace,
     }
+
+
+def _controller_namespace(namespace: str | None) -> str | None:
+    # Where inspect_controller reads: the argument, then the configured controller
+    # namespace, else None (the tool searches for it, so check cluster-wide).
+    from kubeflow_mcp.trainer.api.platform import _get_controller_namespace
+
+    return namespace or _get_controller_namespace()
 
 
 def _verified_claims() -> Mapping[str, Any] | None:
@@ -336,6 +370,8 @@ def build_authz_middleware(
             permissions[tool] = declared
             if client in resolvers:
                 tool_resolvers[tool] = resolvers[client]
+    if "inspect_controller" in permissions:
+        tool_resolvers["inspect_controller"] = _controller_namespace
     return SarAuthorizationMiddleware(
         config,
         permissions,
