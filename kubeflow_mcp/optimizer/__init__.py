@@ -133,10 +133,10 @@ CLIENT_TOOL_DESCRIPTIONS: dict[str, str] = {
         "[DESTRUCTIVE] Delete experiment permanently. Set confirmed=True to execute."
     ),
     "update_hpo_experiment": (
-        "Change a running experiment's parallel_trial_count, max_trial_count or "
-        "max_failed_trial_count. Katib cannot pause: lowering parallel_trial_count "
-        "deletes active trials above the new value (the preview says how many). "
-        "Set confirmed=True to apply."
+        "[DESTRUCTIVE] Change a running experiment's parallel_trial_count, max_trial_count "
+        "or max_failed_trial_count. Katib cannot pause: lowering parallel_trial_count "
+        "makes Katib delete trials, newest first and whatever their state, until the "
+        "active ones fit (the preview lists them). Set confirmed=True to apply."
     ),
 }
 
@@ -272,7 +272,9 @@ CLIENT_TOOL_ANNOTATIONS: dict[str, dict] = {
     "update_hpo_experiment": {
         "title": "Update Experiment",
         "readOnlyHint": False,
-        "destructiveHint": False,
+        # Lowering parallel_trial_count makes Katib delete trials, completed
+        # ones included, so policies denying risk:destructive must remove it.
+        "destructiveHint": True,
         "idempotentHint": True,
         "openWorldHint": True,
         "tags": ["lifecycle", "scale", "budget"],

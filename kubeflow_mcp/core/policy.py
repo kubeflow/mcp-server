@@ -168,6 +168,8 @@ DESTRUCTIVE_TOOLS = {
     "delete_experiment",
     "delete_pipeline",
     "delete_hpo_experiment",
+    # Lowering parallel_trial_count makes Katib delete trials, including completed ones.
+    "update_hpo_experiment",
 }
 
 # Tools matched by each ``risk:<level>`` policy pattern.
