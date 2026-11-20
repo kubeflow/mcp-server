@@ -29,6 +29,7 @@ import pytest
 from kubeflow_mcp.common.constants import SDK_COMPATIBILITY
 from kubeflow_mcp.conftest import make_spark_session_info
 from kubeflow_mcp.spark import TOOLS
+from kubeflow_mcp.spark.api.discovery import SESSION_STATES
 from kubeflow_mcp.spark.api.monitoring import _MISSING_POD_RE
 from kubeflow_mcp.spark.types import session_info_to_dict
 
@@ -178,6 +179,12 @@ class TestSDKSurface:
             "SDK no longer raises a 'no server pod' message that "
             f"get_spark_session_logs recognizes:\n{source}"
         )
+
+    def test_session_states_match_the_sdk_enum(self):
+        # list_spark_sessions refuses any state filter outside SESSION_STATES.
+        from kubeflow.spark.types.types import SparkConnectState
+
+        assert set(SESSION_STATES) == {s.value for s in SparkConnectState}
 
 
 # ─── Compatibility bookkeeping ──────────────────────────────────────────────

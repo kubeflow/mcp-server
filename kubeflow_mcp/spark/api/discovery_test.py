@@ -20,6 +20,8 @@ The spark module imports the SDK lazily, so these run without the
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from kubeflow_mcp.conftest import make_spark_session_info
 from kubeflow_mcp.spark.api import discovery
 
@@ -75,6 +77,34 @@ class TestListSessions:
         out = discovery.list_spark_sessions(state="failed")  # case-insensitive
         assert out["data"]["total"] == 1
         assert out["data"]["sessions"][0]["name"] == "b"
+
+    def test_state_filter_ignores_surrounding_whitespace(self, mock_spark_client):
+        mock_spark_client.list_sessions.return_value = [
+            make_spark_session_info("a"),
+            make_spark_session_info("b", state="NotReady"),
+        ]
+        out = discovery.list_spark_sessions(state=" NotReady ")
+        assert out["data"]["total"] == 1
+        assert out["data"]["sessions"][0]["name"] == "b"
+
+    @pytest.mark.parametrize("state", ["Redy", "Complete", "   ", ""])
+    def test_unsupported_state_is_rejected_before_sdk_call(self, mock_spark_client, state):
+        """A filter no session can match used to read as "no sessions exist"."""
+        out = discovery.list_spark_sessions(state=state)
+        assert out["success"] is False
+        assert out["error_code"] == "VALIDATION_ERROR"
+        assert out["error"] == f"Unsupported state '{state}'"
+        assert out["details"]["supported_states"] == sorted(discovery.SESSION_STATES)
+        mock_spark_client.list_sessions.assert_not_called()
+
+    def test_omitted_state_lists_every_session(self, mock_spark_client):
+        mock_spark_client.list_sessions.return_value = [
+            make_spark_session_info("a"),
+            make_spark_session_info("b", state="Failed"),
+        ]
+        out = discovery.list_spark_sessions()
+        assert out["success"] is True
+        assert out["data"]["total"] == 2
 
     def test_invalid_limit(self):
         out = discovery.list_spark_sessions(limit=0)
