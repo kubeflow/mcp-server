@@ -86,10 +86,9 @@ the name must match a key in `search_space`. A parameter that is searched but
 never referenced is silently ignored — trials all run with the same config and
 the results look flat.
 
-`create_hpo_experiment` sets `primaryContainerName` to the Trainer's `node`
-container, so the template should describe a **TrainJob**. For a plain
-`batch/v1` Job or another kind, use `create_hpo_experiment_from_spec()` and set
-`primaryContainerName` yourself, otherwise metrics are never collected.
+The template can describe a **TrainJob**, a plain `batch/v1` Job, or a bare pod
+spec. `create_hpo_experiment` derives `primaryContainerName` from it (see
+[Metrics collection](#metrics-collection)), so no other tool is needed for a Job.
 
 Use `list_runtimes()` (trainer client) to find a valid `runtimeRef`.
 
@@ -165,7 +164,7 @@ flow. It is restricted to the `ml-engineer` persona and above.
 
 ```
 best = get_best_trial("lr-search")
-# best["parameters"] -> {"lr": "0.0123", "batch_size": "32"}
+# best["data"]["parameters"] -> {"lr": "0.0123", "batch_size": "32"}
 # feed those into fine_tune() or run_custom_training()
 ```
 

@@ -31,7 +31,7 @@ checks container readiness for this reason and reports `controller_ready`.
 | `Experiment 'x' was not created by MCP` | Non-admin persona touching an external experiment | Expected. `data-scientist`/`ml-engineer` may only mutate MCP-created experiments; use `platform-admin` |
 | Stuck in `Created`, no trials | Suggestion not ready, or the trial template is invalid | `get_suggestion(name)` for algorithm state, then `get_hpo_experiment_events(name)` |
 | All trials fail immediately | Bad image, bad command, or unresolvable `runtimeRef` | `get_hpo_experiment_trial_logs(name)`; failure patterns (OOM, missing module, permissions) are auto-detected and returned in `failure_hint` |
-| Trials run but no metrics | The objective metric name does not match what the script prints, or `primaryContainerName` is wrong for the trial kind | Ensure the script emits the metric named in `objective_metric`; for non-TrainJob templates use `create_hpo_experiment_from_spec()` |
+| Trials run but no metrics | The objective metric name does not match what the script prints, the derived `primaryContainerName` is not the container that prints it, or the namespace lacks `katib.kubeflow.org/metrics-collector-injection=enabled` | Ensure the script emits the metric named in `objective_metric`; pass `primary_container_name` when a sidecar is listed first; label the namespace |
 | Results look flat / identical | A searched parameter is never referenced in the template | Every `search_space` key needs a `${trialParameters.<key>}` reference in `trial_template` |
 | `Timeout after Ns` from `wait_for_hpo_experiment` | Trials slower than the timeout | Not a failure — the experiment is still running. Poll `get_hpo_experiment_status()`, or raise `timeout_seconds` (max 3600) |
 
@@ -49,13 +49,15 @@ filter one with the other's vocabulary.
 | `Complete` | Finished; best result available |
 | `Failed` | Failed (e.g. `max_failed_trials` exceeded) |
 
-**Trial** (`get_hpo_experiment_trials`, `get_trial`) — derived from the underlying
-TrainJob, so it uses TrainJob vocabulary: `Created`, `Running`, `Complete`,
-`Failed`, `Suspended`.
+**Trial** (`get_hpo_experiment_trials`, `get_trial`): read from the Trial's own
+conditions, so it is the same whatever the trial runs (TrainJob, Job, ...):
+`Created` (pending), `Running`, `Complete`, `Failed`, `Killed`, `EarlyStopped`,
+`MetricsUnavailable`.
 
-Filter succeeded trials with `status="Complete"`, **not** `"Succeeded"`.
-`list_hpo_experiments(status="Succeeded")` is accepted as an alias for `Complete`
-at the experiment level, but `get_hpo_experiment_trials` has no such alias.
+A succeeded trial or experiment is reported as `Complete`. Both
+`list_hpo_experiments` and `get_hpo_experiment_trials` also accept `"Succeeded"`
+as an alias for it. `get_successful_trials` returns only `Complete` trials, not
+`EarlyStopped` ones.
 
 ## No best trial available
 
@@ -77,7 +79,7 @@ only lets a live experiment change three fields, which is what
 
 | Parameter | Use |
 |---|---|
-| `parallel_trial_count` | Raise it to go faster. Lowering it deletes active trials (see below) |
+| `parallel_trial_count` | Raise it to go faster. Lowering it deletes trials (see below) |
 | `max_trial_count` | Extend the budget. Must exceed the trials already created |
 | `max_failed_trial_count` | Tolerate more (or fewer) failures before the experiment fails |
 
@@ -89,11 +91,14 @@ only be extended when it stopped at `max_trial_count` and was created with
 needs `create_hpo_experiment_from_spec`. To stop an experiment for good, use
 `delete_hpo_experiment`.
 
-**Lowering `parallel_trial_count` is not a gentle throttle.** When it drops
-below the active (pending plus running) trials, Katib deletes the excess
-immediately, newest first, instead of letting them finish. Their work is lost,
-and they do not show up in `trialsKilled`. The preview reports the count as
-`active_trials_deleted`; wait for trials to finish first if their results matter.
+**Lowering `parallel_trial_count` is not a gentle throttle.** While more trials
+are active (pending or running) than the new value allows, Katib deletes trials
+from **all** of the experiment's trials, newest first and whatever their state,
+and repeats until the active ones fit. A trial that finished after an older one
+started is newer, so it goes first, results and all; the running one goes on the
+next round. Deleted trials do not show up in `trialsKilled`. The preview lists
+them by name and state in `trials_to_delete`, estimated from the trials at the
+time of the call; wait for trials to finish first if their results matter.
 
 ## Cleanup
 
