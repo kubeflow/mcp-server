@@ -18,7 +18,7 @@ The Kubeflow MCP Server exposes Kubeflow Training operations as [Model Context P
 - **Security-First**: Persona gating, namespace enforcement, input validation, bearer/JWT auth
 - **Multi-Platform**: Auto-detects OpenShift, EKS, GKE with platform-specific guidance
 - **Token-Efficient**: Progressive/semantic modes compress 23 tools into 2-3 meta-tools
-- **Extensible**: Plugin architecture for additional Kubeflow clients (trainer, spark, pipelines; TODO: optimizer, hub)
+- **Extensible**: Plugin architecture for additional Kubeflow clients (trainer, spark, pipelines, optimizer; TODO: hub)
 
 ## Demo
 
@@ -272,6 +272,28 @@ Set `KUBEFLOW_MCP_PIPELINES_URL`, `KUBEFLOW_MCP_PIPELINES_TOKEN` or
 MCP ownership label; `delete_experiment` and `delete_pipeline` are `platform-admin` only.
 
 
+### Optimizer client
+
+Enable with `--clients optimizer` (add `trainer` to train with the results). The cluster
+needs Katib v0.19, and the target namespace needs the
+`katib.kubeflow.org/metrics-collector-injection=enabled` label for metrics to be collected.
+
+| Phase | Tools | Description |
+|-------|-------|-------------|
+| Planning | `katib_pre_flight` | Check the Experiment CRD, controller readiness and admission webhooks |
+| Discovery | `list_hpo_experiments`, `get_hpo_experiment`, `get_hpo_experiment_status`, `get_trial`, `get_successful_trials`, `list_suggestions` | Browse Katib experiments, trials and suggestions |
+| Optimization | `create_hpo_experiment`, `create_hpo_experiment_from_spec` | Create an experiment from flat parameters or a full `V1beta1Experiment` manifest (preview first) |
+| Monitoring | `get_hpo_experiment_trials`, `get_best_trial`, `get_suggestion`, `get_hpo_experiment_trial_logs`, `get_hpo_experiment_events` | Follow trials, read the best result, trial logs and events |
+| Lifecycle | `wait_for_hpo_experiment`, `update_hpo_experiment`, `delete_hpo_experiment` | Wait for completion, change the trial budget or parallelism, delete (preview first) |
+
+The tools read and write Katib's own resources, so every algorithm `create_hpo_experiment`
+offers (random, grid, bayesianoptimization, tpe, multivariate-tpe, cmaes, sobol, hyperband)
+and any trial workload (a TrainJob, a `batch/v1` Job, ...) can be monitored. Katib has no
+pause: lowering `parallel_trial_count` makes Katib delete trials, newest first and whatever
+their state, so `update_hpo_experiment` is destructive and its preview lists those trials.
+Experiments created through MCP are labelled `kubeflow-mcp/managed-by=mcp`; non-admin
+personas may only update or delete those. See `optimizer://guides/hpo-patterns`.
+
 ### Requirements
 
 | MCP Server | Kubeflow Trainer | Kubeflow SDK | Python      | Kubernetes |
@@ -284,7 +306,7 @@ MCP ownership label; `delete_experiment` and `delete_pipeline` are `platform-adm
 ### `kubeflow-mcp serve`
 
 ```bash
-# Modules: trainer, spark, pipelines, optimizer (stub), hub (stub)
+# Modules: trainer, spark, pipelines, optimizer, hub (stub)
 # Persona: readonly | data-scientist | ml-engineer | platform-admin
 # Mode: full | progressive | semantic
 # Instruction tier: full | compact | minimal
@@ -309,7 +331,7 @@ kubeflow-mcp serve \
 
 | Flag | Values |
 | ---- | ------ |
-| `--clients` | `trainer`, `spark`, `optimizer` (stub), `hub` (stub) |
+| `--clients` | `trainer`, `spark`, `pipelines`, `optimizer`, `hub` (stub) |
 | `--persona` | `readonly` \| `data-scientist` \| `ml-engineer` \| `platform-admin` |
 | `--mode` | `full` \| `progressive` \| `semantic` |
 | `--instruction-tier` | `full` \| `compact` \| `minimal` |
