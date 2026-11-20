@@ -205,6 +205,11 @@ class TestRedactText:
             ("retry s3_secret_access_key: s3-abc999", "s3-abc999"),
             ("refresh with accessToken=at-abc999", "at-abc999"),
             ("login failed user: password=hunter2", "hunter2"),
+            ("sent header x-api-key: sk-abc123", "sk-abc123"),
+            ("sent header X-Api-Key: sk-abc123", "sk-abc123"),
+            ("client apiKey=sk-abc123", "sk-abc123"),
+            ("loaded privateKey=pk-live-123", "pk-live-123"),
+            ("rotated my-secret-key=abc999", "abc999"),
         ],
     )
     def test_credential_is_removed(self, text, leaked):
@@ -235,6 +240,9 @@ class TestRedactText:
             "keyword=llama",
             "key_format=pem",
             "tokenizer: bert-base-uncased",
+            "publicKey=ssh-rsa AAAA",
+            "key-name=prod",
+            "pre-trained model: bert-base-uncased",
         ],
     )
     def test_safe_key_not_redacted(self, text):

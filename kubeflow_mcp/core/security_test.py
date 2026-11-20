@@ -471,6 +471,40 @@ def test_mask_sensitive_data(test_case):
     assert result[test_case.config["key"]] == test_case.config["expected"]
 
 
+@pytest.mark.parametrize(
+    "key",
+    [
+        "apiKey",
+        "api-key",
+        "x-api-key",
+        "X-Api-Key",
+        "privateKey",
+        "private-key",
+        "clientCert",
+        "tlsKey",
+        "accessKey",
+        "S3SecretAccessKey",
+        "hf-token",
+        # Spellings that matched before the snake_case fold must still match.
+        "toKen",
+        "HF_TOKEN",
+    ],
+)
+def test_mask_sensitive_data_masks_every_spelling_of_a_credential_key(key):
+    assert mask_sensitive_data({key: "x"})[key] == "***"
+
+
+@pytest.mark.parametrize("key", ["publicKey", "public-key", "keyName", "key-name", "KeyFormat"])
+def test_mask_sensitive_data_keeps_safe_keys_in_any_spelling(key):
+    assert mask_sensitive_data({key: "x"})[key] == "x"
+
+
+@pytest.mark.parametrize("key", ["key", "operator", "monkey", "keyword"])
+def test_mask_sensitive_data_keeps_plain_keys(key):
+    # A toleration's bare ``key`` must not be mistaken for a credential.
+    assert mask_sensitive_data({key: "x"})[key] == "x"
+
+
 @pytest.mark.parametrize("key", sorted(_SENSITIVE_EXACT))
 def test_mask_all_sensitive_exact_keys(key):
     assert mask_sensitive_data({key: "x"})[key] == "***"
