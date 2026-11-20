@@ -320,7 +320,7 @@ INSTRUCTION_SECTIONS: dict[str, dict[str, str]] = {
 OPTIMIZER PLANNING (always do first):
 - katib_pre_flight() → One call: Katib CRD + controller health + trainer availability
 - If blockers returned, STOP and inform user
-- If trainer_available=false → cross-client workflows require --clients trainer,optimizer
+- If trainer_sdk_available=false → the Trainer SDK cannot start, so cross-client workflows are unavailable
 OPTIMIZER DISCOVERY (before creating experiments):
 - list_hpo_experiments() → find existing experiments in namespace
 - get_hpo_experiment(name) → inspect spec, status, trials, best trial

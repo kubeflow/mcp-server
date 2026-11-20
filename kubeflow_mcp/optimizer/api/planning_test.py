@@ -18,6 +18,7 @@ from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 from kubernetes.client.exceptions import ApiException
 
 from kubeflow_mcp.optimizer.api.planning import katib_pre_flight
@@ -77,7 +78,7 @@ def test_pre_flight_all_healthy():
     assert data["katib_crd_found"] is True
     assert data["katib_crd_versions"] == ["v1beta1"]
     assert data["controller_status"] == "Running"
-    assert data["trainer_available"] is True
+    assert data["trainer_sdk_available"] is True
 
 
 def test_pre_flight_crd_missing():
@@ -170,8 +171,8 @@ def test_pre_flight_trainer_unavailable_is_warning_not_blocker():
     data = result["data"]
     # Trainer missing must not block optimizer-only usage.
     assert data["ready"] is True
-    assert data["trainer_available"] is False
-    assert any("Trainer client not available" in w for w in data["warnings"])
+    assert data["trainer_sdk_available"] is False
+    assert any("Trainer SDK client could not be initialized" in w for w in data["warnings"])
 
 
 def _healthy_cluster():
@@ -256,3 +257,38 @@ def test_pre_flight_controller_falls_back_to_all_namespaces():
     data = result["data"]
     assert data["ready"] is True
     assert data["controller_namespace"] == "katib-system"
+
+
+@pytest.mark.parametrize("order", ["pending_first", "healthy_first"])
+def test_pre_flight_reports_the_healthy_controller_whatever_the_list_order(order):
+    """During a rollout an old Pending pod can be listed next to a Ready one."""
+    pending = _pod(phase="Pending", name="katib-controller-new", ready=None)
+    healthy = _pod(name="katib-controller-old")
+    items = [pending, healthy] if order == "pending_first" else [healthy, pending]
+    apiext = MagicMock()
+    apiext.read_custom_resource_definition.return_value = _crd()
+    core = MagicMock()
+    core.list_namespaced_pod.return_value = SimpleNamespace(items=items)
+    with _patch(apiext, core):
+        data = katib_pre_flight()["data"]
+    assert data["controller_name"] == "katib-controller-old"
+    assert data["controller_ready"] is True
+    assert data["ready"] is True
+
+
+def test_pre_flight_skips_the_webhook_probe_outside_the_allowlist():
+    """The probe dry-runs a create in the default namespace, which policy may forbid."""
+    apiext = MagicMock()
+    apiext.read_custom_resource_definition.return_value = _crd()
+    core = MagicMock()
+    core.list_namespaced_pod.return_value = SimpleNamespace(items=[_pod()])
+    webhook = MagicMock()
+    with (
+        _patch(apiext, core, webhook=webhook),
+        patch("kubeflow_mcp.core.policy.get_allowed_namespaces", return_value=["team-a"]),
+    ):
+        data = katib_pre_flight()["data"]
+    webhook.create_namespaced_custom_object.assert_not_called()
+    assert data["webhook_reachable"] is None
+    assert any("Skipped the Katib admission webhook check" in w for w in data["warnings"])
+    assert data["ready"] is True
