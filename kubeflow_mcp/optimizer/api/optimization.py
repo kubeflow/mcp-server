@@ -403,6 +403,18 @@ def create_hpo_experiment(
             f"parallel_trial_count must be between 1 and {MAX_PARALLEL_TRIAL_LIMIT}, "
             f"got {parallel_trial_count}",
         ),
+        # Katib's webhook rejects both of these; catching them here keeps the
+        # preview honest about what will be admitted.
+        (
+            parallel_trial_count > max_trial_count,
+            f"parallel_trial_count ({parallel_trial_count}) must not exceed "
+            f"max_trial_count ({max_trial_count})",
+        ),
+        (
+            max_failed_trials is not None and not 0 <= max_failed_trials <= max_trial_count,
+            f"max_failed_trials must be between 0 and max_trial_count ({max_trial_count}), "
+            f"got {max_failed_trials}",
+        ),
     ]
     for is_invalid, message in problems:
         if is_invalid:
@@ -443,6 +455,42 @@ def create_hpo_experiment(
         return experiment_error(e, name).model_dump()
 
 
+# Fields Katib needs in every Experiment spec, as paths under ``spec``.
+# ``from_dict`` accepts a manifest missing any of them, so they are checked
+# here, where the message can name the field.
+_REQUIRED_SPEC_FIELDS: tuple[tuple[str, ...], ...] = (
+    ("objective", "type"),
+    ("objective", "objectiveMetricName"),
+    ("algorithm", "algorithmName"),
+    ("trialTemplate",),
+)
+
+
+def _manifest_problem(manifest: dict[str, Any]) -> str | None:
+    """Describe the first way a raw Experiment manifest is incomplete, if any."""
+    expected_api_version = f"{KATIB_API_GROUP}/{KATIB_API_VERSION}"
+    if manifest.get("apiVersion") != expected_api_version:
+        return (
+            f"spec.apiVersion must be '{expected_api_version}', got {manifest.get('apiVersion')!r}"
+        )
+    if manifest.get("kind") != EXPERIMENT_KIND:
+        return f"spec.kind must be '{EXPERIMENT_KIND}', got {manifest.get('kind')!r}"
+    if not isinstance(manifest.get("metadata"), dict):
+        return "spec.metadata must be an object with a name"
+    body = manifest.get("spec")
+    if not isinstance(body, dict):
+        return "spec.spec must be an object"
+    for path in _REQUIRED_SPEC_FIELDS:
+        node: Any = body
+        for key in path:
+            node = node.get(key) if isinstance(node, dict) else None
+        if not node:
+            return f"spec.spec.{'.'.join(path)} is required"
+    if not body.get("parameters") and not body.get("nasConfig"):
+        return "spec.spec.parameters (or spec.spec.nasConfig) is required"
+    return None
+
+
 def create_hpo_experiment_from_spec(
     spec: dict[str, Any],
     namespace: str | None = None,
@@ -470,7 +518,15 @@ def create_hpo_experiment_from_spec(
             error_code=ErrorCode.VALIDATION_ERROR,
         ).model_dump()
 
-    name = (spec.get("metadata") or {}).get("name")
+    manifest_problem = _manifest_problem(spec)
+    if manifest_problem is not None:
+        return ToolError(
+            error=manifest_problem,
+            error_code=ErrorCode.VALIDATION_ERROR,
+            hint="Pass a complete Katib v1beta1 Experiment manifest.",
+        ).model_dump()
+
+    name = spec["metadata"].get("name")
     if not name:
         return ToolError(
             error="spec.metadata.name is required",
@@ -494,7 +550,7 @@ def create_hpo_experiment_from_spec(
     # Check the namespace the experiment will actually be created in. The spec
     # can name its own, so checking only the argument would let
     # spec.metadata.namespace bypass the allowlist.
-    target_namespace = namespace or (spec.get("metadata") or {}).get("namespace")
+    target_namespace = namespace or spec["metadata"].get("namespace")
     if target_namespace is not None and not isinstance(target_namespace, str):
         return ToolError(
             error="spec.metadata.namespace must be a string",

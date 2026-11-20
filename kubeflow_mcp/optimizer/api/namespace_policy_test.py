@@ -20,6 +20,7 @@ different namespace than the one the operation targets, which both let the
 allowlist be bypassed and broke optimizer-only deployments.
 """
 
+import copy
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -88,11 +89,18 @@ def test_no_allowlist_permits_everything():
         assert check_optimizer_namespace("anything") is None
 
 
+def _manifest(**metadata):
+    """A complete Experiment manifest from the sweep below, with extra metadata."""
+    manifest = copy.deepcopy(_TOOL_KWARGS["create_hpo_experiment_from_spec"]["spec"])
+    manifest["metadata"].update(metadata)
+    return manifest
+
+
 def test_spec_namespace_cannot_bypass_the_allowlist():
     """create_hpo_experiment_from_spec must check spec.metadata.namespace, not the
     default, when no namespace argument is given."""
     api = MagicMock()
-    spec = {"metadata": {"name": "exp", "namespace": "team-b"}}
+    spec = _manifest(namespace="team-b")
     with (
         patch(_POLICY, return_value=["team-a"]),
         patch(_OPTIMIZER_NS, side_effect=lambda ns: ns or "team-a"),
@@ -107,7 +115,7 @@ def test_spec_namespace_cannot_bypass_the_allowlist():
 
 
 def test_namespace_argument_overrides_the_spec_namespace():
-    spec = {"metadata": {"name": "exp", "namespace": "team-b"}}
+    spec = _manifest(namespace="team-b")
     with (
         patch(_POLICY, return_value=["team-a"]),
         patch(_OPTIMIZER_NS, side_effect=lambda ns: ns or "team-a"),
@@ -119,7 +127,7 @@ def test_namespace_argument_overrides_the_spec_namespace():
 
 
 def test_non_string_spec_namespace_is_rejected():
-    spec = {"metadata": {"name": "exp", "namespace": 7}}
+    spec = _manifest(namespace=7)
     with patch(_POLICY, return_value=None):
         result = optimization.create_hpo_experiment_from_spec(spec=spec)
 

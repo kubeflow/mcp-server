@@ -510,3 +510,63 @@ def test_from_spec_configmap_template_skips_image_check():
     with cluster():
         result = opt.create_hpo_experiment_from_spec(spec=manifest)
     assert result["status"] == "preview"
+
+
+# ─── Budget and manifest validation ─────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"max_trial_count": 4, "parallel_trial_count": 5}, "must not exceed max_trial_count"),
+        ({"max_trial_count": 4, "max_failed_trials": 5}, "max_failed_trials must be between 0"),
+        ({"max_failed_trials": -1}, "max_failed_trials must be between 0"),
+    ],
+)
+def test_trial_budget_katib_would_reject_is_refused(overrides, message):
+    with cluster() as api:
+        result = _create(confirmed=True, **overrides)
+    assert result["error_code"] == "VALIDATION_ERROR"
+    assert message in result["error"]
+    api.create_namespaced_custom_object.assert_not_called()
+
+
+def test_parallelism_equal_to_the_budget_is_valid():
+    with cluster():
+        result = _create(max_trial_count=4, parallel_trial_count=4, max_failed_trials=4)
+    assert result["status"] == "preview"
+
+
+def _without(path):
+    manifest = _manifest()
+    node = manifest
+    for key in path[:-1]:
+        node = node[key]
+    del node[path[-1]]
+    return manifest
+
+
+@pytest.mark.parametrize(
+    ("manifest", "field"),
+    [
+        (_without(("apiVersion",)), "spec.apiVersion"),
+        (_without(("kind",)), "spec.kind"),
+        (_without(("spec",)), "spec.spec must be an object"),
+        (_without(("spec", "objective")), "spec.spec.objective.type"),
+        (_without(("spec", "objective", "objectiveMetricName")), "objectiveMetricName"),
+        (_without(("spec", "algorithm")), "spec.spec.algorithm.algorithmName"),
+        (_without(("spec", "trialTemplate")), "spec.spec.trialTemplate"),
+        (_without(("spec", "parameters")), "spec.spec.parameters"),
+        ({**_manifest(), "metadata": "exp"}, "spec.metadata must be an object"),
+    ],
+)
+def test_from_spec_names_the_missing_field_before_the_namespace_check(manifest, field):
+    with (
+        cluster() as api,
+        patch("kubeflow_mcp.optimizer.api.optimization.check_optimizer_namespace") as ns_check,
+    ):
+        result = opt.create_hpo_experiment_from_spec(spec=manifest, confirmed=True)
+    assert result["error_code"] == "VALIDATION_ERROR"
+    assert field in result["error"]
+    ns_check.assert_not_called()
+    api.create_namespaced_custom_object.assert_not_called()
