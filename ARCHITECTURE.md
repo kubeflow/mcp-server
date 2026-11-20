@@ -182,7 +182,7 @@ Kubernetes API Server (RBAC enforced)
 - **Namespace restrictions** — policy enforcement on both lifecycle and training tools (training tools use per-call `TrainerClient` with `KubernetesBackendConfig(namespace=...)`)
 - **Error sanitization** — stack traces are only included in error responses when the logger is at DEBUG level; production responses contain error messages only
 - **External API hardening** — HuggingFace Hub calls use a 10s timeout and model ID format validation (`org/model` regex) to prevent SSRF; malformed model IDs return suggestions via `huggingface_hub.list_models` (best-effort, degrades gracefully on network failure)
-- **Thread safety** — `RateLimiter` uses `threading.Lock`; policy cache uses `functools.lru_cache` (GIL-safe); policy reload uses a dedicated `threading.Lock`
+- **Thread safety** — `RateLimiter` and `UserRateLimiter` use `threading.Lock`; policy cache uses `functools.lru_cache` (GIL-safe); policy reload uses a dedicated `threading.Lock`
 - **Audit logging** — every tool call is logged with masked parameters, duration, and correlation ID; log buffer redacts sensitive patterns (tokens, passwords, credentials) before storage
 - **Observability** — opt-in OpenTelemetry tracing via `--otel-endpoint` or `OTEL_EXPORTER_OTLP_ENDPOINT`. Each tool call emits a span with `tool.args_preview` (masked, truncated to 300 chars), persona, correlation ID, MCP session/request IDs, and error status. OTLP exporter uses a 2s timeout to avoid blocking tool calls. Tracing is no-op when OTel packages are not installed
 
@@ -346,7 +346,7 @@ policy:
 
 All tool calls pass through a rate limiter and per-tool circuit breakers:
 
-- **Rate limiter** (token bucket): prevents runaway agent loops. Configurable via `KUBEFLOW_MCP_RATE_LIMIT` (default 10 req/s) and `KUBEFLOW_MCP_RATE_CAPACITY` (default 20 burst).
+- **Rate limiter** (token bucket): prevents runaway agent loops. Configurable via `KUBEFLOW_MCP_RATE_LIMIT` (default 10 req/s) and `KUBEFLOW_MCP_RATE_CAPACITY` (default 20 burst). In multi-user deployments, per-user rate limiting can be enabled via `KUBEFLOW_MCP_PER_USER_RATE_LIMIT` and `KUBEFLOW_MCP_PER_USER_RATE_CAPACITY`, bucketing token buckets by caller `sub`/`user_id` with automatic LRU and TTL eviction to prevent noisy-neighbor starvation.
 - **Circuit breaker** (per-tool): trips on repeated K8s/SDK infrastructure errors (not validation errors). Auto-recovers after `KUBEFLOW_MCP_CB_RECOVERY_TIMEOUT` (default 30s). Prevents cascading failures when the K8s API is degraded.
 - **Retry with backoff**: exponential backoff with jitter for transient failures (sync and async variants available).
 

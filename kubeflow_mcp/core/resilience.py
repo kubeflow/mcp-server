@@ -304,8 +304,12 @@ class RateLimiter:
         self._last_update = time.monotonic()
         self._lock = threading.Lock()
 
-    def acquire(self, tokens: float = 1.0) -> bool:
-        """Try to acquire tokens. Returns True if successful."""
+    def acquire(self, tokens: float = 1.0, user_id: str | None = None) -> bool:
+        """Try to acquire tokens. Returns True if successful.
+
+        The *user_id* argument is accepted for interface compatibility with
+        :class:`UserRateLimiter`, but ignored by this single-bucket limiter.
+        """
         if tokens <= 0:
             raise ValueError("tokens must be greater than zero")
 
@@ -319,6 +323,135 @@ class RateLimiter:
                 self._tokens -= tokens
                 return True
             return False
+
+
+@dataclass
+class UserRateLimiter:
+    """Per-user token bucket rate limiter bucketed by user identity (sub claim).
+
+    Prevents noisy-neighbor starvation in multi-user deployments (ROADMAP Phase 4).
+    Each distinct user identity receives an independent :class:`RateLimiter` token bucket.
+    Includes thread-safe TTL and LRU eviction to prevent unbounded memory growth under
+    high-cardinality user identifiers.
+    """
+
+    user_rate: float = 10.0
+    user_capacity: float = 10.0
+    global_rate: float | None = None
+    global_capacity: float | None = None
+    bucket_ttl: float = 300.0
+    max_buckets: int = 10000
+
+    _buckets: dict[str, RateLimiter] = field(init=False, default_factory=dict)
+    _last_access: dict[str, float] = field(init=False, default_factory=dict)
+    _global_limiter: RateLimiter | None = field(init=False, default=None)
+    _lock: threading.Lock = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.user_rate <= 0:
+            raise ValueError("user_rate must be greater than zero")
+        if self.user_capacity <= 0:
+            raise ValueError("user_capacity must be greater than zero")
+        if self.bucket_ttl <= 0:
+            raise ValueError("bucket_ttl must be greater than zero")
+        if self.max_buckets <= 0:
+            raise ValueError("max_buckets must be greater than zero")
+
+        if self.global_rate is not None:
+            if self.global_rate <= 0:
+                raise ValueError("global_rate must be greater than zero")
+            capacity = (
+                self.global_capacity if self.global_capacity is not None else self.global_rate * 2
+            )
+            if capacity <= 0:
+                raise ValueError("global_capacity must be greater than zero")
+            self._global_limiter = RateLimiter(rate=self.global_rate, capacity=capacity)
+        else:
+            self._global_limiter = None
+
+        self._buckets = {}
+        self._last_access = {}
+        self._lock = threading.Lock()
+
+    def _evict_expired_locked(self, now: float) -> int:
+        """Evict buckets inactive for longer than bucket_ttl. Caller must hold _lock."""
+        expired = [
+            uid for uid, last_time in self._last_access.items() if now - last_time > self.bucket_ttl
+        ]
+        for uid in expired:
+            self._buckets.pop(uid, None)
+            self._last_access.pop(uid, None)
+        return len(expired)
+
+    def _evict_lru_locked(self) -> None:
+        """Evict the least recently used user bucket. Caller must hold _lock."""
+        if not self._last_access:
+            return
+        oldest_user = min(self._last_access, key=self._last_access.get)  # type: ignore[arg-type]
+        self._buckets.pop(oldest_user, None)
+        self._last_access.pop(oldest_user, None)
+
+    def acquire(self, tokens: float = 1.0, user_id: str | None = None) -> bool:
+        """Try to acquire tokens for a specific user.
+
+        If a global limit is configured, tokens are acquired from the global
+        limiter first. Then tokens are acquired from the user's specific
+        bucket. If the user bucket denies the tokens, any acquired global
+        tokens are refunded.
+        """
+        if tokens <= 0:
+            raise ValueError("tokens must be greater than zero")
+
+        user_key = (user_id or "").strip() or "__anonymous__"
+
+        with self._lock:
+            now = time.monotonic()
+            self._evict_expired_locked(now)
+
+            # Global ceiling check
+            if self._global_limiter is not None and not self._global_limiter.acquire(tokens):
+                return False
+
+            bucket = self._buckets.get(user_key)
+            if bucket is None:
+                if len(self._buckets) >= self.max_buckets:
+                    self._evict_lru_locked()
+                bucket = RateLimiter(rate=self.user_rate, capacity=self.user_capacity)
+                self._buckets[user_key] = bucket
+
+            self._last_access[user_key] = now
+            acquired = bucket.acquire(tokens)
+
+            # Refund global limiter if user bucket denies
+            if not acquired and self._global_limiter is not None:
+                with self._global_limiter._lock:
+                    self._global_limiter._tokens = min(
+                        self._global_limiter.capacity,
+                        self._global_limiter._tokens + tokens,
+                    )
+
+            return acquired
+
+    def cleanup_expired(self, now: float | None = None) -> int:
+        """Manually trigger eviction of expired user buckets."""
+        with self._lock:
+            current_time = time.monotonic() if now is None else now
+            return self._evict_expired_locked(current_time)
+
+    def active_user_count(self) -> int:
+        """Return the number of currently tracked user buckets."""
+        with self._lock:
+            return len(self._buckets)
+
+    def reset(self) -> None:
+        """Reset all user buckets and global limiter state."""
+        with self._lock:
+            self._buckets.clear()
+            self._last_access.clear()
+            if self._global_limiter is not None:
+                with self._global_limiter._lock:
+                    self._global_limiter._tokens = self._global_limiter.capacity
+                    self._global_limiter._last_update = time.monotonic()
 
 
 @dataclass
