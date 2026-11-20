@@ -382,6 +382,21 @@ class TestInstructionComposition:
         minimal = _build_server_instructions(modules, "platform-admin", "minimal")
         assert len(minimal) < len(full) * 0.3
 
+    @pytest.mark.parametrize("persona", ["readonly", "data-scientist", "ml-engineer"])
+    def test_build_instructions_minimal_lists_only_allowed_tools(self, persona):
+        import importlib
+
+        modules = {"trainer": importlib.import_module("kubeflow_mcp.trainer")}
+        minimal = _build_server_instructions(modules, persona, "minimal")
+        listed = {
+            name
+            for line in minimal.splitlines()
+            if line.startswith("Tools: ")
+            for name in line.removeprefix("Tools: ").split(", ")
+        }
+        assert listed
+        assert listed <= get_allowed_tools(persona)
+
 
 # ─── Resource loading ──────────────────────────────────────────────────────
 

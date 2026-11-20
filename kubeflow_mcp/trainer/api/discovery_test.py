@@ -19,6 +19,7 @@ Covers discovery behavior, input validation, and status filter aliasing.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -104,6 +105,30 @@ def test_get_training_job_returns_details(mock_trainer_client):
     data = verify_tool_success(result)
     assert data["name"] == VALID_JOB_NAME
     assert data["status"] == "Running"
+
+
+@patch("kubeflow_mcp.common.utils.get_custom_objects_api")
+@patch("kubeflow_mcp.trainer.api.discovery.get_trainer_client_for_namespace")
+@patch("kubeflow_mcp.trainer.api.discovery.check_namespace_allowed", return_value=None)
+def test_discovery_uses_reconciled_status_for_details_and_filters(_ns, mock_client_fn, mock_api_fn):
+    job = SimpleNamespace(
+        name="resumed-job",
+        status="Created",
+        num_nodes=1,
+        runtime=None,
+        steps=[SimpleNamespace(name="node-0", status="Running")],
+    )
+    mock_client_fn.return_value.get_job.return_value = job
+    mock_client_fn.return_value.list_jobs.return_value = [job]
+    mock_api_fn.return_value.get_namespaced_custom_object.return_value = {
+        "spec": {"suspend": False},
+        "status": {"conditions": [{"type": "Suspended", "status": "False"}]},
+    }
+    details = get_training_job("resumed-job", namespace="workloads")
+    assert details["data"]["status"] == "Running"
+    listing = list_training_jobs(status="Running", namespace="workloads")
+    assert listing["data"]["total"] == 1
+    assert listing["data"]["jobs"][0]["status"] == "Running"
 
 
 def test_get_training_job_not_found(mock_trainer_client):
@@ -534,9 +559,14 @@ class TestFetchPackagesViaPodLifecycle:
 # ---------------------------------------------------------------------------
 
 
-def _fake_job(name, status="Running", runtime_name="torch-tune"):
+def _fake_job(name, status="Running", runtime_name="torch-tune", created_at=None):
     runtime = SimpleNamespace(name=runtime_name) if runtime_name else None
-    return SimpleNamespace(name=name, status=status, runtime=runtime)
+    return SimpleNamespace(
+        name=name,
+        status=status,
+        runtime=runtime,
+        creation_timestamp=created_at,
+    )
 
 
 def _fake_runtime(name):
@@ -555,6 +585,31 @@ def test_list_training_jobs_returns_all_when_no_filters():
     assert result["data"]["total"] == 2
     assert result["data"]["returned"] == 2
     assert result["data"]["has_more"] is False
+
+
+def test_list_training_jobs_includes_creation_timestamp():
+    created_at = datetime(2026, 10, 14, 9, 30, tzinfo=timezone.utc)
+    client = MagicMock()
+    client.list_jobs.return_value = [_fake_job("job-a", created_at=created_at)]
+    with patch(
+        "kubeflow_mcp.trainer.api.discovery.get_trainer_client_for_namespace",
+        return_value=client,
+    ):
+        result = list_training_jobs()
+
+    assert result["data"]["jobs"][0]["created_at"] == "2026-10-14T09:30:00+00:00"
+
+
+def test_list_training_jobs_returns_none_when_creation_timestamp_missing():
+    client = MagicMock()
+    client.list_jobs.return_value = [_fake_job("job-a")]
+    with patch(
+        "kubeflow_mcp.trainer.api.discovery.get_trainer_client_for_namespace",
+        return_value=client,
+    ):
+        result = list_training_jobs()
+
+    assert result["data"]["jobs"][0]["created_at"] is None
 
 
 def test_list_training_jobs_filters_by_status():
@@ -682,6 +737,19 @@ def test_get_training_job_failed_status_suggests_diagnostics():
     assert any("get_training_logs" in step for step in next_steps)
 
 
+def test_get_training_job_includes_creation_timestamp():
+    created_at = datetime(2026, 10, 14, 9, 30, tzinfo=timezone.utc)
+    client = MagicMock()
+    client.get_job.return_value = _fake_job("job-a", created_at=created_at)
+    with patch(
+        "kubeflow_mcp.trainer.api.discovery.get_trainer_client_for_namespace",
+        return_value=client,
+    ):
+        result = get_training_job("job-a")
+
+    assert result["data"]["created_at"] == "2026-10-14T09:30:00+00:00"
+
+
 def test_get_training_job_complete_status_has_no_next_steps():
     client = MagicMock()
     client.get_job.return_value = _fake_job("job-a", status="Complete")
@@ -704,6 +772,80 @@ def test_get_training_job_namespace_not_allowed_short_circuits():
 
     assert result["success"] is False
     assert result["error_code"] == ErrorCode.PERMISSION_DENIED
+
+
+def test_list_training_jobs_runtime_not_found():
+    from kubernetes.client.exceptions import ApiException
+
+    from kubeflow_mcp.core.resilience import CircuitState, get_breaker
+    from kubeflow_mcp.core.server import _audit_wrap
+
+    with (
+        patch("kubeflow_mcp.trainer.api.discovery.check_namespace_allowed", return_value=None),
+        patch("kubeflow_mcp.trainer.api.discovery.get_trainer_client_for_namespace") as mock_client,
+    ):
+        mock_client.return_value.get_runtime.side_effect = ApiException(
+            status=404, reason="Not Found"
+        )
+        result = list_training_jobs(runtime="nonexistent-runtime")
+
+    error = verify_tool_error(result, error_code=RESOURCE_NOT_FOUND)
+    assert "TrainingRuntime 'nonexistent-runtime' not found" in error["error"]
+    assert error["hint"] == "Use list_runtimes to find available runtimes"
+
+    wrapped = _audit_wrap(list_training_jobs)
+    breaker = get_breaker("list_training_jobs")
+
+    with (
+        patch("kubeflow_mcp.trainer.api.discovery.check_namespace_allowed", return_value=None),
+        patch("kubeflow_mcp.trainer.api.discovery.get_trainer_client_for_namespace") as mock_client,
+    ):
+        mock_client.return_value.get_runtime.side_effect = ApiException(
+            status=404, reason="Not Found"
+        )
+        for _ in range(5):
+            res = wrapped(runtime="nonexistent-runtime")
+            assert res["success"] is False
+            assert res["error_code"] == RESOURCE_NOT_FOUND
+
+    assert breaker.state == CircuitState.CLOSED
+    assert breaker.failure_count == 0
+
+    with (
+        patch("kubeflow_mcp.trainer.api.discovery.check_namespace_allowed", return_value=None),
+        patch("kubeflow_mcp.trainer.api.discovery.get_trainer_client_for_namespace") as mock_client,
+    ):
+        mock_client.return_value.list_jobs.return_value = []
+        valid_res = wrapped()
+        assert valid_res["success"] is True
+
+
+def test_list_training_jobs_list_jobs_404_returns_sdk_error():
+    from kubernetes.client.exceptions import ApiException
+
+    with (
+        patch("kubeflow_mcp.trainer.api.discovery.check_namespace_allowed", return_value=None),
+        patch("kubeflow_mcp.trainer.api.discovery.get_trainer_client_for_namespace") as mock_client,
+    ):
+        mock_client.return_value.get_runtime.return_value = _fake_runtime("torch-distributed")
+        mock_client.return_value.list_jobs.side_effect = ApiException(
+            status=404, reason="Not Found"
+        )
+        result = list_training_jobs(runtime="torch-distributed")
+
+    error = verify_tool_error(result, error_code=ErrorCode.SDK_ERROR)
+    assert "TrainingRuntime 'torch-distributed' not found" not in error["error"]
+
+    with (
+        patch("kubeflow_mcp.trainer.api.discovery.check_namespace_allowed", return_value=None),
+        patch("kubeflow_mcp.trainer.api.discovery.get_trainer_client_for_namespace") as mock_client,
+    ):
+        mock_client.return_value.get_runtime.side_effect = ApiException(
+            status=500, reason="Internal Server Error"
+        )
+        result = list_training_jobs(runtime="torch-distributed")
+
+    verify_tool_error(result, error_code=ErrorCode.SDK_ERROR)
 
 
 # ─── get_training_job steps ─────────────────────────────────────────────────
@@ -900,3 +1042,33 @@ def test_get_training_job_sdk_error_wrapped():
         result = get_training_job("job-err")
     assert result["success"] is False
     assert result["error_code"] == ErrorCode.SDK_ERROR
+
+
+@pytest.fixture(autouse=True)
+def _offline_pod_diagnostics():
+    """Pod detail parsing is exercised separately with Kubernetes model fixtures."""
+    with patch("kubeflow_mcp.trainer.api.discovery.get_training_pod_diagnostics", return_value={}):
+        yield
+
+
+def test_job_details_include_pod_diagnostics():
+    client = MagicMock()
+    client.get_job.return_value = _fake_job("job-a", status="Created")
+    diagnostics = {
+        "pods": [{"name": "node-0", "phase": "Pending"}],
+        "blocking_reasons": ["Unschedulable"],
+    }
+    with (
+        patch(
+            "kubeflow_mcp.trainer.api.discovery.get_trainer_client_for_namespace",
+            return_value=client,
+        ),
+        patch(
+            "kubeflow_mcp.trainer.api.discovery.get_training_pod_diagnostics",
+            return_value=diagnostics,
+        ) as read,
+    ):
+        result = get_training_job("job-a", namespace="workloads")
+    assert result["data"]["pods"] == diagnostics["pods"]
+    assert result["data"]["blocking_reasons"] == ["Unschedulable"]
+    read.assert_called_once_with("job-a", "workloads")
