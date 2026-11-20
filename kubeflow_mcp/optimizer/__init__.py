@@ -301,7 +301,7 @@ PHASE_TO_SECTION: dict[str, str | None] = {
     "optimizer_discovery": None,
     "optimizer_optimization": "optimizer_optimization",
     "optimizer_monitoring": "optimizer_monitoring",
-    "optimizer_lifecycle": "optimizer_monitoring",
+    "optimizer_lifecycle": "optimizer_lifecycle",
 }
 
 # Canonical ordering of this client's instruction sections.  server.py
@@ -312,6 +312,7 @@ SECTION_ORDER: list[str] = [
     "optimizer_planning",
     "optimizer_optimization",
     "optimizer_monitoring",
+    "optimizer_lifecycle",
 ]
 
 INSTRUCTION_SECTIONS: dict[str, dict[str, str]] = {
@@ -329,17 +330,22 @@ OPTIMIZER DISCOVERY (before creating experiments):
     },
     "optimizer_monitoring": {
         "full": """\
-OPTIMIZER MONITORING AND LIFECYCLE:
+OPTIMIZER MONITORING:
 - get_hpo_experiment_trials(name) → list all trials with status and parameters
 - get_best_trial(name) → optimal hyperparameters and metrics from best trial
 - get_hpo_experiment_trial_logs(name) → pod logs with failure pattern detection
 - get_hpo_experiment_events(name) → K8s events for debugging scheduling/image issues
+- get_suggestion(name) → algorithm status and request/reply counts""",
+    },
+    # Separate from monitoring so personas without these tools (readonly) are
+    # not told to call them.
+    "optimizer_lifecycle": {
+        "full": """OPTIMIZER LIFECYCLE:
 - wait_for_hpo_experiment(name) → block until Complete/Failed (timeout capped at 3600s)
-- get_suggestion(name) → algorithm status and request/reply counts
 - delete_hpo_experiment(name, confirmed=True) → remove permanently (preview first)
 - update_hpo_experiment(name, max_trial_count=N, confirmed=True) → extend the budget, or
-  change parallel_trial_count. Katib cannot pause, and lowering parallelism deletes
-  active trials above the new value; check active_trials_deleted in the preview""",
+  change parallel_trial_count. Katib cannot pause; lowering parallelism deletes trials,
+  newest first and whatever their state, so check trials_to_delete in the preview""",
     },
     "optimizer_optimization": {
         "full": """\
