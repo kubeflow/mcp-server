@@ -24,7 +24,7 @@ import tempfile
 import textwrap
 import threading
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -203,8 +203,8 @@ class SecretKeyRef(TypedDict):
 
 
 # Kubernetes Secret data keys and (pre-1.30, conservative) env var names.
-_SECRET_KEY_RE = re.compile(r"^[-._a-zA-Z0-9]+$")
-_ENV_NAME_RE = re.compile(r"^[-._a-zA-Z][-._a-zA-Z0-9]*$")
+_SECRET_KEY_RE = re.compile(r"[-._a-zA-Z0-9]+")
+_ENV_NAME_RE = re.compile(r"[-._a-zA-Z][-._a-zA-Z0-9]*")
 
 
 @dataclass(frozen=True)
@@ -234,13 +234,14 @@ def _secret_env_var(env_name: str, secret: str, key: str) -> Any:
 
 
 def _upsert_env(cr: Any, envs: list[Any]) -> None:
-    """Replace same-named entries: TrainJob env lists are keyed by name."""
+    """Replace same-named entries (env lists are keyed by name) and put ``envs`` first,
+    so other values can reference them as ``$(NAME)``."""
     names = {e.name for e in envs}
-    cr.env = [e for e in (cr.env or []) if e.name not in names] + envs
+    cr.env = envs + [e for e in (cr.env or []) if e.name not in names]
 
 
 def _wrap_initializer_builder(original: Callable) -> Callable:
-    def _patched(source):
+    def _patched(source: Any) -> Any:
         cr = original(source)
         refs = _secret_refs_ctx.get()
         if refs is None:
@@ -261,7 +262,7 @@ def _wrap_initializer_builder(original: Callable) -> Callable:
 
 
 def _wrap_custom_trainer_builder(original: Callable) -> Callable:
-    def _patched(runtime, trainer):
+    def _patched(runtime: Any, trainer: Any) -> Any:
         cr = original(runtime, trainer)
         refs = _secret_refs_ctx.get()
         if refs is not None and refs.trainer_env:
@@ -279,7 +280,7 @@ _SECRET_REF_WRAPPERS: dict[str, Callable[[Callable], Callable]] = {
 
 
 @contextmanager
-def _inject_secret_refs(refs: _SecretRefs | None):
+def _inject_secret_refs(refs: _SecretRefs | None) -> Iterator[None]:
     """Patch SDK builders so credentials come from Secrets instead of plain env values.
 
     The SDK (v0.5.x) has no ``secretRef`` on initializers and only plain-string env.
@@ -332,7 +333,7 @@ def _validate_secret_key_ref(ref: Any, field: str) -> ToolError | None:
     key = ref["key"]
     if (
         len(key) > 253
-        or not _SECRET_KEY_RE.match(key)
+        or not _SECRET_KEY_RE.fullmatch(key)
         or key in (".", "..")
         or key.startswith("..")
     ):
@@ -346,7 +347,7 @@ def _validate_secret_env(secret_env: Any, env: dict[str, str] | None) -> ToolErr
     if not isinstance(secret_env, dict):
         return _validation_error("secret_env must map env var names to Secret keys")
     for env_name, ref in secret_env.items():
-        if not isinstance(env_name, str) or not _ENV_NAME_RE.match(env_name):
+        if not isinstance(env_name, str) or not _ENV_NAME_RE.fullmatch(env_name):
             return _validation_error(f"secret_env name '{env_name}' is not a valid env var name")
         err = _validate_secret_key_ref(ref, f"secret_env.{env_name}")
         if err:

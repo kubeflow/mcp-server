@@ -192,7 +192,7 @@ kubectl create secret generic s3-creds --from-literal=ACCESS_KEY_ID=<id> --from-
 - `fine_tune(s3_credentials_secret="s3-creds")` — the S3 initializer reads the whole Secret as env, so keys must be `ACCESS_KEY_ID` and `SECRET_ACCESS_KEY` (optionally `ENDPOINT`, `REGION`, `ROLE_ARN`; `s3_endpoint`, `s3_region` and `s3_role_arn` take precedence over those)
 - `run_custom_training` / `run_container_training(secret_env={"HF_TOKEN": {"name": "hf-creds", "key": "token"}})`
 
-The server does not read the Secret. A missing Secret or key shows up as `CreateContainerConfigError` in `get_training_job()` `blocking_reasons`.
+The server does not read the Secret. A missing Secret, or a missing key for `hf_token_secret` / `secret_env`, shows up as `CreateContainerConfigError` in `get_training_job()` `blocking_reasons`. `s3_credentials_secret` loads whatever keys the Secret has, so a misnamed S3 key raises no error there: check the Secret's key names and the dataset/model initializer logs.
 
 ### MCP Ownership Label
 

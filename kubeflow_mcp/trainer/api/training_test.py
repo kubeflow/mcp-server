@@ -19,6 +19,7 @@ from __future__ import annotations
 import ast
 import inspect
 import threading
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -1874,7 +1875,7 @@ def test_preview_warns_when_overrides_omit_inherited_gpus(
 # ─── Credentials from Secrets ───────────────────────────────────────────────
 
 
-def _secret_backend(trainer_type, runtime_name):
+def _secret_backend(trainer_type: Any, runtime_name: str) -> Any:
     """Real SDK backend with a mocked API, so tests see the TrainJob that would be created."""
     from kubeflow.trainer.backends.kubernetes.backend import KubernetesBackend
     from kubeflow.trainer.types import types as sdk_types
@@ -1896,7 +1897,7 @@ def _secret_backend(trainer_type, runtime_name):
     return backend
 
 
-def _created_train_job(backend) -> dict:
+def _created_train_job(backend: Any) -> dict:
     backend.custom_api.create_namespaced_custom_object.assert_called_once()
     return backend.custom_api.create_namespaced_custom_object.call_args[0][4]
 
@@ -1909,7 +1910,7 @@ _HF_REF = {"name": "hf-creds", "key": "token"}
 _HF_SECRET_ENV = {"valueFrom": {"secretKeyRef": {"name": "hf-creds", "key": "token"}}}
 
 
-def _sdk_builders():
+def _sdk_builders() -> list[Any]:
     import kubeflow.trainer.backends.kubernetes.utils as k8s_utils
 
     return [
@@ -1924,7 +1925,7 @@ def _sdk_builders():
 
 @patch("kubeflow_mcp.trainer.api.training._check_hf_repos_exist", return_value=None)
 @patch(PATCH_NS_CHECK, return_value=None)
-def test_fine_tune_hf_token_secret_reaches_both_initializers(_ns, _hf):
+def test_fine_tune_hf_token_secret_reaches_both_initializers(_ns, _hf) -> None:
     from kubeflow.trainer.types.types import TrainerType
 
     backend = _secret_backend(TrainerType.BUILTIN_TRAINER, "torchtune-llama3.2-1b")
@@ -1949,7 +1950,7 @@ def test_fine_tune_hf_token_secret_reaches_both_initializers(_ns, _hf):
 
 @patch("kubeflow_mcp.trainer.api.training._check_hf_repos_exist", return_value=None)
 @patch(PATCH_NS_CHECK, return_value=None)
-def test_fine_tune_mixed_sources_get_matching_secret_refs(_ns, _hf):
+def test_fine_tune_mixed_sources_get_matching_secret_refs(_ns, _hf) -> None:
     from kubeflow.trainer.types.types import TrainerType
 
     backend = _secret_backend(TrainerType.BUILTIN_TRAINER, "torchtune-llama3.2-1b")
@@ -1974,13 +1975,13 @@ def test_fine_tune_mixed_sources_get_matching_secret_refs(_ns, _hf):
 
 @pytest.mark.parametrize("tool", ["run_container_training", "run_custom_training"])
 @patch(PATCH_NS_CHECK, return_value=None)
-def test_run_training_secret_env_reaches_trainer_env(_ns, tool):
+def test_run_training_secret_env_reaches_trainer_env(_ns, tool) -> None:
     from kubeflow.trainer.types.types import TrainerType
 
     backend = _secret_backend(TrainerType.CUSTOM_TRAINER, "torch-distributed")
     common = {
         "gpu_per_node": 0,
-        "env": {"LOG_LEVEL": "info"},
+        "env": {"LOG_LEVEL": "info", "AUTH_HEADER": "Bearer $(HF_TOKEN)"},
         "secret_env": {"HF_TOKEN": _HF_REF},
         "confirmed": True,
     }
@@ -2000,9 +2001,11 @@ def test_run_training_secret_env_reaches_trainer_env(_ns, tool):
     env = _env(_created_train_job(backend)["spec"]["trainer"]["env"])
     assert env["HF_TOKEN"] == {"name": "HF_TOKEN", **_HF_SECRET_ENV}
     assert env["LOG_LEVEL"] == {"name": "LOG_LEVEL", "value": "info"}
+    # Kubernetes only expands $(HF_TOKEN) in values listed after HF_TOKEN.
+    assert list(env).index("HF_TOKEN") < list(env).index("AUTH_HEADER")
 
 
-def _ft(**kwargs):
+def _ft(**kwargs: Any) -> dict[str, Any]:
     return {"model": "hf://org/model", "dataset": "hf://org/data", **kwargs}
 
 
@@ -2020,10 +2023,11 @@ def _ft(**kwargs):
         (_ft(hf_token_secret={"name": "hf-creds"}), "must be"),
         (_ft(hf_token_secret={"name": "hf-creds", "key": ".."}), "not a valid Secret key"),
         (_ft(hf_token_secret={"name": "hf-creds", "key": "a/b"}), "not a valid Secret key"),
+        (_ft(hf_token_secret={"name": "hf-creds", "key": "token\n"}), "not a valid Secret key"),
         (_ft(hf_token_secret={"name": "-bad-", "key": "token"}), "hf_token_secret.name"),
     ],
 )
-def test_fine_tune_rejects_bad_credential_secrets(kwargs, message):
+def test_fine_tune_rejects_bad_credential_secrets(kwargs, message) -> None:
     with patch(PATCH_NS_CHECK) as ns_check:
         result = fine_tune(**kwargs)
 
@@ -2039,11 +2043,12 @@ def test_fine_tune_rejects_bad_credential_secrets(kwargs, message):
     [
         ({"env": {"HF_TOKEN": "x"}, "secret_env": {"HF_TOKEN": _HF_REF}}, "not both"),
         ({"secret_env": {"1BAD": _HF_REF}}, "not a valid env var name"),
+        ({"secret_env": {"HF_TOKEN\n": _HF_REF}}, "not a valid env var name"),
         ({"secret_env": {"HF_TOKEN": {"name": "hf-creds"}}}, "must be"),
         ({"secret_env": {"HF_TOKEN": "hf-creds"}}, "must be"),
     ],
 )
-def test_run_training_rejects_bad_secret_env(tool, kwargs, message):
+def test_run_training_rejects_bad_secret_env(tool, kwargs, message) -> None:
     first = {"image": "busybox:1.36"} if tool is run_container_training else {"script": "pass"}
     with patch(PATCH_NS_CHECK) as ns_check:
         result = tool(**first, **kwargs)
@@ -2056,7 +2061,7 @@ def test_run_training_rejects_bad_secret_env(tool, kwargs, message):
 
 @patch(PATCH_GPU_CHECK, return_value=None)
 @patch(PATCH_NS_CHECK, return_value=None)
-def test_fine_tune_preview_shows_refs_and_warns_on_inline_credentials(_ns, _gpu):
+def test_fine_tune_preview_shows_refs_and_warns_on_inline_credentials(_ns, _gpu) -> None:
     with patch("kubeflow_mcp.trainer.api.planning.get_cluster_resources", return_value={}):
         with_ref = fine_tune(**_ft(runtime="torchtune-llama3.2-1b", hf_token_secret=_HF_REF))
         inline = fine_tune(**_ft(runtime="torchtune-llama3.2-1b", hf_token="hf_secret"))
@@ -2069,7 +2074,7 @@ def test_fine_tune_preview_shows_refs_and_warns_on_inline_credentials(_ns, _gpu)
 
 
 @patch(PATCH_NS_CHECK, return_value=None)
-def test_run_container_training_preview_shows_secret_env_and_warns_on_inline(_ns):
+def test_run_container_training_preview_shows_secret_env_and_warns_on_inline(_ns) -> None:
     result = run_container_training(
         image="busybox:1.36",
         env={"API_TOKEN": "tok-123", "LOG_LEVEL": "info"},
@@ -2085,7 +2090,7 @@ def test_run_container_training_preview_shows_secret_env_and_warns_on_inline(_ns
 
 @patch(PATCH_GPU_CHECK, return_value=None)
 @patch(PATCH_NS_CHECK, return_value=None)
-def test_fine_tune_treats_empty_inline_credentials_as_unset(_ns, _gpu):
+def test_fine_tune_treats_empty_inline_credentials_as_unset(_ns, _gpu) -> None:
     with patch("kubeflow_mcp.trainer.api.planning.get_cluster_resources", return_value={}):
         result = fine_tune(
             **_ft(
@@ -2102,13 +2107,13 @@ def test_fine_tune_treats_empty_inline_credentials_as_unset(_ns, _gpu):
     assert "credential_warning" not in result["config"]
 
 
-def test_inject_secret_refs_none_leaves_sdk_untouched():
+def test_inject_secret_refs_none_leaves_sdk_untouched() -> None:
     builders = _sdk_builders()
     with _inject_secret_refs(None):
         assert _sdk_builders() == builders
 
 
-def test_inject_secret_refs_replaces_plain_access_token_and_restores_on_error():
+def test_inject_secret_refs_replaces_plain_access_token_and_restores_on_error() -> None:
     import kubeflow.trainer.backends.kubernetes.utils as k8s_utils
     from kubeflow.trainer.types.types import HuggingFaceModelInitializer
 
@@ -2127,7 +2132,7 @@ def test_inject_secret_refs_replaces_plain_access_token_and_restores_on_error():
     assert _sdk_builders() == builders
 
 
-def test_inject_secret_refs_concurrent_calls_stay_isolated():
+def test_inject_secret_refs_concurrent_calls_stay_isolated() -> None:
     import kubeflow.trainer.backends.kubernetes.utils as k8s_utils
     from kubeflow.trainer.types.types import HuggingFaceModelInitializer
 

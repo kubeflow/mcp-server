@@ -247,7 +247,7 @@ class TestSDKAPISignatures:
         assert "trainer" in params
         assert "options" in params
 
-    def test_builders_wrapped_for_secret_refs(self):
+    def test_builders_wrapped_for_secret_refs(self) -> None:
         """_inject_secret_refs wraps these builders and edits the CRs they return."""
         from kubeflow.trainer.backends.kubernetes import utils as k8s_utils
         from kubeflow_trainer_api import models
