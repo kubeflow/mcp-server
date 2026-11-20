@@ -26,7 +26,6 @@ timeout, so a confirmed delete could hang indefinitely on an unresponsive API
 server.
 """
 
-import logging
 from typing import Any
 
 from kubeflow_mcp.common import utils as mcp_utils
@@ -52,8 +51,6 @@ from kubeflow_mcp.optimizer.constants import (
     OPTIMIZATION_JOB_FAILED,
 )
 from kubeflow_mcp.optimizer.types import ACTIVE_TRIAL_STATES, experiment_phase, trial_status
-
-logger = logging.getLogger(__name__)
 
 # The parameters update_hpo_experiment accepts, the Experiment spec field each one
 # patches, and its bounds. These are exactly the fields Katib's validating
@@ -298,7 +295,6 @@ def delete_hpo_experiment(
         ).model_dump()
 
     except Exception as e:
-        logger.warning("delete_hpo_experiment(%s) failed: %s", name, e, exc_info=True)
         return experiment_error(e, name).model_dump()
 
 
@@ -450,5 +446,4 @@ def update_hpo_experiment(
         return _update_response(name, ns, changes, f"updated ({summary}).{warning}", doomed)
 
     except Exception as e:
-        logger.warning("update_hpo_experiment(%s) failed: %s", name, e, exc_info=True)
         return experiment_error(e, name).model_dump()

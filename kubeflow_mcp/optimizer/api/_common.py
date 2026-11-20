@@ -20,6 +20,7 @@ enforcing MCP ownership before a mutating operation.
 """
 
 import json
+import logging
 
 from kubeflow_mcp.common import utils as mcp_utils
 from kubeflow_mcp.common.constants import ErrorCode
@@ -27,6 +28,8 @@ from kubeflow_mcp.common.types import ToolError, exception_details, is_k8s_not_f
 from kubeflow_mcp.core.policy import get_effective_persona
 from kubeflow_mcp.core.security import check_namespace_allowed
 from kubeflow_mcp.optimizer.constants import KATIB_API_GROUP
+
+logger = logging.getLogger(__name__)
 
 _FIND_HINT = "Use list_hpo_experiments() to find available experiments"
 _WEBHOOK_HINT = (
@@ -191,6 +194,9 @@ def resource_error(exc: Exception, name: str, kind: str = "Experiment") -> ToolE
                 f"with delete_hpo_experiment('{name}', confirmed=True)."
             ),
         )
+    # Everything from here on is an infrastructure failure rather than a
+    # caller mistake, so it is logged once here, for every tool, with the trace.
+    logger.warning("%s '%s': API call failed: %s", kind, name, exc, exc_info=True)
     if is_request_timeout(exc):
         # TIMEOUT still counts as an infrastructure failure for the circuit
         # breaker, but it names what happened instead of surfacing a raw
@@ -229,6 +235,7 @@ def collection_error(exc: Exception) -> ToolError:
             error_code=ErrorCode.PERMISSION_DENIED,
             hint="Check the service account's RBAC for the target namespace.",
         )
+    logger.warning("List call failed: %s", exc, exc_info=True)
     return ToolError(
         error=str(exc),
         error_code=ErrorCode.SDK_ERROR,

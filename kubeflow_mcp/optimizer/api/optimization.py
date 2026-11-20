@@ -27,7 +27,6 @@ avoids all three limits, and additionally reaches Katib algorithms the SDK's
 typed classes cannot express (tpe, cmaes, hyperband, ...).
 """
 
-import logging
 import re
 from typing import Any
 
@@ -47,8 +46,6 @@ from kubeflow_mcp.optimizer.constants import (
     KATIB_API_GROUP,
     KATIB_API_VERSION,
 )
-
-logger = logging.getLogger(__name__)
 
 # Katib suggestion algorithms. Superset of what the SDK's typed algorithm
 # classes expose (RandomSearch/GridSearch), reachable because we build the CR.
@@ -451,7 +448,6 @@ def create_hpo_experiment(
     try:
         return _create(experiment, ns, name)
     except Exception as e:
-        logger.warning("create_hpo_experiment(%s) failed: %s", name, e, exc_info=True)
         return experiment_error(e, name).model_dump()
 
 
@@ -590,5 +586,4 @@ def create_hpo_experiment_from_spec(
     try:
         return _create(body, ns, name)
     except Exception as e:
-        logger.warning("create_hpo_experiment_from_spec(%s) failed: %s", name, e, exc_info=True)
         return experiment_error(e, name).model_dump()
