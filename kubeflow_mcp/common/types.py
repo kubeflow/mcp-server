@@ -74,13 +74,21 @@ class ToolResponse(BaseModel):
 
 
 class ToolError(BaseModel):
-    """Standard error response."""
+    """Standard error response.
+
+    ``error_code`` is the stable, machine-readable signal: clients branch on it
+    instead of matching ``error`` text, which is free-form and may change.
+    ``tool`` is set when the failure is reported by a wrapper (the audit
+    wrapper or ``execute_tool``) rather than by the tool itself, so the agent
+    knows which call failed.
+    """
 
     success: Literal[False] = False
     error: str
     error_code: str | None = None
     details: dict[str, Any] | None = None
     hint: str | None = None  # Suggest relevant MCP prompt for recovery
+    tool: str | None = None
 
 
 class PreviewResponse(BaseModel):
