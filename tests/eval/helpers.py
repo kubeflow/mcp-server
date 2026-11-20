@@ -69,6 +69,49 @@ READ_ARGS: dict[str, dict[str, Any]] = {
     "wait_for_training": {"name": "job-a", "timeout_seconds": 1, "polling_interval": 1},
 }
 
+# Arguments for every tool the readonly persona exposes, with optional flags that
+# reach extra work switched on (include_packages starts a Pod on some paths), so
+# test_readonly_persona_never_writes covers the deepest path of each tool. A new
+# readonly tool fails test_every_readonly_tool_has_arguments until it is added here.
+READONLY_ARGS: dict[str, dict[str, Any]] = {
+    "check_compatibility": {},
+    "estimate_resources": {"model": "hf://google/gemma-2b"},
+    "get_cluster_resources": {},
+    "get_experiment": {"name": EXPERIMENT, "namespace": "default"},
+    "get_pipeline": {"name": "pipe-a", "namespace": "default", "include_versions": True},
+    "get_pipeline_logs": {"run_id": RUNNING_RUN_ID, "namespace": "default"},
+    "get_pipeline_run": {"run_id": RUNNING_RUN_ID, "namespace": "default"},
+    "get_runtime": {"name": "rt-a", "include_packages": True},
+    "get_server_logs": {},
+    "get_spark_session": {"name": "spark-a"},
+    "get_spark_session_logs": {"name": "spark-a"},
+    "get_training_events": {"name": "job-a"},
+    "get_training_job": {"name": "job-a"},
+    "get_training_logs": {"name": "job-a"},
+    "health_check": {},
+    "list_experiments": {"namespace": "default"},
+    "list_pipeline_runs": {"namespace": "default"},
+    "list_pipelines": {"namespace": "default"},
+    "list_runtimes": {},
+    "list_spark_sessions": {},
+    "list_training_jobs": {},
+    "pre_flight": {},
+}
+
+# Readonly tools the fakes cannot serve yet: the call fails before the tool's main
+# work, so the judge cannot see a write that comes after that point. Every other
+# readonly tool must succeed. Drop an entry once the fakes can serve the tool.
+SHALLOW_TOOLS: dict[str, str] = {
+    "get_spark_session": "the SDK cannot parse a mock SparkConnect",
+    "get_spark_session_logs": "the SDK cannot parse a mock SparkConnect",
+    "get_training_events": "the SDK cannot parse a mock TrainJob",
+    "get_training_job": "the SDK cannot parse a mock TrainJob",
+    "get_training_logs": "the SDK cannot parse a mock TrainJob",
+    "list_runtimes": "the SDK cannot parse a mock runtime list",
+    "list_spark_sessions": "the SDK cannot parse a mock SparkConnect list",
+    "list_training_jobs": "the SDK cannot parse a mock TrainJob list",
+}
+
 
 def payload(result: Any) -> dict[str, Any]:
     """Return the tool's response dict from an MCP CallToolResult."""
