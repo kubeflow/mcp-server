@@ -210,6 +210,8 @@ class TestRedactText:
             ("client apiKey=sk-abc123", "sk-abc123"),
             ("loaded privateKey=pk-live-123", "pk-live-123"),
             ("rotated my-secret-key=abc999", "abc999"),
+            ("sent header APIKey: sk-abc123", "sk-abc123"),
+            ("loaded clientTLSKey=tls-abc999", "tls-abc999"),
         ],
     )
     def test_credential_is_removed(self, text, leaked):

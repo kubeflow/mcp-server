@@ -521,7 +521,9 @@ _SENSITIVE_SUBSTRINGS = {
 _SAFE_KEYS = {"public_key", "keyword", "key_format", "key_name"}
 
 
-_CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+# Split before a capital that follows a lowercase letter or digit (apiKey), and before the
+# last capital of an acronym that is followed by a word (APIKey, clientTLSKey).
+_CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
 
 
 def _to_snake_case(key: str) -> str:

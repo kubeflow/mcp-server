@@ -484,23 +484,26 @@ def test_mask_sensitive_data(test_case):
         "tlsKey",
         "accessKey",
         "S3SecretAccessKey",
+        "APIKey",
+        "clientTLSKey",
+        "OAuthToken",
         "hf-token",
         # Spellings that matched before the snake_case fold must still match.
         "toKen",
         "HF_TOKEN",
     ],
 )
-def test_mask_sensitive_data_masks_every_spelling_of_a_credential_key(key):
+def test_mask_sensitive_data_masks_every_spelling_of_a_credential_key(key: str) -> None:
     assert mask_sensitive_data({key: "x"})[key] == "***"
 
 
 @pytest.mark.parametrize("key", ["publicKey", "public-key", "keyName", "key-name", "KeyFormat"])
-def test_mask_sensitive_data_keeps_safe_keys_in_any_spelling(key):
+def test_mask_sensitive_data_keeps_safe_keys_in_any_spelling(key: str) -> None:
     assert mask_sensitive_data({key: "x"})[key] == "x"
 
 
 @pytest.mark.parametrize("key", ["key", "operator", "monkey", "keyword"])
-def test_mask_sensitive_data_keeps_plain_keys(key):
+def test_mask_sensitive_data_keeps_plain_keys(key: str) -> None:
     # A toleration's bare ``key`` must not be mistaken for a credential.
     assert mask_sensitive_data({key: "x"})[key] == "x"
 
