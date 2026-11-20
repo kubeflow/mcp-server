@@ -423,6 +423,7 @@ def create_server(  # noqa: C901
     mode: str = "full",
     instruction_tier: str = "full",
     auth_provider: Any = None,
+    transport: str = "http",
 ) -> FastMCP:
     """Create MCP server with dynamic client loading.
 
@@ -436,6 +437,7 @@ def create_server(  # noqa: C901
               - "semantic": 2 meta-tools (find_tools, execute_tool)
         instruction_tier: Instruction verbosity — "full", "compact", or "minimal"
         auth_provider: Optional FastMCP auth provider for HTTP transport.
+        transport: MCP transport protocol ("http", "streamable-http", "sse", "stdio")
 
     Returns:
         Configured FastMCP server instance
@@ -578,8 +580,9 @@ def create_server(  # noqa: C901
     register_server_card_route(
         mcp,
         persona=persona,
-        clients=list(loaded_modules.keys()) if loaded_modules else list(clients),
+        clients=list(loaded_modules.keys()),
         mode=mode,
+        transport=transport,
     )
 
     return mcp

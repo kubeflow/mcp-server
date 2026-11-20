@@ -43,8 +43,18 @@ def register_server_card_route(
     persona: str = "readonly",
     clients: list[str] | None = None,
     mode: str = "full",
+    transport: str = "http",
 ) -> None:
     """Register the RFC 8615 well-known MCP Server Card auto-discovery endpoint (ROADMAP Phase 4)."""
+    if transport == "sse":
+        transport_type = "sse"
+        endpoint = "/sse"
+    else:
+        transport_type = "streamable-http"
+        endpoint = "/mcp"
+
+    effective_clients = ["trainer"] if clients is None else list(clients)
+
     server_card: dict[str, Any] = {
         "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
         "name": "io.github.kubeflow/mcp-server",
@@ -52,8 +62,8 @@ def register_server_card_route(
         "version": __version__,
         "description": "AI-assisted Kubeflow Training and ML workflows via Model Context Protocol.",
         "transport": {
-            "type": "streamable-http",
-            "endpoint": "/mcp",
+            "type": transport_type,
+            "endpoint": endpoint,
         },
         "capabilities": {
             "tools": True,
@@ -64,7 +74,7 @@ def register_server_card_route(
         "metadata": {
             "persona": persona,
             "mode": mode,
-            "clients": list(clients or ["trainer"]),
+            "clients": effective_clients,
             "personas_supported": [
                 "readonly",
                 "data-scientist",
@@ -76,5 +86,13 @@ def register_server_card_route(
     }
 
     @mcp.custom_route("/.well-known/mcp.json", methods=["GET"], include_in_schema=False)
-    async def server_card_route(_request: Request) -> Response:
-        return JSONResponse(server_card)
+    async def server_card_route(request: Request) -> Response:
+        base_url = str(request.base_url).rstrip("/")
+        card = dict(server_card)
+        card["remotes"] = [
+            {
+                "type": transport_type,
+                "url": f"{base_url}{endpoint}",
+            }
+        ]
+        return JSONResponse(card)

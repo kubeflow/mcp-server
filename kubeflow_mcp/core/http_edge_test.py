@@ -97,16 +97,47 @@ def test_server_card_reports_metadata() -> None:
 
     assert response.status_code == 200
     card = response.json()
+    assert (
+        card["$schema"]
+        == "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json"
+    )
     assert card["name"] == "io.github.kubeflow/mcp-server"
     assert card["title"] == "Kubeflow MCP Server"
     assert card["version"] == __version__
     assert card["transport"]["type"] == "streamable-http"
     assert card["transport"]["endpoint"] == "/mcp"
+    assert len(card["remotes"]) == 1
+    assert card["remotes"][0]["type"] == "streamable-http"
+    assert card["remotes"][0]["url"].startswith("http://")
+    assert card["remotes"][0]["url"].endswith("/mcp")
     assert card["metadata"]["persona"] == "platform-admin"
     assert card["metadata"]["mode"] == "progressive"
     assert "trainer" in card["metadata"]["clients"]
     assert card["capabilities"]["tools"] is True
     assert card["capabilities"]["resources"] is True
+
+
+def test_server_card_supports_sse_transport() -> None:
+    mcp = create_server(transport="sse")
+    with TestClient(mcp.http_app(transport="sse")) as client:
+        response = client.get("/.well-known/mcp.json")
+
+    assert response.status_code == 200
+    card = response.json()
+    assert card["transport"]["type"] == "sse"
+    assert card["transport"]["endpoint"] == "/sse"
+    assert card["remotes"][0]["type"] == "sse"
+    assert card["remotes"][0]["url"].endswith("/sse")
+
+
+def test_server_card_handles_empty_or_failed_clients() -> None:
+    mcp = create_server(clients=["nonexistent_client"])
+    with TestClient(mcp.http_app(transport="streamable-http")) as client:
+        response = client.get("/.well-known/mcp.json")
+
+    assert response.status_code == 200
+    card = response.json()
+    assert card["metadata"]["clients"] == []
 
 
 def test_server_card_remains_available_when_auth_is_enabled() -> None:
