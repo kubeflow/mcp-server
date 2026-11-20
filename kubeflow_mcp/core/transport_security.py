@@ -92,7 +92,9 @@ def build_transport_security_settings(
 # kubelet, which sends liveness/readiness probes with `Host: <pod-ip>:<port>`
 # rather than a loopback name. Rejecting those probes causes CrashLoopBackOff
 # in any Kubernetes/OpenShift deployment (see issue #91).
-_EXEMPT_PATHS = frozenset({"/health", "/ready"})
+# Also includes the well-known MCP Server Card (/.well-known/mcp.json)
+# for cross-origin agent and client auto-discovery (ROADMAP Phase 4).
+_EXEMPT_PATHS = frozenset({"/health", "/ready", "/.well-known/mcp.json"})
 
 
 class DNSRebindingProtectionMiddleware:

@@ -45,7 +45,7 @@ from kubeflow_mcp.core.health import (
     HEALTH_TOOL_DESCRIPTIONS,
     HEALTH_TOOLS,
 )
-from kubeflow_mcp.core.http_edge import register_probe_routes
+from kubeflow_mcp.core.http_edge import register_probe_routes, register_server_card_route
 from kubeflow_mcp.core.logging import with_correlation_id
 from kubeflow_mcp.core.middleware import get_mcp_request_id, get_user_id
 from kubeflow_mcp.core.policy import (
@@ -423,6 +423,7 @@ def create_server(  # noqa: C901
     mode: str = "full",
     instruction_tier: str = "full",
     auth_provider: Any = None,
+    transport: str = "http",
 ) -> FastMCP:
     """Create MCP server with dynamic client loading.
 
@@ -436,6 +437,7 @@ def create_server(  # noqa: C901
               - "semantic": 2 meta-tools (find_tools, execute_tool)
         instruction_tier: Instruction verbosity — "full", "compact", or "minimal"
         auth_provider: Optional FastMCP auth provider for HTTP transport.
+        transport: MCP transport protocol ("http", "streamable-http", "sse", "stdio")
 
     Returns:
         Configured FastMCP server instance
@@ -575,5 +577,12 @@ def create_server(  # noqa: C901
     # Register MCP resources from client modules (all resources, always)
     resources_ready = register_resources(mcp, loaded_modules)
     register_probe_routes(mcp, is_ready=clients_ready and resources_ready)
+    register_server_card_route(
+        mcp,
+        persona=persona,
+        clients=list(loaded_modules.keys()),
+        mode=mode,
+        transport=transport,
+    )
 
     return mcp
