@@ -292,6 +292,11 @@ rules:
   - apiGroups: ["trainer.kubeflow.org"]
     resources: ["clustertrainingruntimes"]
     verbs: ["list", "get", "create", "delete", "patch"]
+
+  # Spark: list_spark_jobs, get_spark_job, get_spark_job_logs (batch jobs)
+  - apiGroups: ["sparkoperator.k8s.io"]
+    resources: ["sparkapplications"]
+    verbs: ["list", "get"]
 ```
 
 #### Read-Only ClusterRole
@@ -324,6 +329,11 @@ rules:
     verbs: ["list", "get"]
   - apiGroups: [""]
     resources: ["pods", "pods/log", "events"]
+    verbs: ["list", "get"]
+
+  # Spark: list_spark_jobs, get_spark_job, get_spark_job_logs (batch jobs)
+  - apiGroups: ["sparkoperator.k8s.io"]
+    resources: ["sparkapplications"]
     verbs: ["list", "get"]
 ```
 

@@ -40,7 +40,14 @@ from kubeflow_mcp.spark import (
 )
 
 SPARK_TOOL_NAMES = {t.__name__ for t in TOOLS}
-READ_TOOLS = {"list_spark_sessions", "get_spark_session", "get_spark_session_logs"}
+READ_TOOLS = {
+    "list_spark_sessions",
+    "get_spark_session",
+    "get_spark_session_logs",
+    "list_spark_jobs",
+    "get_spark_job",
+    "get_spark_job_logs",
+}
 WRITE_TOOLS = {"create_spark_session", "delete_spark_session"}
 
 

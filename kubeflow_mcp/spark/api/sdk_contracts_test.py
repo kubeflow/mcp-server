@@ -29,8 +29,9 @@ import pytest
 from kubeflow_mcp.common.constants import SDK_COMPATIBILITY
 from kubeflow_mcp.conftest import make_spark_session_info
 from kubeflow_mcp.spark import TOOLS
+from kubeflow_mcp.spark.api.discovery import JOB_STATUSES
 from kubeflow_mcp.spark.api.monitoring import _MISSING_POD_RE
-from kubeflow_mcp.spark.types import session_info_to_dict
+from kubeflow_mcp.spark.types import job_to_dict, session_info_to_dict
 
 sdk_spark = pytest.importorskip("kubeflow.spark", reason="requires the kubeflow[spark] extra")
 
@@ -178,6 +179,35 @@ class TestSDKSurface:
             "SDK no longer raises a 'no server pod' message that "
             f"get_spark_session_logs recognizes:\n{source}"
         )
+
+    def test_job_without_driver_pod_wording_is_recognized(self):
+        # get_spark_job_logs reuses the same message match for batch jobs.
+        from kubeflow.spark.backends.kubernetes.backend import KubernetesBackend
+
+        source = inspect.getsource(KubernetesBackend.get_job_logs)
+        assert _MISSING_POD_RE.search(source), (
+            f"SDK no longer raises a 'no driver pod' message for jobs:\n{source}"
+        )
+
+    def test_job_statuses_match_the_sdk(self):
+        # list_spark_jobs refuses any status filter outside JOB_STATUSES.
+        from kubeflow.spark.types.types import SparkJobStatus
+
+        assert set(JOB_STATUSES) == {s.value for s in SparkJobStatus}
+
+    def test_job_fields_read_by_the_serializer_exist(self):
+        from kubeflow.spark.types.types import SparkJob
+
+        fields = set(inspect.signature(SparkJob).parameters)
+        assert set(job_to_dict(SimpleNamespace())) <= fields
+
+    def test_job_lookups_keep_the_404_as_cause(self):
+        # get_spark_job and get_spark_job_logs report RESOURCE_NOT_FOUND by finding
+        # the ApiException 404 as the cause of the SDK's RuntimeError.
+        from kubeflow.spark.backends.kubernetes.backend import KubernetesBackend
+
+        source = inspect.getsource(KubernetesBackend.get_job)
+        assert "e.status == 404" in source and ") from e" in source
 
 
 # ─── Compatibility bookkeeping ──────────────────────────────────────────────
