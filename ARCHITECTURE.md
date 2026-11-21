@@ -108,7 +108,8 @@ kubeflow-mcp serve
   ├─ OIDC / OAuth 2.1 native auth
   ├─ K8s RBAC per caller (SubjectAccessReview)
   ├─ Per-user rate limiting
-  ├─ MCP Server Card (/.well-known/mcp.json)
+  ├─ MCP Server Card (/mcp/server-card, /.well-known/mcp-server-card)
+  ├─ A2A Agent Card (/.well-known/agent-card.json)
   └─ A2A endpoint (/a2a)
 ```
 

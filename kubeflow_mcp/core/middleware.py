@@ -23,8 +23,10 @@ without depending on DI.
 
 from __future__ import annotations
 
+import contextlib
 import contextvars
 import logging
+from collections.abc import Iterator
 from typing import Any
 
 from fastmcp.server.middleware import Middleware
@@ -49,6 +51,25 @@ def get_mcp_request_id() -> str | None:
 def get_user_id() -> str | None:
     """Return the user identity for the current request, or None."""
     return _user_id_var.get()
+
+
+@contextlib.contextmanager
+def audit_identity(user_id: str | None) -> Iterator[None]:
+    """Bind the caller identity for the duration of a block.
+
+    ``AuditIdentityMiddleware`` only runs for MCP requests. HTTP endpoints
+    mounted beside the MCP app — notably A2A delegation — authenticate their
+    own callers, so they bind the verified identity here rather than leaving
+    the audit log to record the call with no subject attached.
+
+    Reuses the same ContextVar ``_audit_wrap`` already reads, so there is one
+    identity path rather than two that can disagree.
+    """
+    token = _user_id_var.set(str(user_id) if user_id is not None else None)
+    try:
+        yield
+    finally:
+        _user_id_var.reset(token)
 
 
 class AuditIdentityMiddleware:

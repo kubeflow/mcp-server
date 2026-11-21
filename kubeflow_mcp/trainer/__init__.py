@@ -20,6 +20,8 @@ Structure mirrors kubeflow/trainer/:
 └── constants/     # Constants
 """
 
+from typing import Any
+
 from kubeflow_mcp.common.constants import KUBEFLOW_SDK_VERSION_SPEC
 from kubeflow_mcp.trainer.api.discovery import (
     get_runtime,
@@ -324,6 +326,51 @@ CLIENT_RESOURCES: dict[str, tuple[str, str]] = {
     ),
 }
 
+# ─── A2A skills (owned by this client module) ──────────────────────────────
+# Advertised on the unauthenticated A2A Agent Card, so these name what this
+# client lets the server do, never which tools implement it or what arguments
+# they take. A client module that serves no tools exports nothing here, so the
+# card cannot advertise a capability the delegation endpoint will not serve.
+
+# ``_tools`` names the tools behind each skill so the card can drop a skill
+# this server will not serve. It is private metadata: core strips every
+# underscore-prefixed key before serving, so tool names stay off the public
+# card.
+
+A2A_SKILLS: list[dict[str, Any]] = [
+    {
+        "id": "fine-tuning",
+        "name": "Model fine-tuning",
+        "description": (
+            "Fine-tune a foundation model on a dataset using Kubeflow Trainer, "
+            "including LoRA configuration and resource planning."
+        ),
+        "tags": ["training", "fine-tuning", "llm"],
+        "_tools": ["fine_tune"],
+    },
+    {
+        "id": "distributed-training",
+        "name": "Distributed training",
+        "description": "Submit and manage multi-node distributed training jobs on Kubernetes.",
+        "tags": ["training", "distributed", "kubernetes"],
+        "_tools": ["run_custom_training", "run_container_training"],
+    },
+    {
+        "id": "job-monitoring",
+        "name": "Training job monitoring",
+        "description": (
+            "Inspect status, logs, and events for training jobs, and diagnose failures."
+        ),
+        "tags": ["monitoring", "observability", "logs"],
+        "_tools": [
+            "list_training_jobs",
+            "get_training_job",
+            "get_training_logs",
+            "get_training_events",
+        ],
+    },
+]
+
 # ─── Instruction sections (full tier; compact/minimal auto-derived) ────────
 # Phase-to-section mapping for auto-deriving which sections a persona needs.
 # TOOL_PHASES keys -> instruction section names.
@@ -415,6 +462,7 @@ __all__ = [
     "CLIENT_TOOL_DESCRIPTIONS",
     "CLIENT_TOOL_ANNOTATIONS",
     "CLIENT_RESOURCES",
+    "A2A_SKILLS",
     "INSTRUCTION_SECTIONS",
     "SECTION_ORDER",
     "PHASE_TO_SECTION",
