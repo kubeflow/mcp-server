@@ -15,6 +15,7 @@
 """Training submission tools: fine_tune, run_custom_training, run_container_training."""
 
 import ast
+import functools
 import json
 import logging
 import os
@@ -241,6 +242,7 @@ def _upsert_env(cr: Any, envs: list[Any]) -> None:
 
 
 def _wrap_initializer_builder(original: Callable) -> Callable:
+    @functools.wraps(original)
     def _patched(source: Any) -> Any:
         cr = original(source)
         refs = _secret_refs_ctx.get()
@@ -262,6 +264,7 @@ def _wrap_initializer_builder(original: Callable) -> Callable:
 
 
 def _wrap_custom_trainer_builder(original: Callable) -> Callable:
+    @functools.wraps(original)
     def _patched(runtime: Any, trainer: Any) -> Any:
         cr = original(runtime, trainer)
         refs = _secret_refs_ctx.get()

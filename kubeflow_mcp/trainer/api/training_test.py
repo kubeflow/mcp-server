@@ -2107,6 +2107,17 @@ def test_fine_tune_treats_empty_inline_credentials_as_unset(_ns, _gpu) -> None:
     assert "credential_warning" not in result["config"]
 
 
+def test_inject_secret_refs_wrappers_keep_builder_signature() -> None:
+    import kubeflow.trainer.backends.kubernetes.utils as k8s_utils
+
+    expected = {f.__name__: list(inspect.signature(f).parameters) for f in _sdk_builders()}
+    with _inject_secret_refs(_SecretRefs(hf_token=_HF_REF)):
+        for name, params in expected.items():
+            wrapped = getattr(k8s_utils, name)
+            assert wrapped.__name__ == name
+            assert list(inspect.signature(wrapped).parameters) == params
+
+
 def test_inject_secret_refs_none_leaves_sdk_untouched() -> None:
     builders = _sdk_builders()
     with _inject_secret_refs(None):
