@@ -27,7 +27,7 @@ read fails, the SDK status is preserved. A wait response with `reached=false` is
 | FailedScheduling | No node matches resource request | Check `get_cluster_resources()`, reduce `gpu_per_node`, add `tolerations` parameter |
 | ErrImagePull / ImagePullBackOff | Image not found or auth failed | Verify image name, check `image_pull_secrets` parameter |
 | NCCL timeout | Multi-node communication failure | Pass `env={"NCCL_TIMEOUT": "1800"}`, try gloo backend, check network |
-| 403 Forbidden (HuggingFace) | Gated model, no token | Accept model license, pass `hf_token` |
+| 403 Forbidden (HuggingFace) | Gated model, no token | Accept model license, pass `hf_token_secret` (see Credentials from Secrets) |
 | Read-only file system | Platform with read-only root FS | Add emptyDir volumes (see trainer://guides/platform-fixes) |
 | Permission denied /.local (at runtime) | Read-only root filesystem | Add dot-local emptyDir volume |
 | Permission denied /.local (during packages install) | run_custom_training pre-script restriction | Do NOT use `packages` parameter. See Workaround #4 in trainer://guides/platform-fixes |
@@ -178,6 +178,21 @@ The `env` parameter is not available on `fine_tune()`. If you need custom enviro
 ### fine_tune() Repo Existence Check Needs HF_TOKEN
 
 On submission, `fine_tune()` rejects an `hf://` model or dataset only when the Hugging Face Hub confirms it missing (404). Without `HF_TOKEN` on the MCP host, the Hub answers 401 for a missing repo, so the check cannot tell a typo from a private repo and the job is submitted anyway. A typo then fails later in the initializer; check `get_training_logs()`.
+
+### Credentials from Secrets
+
+`hf_token`, `s3_access_key_id`, `s3_secret_access_key` and `env` values are stored as plain text on the TrainJob. Read them from a Secret in the job namespace instead:
+
+```bash
+kubectl create secret generic hf-creds --from-literal=token=<hf token> -n <namespace>
+kubectl create secret generic s3-creds --from-literal=ACCESS_KEY_ID=<id> --from-literal=SECRET_ACCESS_KEY=<key> -n <namespace>
+```
+
+- `fine_tune(hf_token_secret={"name": "hf-creds", "key": "token"})` — token for `hf://` sources
+- `fine_tune(s3_credentials_secret="s3-creds")` — the S3 initializer reads the whole Secret as env, so keys must be `ACCESS_KEY_ID` and `SECRET_ACCESS_KEY` (optionally `ENDPOINT`, `REGION`, `ROLE_ARN`; `s3_endpoint`, `s3_region` and `s3_role_arn` take precedence over those)
+- `run_custom_training` / `run_container_training(secret_env={"HF_TOKEN": {"name": "hf-creds", "key": "token"}})`
+
+The server does not read the Secret. A missing Secret, or a missing key for `hf_token_secret` / `secret_env`, shows up as `CreateContainerConfigError` in `get_training_job()` `blocking_reasons`. `s3_credentials_secret` loads whatever keys the Secret has, so a misnamed S3 key raises no error there: check the Secret's key names and the dataset/model initializer logs.
 
 ### MCP Ownership Label
 

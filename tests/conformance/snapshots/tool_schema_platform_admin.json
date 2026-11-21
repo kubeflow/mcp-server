@@ -350,6 +350,29 @@
           ],
           "default": null
         },
+        "hf_token_secret": {
+          "anyOf": [
+            {
+              "properties": {
+                "key": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "name",
+                "key"
+              ],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "image_pull_secrets": {
           "anyOf": [
             {
@@ -508,6 +531,17 @@
           "type": "string"
         },
         "s3_access_key_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "s3_credentials_secret": {
           "anyOf": [
             {
               "type": "string"
@@ -1327,6 +1361,32 @@
           ],
           "default": null
         },
+        "secret_env": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "properties": {
+                  "key": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name",
+                  "key"
+                ],
+                "type": "object"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "service_account_name": {
           "anyOf": [
             {
@@ -1601,6 +1661,32 @@
         },
         "script": {
           "type": "string"
+        },
+        "secret_env": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "properties": {
+                  "key": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name",
+                  "key"
+                ],
+                "type": "object"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "service_account_name": {
           "anyOf": [
