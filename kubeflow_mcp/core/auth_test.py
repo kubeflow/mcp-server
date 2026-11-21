@@ -18,9 +18,16 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+import httpx
+import pytest
 from fastmcp.server.auth.providers.jwt import JWTVerifier
 
-from kubeflow_mcp.core.auth import APIKeyVerifier, AuthContext, build_auth_provider
+from kubeflow_mcp.core.auth import (
+    APIKeyVerifier,
+    AuthContext,
+    build_auth_provider,
+    discover_oidc_configuration,
+)
 from kubeflow_mcp.core.config import AuthConfig
 
 
@@ -91,6 +98,128 @@ class TestBuildAuthProvider:
         provider = build_auth_provider(config)
 
         assert isinstance(provider, JWTVerifier)
+
+    def test_oidc_issuer_auto_discovery(self):
+        metadata = {
+            "issuer": "https://accounts.google.com",
+            "jwks_uri": "https://www.googleapis.com/oauth2/v3/certs",
+        }
+        with patch(
+            "kubeflow_mcp.core.auth.discover_oidc_configuration", return_value=metadata
+        ) as mock_disc:
+            config = AuthConfig(oidc_issuer="https://accounts.google.com", audience="my-app")
+            provider = build_auth_provider(config)
+
+        mock_disc.assert_called_once_with("https://accounts.google.com", client=None)
+        assert isinstance(provider, JWTVerifier)
+        assert provider.jwks_uri == "https://www.googleapis.com/oauth2/v3/certs"
+        assert provider.issuer == "https://accounts.google.com"
+        assert provider.audience == "my-app"
+
+    def test_issuer_fallback_auto_discovery(self):
+        metadata = {
+            "issuer": "https://keycloak.example.com/realms/kf",
+            "jwks_uri": "https://keycloak.example.com/realms/kf/protocol/openid-connect/certs",
+        }
+        with patch(
+            "kubeflow_mcp.core.auth.discover_oidc_configuration", return_value=metadata
+        ) as mock_disc:
+            config = AuthConfig(issuer="https://keycloak.example.com/realms/kf")
+            provider = build_auth_provider(config)
+
+        mock_disc.assert_called_once_with("https://keycloak.example.com/realms/kf", client=None)
+        assert isinstance(provider, JWTVerifier)
+        assert (
+            provider.jwks_uri
+            == "https://keycloak.example.com/realms/kf/protocol/openid-connect/certs"
+        )
+
+    def test_jwks_uri_skips_oidc_discovery(self):
+        with patch("kubeflow_mcp.core.auth.discover_oidc_configuration") as mock_disc:
+            config = AuthConfig(
+                jwks_uri="https://static.example.com/jwks.json",
+                oidc_issuer="https://accounts.google.com",
+            )
+            provider = build_auth_provider(config)
+
+        mock_disc.assert_not_called()
+        assert isinstance(provider, JWTVerifier)
+        assert provider.jwks_uri == "https://static.example.com/jwks.json"
+
+
+class TestDiscoverOIDCConfiguration:
+    def test_successful_openid_configuration_discovery(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/.well-known/openid-configuration":
+                return httpx.Response(
+                    200,
+                    json={
+                        "issuer": "https://idp.example.com",
+                        "jwks_uri": "https://idp.example.com/keys",
+                    },
+                )
+            return httpx.Response(404)
+
+        transport = httpx.MockTransport(handler)
+        client = httpx.Client(transport=transport)
+        metadata = discover_oidc_configuration("https://idp.example.com", client=client)
+        assert metadata["jwks_uri"] == "https://idp.example.com/keys"
+
+    def test_fallback_to_oauth_authorization_server(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/.well-known/openid-configuration":
+                return httpx.Response(404)
+            if request.url.path == "/.well-known/oauth-authorization-server":
+                return httpx.Response(
+                    200,
+                    json={
+                        "issuer": "https://oauth.example.com",
+                        "jwks_uri": "https://oauth.example.com/jwks",
+                    },
+                )
+            return httpx.Response(404)
+
+        transport = httpx.MockTransport(handler)
+        client = httpx.Client(transport=transport)
+        metadata = discover_oidc_configuration("https://oauth.example.com", client=client)
+        assert metadata["jwks_uri"] == "https://oauth.example.com/jwks"
+
+    def test_rejects_invalid_issuer_urls(self):
+        with pytest.raises(ValueError, match="OIDC issuer must be a non-empty URL string"):
+            discover_oidc_configuration("")
+
+        with pytest.raises(ValueError, match="must start with http:// or https://"):
+            discover_oidc_configuration("ftp://idp.example.com")
+
+        with pytest.raises(ValueError, match="must start with http:// or https://"):
+            discover_oidc_configuration("invalid-domain-without-scheme")
+
+    def test_rejects_missing_jwks_uri_in_metadata(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"issuer": "https://idp.example.com"})
+
+        transport = httpx.MockTransport(handler)
+        client = httpx.Client(transport=transport)
+        with pytest.raises(ValueError, match="returned metadata without a valid 'jwks_uri'"):
+            discover_oidc_configuration("https://idp.example.com", client=client)
+
+    def test_rejects_non_json_response(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, text="not-json")
+
+        transport = httpx.MockTransport(handler)
+        client = httpx.Client(transport=transport)
+        with pytest.raises(ValueError, match="not valid JSON"):
+            discover_oidc_configuration("https://idp.example.com", client=client)
+
+    def test_rejects_unreachable_issuer(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(500, text="Internal Server Error")
+
+        transport = httpx.MockTransport(handler)
+        client = httpx.Client(transport=transport)
+        with pytest.raises(ValueError, match="Failed to discover OIDC configuration"):
+            discover_oidc_configuration("https://idp.example.com", client=client)
 
 
 class TestAuthContext:

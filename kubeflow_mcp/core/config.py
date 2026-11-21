@@ -101,10 +101,12 @@ class TrainerConfig(BaseModel):
 class AuthConfig(BaseModel):
     """HTTP transport authentication configuration.
 
-    Supports two modes:
+    Supports three modes:
     - **API key**: set ``auth_token`` for simple bearer token auth (dev/staging).
-    - **JWT**: set ``jwks_uri`` (+ optional ``issuer``, ``audience``) for
-      production JWT verification via FastMCP's ``JWTVerifier``.
+    - **JWT / JWKS**: set ``jwks_uri`` (+ optional ``issuer``, ``audience``) for
+      static JWT verification via FastMCP's ``JWTVerifier``.
+    - **Native OIDC / OAuth 2.1 Discovery**: set ``oidc_issuer`` (or ``issuer``) to
+      automatically discover ``jwks_uri`` from OpenID Connect / RFC 8414 metadata.
 
     Ignored when ``transport=stdio`` (stdio inherits OS-level security).
     """
@@ -113,6 +115,7 @@ class AuthConfig(BaseModel):
     jwks_uri: str | None = Field(default=None)
     issuer: str | None = Field(default=None)
     audience: str | None = Field(default=None)
+    oidc_issuer: str | None = Field(default=None)
 
 
 class SecurityConfig(BaseModel):
@@ -312,6 +315,7 @@ def load_config(config_path: Path | None = None) -> Config:
         jwks_uri=os.getenv("KUBEFLOW_MCP_JWKS_URI", auth_file.get("jwks_uri")),
         issuer=os.getenv("KUBEFLOW_MCP_JWT_ISSUER", auth_file.get("issuer")),
         audience=os.getenv("KUBEFLOW_MCP_JWT_AUDIENCE", auth_file.get("audience")),
+        oidc_issuer=os.getenv("KUBEFLOW_MCP_OIDC_ISSUER", auth_file.get("oidc_issuer")),
     )
 
     security_file = file_config.get("security", {})
