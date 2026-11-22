@@ -65,9 +65,10 @@ def cli() -> None:
 @click.option(
     "--mode",
     "-m",
-    default="full",
+    default=None,
     type=click.Choice(["full", "progressive", "semantic"]),
-    help="Tool loading mode: full (all tools), progressive (hierarchical discovery), semantic (embedding search)",
+    help="Tool loading mode: full (all tools), progressive (hierarchical discovery), semantic (embedding search). "
+    "Falls back to KUBEFLOW_MCP_MODE env var, config file, then 'full'.",
 )
 @click.option(
     "--log-format",
@@ -105,7 +106,7 @@ def serve(
     clients: str | None,
     persona: str | None,
     transport: str | None,
-    mode: str,
+    mode: str | None,
     log_level: str | None,
     log_format: str | None,
     instruction_tier: str | None,
@@ -145,6 +146,7 @@ def serve(
     except ValueError as e:
         raise click.BadParameter(str(e), param_hint="persona") from e
     transport = transport or cfg.server.transport
+    mode = mode or cfg.server.mode
     instruction_tier = instruction_tier or cfg.server.instruction_tier
     log_level = log_level or cfg.logging.level
     log_format = log_format or cfg.logging.format

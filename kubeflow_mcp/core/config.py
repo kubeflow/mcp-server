@@ -88,6 +88,7 @@ class ServerConfig(BaseModel):
     persona: str = Field(default="readonly")
     transport: Literal["stdio", "http", "sse"] = Field(default="stdio")
     instruction_tier: Literal["full", "compact", "minimal"] = Field(default="full")
+    mode: Literal["full", "progressive", "semantic"] = Field(default="full")
 
 
 class TrainerConfig(BaseModel):
@@ -273,6 +274,10 @@ def load_config(config_path: Path | None = None) -> Config:
         instruction_tier=os.getenv(
             "KUBEFLOW_MCP_INSTRUCTION_TIER",
             server_file.get("instruction_tier", "full"),
+        ),
+        mode=os.getenv(
+            "KUBEFLOW_MCP_MODE",
+            server_file.get("mode", "full"),
         ),
     )
 

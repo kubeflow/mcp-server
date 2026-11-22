@@ -36,14 +36,21 @@ def test_server_config_defaults():
     assert cfg.persona == "readonly"
     assert cfg.transport == "stdio"
     assert cfg.instruction_tier == "full"
+    assert cfg.mode == "full"
     assert cfg.clients == ["trainer"]
 
 
 def test_server_config_custom_values():
-    cfg = ServerConfig(persona="ml-engineer", transport="http", instruction_tier="compact")
+    cfg = ServerConfig(
+        persona="ml-engineer",
+        transport="http",
+        instruction_tier="compact",
+        mode="progressive",
+    )
     assert cfg.persona == "ml-engineer"
     assert cfg.transport == "http"
     assert cfg.instruction_tier == "compact"
+    assert cfg.mode == "progressive"
 
 
 def test_load_config_defaults_when_no_file():
@@ -94,6 +101,11 @@ def test_resilience_config_allows_zero_recovery_timeout():
             expected_output={"field": "server.instruction_tier", "value": "minimal"},
         ),
         TestCase(
+            name="KUBEFLOW_MCP_MODE overrides mode",
+            config={"env": {"KUBEFLOW_MCP_MODE": "progressive"}},
+            expected_output={"field": "server.mode", "value": "progressive"},
+        ),
+        TestCase(
             name="KUBEFLOW_MCP_RATE_LIMIT overrides rate limit",
             config={"env": {"KUBEFLOW_MCP_RATE_LIMIT": "5.0"}},
             expected_output={"field": "resilience.rate_limit", "value": 5.0},
@@ -137,13 +149,18 @@ def test_load_config_from_file(tmp_path):
     config_file.write_text(
         yaml.dump(
             {
-                "server": {"persona": "data-scientist", "transport": "http"},
+                "server": {
+                    "persona": "data-scientist",
+                    "transport": "http",
+                    "mode": "progressive",
+                },
                 "trainer": {"default_runtime": "torchtune-llama"},
             }
         )
     )
     cfg = load_config(config_path=config_file)
     assert cfg.server.persona == "data-scientist"
+    assert cfg.server.mode == "progressive"
     assert cfg.trainer.default_runtime == "torchtune-llama"
 
 

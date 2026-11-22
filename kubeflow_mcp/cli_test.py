@@ -436,6 +436,32 @@ def test_serve_transport_config_fallback():
     assert kwargs.get("transport") == "streamable-http"
 
 
+def test_serve_mode_config_fallback():
+    config = _make_default_config(mode="progressive")
+    mock_server, mock_create_server, modules_patch = _make_serve_mocks(config=config)
+
+    with patch.dict(sys.modules, modules_patch):
+        runner = CliRunner()
+        runner.invoke(cli, ["serve"])
+
+    mock_create_server.assert_called_once()
+    _, kwargs = mock_create_server.call_args
+    assert kwargs["mode"] == "progressive"
+
+
+def test_serve_mode_cli_overrides_config():
+    config = _make_default_config(mode="progressive")
+    mock_server, mock_create_server, modules_patch = _make_serve_mocks(config=config)
+
+    with patch.dict(sys.modules, modules_patch):
+        runner = CliRunner()
+        runner.invoke(cli, ["serve", "--mode", "semantic"])
+
+    mock_create_server.assert_called_once()
+    _, kwargs = mock_create_server.call_args
+    assert kwargs["mode"] == "semantic"
+
+
 # --- serve: auth token wiring ---
 
 
