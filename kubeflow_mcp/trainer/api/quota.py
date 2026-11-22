@@ -34,8 +34,8 @@ from kubeflow_mcp.common.utils import K8S_TIMEOUT, get_core_v1_api, get_trainer_
 logger = logging.getLogger(__name__)
 
 # Standard resource aliases mapped to ResourceQuota keys
-_CPU_KEYS = ("requests.cpu", "cpu")
-_MEMORY_KEYS = ("requests.memory", "memory")
+_CPU_KEYS = ("requests.cpu", "cpu", "limits.cpu")
+_MEMORY_KEYS = ("requests.memory", "memory", "limits.memory")
 _POD_KEYS = ("count/pods", "pods")
 _GPU_KEYS = (
     "requests.nvidia.com/gpu",
@@ -44,6 +44,8 @@ _GPU_KEYS = (
     "amd.com/gpu",
     "requests.intel.com/gpu",
     "intel.com/gpu",
+    "requests.gpu.intel.com/i915",
+    "gpu.intel.com/i915",
 )
 
 
@@ -72,19 +74,22 @@ def _extract_quota_items(quota_list: Any) -> list[Any]:
     return list(items)
 
 
-def _extract_quota_data(q: Any) -> tuple[str, dict[str, Any], dict[str, Any]]:
-    """Safely extract quota name, hard, and used dicts from a model or dict."""
+def _extract_quota_data(q: Any) -> tuple[str, dict[str, Any], dict[str, Any], list[str]]:
+    """Safely extract quota name, hard, used dicts, and scopes from a model or dict."""
     if isinstance(q, dict):
         q_name = q.get("metadata", {}).get("name", "quota")
         status = q.get("status", {}) or {}
         hard = status.get("hard", {}) or {}
         used = status.get("used", {}) or {}
-        return q_name, hard, used
+        scopes = q.get("spec", {}).get("scopes", []) or []
+        return q_name, hard, used, list(scopes)
     q_name = getattr(q.metadata, "name", "quota") if hasattr(q, "metadata") else "quota"
     status = getattr(q, "status", None)
     hard = getattr(status, "hard", {}) or {} if status else {}
     used = getattr(status, "used", {}) or {} if status else {}
-    return q_name, hard, used
+    spec = getattr(q, "spec", None)
+    scopes = getattr(spec, "scopes", []) or [] if spec else []
+    return q_name, hard, used, list(scopes)
 
 
 def get_namespace_resource_quotas(
@@ -123,7 +128,7 @@ def get_namespace_resource_quotas(
     quotas_info: list[dict[str, Any]] = []
     items = _extract_quota_items(quota_list)
     for q in items:
-        name, hard, used = _extract_quota_data(q)
+        name, hard, used, _ = _extract_quota_data(q)
 
         quota_entry: dict[str, Any] = {
             "name": name,
@@ -159,13 +164,13 @@ def _extract_requested_resources(
 ) -> tuple[Decimal | None, Decimal | None, Decimal | None]:
     """Extract and scale total CPU, memory, and GPU requirements."""
     req_cpu: Decimal | None = None
-    for k in ("cpu", "requests.cpu"):
+    for k in ("cpu", "CPU", "requests.cpu", "limits.cpu"):
         if k in resources and resources[k] is not None:
             req_cpu = _to_decimal(resources[k]) * nodes_dec
             break
 
     req_mem: Decimal | None = None
-    for k in ("memory", "requests.memory"):
+    for k in ("memory", "requests.memory", "limits.memory"):
         if k in resources and resources[k] is not None:
             req_mem = _to_decimal(resources[k]) * nodes_dec
             break
@@ -177,6 +182,10 @@ def _extract_requested_resources(
         "requests.nvidia.com/gpu",
         "amd.com/gpu",
         "requests.amd.com/gpu",
+        "intel.com/gpu",
+        "requests.intel.com/gpu",
+        "gpu.intel.com/i915",
+        "requests.gpu.intel.com/i915",
     ):
         if k in resources and resources[k] is not None:
             req_gpu = _to_decimal(resources[k]) * nodes_dec
@@ -356,8 +365,11 @@ def check_resource_quota(
     req_cpu, req_mem, req_gpu = _extract_requested_resources(resources_per_node or {}, nodes_dec)
 
     for q in items:
-        q_name, hard, used = _extract_quota_data(q)
+        q_name, hard, used, scopes = _extract_quota_data(q)
         if not hard:
+            continue
+        # Skip BestEffort-only quotas if workload requests explicit resources
+        if scopes == ["BestEffort"] and (req_cpu or req_mem or req_gpu):
             continue
 
         err = _check_single_quota(

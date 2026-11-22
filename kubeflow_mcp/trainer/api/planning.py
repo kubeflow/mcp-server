@@ -683,7 +683,12 @@ def estimate_resources(
 
 def _check_preflight_quotas(next_steps: list[str]) -> list[dict[str, Any]] | None:
     """Read active ResourceQuotas and record recommendations if any quota is exhausted."""
+    from kubeflow_mcp.core.security import check_namespace_allowed
     from kubeflow_mcp.trainer.api.quota import get_namespace_resource_quotas
+
+    err = check_namespace_allowed(None)
+    if err is not None:
+        return None
 
     quotas = get_namespace_resource_quotas()
     if not quotas:
