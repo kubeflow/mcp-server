@@ -1246,6 +1246,16 @@ def fine_tune(
         if validation_err:
             return validation_err
 
+        from kubeflow_mcp.trainer.api.quota import check_resource_quota
+
+        quota_err = check_resource_quota(
+            namespace=namespace,
+            resources_per_node=resources_per_node,
+            num_nodes=num_nodes,
+        )
+        if quota_err:
+            return quota_err.model_dump()
+
         optional_fields = [
             ("loss", loss),
             ("resources_per_node", resources_per_node),
@@ -1415,6 +1425,48 @@ def fine_tune(
         )
 
 
+def _validate_custom_training_submission(
+    name: str | None,
+    num_nodes: int,
+    gpu_per_node: int,
+    script: str,
+    packages: list[str] | None,
+    image: str,
+    namespace: str | None,
+    effective_resources: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Validate bounds, namespace permissions, name syntax, and resource quotas."""
+    bounds_err = validate_training_bounds(
+        num_nodes=num_nodes,
+        gpu_per_node=gpu_per_node,
+        script=script,
+        packages=packages,
+    ) or validate_image_reference(image or None)
+    if bounds_err:
+        return bounds_err.model_dump()
+
+    ns_err = check_namespace_allowed(namespace)
+    if ns_err:
+        return ns_err.model_dump()
+
+    if name:
+        err = validate_k8s_name(name)
+        if err:
+            return err.model_dump()
+
+    from kubeflow_mcp.trainer.api.quota import check_resource_quota
+
+    quota_err = check_resource_quota(
+        namespace=namespace,
+        resources_per_node=effective_resources,
+        num_nodes=num_nodes,
+    )
+    if quota_err:
+        return quota_err.model_dump()
+
+    return None
+
+
 def run_custom_training(
     script: str,
     runtime: str | None = None,
@@ -1503,29 +1555,22 @@ def run_custom_training(
         if input_err:
             return input_err.model_dump()
 
-        # Input checks run before the namespace check: with an allowlist and no
-        # namespace, that check resolves the default through the Trainer SDK.
-        bounds_err = validate_training_bounds(
+        effective_resources = resources_per_node or (
+            {"gpu": gpu_per_node} if gpu_per_node > 0 else None
+        )
+
+        validation_err = _validate_custom_training_submission(
+            name=name,
             num_nodes=num_nodes,
             gpu_per_node=gpu_per_node,
             script=script,
             packages=packages,
-        ) or validate_image_reference(image or None)  # "" means unset: the SDK skips it too
-        if bounds_err:
-            return bounds_err.model_dump()
-
-        ns_err = check_namespace_allowed(namespace)
-        if ns_err:
-            return ns_err.model_dump()
-
-        if name:
-            err = validate_k8s_name(name)
-            if err:
-                return err.model_dump()
-
-        effective_resources = resources_per_node or (
-            {"gpu": gpu_per_node} if gpu_per_node > 0 else None
+            image=image,
+            namespace=namespace,
+            effective_resources=effective_resources,
         )
+        if validation_err:
+            return validation_err
 
         # The SDK writes its script into /workspace, which may be unwritable for non-root UIDs.
         volumes, volume_mounts = _ensure_workspace(
@@ -1746,6 +1791,16 @@ def run_container_training(
         effective_resources = resources_per_node or (
             {"gpu": gpu_per_node} if gpu_per_node > 0 else None
         )
+
+        from kubeflow_mcp.trainer.api.quota import check_resource_quota
+
+        quota_err = check_resource_quota(
+            namespace=namespace,
+            resources_per_node=effective_resources,
+            num_nodes=num_nodes,
+        )
+        if quota_err:
+            return quota_err.model_dump()
 
         config: dict[str, Any] = {
             "image": image,

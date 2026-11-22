@@ -681,6 +681,26 @@ def estimate_resources(
         ).model_dump()
 
 
+def _check_preflight_quotas(next_steps: list[str]) -> list[dict[str, Any]] | None:
+    """Read active ResourceQuotas and record recommendations if any quota is exhausted."""
+    from kubeflow_mcp.trainer.api.quota import get_namespace_resource_quotas
+
+    quotas = get_namespace_resource_quotas()
+    if not quotas:
+        return None
+    exhausted = [
+        f"{q['name']} ({k}: 0 available)"
+        for q in quotas
+        for k, avail in q.get("available", {}).items()
+        if avail == "0"
+    ]
+    if exhausted:
+        next_steps.append(
+            f"Resource quota exhausted: {', '.join(exhausted)} — free quota before submitting jobs"
+        )
+    return quotas
+
+
 def pre_flight(
     model: str = "",
     num_workers: int = 1,
@@ -755,6 +775,10 @@ def pre_flight(
         )
         estimate_data = estimate.get("data", estimate)
         result["estimate"] = estimate_data
+
+    quotas = _check_preflight_quotas(next_steps)
+    if quotas:
+        result["resource_quotas"] = quotas
 
     from kubeflow_mcp.trainer.api.discovery import list_runtimes as _list_runtimes
 

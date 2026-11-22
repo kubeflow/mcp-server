@@ -1,0 +1,348 @@
+# Copyright The Kubeflow Authors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Resource quota pre-flight verification for training jobs (ROADMAP Phase 4).
+
+Validates requested compute and pod counts against Kubernetes ResourceQuota
+objects in the target namespace before jobs are admitted or submitted.
+"""
+
+from __future__ import annotations
+
+import logging
+from decimal import Decimal
+from typing import Any
+
+from kubernetes.client.rest import ApiException
+from kubernetes.utils.quantity import parse_quantity
+
+from kubeflow_mcp.common.constants import ErrorCode
+from kubeflow_mcp.common.types import ToolError
+from kubeflow_mcp.common.utils import K8S_TIMEOUT, get_core_v1_api, get_trainer_effective_namespace
+
+logger = logging.getLogger(__name__)
+
+# Standard resource aliases mapped to ResourceQuota keys
+_CPU_KEYS = ("requests.cpu", "cpu")
+_MEMORY_KEYS = ("requests.memory", "memory")
+_POD_KEYS = ("count/pods", "pods")
+_GPU_KEYS = (
+    "requests.nvidia.com/gpu",
+    "nvidia.com/gpu",
+    "requests.amd.com/gpu",
+    "amd.com/gpu",
+    "requests.intel.com/gpu",
+    "intel.com/gpu",
+)
+
+
+def _to_decimal(val: Any) -> Decimal:
+    """Safely parse a Kubernetes quantity string or number into a Decimal."""
+    if isinstance(val, (int, float, Decimal)):
+        return Decimal(str(val))
+    return parse_quantity(str(val).strip())
+
+
+def _format_quantity(val: Decimal) -> str:
+    """Format decimal quantity cleanly for error messages."""
+    if val == val.to_integral_value():
+        return str(int(val))
+    return str(val.normalize())
+
+
+def get_namespace_resource_quotas(
+    namespace: str | None = None,
+    *,
+    core_v1_api: Any = None,
+) -> list[dict[str, Any]]:
+    """List and parse active ResourceQuota objects in the target namespace.
+
+    Returns an empty list if no quotas exist or if the caller lacks permission
+    to list ResourceQuotas.
+    """
+    try:
+        effective_ns = get_trainer_effective_namespace(namespace)
+        api = core_v1_api or get_core_v1_api()
+        quota_list = api.list_namespaced_resource_quota(
+            namespace=effective_ns,
+            _request_timeout=K8S_TIMEOUT,
+        )
+    except ApiException as e:
+        logger.debug(
+            "ResourceQuota listing skipped for namespace '%s' (status %s): %s",
+            namespace,
+            e.status,
+            e.reason,
+        )
+        return []
+    except Exception as e:
+        logger.debug(
+            "Could not query ResourceQuota in namespace '%s': %s",
+            namespace,
+            e,
+        )
+        return []
+
+    quotas_info: list[dict[str, Any]] = []
+    items = getattr(quota_list, "items", []) or []
+    for q in items:
+        name = getattr(q.metadata, "name", "unknown") if hasattr(q, "metadata") else "unknown"
+        status = getattr(q, "status", None)
+        hard = getattr(status, "hard", {}) or {}
+        used = getattr(status, "used", {}) or {}
+
+        quota_entry: dict[str, Any] = {
+            "name": name,
+            "namespace": effective_ns,
+            "hard": {},
+            "used": {},
+            "available": {},
+        }
+
+        for res_key, hard_val_str in hard.items():
+            try:
+                hard_dec = _to_decimal(hard_val_str)
+                used_val_str = used.get(res_key, "0")
+                used_dec = _to_decimal(used_val_str)
+                avail_dec = max(Decimal(0), hard_dec - used_dec)
+
+                quota_entry["hard"][res_key] = hard_val_str
+                quota_entry["used"][res_key] = used_val_str
+                quota_entry["available"][res_key] = _format_quantity(avail_dec)
+            except Exception as parse_err:
+                logger.debug("Failed to parse quantity for %s in quota %s: %s", res_key, name, parse_err)
+
+        quotas_info.append(quota_entry)
+
+    return quotas_info
+
+
+def _extract_requested_resources(
+    resources: dict[str, Any],
+    nodes_dec: Decimal,
+) -> tuple[Decimal | None, Decimal | None, Decimal | None]:
+    """Extract and scale total CPU, memory, and GPU requirements."""
+    req_cpu: Decimal | None = None
+    for k in ("cpu", "requests.cpu"):
+        if k in resources and resources[k] is not None:
+            req_cpu = _to_decimal(resources[k]) * nodes_dec
+            break
+
+    req_mem: Decimal | None = None
+    for k in ("memory", "requests.memory"):
+        if k in resources and resources[k] is not None:
+            req_mem = _to_decimal(resources[k]) * nodes_dec
+            break
+
+    req_gpu: Decimal | None = None
+    for k in ("gpu", "nvidia.com/gpu", "requests.nvidia.com/gpu", "amd.com/gpu", "requests.amd.com/gpu"):
+        if k in resources and resources[k] is not None:
+            req_gpu = _to_decimal(resources[k]) * nodes_dec
+            break
+
+    return req_cpu, req_mem, req_gpu
+
+
+def _check_resource_limit(
+    q_name: str,
+    effective_ns: str,
+    hard: dict[str, Any],
+    used: dict[str, Any],
+    keys: tuple[str, ...],
+    requested: Decimal,
+    unit_label: str,
+    remediation_hint: str,
+) -> ToolError | None:
+    """Check a specific resource category against a ResourceQuota limit."""
+    for k in keys:
+        if k in hard:
+            hard_val = _to_decimal(hard[k])
+            used_val = _to_decimal(used.get(k, "0"))
+            avail_val = max(Decimal(0), hard_val - used_val)
+            if requested > avail_val:
+                return ToolError(
+                    error=(
+                        f"Resource quota '{q_name}' exceeded in namespace '{effective_ns}': "
+                        f"requested {requested} {unit_label}, but only {avail_val} available "
+                        f"(hard: {hard_val}, used: {used_val})"
+                    ),
+                    error_code=ErrorCode.QUOTA_EXCEEDED,
+                    details={
+                        "quota_name": q_name,
+                        "namespace": effective_ns,
+                        "resource": k,
+                        "requested": _format_quantity(requested),
+                        "available": _format_quantity(avail_val),
+                        "hard": _format_quantity(hard_val),
+                        "used": _format_quantity(used_val),
+                        "remediation": remediation_hint,
+                    },
+                )
+    return None
+
+
+def _check_single_quota(
+    q_name: str,
+    effective_ns: str,
+    hard: dict[str, Any],
+    used: dict[str, Any],
+    nodes_dec: Decimal,
+    req_cpu: Decimal | None,
+    req_mem: Decimal | None,
+    req_gpu: Decimal | None,
+) -> ToolError | None:
+    """Check a single ResourceQuota object for capacity violations."""
+    # 1. Pod count
+    pod_err = _check_resource_limit(
+        q_name=q_name,
+        effective_ns=effective_ns,
+        hard=hard,
+        used=used,
+        keys=_POD_KEYS,
+        requested=nodes_dec,
+        unit_label="pod(s)",
+        remediation_hint=(
+            f"Reduce num_nodes (currently {nodes_dec}), delete finished pods, "
+            f"or request a quota increase in namespace '{effective_ns}'."
+        ),
+    )
+    if pod_err:
+        return pod_err
+
+    # 2. CPU requests
+    if req_cpu is not None:
+        cpu_err = _check_resource_limit(
+            q_name=q_name,
+            effective_ns=effective_ns,
+            hard=hard,
+            used=used,
+            keys=_CPU_KEYS,
+            requested=req_cpu,
+            unit_label=f"CPU(s) across {nodes_dec} node(s)",
+            remediation_hint=(
+                f"Reduce requested cpu in resources_per_node or reduce num_nodes, "
+                f"or request a quota increase in namespace '{effective_ns}'."
+            ),
+        )
+        if cpu_err:
+            return cpu_err
+
+    # 3. Memory requests
+    if req_mem is not None:
+        mem_err = _check_resource_limit(
+            q_name=q_name,
+            effective_ns=effective_ns,
+            hard=hard,
+            used=used,
+            keys=_MEMORY_KEYS,
+            requested=req_mem,
+            unit_label=f"bytes memory across {nodes_dec} node(s)",
+            remediation_hint=(
+                f"Reduce requested memory in resources_per_node or reduce num_nodes, "
+                f"or request a quota increase in namespace '{effective_ns}'."
+            ),
+        )
+        if mem_err:
+            return mem_err
+
+    # 4. GPU requests
+    if req_gpu is not None:
+        gpu_err = _check_resource_limit(
+            q_name=q_name,
+            effective_ns=effective_ns,
+            hard=hard,
+            used=used,
+            keys=_GPU_KEYS,
+            requested=req_gpu,
+            unit_label=f"GPU(s) across {nodes_dec} node(s)",
+            remediation_hint=(
+                f"Reduce requested gpu count or reduce num_nodes, "
+                f"or request a quota increase in namespace '{effective_ns}'."
+            ),
+        )
+        if gpu_err:
+            return gpu_err
+
+    return None
+
+
+def check_resource_quota(
+    namespace: str | None = None,
+    resources_per_node: dict[str, Any] | None = None,
+    num_nodes: int = 1,
+    *,
+    core_v1_api: Any = None,
+) -> ToolError | None:
+    """Pre-flight check verifying requested resources against namespace ResourceQuota.
+
+    Calculates total requirements across all worker nodes (`num_nodes * per_node`)
+    and verifies that CPU, memory, GPU, and pod counts do not exceed remaining
+    unallocated quota.
+
+    Returns:
+        ToolError with error_code=QUOTA_EXCEEDED if quota would be exceeded.
+        None if all quotas are satisfied or if no quotas are configured.
+    """
+    try:
+        effective_ns = get_trainer_effective_namespace(namespace)
+        api = core_v1_api or get_core_v1_api()
+        quota_list = api.list_namespaced_resource_quota(
+            namespace=effective_ns,
+            _request_timeout=K8S_TIMEOUT,
+        )
+    except ApiException as e:
+        logger.debug(
+            "ResourceQuota check skipped for namespace '%s' (status %s): %s",
+            namespace,
+            e.status,
+            e.reason,
+        )
+        return None
+    except Exception as e:
+        logger.debug(
+            "Failed to retrieve ResourceQuota for namespace '%s': %s",
+            namespace,
+            e,
+        )
+        return None
+
+    items = getattr(quota_list, "items", []) or []
+    if not items:
+        return None
+
+    nodes_dec = Decimal(max(1, num_nodes))
+    req_cpu, req_mem, req_gpu = _extract_requested_resources(resources_per_node or {}, nodes_dec)
+
+    for q in items:
+        q_name = getattr(q.metadata, "name", "quota") if hasattr(q, "metadata") else "quota"
+        status = getattr(q, "status", None)
+        if not status:
+            continue
+        hard = getattr(status, "hard", {}) or {}
+        used = getattr(status, "used", {}) or {}
+
+        err = _check_single_quota(
+            q_name=q_name,
+            effective_ns=effective_ns,
+            hard=hard,
+            used=used,
+            nodes_dec=nodes_dec,
+            req_cpu=req_cpu,
+            req_mem=req_mem,
+            req_gpu=req_gpu,
+        )
+        if err:
+            return err
+
+    return None
