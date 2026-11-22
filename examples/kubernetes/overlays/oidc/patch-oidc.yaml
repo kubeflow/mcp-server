@@ -1,0 +1,14 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kubeflow-mcp
+spec:
+  template:
+    spec:
+      containers:
+        - name: kubeflow-mcp
+          env:
+            - name: KUBEFLOW_MCP_OIDC_ISSUER
+              value: "https://accounts.google.com"
+            - name: KUBEFLOW_MCP_OIDC_AUDIENCE
+              value: "kubeflow-mcp"

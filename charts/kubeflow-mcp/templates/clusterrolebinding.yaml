@@ -1,0 +1,16 @@
+{{- if and .Values.rbac.create .Values.rbac.clusterRole -}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "kubeflow-mcp.fullname" . }}-cluster-read
+  labels:
+    {{- include "kubeflow-mcp.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "kubeflow-mcp.fullname" . }}-cluster-read
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "kubeflow-mcp.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

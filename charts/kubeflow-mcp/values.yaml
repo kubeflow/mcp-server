@@ -1,0 +1,164 @@
+# Default values for kubeflow-mcp.
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+replicaCount: 2
+
+image:
+  repository: ghcr.io/kubeflow/mcp-server
+  pullPolicy: IfNotPresent
+  # Overrides the image tag whose default is the chart appVersion.
+  tag: "0.2.0rc1"
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+server:
+  # List of MCP clients to enable: trainer, spark, pipelines, optimizer, hub
+  clients:
+    - trainer
+    - spark
+    - pipelines
+  # Persona for RBAC tool filtering: readonly, data-scientist, ml-engineer, platform-admin
+  persona: ml-engineer
+  # Tool loading mode: full, progressive, semantic
+  mode: full
+  # Transport protocol: http (Streamable HTTP) or stdio
+  transport: http
+  # Host and port to bind
+  host: "0.0.0.0"
+  port: 8000
+  # Instruction tier: minimal, standard, detailed
+  instructionTier: standard
+  # Read-only policy override
+  readOnly: false
+  # Additional arguments passed to kubeflow-mcp serve
+  extraArgs: []
+  # Additional environment variables
+  extraEnv: []
+
+auth:
+  # Enable HTTP bearer token / JWT authentication
+  enabled: true
+  # Literal token value (if creating secret from values)
+  token: ""
+  # Existing secret name containing the auth token
+  existingSecret: ""
+  # Key inside the existing secret (default: token)
+  secretKey: "token"
+  # OIDC / OAuth 2.1 auto-discovery configuration
+  oidc:
+    enabled: false
+    issuer: ""
+    jwksUri: ""
+    audience: ""
+
+serviceAccount:
+  # Specifies whether a service account should be created
+  create: true
+  # Annotations to add to the service account
+  annotations: {}
+  # The name of the service account to use.
+  # If not set and create is true, a name is generated using the fullname template
+  name: ""
+
+rbac:
+  # Specifies whether RBAC resources should be created
+  create: true
+  # Create ClusterRole for cluster-scoped reads (nodes, namespaces, runtimes, CRDs)
+  clusterRole: true
+  # Target namespace for namespace-scoped writes (defaults to Release namespace)
+  targetNamespace: ""
+
+podAnnotations: {}
+
+podSecurityContext:
+  fsGroup: 1000
+  runAsNonRoot: true
+  runAsUser: 1000
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 1000
+  capabilities:
+    drop:
+      - ALL
+
+service:
+  type: ClusterIP
+  port: 8000
+  targetPort: 8000
+  annotations: {}
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+    # kubernetes.io/ingress.class: nginx
+    # cert-manager.io/cluster-issuer: letsencrypt-prod
+  hosts:
+    - host: kubeflow-mcp.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+  #  - secretName: kubeflow-mcp-tls
+  #    hosts:
+  #      - kubeflow-mcp.local
+
+resources:
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+  requests:
+    cpu: 250m
+    memory: 256Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 80
+  targetMemoryUtilizationPercentage: 80
+
+probes:
+  liveness:
+    httpGet:
+      path: /health
+      port: http
+    initialDelaySeconds: 10
+    periodSeconds: 15
+    timeoutSeconds: 5
+    failureThreshold: 3
+  readiness:
+    httpGet:
+      path: /ready
+      port: http
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 2
+
+networkPolicy:
+  enabled: false
+  ingress: []
+  egress: []
+
+monitoring:
+  serviceMonitor:
+    enabled: false
+    namespace: ""
+    interval: 30s
+    scrapeTimeout: 10s
+    labels: {}
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
