@@ -18,7 +18,7 @@ The Kubeflow MCP Server exposes Kubeflow Training operations as [Model Context P
 - **Security-First**: Persona gating, namespace enforcement, input validation, bearer/JWT auth
 - **Multi-Platform**: Auto-detects OpenShift, EKS, GKE with platform-specific guidance
 - **Token-Efficient**: Progressive/semantic modes compress 23 tools into 2-3 meta-tools
-- **Extensible**: Plugin architecture for additional Kubeflow clients (TODO: optimizer, hub)
+- **Extensible**: Plugin architecture for additional Kubeflow clients (trainer, spark, pipelines; TODO: optimizer, hub)
 
 ## Demo
 
@@ -211,6 +211,66 @@ claude mcp add kubeflow -- kubeflow-mcp serve
 | Platform | `inspect_crd`, `inspect_controller`, `patch_runtime`, `create_runtime`, `delete_runtime` | Cluster inspection and runtime management |
 | Health | `health_check`, `get_server_logs` | Server diagnostics |
 
+### Spark tools
+
+Enabled with `--clients trainer,spark` (requires the `kubeflow[spark]` extra):
+
+| Phase | Tools | Description |
+|-------|-------|-------------|
+| Discovery | `list_spark_sessions`, `get_spark_session` | Browse SparkConnect sessions |
+| Sessions | `create_spark_session`, `delete_spark_session` | Provision and tear down SparkConnect sessions (ownership-guarded) |
+| Monitoring | `get_spark_session_logs` | Read driver logs |
+
+Sessions created through MCP are labelled `kubeflow-mcp/managed-by=mcp`. Non-admin
+personas may only delete sessions carrying that label; use the `platform-admin`
+persona to manage sessions created outside MCP.
+
+Creation supports CPU/memory resources and an optional `service_account_name` for
+the driver. The selected account must already exist and have namespace-scoped
+Spark workload RBAC; see `spark://guides/session-patterns`. GPU resource keys are
+rejected because SDK 0.5.0's SparkConnect builder does not preserve them.
+SDK 0.5.0 batch jobs (`FileJob`/`FuncJob`) are separate MCP follow-up scope in
+[#331](https://github.com/kubeflow/mcp-server/issues/331); this session module is
+only part of [#5](https://github.com/kubeflow/mcp-server/issues/5).
+
+### Pipelines client
+
+Enable with `--clients pipelines` (add `trainer` for the training tools too) and install
+the `pipelines` extra on the server host (it brings `kfp`):
+
+```bash
+pip install "kubeflow-mcp[pipelines]"
+```
+
+Wraps `kubeflow.pipelines.PipelinesClient`. The cluster needs Kubeflow Pipelines;
+Kubeflow Trainer is only needed when a pipeline step creates a `TrainJob`.
+
+| Phase | Tools | Description |
+|-------|-------|-------------|
+| Discovery | `list_pipelines`, `get_pipeline`, `list_experiments`, `get_experiment` | Browse registered pipelines, their versions and experiments |
+| Authoring | `create_pipeline`, `delete_pipeline` | Register a pipeline from KFP v2 Python code, or delete a pipeline or one version (preview first) |
+| Monitoring | `list_pipeline_runs`, `get_pipeline_run`, `get_pipeline_logs` | Follow runs, read task pod logs |
+| Runs | `create_pipeline_run`, `stop_pipeline_run`, `retry_pipeline_run`, `create_experiment`, `delete_experiment` | Start, stop or retry runs; manage experiments (preview first) |
+
+With these tools an agent can go from "train this model on this dataset" to a running
+pipeline: it writes the KFP code, `create_pipeline` checks it, compiles it to pipeline
+YAML and registers it, and `create_pipeline_run` starts it. The compile runs in a
+separate Python process on the server host. Because KFP runs the `@dsl.pipeline` body
+while compiling, `create_pipeline` only accepts a restricted shape there (component
+calls, task options and `dsl` / `kfp.kubernetes` helpers); component bodies run in the
+cluster and are not restricted. See `pipelines://guides/authoring`.
+
+Installing the extra pins the `kubernetes` Python client to a `kfp`-compatible release
+(`<31`); the Kubeflow SDK accepts any `>=27.2,<36`. If pip prints a warning that a
+`kubeflow` release "does not provide the extra 'pipelines'", the resolution picked an
+older `kubeflow-mcp` (the `0.1.x` releases pin `kubeflow==0.4.0`, which has no
+`pipelines` extra): upgrade `kubeflow-mcp` to `>=0.2.x` and re-install.
+
+Set `KUBEFLOW_MCP_PIPELINES_URL`, `KUBEFLOW_MCP_PIPELINES_TOKEN` or
+`KUBEFLOW_MCP_PIPELINES_NAMESPACE` when the defaults do not fit. Stop, retry and
+`create_pipeline` need the `ml-engineer` persona because KFP runs and pipelines carry no
+MCP ownership label; `delete_experiment` and `delete_pipeline` are `platform-admin` only.
+
 
 ### Requirements
 
@@ -224,7 +284,7 @@ claude mcp add kubeflow -- kubeflow-mcp serve
 ### `kubeflow-mcp serve`
 
 ```bash
-# Modules: trainer, optimizer (stub), hub (stub)
+# Modules: trainer, spark, pipelines, optimizer (stub), hub (stub)
 # Persona: readonly | data-scientist | ml-engineer | platform-admin
 # Mode: full | progressive | semantic
 # Instruction tier: full | compact | minimal
@@ -235,7 +295,7 @@ claude mcp add kubeflow -- kubeflow-mcp serve
 # Log format: console | json (auto-detected if omitted)
 # No banner: suppress the FastMCP startup banner
 kubeflow-mcp serve \
-  --clients trainer \
+  --clients trainer,spark \
   --persona ml-engineer \
   --mode full \
   --instruction-tier full \
@@ -246,6 +306,19 @@ kubeflow-mcp serve \
   --log-format console \
   --no-banner
 ```
+
+| Flag | Values |
+| ---- | ------ |
+| `--clients` | `trainer`, `spark`, `optimizer` (stub), `hub` (stub) |
+| `--persona` | `readonly` \| `data-scientist` \| `ml-engineer` \| `platform-admin` |
+| `--mode` | `full` \| `progressive` \| `semantic` |
+| `--instruction-tier` | `full` \| `compact` \| `minimal` |
+| `--transport` | `stdio` \| `http` \| `sse` |
+| `--auth-token` | bearer token for HTTP auth (dev/staging) |
+| `--otel-endpoint` | OTLP HTTP endpoint (optional tracing) |
+| `--log-level` | `DEBUG` \| `INFO` \| `WARNING` \| `ERROR` |
+| `--log-format` | `console` \| `json` (auto-detected if omitted) |
+| `--no-banner` | suppress startup banner |
 
 `--mode progressive` exposes 3 meta-tools (~85 tokens) for hierarchical discovery. `--mode semantic` exposes 2 meta-tools (~69 tokens) using embedding search. Both reduce token consumption significantly for agent workflows.
 
@@ -336,3 +409,11 @@ make inspector TRANSPORT=sse      # Inspector + SSE (deprecated; start server se
 ## License
 
 Apache License 2.0 — see [LICENSE](LICENSE).
+
+## ✨ Contributors
+
+We couldn't have done it without these incredible people:
+
+<a href="https://github.com/kubeflow/mcp-server/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=kubeflow/mcp-server" />
+</a>

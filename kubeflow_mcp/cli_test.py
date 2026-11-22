@@ -572,6 +572,20 @@ def test_serve_otel_endpoint_cli_overrides_config():
     )
 
 
+def test_serve_reports_invalid_log_level_cleanly():
+    _, mock_create_server, modules_patch = _make_serve_mocks()
+    setup_logging = modules_patch["kubeflow_mcp.core.logging"].setup_logging
+    setup_logging.side_effect = ValueError("Invalid log level 'BOGUS'")
+
+    with patch.dict(sys.modules, modules_patch):
+        result = CliRunner().invoke(cli, ["serve"])
+
+    assert result.exit_code == 1
+    assert "Invalid log level 'BOGUS'" in result.output
+    assert "Traceback" not in result.output
+    mock_create_server.assert_not_called()
+
+
 def test_serve_reports_config_value_errors_cleanly():
     _, mock_create_server, modules_patch = _make_serve_mocks()
     mock_load_config = modules_patch["kubeflow_mcp.core.config"].load_config
@@ -602,3 +616,9 @@ def test_serve_reports_invalid_clients_environment_cleanly(monkeypatch):
     assert result.exit_code == 1
     assert "at least one client must be specified" in result.output
     assert "Traceback" not in result.output
+
+
+def test_clients_help_lists_pipelines_with_spacing():
+    result = CliRunner().invoke(cli, ["serve", "--help"], terminal_width=200)
+
+    assert "(trainer, spark, pipelines, optimizer, hub). Falls back" in result.output

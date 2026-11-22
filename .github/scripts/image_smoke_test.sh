@@ -147,23 +147,19 @@ else
 fi
 
 
-# Test 4: OTel absent from base image
-# TODO: Issue #307 plans to install the OTel group in the image. Once that happens,
-# flip this check so it asserts that opentelemetry-sdk IS present instead of absent.
-_log "Test 4: no-otel-in-base"
+# Test 4: Published images include the OTel SDK and HTTP exporter for tracing.
+_log "Test 4: otel-packages"
 otel_exit=0
 otel_out=$(docker run --rm --entrypoint python "$IMAGE" -c '
 import importlib.metadata as md
-import kubeflow_mcp
-try:
-    print(md.version("opentelemetry-sdk"))
-except md.PackageNotFoundError:
-    pass
+from kubeflow_mcp.core import telemetry
+assert telemetry._OTEL_AVAILABLE, "OpenTelemetry SDK or HTTP exporter could not be imported"
+print(md.version("opentelemetry-sdk"))
 ' 2>&1) || otel_exit=$?
-if [ "$otel_exit" -eq 0 ] && [ -z "$otel_out" ]; then
-    _pass "no-otel-in-base: opentelemetry-sdk is not installed (optional otel group)"
+if [ "$otel_exit" -eq 0 ] && [ -n "$otel_out" ]; then
+    _pass "otel-packages: opentelemetry-sdk=${otel_out}"
 else
-    _fail "no-otel-in-base" "exit=${otel_exit}, output: ${otel_out}"
+    _fail "otel-packages" "exit=${otel_exit}, output: ${otel_out}"
 fi
 
 # Server tests

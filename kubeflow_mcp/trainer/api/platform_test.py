@@ -171,7 +171,7 @@ def test_runtime_tools_accept_dotted_runtime_names(good_name, mock_k8s_apis):
 # ─── Runtime CRUD ───────────────────────────────────────────────────────────
 
 
-def test_patch_runtime_confirmed_applies_strategic_patch(mock_k8s_apis):
+def test_patch_runtime_confirmed_applies_merge_patch(mock_k8s_apis):
     api = mock_k8s_apis["custom"]
     api.patch_cluster_custom_object.return_value = {
         "metadata": {"resourceVersion": "123"},
@@ -192,6 +192,180 @@ def test_patch_runtime_confirmed_applies_strategic_patch(mock_k8s_apis):
         body=patch_body,
         _request_timeout=mcp_utils.K8S_TIMEOUT,
     )
+
+
+def _runtime_with_jobs() -> dict:
+    node = {"name": "node", "image": "old", "command": ["tune", "run"], "args": ["a"]}
+    init = {"name": "dataset-initializer", "image": "init"}
+    return {
+        "spec": {
+            "template": {
+                "spec": {
+                    "replicatedJobs": [
+                        {"name": "dataset-initializer", "containers": [init]},
+                        {"name": "node", "containers": [node]},
+                    ]
+                }
+            }
+        }
+    }
+
+
+def _patch_jobs(jobs: list[dict]) -> dict:
+    return {"spec": {"template": {"spec": {"replicatedJobs": jobs}}}}
+
+
+def _sent_jobs(api) -> list[dict]:
+    body = api.patch_cluster_custom_object.call_args.kwargs["body"]
+    return body["spec"]["template"]["spec"]["replicatedJobs"]
+
+
+def test_patch_runtime_keeps_unmentioned_entries_of_named_lists(mock_k8s_apis):
+    api = mock_k8s_apis["custom"]
+    api.get_cluster_custom_object.return_value = _runtime_with_jobs()
+    api.patch_cluster_custom_object.return_value = {"metadata": {}}
+    patch_body = _patch_jobs([{"name": "node", "containers": [{"name": "node", "image": "new"}]}])
+
+    verify_tool_success(patch_runtime("torchtune-llama", patch=patch_body, confirmed=True))
+
+    jobs = _sent_jobs(api)
+    assert [j["name"] for j in jobs] == ["dataset-initializer", "node"]
+    assert jobs[1]["containers"] == [
+        {"name": "node", "image": "new", "command": ["tune", "run"], "args": ["a"]}
+    ]
+
+
+def test_patch_runtime_applies_requested_order_when_all_entries_listed(mock_k8s_apis):
+    api = mock_k8s_apis["custom"]
+    api.get_cluster_custom_object.return_value = _runtime_with_jobs()
+    api.patch_cluster_custom_object.return_value = {"metadata": {}}
+    patch_body = _patch_jobs([{"name": "node"}, {"name": "dataset-initializer"}])
+
+    verify_tool_success(patch_runtime("torchtune-llama", patch=patch_body, confirmed=True))
+
+    jobs = _sent_jobs(api)
+    assert [j["name"] for j in jobs] == ["node", "dataset-initializer"]
+    assert jobs[0]["containers"][0]["command"] == ["tune", "run"]
+
+
+def test_patch_runtime_preview_states_merge_semantics():
+    result = patch_runtime("torchtune-llama", patch={"spec": {"x": 1}})
+    assert "cannot remove" in result["data"]["merge_semantics"]
+    assert "clears all entries" in result["data"]["merge_semantics"]
+
+
+def test_patch_runtime_appends_new_entry_and_honours_null(mock_k8s_apis):
+    api = mock_k8s_apis["custom"]
+    api.get_cluster_custom_object.return_value = _runtime_with_jobs()
+    api.patch_cluster_custom_object.return_value = {"metadata": {}}
+    patch_body = _patch_jobs(
+        [
+            {"name": "node", "containers": [{"name": "node", "args": None}]},
+            {"name": "extra", "containers": []},
+        ]
+    )
+
+    verify_tool_success(patch_runtime("torchtune-llama", patch=patch_body, confirmed=True))
+
+    jobs = _sent_jobs(api)
+    assert [j["name"] for j in jobs] == ["dataset-initializer", "node", "extra"]
+    assert "args" not in jobs[1]["containers"][0]
+    assert jobs[1]["containers"][0]["command"] == ["tune", "run"]
+
+
+def test_patch_runtime_still_replaces_unnamed_and_empty_lists(mock_k8s_apis):
+    api = mock_k8s_apis["custom"]
+    api.get_cluster_custom_object.return_value = _runtime_with_jobs()
+    api.patch_cluster_custom_object.return_value = {"metadata": {}}
+    patch_body = {"spec": {"template": {"spec": {"replicatedJobs": [], "tags": ["a", "b"]}}}}
+
+    verify_tool_success(patch_runtime("torchtune-llama", patch=patch_body, confirmed=True))
+
+    assert api.patch_cluster_custom_object.call_args.kwargs["body"] == patch_body
+
+
+def test_patch_runtime_replaces_named_lists_under_unsupported_keys(mock_k8s_apis):
+    api = mock_k8s_apis["custom"]
+    current = _runtime_with_jobs()
+    current["spec"]["other"] = [{"name": "a"}, {"name": "b"}]
+    api.get_cluster_custom_object.return_value = current
+    api.patch_cluster_custom_object.return_value = {"metadata": {}}
+    patch_body = {"spec": {"other": [{"name": "a", "x": 1}]}}
+
+    verify_tool_success(patch_runtime("torchtune-llama", patch=patch_body, confirmed=True))
+
+    assert api.patch_cluster_custom_object.call_args.kwargs["body"] == patch_body
+
+
+def test_patch_runtime_pins_resource_version_and_reports_conflict(mock_k8s_apis):
+    api = mock_k8s_apis["custom"]
+    current = _runtime_with_jobs()
+    current["metadata"] = {"resourceVersion": "7"}
+    api.get_cluster_custom_object.return_value = current
+    api.patch_cluster_custom_object.side_effect = ApiException(status=409, reason="Conflict")
+
+    result = patch_runtime(
+        "torchtune-llama", patch={"metadata": {"labels": {"a": "b"}}}, confirmed=True
+    )
+
+    body = api.patch_cluster_custom_object.call_args.kwargs["body"]
+    assert body["metadata"] == {"labels": {"a": "b"}, "resourceVersion": "7"}
+    error = verify_tool_error(result, error_code=KUBERNETES_ERROR)
+    assert "changed while patching" in error["error"]
+
+
+def test_patch_runtime_merges_volume_mounts_by_mount_path(mock_k8s_apis):
+    api = mock_k8s_apis["custom"]
+    current = _runtime_with_jobs()
+    current["spec"]["template"]["spec"]["replicatedJobs"][1]["containers"][0]["volumeMounts"] = [
+        {"name": "data", "mountPath": "/data/train"}
+    ]
+    api.get_cluster_custom_object.return_value = current
+    api.patch_cluster_custom_object.return_value = {"metadata": {}}
+    patch_body = _patch_jobs(
+        [
+            {
+                "name": "node",
+                "containers": [
+                    {"name": "node", "volumeMounts": [{"name": "data", "mountPath": "/data/eval"}]}
+                ],
+            }
+        ]
+    )
+
+    verify_tool_success(patch_runtime("torchtune-llama", patch=patch_body, confirmed=True))
+
+    mounts = _sent_jobs(api)[1]["containers"][0]["volumeMounts"]
+    assert [m["mountPath"] for m in mounts] == ["/data/train", "/data/eval"]
+
+
+def test_patch_runtime_keeps_caller_resource_version(mock_k8s_apis):
+    api = mock_k8s_apis["custom"]
+    current = _runtime_with_jobs()
+    current["metadata"] = {"resourceVersion": "7"}
+    api.get_cluster_custom_object.return_value = current
+    api.patch_cluster_custom_object.return_value = {"metadata": {}}
+
+    verify_tool_success(
+        patch_runtime(
+            "torchtune-llama", patch={"metadata": {"resourceVersion": "5"}}, confirmed=True
+        )
+    )
+
+    body = api.patch_cluster_custom_object.call_args.kwargs["body"]
+    assert body["metadata"]["resourceVersion"] == "5"
+
+
+def test_patch_runtime_missing_runtime_is_not_patched(mock_k8s_apis):
+    api = mock_k8s_apis["custom"]
+    api.get_cluster_custom_object.side_effect = ApiException(status=404, reason="Not Found")
+
+    result = patch_runtime(
+        "missing-runtime", patch={"spec": {"labels": {"a": "b"}}}, confirmed=True
+    )
+
+    verify_tool_error(result, error_code=RESOURCE_NOT_FOUND)
+    api.patch_cluster_custom_object.assert_not_called()
 
 
 def test_patch_runtime_invalid_runtime_name_returns_not_found(mock_k8s_apis):
@@ -348,8 +522,9 @@ def test_inspect_controller_missing_pod_is_still_not_found(mock_k8s_apis, scan_d
     verify_tool_error(result, error_code=RESOURCE_NOT_FOUND)
 
 
+@pytest.mark.parametrize("controller_name", ["trainer", "kubeflow-trainer"])
 def test_inspect_controller_finds_pod_despite_forbidden_namespace(
-    mock_k8s_apis, scan_default_namespaces
+    mock_k8s_apis, scan_default_namespaces, controller_name
 ):
     core = mock_k8s_apis["core_v1"]
     pod = MagicMock()
@@ -357,10 +532,11 @@ def test_inspect_controller_finds_pod_despite_forbidden_namespace(
     pod.metadata.namespace = "kubeflow-system"
     pod.status.phase = "Running"
 
-    def list_pods(namespace, **_kwargs):
+    def list_pods(namespace, label_selector, **_kwargs):
         if namespace == "kubeflow":
             raise ApiException(status=403, reason="Forbidden")
-        return MagicMock(items=[pod])
+        selector = f"app.kubernetes.io/name={controller_name},app.kubernetes.io/component=manager"
+        return MagicMock(items=[pod] if label_selector == selector else [])
 
     core.list_namespaced_pod.side_effect = list_pods
     core.read_namespaced_pod_log.return_value = "controller started"
@@ -447,8 +623,125 @@ def test_inspect_controller_auto_discovery_is_exempt_from_policy(
     assert verify_tool_success(result)["namespace"] == "kubeflow"
 
 
-# Remaining TODOs are outside this PR's runtime CRUD slice.
-# TODO(test): test inspect_crd — lists all Trainer CRDs
-# TODO(test): test inspect_crd(name) — returns CRD schema and conditions
-# TODO(test): test inspect_crd — invalid CRD name
-# TODO(test): test inspect_controller(view="logs") — returns controller logs
+def test_inspect_crd_lists_only_trainer_crds(mock_k8s_apis):
+    api = mock_k8s_apis["apiextensions"]
+
+    trainer_crd = MagicMock()
+    trainer_crd.metadata.name = "trainjobs.trainer.kubeflow.org"
+    trainer_crd.spec.group = "trainer.kubeflow.org"
+    trainer_crd.spec.scope = "Namespaced"
+
+    version = MagicMock()
+    version.name = "v1"
+    version.served = True
+    version.storage = True
+    trainer_crd.spec.versions = [version]
+
+    other_crd = MagicMock()
+    other_crd.spec.group = "example.com"
+
+    api.list_custom_resource_definition.return_value = MagicMock(items=[trainer_crd, other_crd])
+
+    result = inspect_crd()
+
+    data = verify_tool_success(result)
+    assert data["count"] == 1
+    assert data["crds"] == [
+        {
+            "name": "trainjobs.trainer.kubeflow.org",
+            "group": "trainer.kubeflow.org",
+            "versions": ["v1"],
+            "scope": "Namespaced",
+            "served_versions": ["v1"],
+        }
+    ]
+    api.list_custom_resource_definition.assert_called_once_with(
+        _request_timeout=mcp_utils.K8S_TIMEOUT
+    )
+
+
+def test_inspect_crd_returns_schema_and_conditions(mock_k8s_apis):
+    api = mock_k8s_apis["apiextensions"]
+
+    crd = MagicMock()
+    crd.metadata.name = "trainjobs.trainer.kubeflow.org"
+    crd.spec.group = "trainer.kubeflow.org"
+    crd.spec.scope = "Namespaced"
+
+    spec_schema = MagicMock()
+    spec_schema.properties = {
+        "numNodes": MagicMock(),
+        "template": MagicMock(),
+    }
+
+    openapi_schema = MagicMock()
+    openapi_schema.properties = {"spec": spec_schema}
+
+    version = MagicMock()
+    version.name = "v1"
+    version.served = True
+    version.storage = True
+    version.schema = MagicMock()
+    version.schema.open_apiv3_schema = openapi_schema
+    crd.spec.versions = [version]
+
+    condition = MagicMock()
+    condition.type = "Established"
+    condition.status = "True"
+    crd.status.conditions = [condition]
+
+    api.read_custom_resource_definition.return_value = crd
+
+    result = inspect_crd("trainjobs.trainer.kubeflow.org")
+
+    data = verify_tool_success(result)
+    assert data["name"] == "trainjobs.trainer.kubeflow.org"
+    assert data["group"] == "trainer.kubeflow.org"
+    assert data["scope"] == "Namespaced"
+    assert data["versions"] == [
+        {
+            "name": "v1",
+            "served": True,
+            "storage": True,
+            "spec_fields": ["numNodes", "template"],
+        }
+    ]
+    assert data["conditions"] == [{"type": "Established", "status": "True"}]
+
+    api.read_custom_resource_definition.assert_called_once_with(
+        name="trainjobs.trainer.kubeflow.org",
+        _request_timeout=mcp_utils.K8S_TIMEOUT,
+    )
+
+
+def test_inspect_crd_invalid_name_returns_kubernetes_error(mock_k8s_apis):
+    api = mock_k8s_apis["apiextensions"]
+    api.read_custom_resource_definition.side_effect = ApiException(status=400, reason="Bad Request")
+
+    result = inspect_crd("not a valid/name")
+
+    error = verify_tool_error(result, error_code=KUBERNETES_ERROR)
+    assert "Bad Request" in error["error"]
+
+
+def test_inspect_controller_logs_response(mock_k8s_apis, scan_default_namespaces):
+    core = mock_k8s_apis["core_v1"]
+    pod = _controller_pod("kubeflow-system")
+    core.list_namespaced_pod.return_value = MagicMock(items=[pod])
+    core.read_namespaced_pod_log.return_value = "controller started\nready"
+
+    result = inspect_controller(view="logs", tail_lines=25)
+
+    data = verify_tool_success(result)
+    assert data["pod"] == "trainer-controller-manager-0"
+    assert data["namespace"] == "kubeflow-system"
+    assert data["logs"] == "controller started\nready"
+    assert data["tail_lines"] == 25
+    assert data["phase"] == "Running"
+
+    core.read_namespaced_pod_log.assert_called_once_with(
+        name="trainer-controller-manager-0",
+        namespace="kubeflow-system",
+        tail_lines=25,
+        _request_timeout=mcp_utils.K8S_TIMEOUT,
+    )

@@ -94,10 +94,10 @@ CLIENT_TOOL_DESCRIPTIONS: dict[str, str] = {
         "Call FIRST. Pass model= for GPU sizing."
     ),
     "check_compatibility": "Verify K8s version, Trainer CRD, installed packages, and platform. Use pre_flight() for full check.",
-    "get_cluster_resources": "Check cluster GPU/CPU availability. Use pre_flight() instead for full check.",
+    "get_cluster_resources": "Check cluster GPU capacity and estimated unallocated GPUs. Free GPUs are unknown without cluster-wide pod access.",
     "estimate_resources": "Estimate GPU memory needed for a HuggingFace model. Use pre_flight(model=...) instead.",
     "list_training_jobs": "List training jobs. Filter by runtime, status, or namespace.",
-    "get_training_job": "Get details of a specific training job, including the status of each step (pod). Supports optional namespace.",
+    "get_training_job": "Inspect job and initializer/trainer pods: readiness, restarts, waiting/termination reasons and scheduling blockers. Supports optional namespace.",
     "list_runtimes": "List available ClusterTrainingRuntimes.",
     "get_runtime": "Get runtime config. Pass include_packages=True to fetch pip list (slow: creates a Pod).",
     "fine_tune": (
@@ -126,7 +126,12 @@ CLIENT_TOOL_DESCRIPTIONS: dict[str, str] = {
     "update_training_job": "Suspend or resume a training job. Pass action='suspend' or 'resume'. Set confirmed=True to execute.",
     "inspect_crd": "List Trainer CRDs or get details for a specific one. Pass name= for details.",
     "inspect_controller": "Inspect controller pod. Pass view='logs' or 'events'. Auto-discovers namespace.",
-    "patch_runtime": "Strategic merge patch on a ClusterTrainingRuntime. Set confirmed=True to apply.",
+    "patch_runtime": (
+        "Merge patch on a ClusterTrainingRuntime. Keyed lists (replicatedJobs, containers, "
+        "initContainers, env, volumes by name; volumeMounts by mountPath) merge by key: unmentioned entries are kept, "
+        "a partial list cannot remove one, listing all entries applies their order, and [] clears the list. "
+        "Set confirmed=True to apply."
+    ),
     "create_runtime": "Create a new ClusterTrainingRuntime. Set confirmed=True to create.",
     "delete_runtime": "[DESTRUCTIVE] Delete a ClusterTrainingRuntime. Lists dependent jobs first. Set confirmed=True.",
 }
@@ -354,7 +359,7 @@ DISCOVERY (before training):
     "monitoring": {
         "full": """\
 MONITORING AND LIFECYCLE:
-- get_training_job(name) -> check status (Created/Running/Complete/Failed/Suspended)
+- get_training_job(name) -> check status, pod readiness/restarts and blocking_reasons before waiting again
 - get_training_logs(name) -> view output/errors. Failure patterns auto-detected with hints
 - get_training_logs(name, since_line=N) -> cursor mode: returns lines [N:N+max_lines], adds next_offset and total_lines. Echo next_offset as since_line each poll. A page may have fewer than max_lines lines due to the char budget; use next_offset to advance, not page length — a short page does not mean end of log. since_line==total_lines: nothing new yet. since_line>total_lines: log_reset=true, restart from 0. Returns VALIDATION_ERROR if active logs empty (pod restarted); drop since_line to read crash logs
 - get_training_events(name) -> debug scheduling issues, pending pods, image pull errors
@@ -397,7 +402,7 @@ PLATFORM ADMINISTRATION:
 - inspect_crd() -> list all Trainer CRDs; inspect_crd(name) -> get schema, versions, conditions
 - inspect_controller(view="logs") -> read trainer-controller-manager pod logs (auto-discovers namespace; override via KUBEFLOW_MCP_CONTROLLER_NAMESPACE)
 - inspect_controller(view="events") -> K8s events for controller pod
-- patch_runtime(name, patch, confirmed=True) -> strategic merge patch on ClusterTrainingRuntime (update images, add volumes, change defaults)
+- patch_runtime(name, patch, confirmed=True) -> merge patch on ClusterTrainingRuntime; lists of keyed entries (replicatedJobs, containers, env, volumes by name; volumeMounts by mountPath) merge by key (update images, add volumes, change defaults)
 - create_runtime(name, spec, confirmed=True) -> create new ClusterTrainingRuntime
 - delete_runtime(name, confirmed=True) -> delete runtime; lists dependent TrainJobs as warning before deletion""",
     },

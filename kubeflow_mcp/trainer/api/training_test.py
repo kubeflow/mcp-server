@@ -54,6 +54,39 @@ def _offline_hub(monkeypatch):
     monkeypatch.setattr("huggingface_hub.model_info", MagicMock())
     monkeypatch.setattr("huggingface_hub.dataset_info", MagicMock())
     monkeypatch.setattr("huggingface_hub.list_models", MagicMock(return_value=[]))
+    api = MagicMock()
+    api.get_namespaced_custom_object.return_value = {
+        "spec": {
+            "template": {
+                "spec": {
+                    "replicatedJobs": [
+                        {
+                            "name": "node",
+                            "template": {
+                                "spec": {
+                                    "template": {
+                                        "spec": {
+                                            "containers": [{"name": "node"}],
+                                        }
+                                    }
+                                }
+                            },
+                        }
+                    ],
+                }
+            }
+        }
+    }
+    monkeypatch.setattr(
+        "kubeflow_mcp.common.utils.get_custom_objects_api", MagicMock(return_value=api)
+    )
+    monkeypatch.setattr(
+        "kubeflow_mcp.common.utils.get_trainer_effective_namespace",
+        lambda namespace=None: namespace or "default",
+    )
+    monkeypatch.setattr(
+        "kubeflow_mcp.trainer.api.planning.get_cluster_resources", MagicMock(return_value={})
+    )
 
 
 # ─── fine_tune validation ───────────────────────────────────────────────────
@@ -675,6 +708,59 @@ def test_run_custom_training_accepts_valid_or_missing_image(image):
 
 
 class TestRunCustomTrainingConfirmed:
+    @pytest.mark.parametrize(
+        ("volumes", "mounts"),
+        [
+            (None, None),
+            ([], []),
+            ([{"name": "data", "emptyDir": {}}], [{"name": "data", "mountPath": "/data"}]),
+            (
+                [{"name": "workspace", "persistentVolumeClaim": {"claimName": "data"}}],
+                [{"name": "workspace", "mountPath": "/data"}],
+            ),
+            (
+                [{"name": "data", "persistentVolumeClaim": {"claimName": "data"}}],
+                [{"name": "data", "mountPath": "/workspace"}],
+            ),
+        ],
+        ids=["omitted", "empty", "other-volume", "name-collision", "existing-workspace"],
+    )
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_workspace_matches_preview_and_preserves_inputs(
+        self,
+        mock_client_fn: MagicMock,
+        _ns: MagicMock,
+        volumes: list[dict] | None,
+        mounts: list[dict] | None,
+    ) -> None:
+        original_volumes = [dict(v) for v in volumes] if volumes is not None else None
+        original_mounts = [dict(m) for m in mounts] if mounts is not None else None
+        kwargs = {"script": "print('hello')", "volumes": volumes, "volume_mounts": mounts}
+        preview = run_custom_training(**kwargs)
+        mock_client_fn.assert_not_called()
+        mock_client_fn.return_value.train.return_value = "workspace-test"
+        result = run_custom_training(**kwargs, confirmed=True)
+
+        assert result["success"] is True
+        node = _pod_specs(mock_client_fn.return_value.train.call_args.kwargs["options"])["node"]
+        actual_mounts = node.containers[0].volume_mounts
+        assert node.volumes == preview["config"]["volumes"]
+        assert actual_mounts == preview["config"]["volume_mounts"]
+        assert len({v["name"] for v in node.volumes}) == len(node.volumes)
+        workspace_mounts = [m for m in actual_mounts if m["mountPath"] == "/workspace"]
+        assert len(workspace_mounts) == 1
+        workspace = next(v for v in node.volumes if v["name"] == workspace_mounts[0]["name"])
+        if any(m["mountPath"] == "/workspace" for m in (mounts or [])):
+            assert node.volumes == volumes
+            assert actual_mounts == mounts
+        else:
+            assert workspace["emptyDir"] == {}
+        assert node.volumes[: len(volumes or [])] == (volumes or [])
+        assert actual_mounts[: len(mounts or [])] == (mounts or [])
+        assert volumes == original_volumes
+        assert mounts == original_mounts
+
     @patch(PATCH_NS_CHECK, return_value=None)
     @patch(PATCH_CLIENT)
     def test_confirmed_creates_job(self, mock_client_fn, _ns):
@@ -1130,3 +1216,654 @@ class TestBuildRuntimePatch:
         assert [type(o).__name__ for o in options] == ["Labels", "Annotations"]
         assert options[0].labels == {"team": "ml"}
         assert options[1].annotations == {"owner": "alice"}
+
+
+# ─── Top-level Hugging Face Dataset Workaround (#32, #494) ───────────────────
+
+
+class TestFineTuneHuggingFaceDatasetWorkaround:
+    """Verify fine_tune handles top-level Hugging Face dataset URIs with SDK 0.5.0."""
+
+    @pytest.fixture
+    def mock_backend(self):
+        from unittest.mock import MagicMock
+
+        from kubeflow.trainer.backends.kubernetes.backend import KubernetesBackend
+        from kubeflow.trainer.types.types import TrainerType
+
+        backend = KubernetesBackend.__new__(KubernetesBackend)
+        backend.namespace = "default"
+        backend.custom_api = MagicMock()
+
+        fake_runtime = MagicMock()
+        fake_runtime.name = "torchtune-llama3.2-1b"
+        fake_runtime.kind.value = "ClusterTrainingRuntime"
+        fake_runtime.trainer.trainer_type = TrainerType.BUILTIN_TRAINER
+        fake_runtime.trainer.command = ["tune", "run"]
+        backend.get_runtime = MagicMock(return_value=fake_runtime)
+        return backend
+
+    @patch("kubeflow_mcp.trainer.api.training._check_hf_repos_exist", return_value=None)
+    @patch("kubeflow_mcp.trainer.api.training.check_namespace_allowed", return_value=None)
+    def test_top_level_hf_dataset_reaches_creation_without_trainer_args_error(
+        self, _ns, _hf, mock_backend
+    ):
+        with patch("kubeflow_mcp.trainer.api.training._get_client", return_value=mock_backend):
+            result = fine_tune(
+                model="hf://meta-llama/Llama-3.2-1B",
+                dataset="hf://tatsu-lab/alpaca",
+                runtime="torchtune-llama3.2-1b",
+                namespace="default",
+                confirmed=True,
+            )
+
+        assert result["success"] is True
+        mock_backend.custom_api.create_namespaced_custom_object.assert_called_once()
+        train_job = mock_backend.custom_api.create_namespaced_custom_object.call_args[0][4]
+        args = train_job["spec"]["trainer"]["args"]
+
+        assert "dataset.source=/workspace/dataset" in args
+        assert "dataset.data_dir=null" in args
+        assert not any(
+            a.startswith("dataset.data_dir=/workspace") and a.endswith("/.") for a in args
+        )
+        assert "batch_size=4" in args
+        assert "epochs=1" in args
+        assert "model.lora_rank=8" in args
+        assert "model.lora_alpha=16" in args
+
+    @patch("kubeflow_mcp.trainer.api.training._check_hf_repos_exist", return_value=None)
+    @patch("kubeflow_mcp.trainer.api.training.check_namespace_allowed", return_value=None)
+    def test_top_level_hf_dataset_preserves_explicit_dataset_source(self, _ns, _hf, mock_backend):
+        with patch("kubeflow_mcp.trainer.api.training._get_client", return_value=mock_backend):
+            result = fine_tune(
+                model="hf://meta-llama/Llama-3.2-1B",
+                dataset="hf://tatsu-lab/alpaca",
+                runtime="torchtune-llama3.2-1b",
+                dataset_source="json",
+                namespace="default",
+                confirmed=True,
+            )
+
+        assert result["success"] is True
+        train_job = mock_backend.custom_api.create_namespaced_custom_object.call_args[0][4]
+        args = train_job["spec"]["trainer"]["args"]
+
+        assert "dataset.source=json" in args
+        assert "dataset.data_dir=/workspace/dataset" in args
+        assert "dataset.data_dir=null" not in args
+        assert "dataset.source=/workspace/dataset" not in args
+
+    @patch("kubeflow_mcp.trainer.api.training._check_hf_repos_exist", return_value=None)
+    @patch("kubeflow_mcp.trainer.api.training.check_namespace_allowed", return_value=None)
+    def test_s3_dataset_does_not_apply_hf_workaround(self, _ns, _hf, mock_backend):
+        with patch("kubeflow_mcp.trainer.api.training._get_client", return_value=mock_backend):
+            result = fine_tune(
+                model="hf://meta-llama/Llama-3.2-1B",
+                dataset="s3://my-bucket/dataset",
+                runtime="torchtune-llama3.2-1b",
+                namespace="default",
+                confirmed=True,
+            )
+
+        assert result["success"] is True
+        train_job = mock_backend.custom_api.create_namespaced_custom_object.call_args[0][4]
+        args = train_job["spec"]["trainer"]["args"]
+
+        assert "dataset.source=/workspace/dataset" not in args
+        assert "dataset.data_dir=null" not in args
+
+
+@pytest.mark.parametrize("scope", ["namespace", "cluster", "denied"])
+def test_runtime_node_lookup_respects_scope_and_denials(scope: str) -> None:
+    from kubeflow_mcp.trainer.api.training import _get_runtime_node_spec
+
+    pod = {"containers": [{"name": "node"}]}
+    raw = {
+        "spec": {
+            "template": {
+                "spec": {
+                    "replicatedJobs": [
+                        {"name": "node", "template": {"spec": {"template": {"spec": pod}}}}
+                    ]
+                }
+            }
+        }
+    }
+    api = MagicMock()
+    api.get_namespaced_custom_object.return_value = raw
+    api.get_cluster_custom_object.return_value = raw
+    if scope != "namespace":
+        api.get_namespaced_custom_object.side_effect = ApiException(
+            status=404 if scope == "cluster" else 403
+        )
+    with patch("kubeflow_mcp.common.utils.get_custom_objects_api", return_value=api):
+        if scope == "denied":
+            with pytest.raises(ApiException):
+                _get_runtime_node_spec("custom-runtime", "workloads")
+        else:
+            assert _get_runtime_node_spec("custom-runtime", "workloads") == pod
+    assert api.get_namespaced_custom_object.call_args.kwargs["namespace"] == "workloads"
+    assert api.get_namespaced_custom_object.call_args.kwargs["name"] == "custom-runtime"
+    assert api.get_cluster_custom_object.call_count == int(scope == "cluster")
+
+
+@pytest.mark.parametrize("confirmed", [False, True])
+@pytest.mark.parametrize("cluster_scoped", [False, True])
+@pytest.mark.parametrize("mount_path", ["/workspace", "/workspace/"])
+def test_custom_training_preserves_inherited_workspace(
+    confirmed: bool, cluster_scoped: bool, mount_path: str
+) -> None:
+    pod_spec = {
+        "volumes": [{"name": "saved", "persistentVolumeClaim": {"claimName": "checkpoints"}}],
+        "containers": [
+            {"name": "node", "volumeMounts": [{"name": "saved", "mountPath": mount_path}]}
+        ],
+    }
+    raw = {
+        "spec": {
+            "template": {
+                "spec": {
+                    "replicatedJobs": [
+                        {"name": "node", "template": {"spec": {"template": {"spec": pod_spec}}}},
+                    ]
+                }
+            }
+        }
+    }
+    api = MagicMock()
+    api.get_namespaced_custom_object.return_value = raw
+    api.get_cluster_custom_object.return_value = raw
+    if cluster_scoped:
+        api.get_namespaced_custom_object.side_effect = ApiException(status=404)
+    with (
+        patch(PATCH_NS_CHECK, return_value=None),
+        patch(PATCH_CLIENT) as client,
+        patch("kubeflow_mcp.common.utils.get_custom_objects_api", return_value=api),
+    ):
+        client.return_value.train.return_value = "workspace-test"
+        result = run_custom_training(
+            script="print('hello')",
+            runtime="pvc-runtime",
+            namespace="workloads",
+            confirmed=confirmed,
+        )
+    if confirmed:
+        assert result["success"] is True
+        assert not any(
+            type(option).__name__ == "RuntimePatch"
+            for option in client.return_value.train.call_args.kwargs["options"]
+        )
+    else:
+        assert result["status"] == "preview"
+        assert "volumes" not in result["config"]
+        assert "volume_mounts" not in result["config"]
+        client.assert_not_called()
+    assert api.get_namespaced_custom_object.call_args.kwargs["namespace"] == "workloads"
+    assert api.get_namespaced_custom_object.call_args.kwargs["name"] == "pvc-runtime"
+    assert api.get_cluster_custom_object.call_count == int(cluster_scoped)
+    assert pod_spec["volumes"][0]["persistentVolumeClaim"]["claimName"] == "checkpoints"
+
+
+def test_workspace_fallback_avoids_runtime_volume_name_collision() -> None:
+    from kubeflow_mcp.trainer.api.training import _ensure_workspace
+
+    node = {
+        "containers": [{"name": "node"}],
+        "volumes": [
+            {"name": "workspace", "persistentVolumeClaim": {"claimName": "data"}},
+        ],
+    }
+    with patch("kubeflow_mcp.trainer.api.training._get_runtime_node_spec", return_value=node):
+        volumes, mounts = _ensure_workspace(None, None, runtime="custom", namespace="workloads")
+    assert volumes == [{"name": "workspace-1", "emptyDir": {}}]
+    assert mounts == [{"name": "workspace-1", "mountPath": "/workspace"}]
+
+
+@pytest.mark.parametrize("confirmed", [False, True])
+def test_custom_training_does_not_replace_unknown_runtime_storage(confirmed: bool) -> None:
+    api = MagicMock()
+    api.get_namespaced_custom_object.side_effect = ApiException(
+        status=403, reason="Cannot read runtime"
+    )
+    with (
+        patch(PATCH_NS_CHECK, return_value=None),
+        patch(PATCH_CLIENT) as client,
+        patch("kubeflow_mcp.common.utils.get_custom_objects_api", return_value=api),
+    ):
+        result = run_custom_training(
+            script="print('hello')",
+            runtime="private-runtime",
+            namespace="workloads",
+            confirmed=confirmed,
+        )
+    assert result["error_code"] == "PERMISSION_DENIED"
+    client.assert_not_called()
+    api.get_cluster_custom_object.assert_not_called()
+
+
+@pytest.mark.parametrize("mount_path", ["/workspace", "/workspace/"])
+def test_explicit_workspace_does_not_require_runtime_lookup(mount_path: str) -> None:
+    from kubeflow_mcp.trainer.api.training import _ensure_workspace
+
+    volumes = [{"name": "data", "persistentVolumeClaim": {"claimName": "checkpoints"}}]
+    mounts = [{"name": "data", "mountPath": mount_path}]
+    with patch("kubeflow_mcp.trainer.api.training._get_runtime_node_spec") as read:
+        assert _ensure_workspace(volumes, mounts, runtime="custom", namespace="workloads") == (
+            volumes,
+            mounts,
+        )
+    read.assert_not_called()
+
+
+@pytest.mark.parametrize(("tool", "config"), _TRAINING_TOOLS)
+@pytest.mark.parametrize("confirmed", [False, True])
+@pytest.mark.parametrize(
+    "storage",
+    [
+        {"volumes": [{"name": "data", "persistent_volume_claim": {"claim_name": "data"}}]},
+        {"volumes": [{"name": "data", "persistentVolumeClaim": {"claim_name": "data"}}]},
+        {"volumes": [{"name": "data", "persistentVolumeClaim": {}}]},
+        {"volumes": [{"name": "data"}]},
+        {
+            "volumes": [
+                {"name": "data", "emptyDir": {}, "persistentVolumeClaim": {"claimName": "data"}}
+            ]
+        },
+        {"volume_mounts": [{"name": "data", "mount_path": "/workspace"}]},
+        {"volume_mounts": [{"name": "data", "mountPath": "relative"}]},
+    ],
+)
+def test_storage_rejected_before_preview_or_submission(tool, config, confirmed, storage):
+    with patch(PATCH_CLIENT) as sdk, patch(PATCH_GPU_CHECK) as gpu:
+        result = tool(**config, **storage, confirmed=confirmed)
+    assert result["error_code"] == "VALIDATION_ERROR"
+    sdk.assert_not_called()
+    gpu.assert_not_called()
+
+
+def test_storage_accepts_kubernetes_fields_and_runtime_mounts():
+    from kubeflow_mcp.trainer.api.training import _validate_storage
+
+    assert (
+        _validate_storage(
+            [
+                {"name": "checkpoint", "persistentVolumeClaim": {"claimName": "saved.model"}},
+                {"name": "tmp", "emptyDir": {}},
+            ],
+            [{"name": "checkpoint", "mountPath": "/workspace"}],
+        )
+        is None
+    )
+    assert _validate_storage(None, [{"name": "runtime-volume", "mountPath": "/runtime"}]) is None
+
+
+@pytest.mark.parametrize("confirmed", [False, True])
+@pytest.mark.parametrize("missing", ["node job", "node container"])
+def test_custom_training_reports_missing_runtime_node(missing: str, confirmed: bool) -> None:
+    pod = {"containers": [{"name": "sidecar"}]}
+    jobs = (
+        []
+        if missing == "node job"
+        else [{"name": "node", "template": {"spec": {"template": {"spec": pod}}}}]
+    )
+    raw = {"spec": {"template": {"spec": {"replicatedJobs": jobs}}}}
+    api = MagicMock()
+    api.get_namespaced_custom_object.return_value = raw
+    with (
+        patch(PATCH_NS_CHECK, return_value=None),
+        patch(PATCH_CLIENT) as client,
+        patch("kubeflow_mcp.common.utils.get_custom_objects_api", return_value=api),
+    ):
+        result = run_custom_training(
+            script="print('hello')",
+            runtime="invalid-runtime",
+            namespace="workloads",
+            confirmed=confirmed,
+        )
+    assert result["success"] is False
+    assert "invalid-runtime" in result["error"]
+    assert missing in result["error"]
+    client.assert_not_called()
+
+
+@pytest.mark.parametrize("confirmed", [False, True])
+def test_custom_training_reports_runtime_not_found(confirmed: bool) -> None:
+    api = MagicMock()
+    api.get_namespaced_custom_object.side_effect = ApiException(status=404)
+    api.get_cluster_custom_object.side_effect = ApiException(status=404)
+    with (
+        patch(PATCH_NS_CHECK, return_value=None),
+        patch(PATCH_CLIENT) as client,
+        patch("kubeflow_mcp.common.utils.get_custom_objects_api", return_value=api),
+    ):
+        result = run_custom_training(
+            script="print('hello')",
+            runtime="missing-runtime",
+            namespace="workloads",
+            confirmed=confirmed,
+        )
+    assert result["error_code"] == "RESOURCE_NOT_FOUND"
+    assert "missing-runtime" in result["error"]
+    assert "workloads" in result["error"]
+    client.assert_not_called()
+
+
+def test_custom_training_namespace_404_keeps_the_submission_context() -> None:
+    with patch(PATCH_NS_CHECK, return_value=None), patch(PATCH_CLIENT) as client:
+        client.return_value.train.side_effect = ApiException(status=404, reason="Namespace missing")
+        result = run_custom_training(
+            script="print('hello')",
+            runtime="torch-distributed",
+            namespace="missing-namespace",
+            volumes=[{"name": "workspace", "emptyDir": {}}],
+            volume_mounts=[{"name": "workspace", "mountPath": "/workspace"}],
+            confirmed=True,
+        )
+    assert result["error_code"] == "RESOURCE_NOT_FOUND"
+    assert "missing-namespace" in result["error"]
+    assert "torch-distributed" in result["error"]
+    assert "namespace" in result["hint"]
+    client.return_value.train.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "message,expected",
+    [
+        (
+            'admission webhook "validator.trainer" denied the request: spec.runtimeRef.name: Invalid value: "qwen": QLoRA is not supported',
+            "VALIDATION_ERROR",
+        ),
+        (
+            'admission webhook "validator.trainer" denied the request: spec.runtimeRef: Required value',
+            "VALIDATION_ERROR",
+        ),
+        (
+            'admission webhook "validator.trainer" denied the request: spec.trainer: Unsupported value',
+            "VALIDATION_ERROR",
+        ),
+        (
+            'admission webhook "validator.trainer" denied the request: spec.initializer: Forbidden',
+            "VALIDATION_ERROR",
+        ),
+        (
+            'admission webhook "security-policy" denied the request: spec.trainerPolicy: Invalid value',
+            "PERMISSION_DENIED",
+        ),
+        (
+            'admission webhook "security-policy" denied the request: service account forbidden',
+            "PERMISSION_DENIED",
+        ),
+        (
+            'admission webhook "security-policy" denied the request: spec.serviceAccountName: Invalid value: "admin"',
+            "PERMISSION_DENIED",
+        ),
+        ("User cannot create trainjobs in namespace workloads", "PERMISSION_DENIED"),
+    ],
+)
+@pytest.mark.parametrize("wrapping", ["direct", "cause", "context"])
+def test_admission_validation_distinguished_from_permissions(
+    message: str, expected: str, wrapping: str
+) -> None:
+    import json
+
+    from kubeflow_mcp.trainer.api.training import _sdk_error
+
+    api_error = ApiException(status=403)
+    api_error.body = json.dumps({"message": message})
+    error: Exception = api_error
+    if wrapping != "direct":
+        error = RuntimeError("Failed to create TrainJob")
+        if wrapping == "cause":
+            error.__cause__ = api_error
+        else:
+            error.__context__ = api_error
+    result = _sdk_error(error)
+    assert result["error_code"] == expected
+    if expected == "VALIDATION_ERROR":
+        assert result["error"] == message
+        assert "service_account_name" not in result["hint"]
+
+
+@pytest.mark.parametrize(
+    "free,expected",
+    [
+        (1, "no node has that capacity"),
+        (None, "Free GPUs are unknown"),
+        (0, "cannot fit all requested workers"),
+    ],
+)
+def test_fine_tune_preview_inherits_resources_and_warns_per_pod_fit(free, expected):
+    from kubeflow_mcp.trainer.api.training import _fine_tune_resource_preview
+
+    api = MagicMock()
+    api.get_namespaced_custom_object.side_effect = ApiException(status=404)
+    api.get_cluster_custom_object.return_value = {
+        "spec": {
+            "template": {
+                "spec": {
+                    "replicatedJobs": [
+                        {
+                            "name": "node",
+                            "template": {
+                                "spec": {
+                                    "template": {
+                                        "spec": {
+                                            "containers": [
+                                                {
+                                                    "name": "node",
+                                                    "resources": {
+                                                        "requests": {"cpu": "4", "memory": "16Gi"},
+                                                        "limits": {"nvidia.com/gpu": "2"},
+                                                    },
+                                                }
+                                            ]
+                                        }
+                                    }
+                                }
+                            },
+                        }
+                    ]
+                }
+            }
+        }
+    }
+    cluster = {
+        "data": {
+            "gpu_total": 2,
+            "gpu_available": free,
+            "nodes": [{"gpus": 1, "gpu_available": free}, {"gpus": 1, "gpu_available": free}],
+        }
+    }
+    with (
+        patch("kubeflow_mcp.common.utils.get_custom_objects_api", return_value=api),
+    ):
+        # An explicit 1-GPU override fits capacity but availability can still be unknown.
+        result = _fine_tune_resource_preview(
+            "torchtune-qwen", "workloads", {"gpu": 1} if free != 1 else None, 1, cluster["data"]
+        )
+    assert result["effective_resources_per_node"]["cpu"] == "4"
+    assert result["effective_resources_per_node"]["nvidia.com/gpu"] == (1 if free != 1 else "2")
+    assert any(expected in warning for warning in result["resource_warnings"])
+    assert api.get_namespaced_custom_object.call_args.kwargs["namespace"] == "workloads"
+
+
+def test_resource_preview_keeps_explicit_requests_when_runtime_unreadable():
+    from kubeflow_mcp.trainer.api.training import _fine_tune_resource_preview
+
+    api = MagicMock()
+    api.get_namespaced_custom_object.side_effect = ApiException(status=403)
+    with patch("kubeflow_mcp.common.utils.get_custom_objects_api", return_value=api):
+        result = _fine_tune_resource_preview("torchtune-qwen", "workloads", {"cpu": "2"}, 1, {})
+    assert result["effective_resources_per_node"] == {"cpu": "2"}
+    assert "incomplete" in result["resource_warnings"][0]
+    api.get_cluster_custom_object.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "resources,expected",
+    [
+        ({"GPU": 1}, {"nvidia.com/gpu": 1}),
+        ({"nvidia.com/gpu": 1}, {"nvidia.com/gpu": 1}),
+        (
+            {"gpu": 1, "CPU": "2", "Memory": "8Gi", "storage": "10Gi"},
+            {"nvidia.com/gpu": 1, "cpu": "2", "memory": "8Gi", "ephemeral-storage": "10Gi"},
+        ),
+    ],
+)
+def test_fine_tune_preview_matches_sdk_resources_and_inspects_cluster_once(resources, expected):
+    pod_spec = {
+        "containers": [
+            {
+                "name": "node",
+                "resources": {
+                    "requests": {"cpu": "4"},
+                    "limits": {"nvidia.com/gpu": "2"},
+                },
+            }
+        ]
+    }
+    job = {"name": "node", "template": {"spec": {"template": {"spec": pod_spec}}}}
+    api = MagicMock()
+    api.get_namespaced_custom_object.return_value = {
+        "spec": {
+            "template": {
+                "spec": {"replicatedJobs": [job]},
+            }
+        }
+    }
+    snapshot = {
+        "gpu_total": 2,
+        "gpu_available": 2,
+        "nodes": [
+            {"gpus": 1, "gpu_available": 1},
+            {"gpus": 1, "gpu_available": 1},
+        ],
+    }
+    with (
+        patch(PATCH_NS_CHECK, return_value=None),
+        patch(PATCH_CLIENT) as client,
+        patch("kubeflow_mcp.common.utils.get_custom_objects_api", return_value=api),
+        patch(
+            "kubeflow_mcp.trainer.api.planning.get_cluster_resources",
+            return_value={"data": snapshot},
+        ) as inspect,
+    ):
+        result = fine_tune(
+            "hf://org/model",
+            "hf://org/dataset",
+            runtime="torchtune-test",
+            namespace="workloads",
+            resources_per_node=resources,
+        )
+    assert result["status"] == "preview"
+    effective = result["config"]["effective_resources_per_node"]
+    assert expected.items() <= effective.items()
+    assert "GPU" not in effective
+    assert "CPU" not in effective
+    assert not any("no node has that capacity" in w for w in result["config"]["resource_warnings"])
+    assert result["config"]["resources_per_node"] == resources
+    inspect.assert_called_once_with()
+    client.assert_not_called()
+
+
+def test_fine_tune_zero_gpu_snapshot_blocks_before_runtime_inspection():
+    with (
+        patch(PATCH_NS_CHECK, return_value=None),
+        patch("kubeflow_mcp.common.utils.get_custom_objects_api") as api,
+        patch(
+            "kubeflow_mcp.trainer.api.planning.get_cluster_resources",
+            return_value={"data": {"gpu_total": 0}},
+        ) as inspect,
+    ):
+        result = fine_tune("hf://org/model", "hf://org/dataset")
+    assert result["error_code"] == "VALIDATION_ERROR"
+    assert "No GPUs detected" in result["error"]
+    inspect.assert_called_once_with()
+    api.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "failure", [{"success": False, "error": "Unavailable"}, RuntimeError("Unavailable")]
+)
+def test_fine_tune_preview_preserves_unknown_availability_on_cluster_failure(failure):
+    with (
+        patch(PATCH_NS_CHECK, return_value=None),
+        patch("kubeflow_mcp.trainer.api.planning.get_cluster_resources") as inspect,
+    ):
+        if isinstance(failure, Exception):
+            inspect.side_effect = failure
+        else:
+            inspect.return_value = failure
+        result = fine_tune("hf://org/model", "hf://org/dataset", resources_per_node={"GPU": 1})
+    assert result["status"] == "preview"
+    assert any("Free GPUs are unknown" in w for w in result["config"]["resource_warnings"])
+    inspect.assert_called_once_with()
+
+
+def test_fine_tune_healthy_resource_preview_has_no_warnings() -> None:
+    from kubeflow_mcp.trainer.api.training import _fine_tune_resource_preview
+
+    pod = {"containers": [{"name": "node", "resources": {"requests": {"nvidia.com/gpu": "1"}}}]}
+    cluster = {"gpu_available": 2, "nodes": [{"gpus": 2, "gpu_available": 2}]}
+    with patch("kubeflow_mcp.trainer.api.training._get_runtime_node_spec", return_value=pod):
+        result = _fine_tune_resource_preview("torchtune", "workloads", None, 1, cluster)
+    assert result["effective_resources_per_node"] == {"nvidia.com/gpu": "1"}
+    assert result["resource_warnings"] == []
+
+
+@pytest.mark.parametrize(
+    "resources,runtime_gpus,warned",
+    [
+        ({"cpu": "8", "memory": "32Gi"}, 2, True),
+        ({"memory": "32Gi"}, 2, True),
+        ({"CPU": "8"}, 2, True),
+        ({"gpu": 2, "cpu": "8"}, 2, False),
+        ({"GPU": 2}, 2, False),
+        ({"nvidia.com/gpu": 2}, 2, False),
+        ({"mig-1g.5gb": 1}, 2, False),
+        ({"memory": "32Gi"}, 0, False),
+        (None, 2, False),
+    ],
+)
+def test_preview_warns_when_overrides_omit_inherited_gpus(
+    resources: dict | None, runtime_gpus: int, warned: bool
+) -> None:
+    pod = {
+        "containers": [
+            {
+                "name": "node",
+                "resources": {"limits": {"nvidia.com/gpu": str(runtime_gpus)}},
+            }
+        ]
+    }
+    cluster = {
+        "data": {
+            "gpu_total": 2,
+            "gpu_available": 2,
+            "nodes": [{"gpus": 2, "gpu_available": 2}],
+        }
+    }
+    original = dict(resources) if resources is not None else None
+    with (
+        patch(PATCH_NS_CHECK, return_value=None),
+        patch(PATCH_CLIENT) as sdk,
+        patch("kubeflow_mcp.trainer.api.training._get_runtime_node_spec", return_value=pod),
+        patch(
+            "kubeflow_mcp.trainer.api.planning.get_cluster_resources", return_value=cluster
+        ) as inspect,
+    ):
+        result = fine_tune(
+            "hf://org/model",
+            "hf://org/dataset",
+            runtime="torchtune-test",
+            resources_per_node=resources,
+        )
+    assert result["status"] == "preview"
+    config = result["config"]
+    assert any("Set gpu explicitly" in w for w in config["resource_warnings"]) == warned
+    assert int(config["effective_resources_per_node"]["nvidia.com/gpu"]) == runtime_gpus
+    assert config.get("resources_per_node") == original
+    assert resources == original
+    inspect.assert_called_once_with()
+    sdk.assert_not_called()
