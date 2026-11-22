@@ -14,6 +14,7 @@
 
 """HTTP liveness and readiness probes, and discovery routes for network transports."""
 
+import os
 from typing import Any
 
 from fastmcp import FastMCP
@@ -87,7 +88,24 @@ def register_server_card_route(
 
     @mcp.custom_route("/.well-known/mcp.json", methods=["GET"], include_in_schema=False)
     async def server_card_route(request: Request) -> Response:
-        base_url = str(request.base_url).rstrip("/")
+        # Public origin derivation:
+        # 1. Reuse explicitly configured public base URL if available
+        public_url = os.environ.get("KUBEFLOW_MCP_PUBLIC_URL") or os.environ.get(
+            "KUBEFLOW_MCP_BASE_URL"
+        )
+        if public_url:
+            base_url = public_url.rstrip("/")
+        else:
+            # 2. Check X-Forwarded headers if present from reverse proxy/ingress
+            forwarded_proto = request.headers.get("x-forwarded-proto")
+            forwarded_host = request.headers.get("x-forwarded-host")
+            if forwarded_proto and forwarded_host:
+                proto = forwarded_proto.split(",")[0].strip()
+                host = forwarded_host.split(",")[0].strip()
+                base_url = f"{proto}://{host}".rstrip("/")
+            else:
+                base_url = str(request.base_url).rstrip("/")
+
         card = dict(server_card)
         card["remotes"] = [
             {

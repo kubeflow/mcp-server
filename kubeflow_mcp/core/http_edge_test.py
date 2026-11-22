@@ -151,3 +151,30 @@ def test_server_card_remains_available_when_auth_is_enabled() -> None:
 
     assert card_response.status_code == 200
     assert mcp_response.status_code == 401
+
+
+def test_server_card_respects_configured_public_url(monkeypatch) -> None:
+    monkeypatch.setenv("KUBEFLOW_MCP_PUBLIC_URL", "https://mcp.kubeflow.org/base")
+    mcp = create_server(persona="readonly")
+    with TestClient(mcp.http_app(transport="streamable-http")) as client:
+        response = client.get("/.well-known/mcp.json")
+
+    assert response.status_code == 200
+    card = response.json()
+    assert card["remotes"][0]["url"] == "https://mcp.kubeflow.org/base/mcp"
+
+
+def test_server_card_respects_forwarded_headers() -> None:
+    mcp = create_server(persona="readonly")
+    with TestClient(mcp.http_app(transport="streamable-http")) as client:
+        response = client.get(
+            "/.well-known/mcp.json",
+            headers={
+                "x-forwarded-proto": "https, http",
+                "x-forwarded-host": "mcp.example.com:8443, proxy.internal",
+            },
+        )
+
+    assert response.status_code == 200
+    card = response.json()
+    assert card["remotes"][0]["url"] == "https://mcp.example.com:8443/mcp"
