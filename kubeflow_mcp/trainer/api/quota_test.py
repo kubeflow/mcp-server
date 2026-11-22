@@ -28,9 +28,15 @@ from kubeflow_mcp.trainer.api.quota import (
 )
 
 
-def _make_resource_quota(name: str, hard: dict[str, str], used: dict[str, str]) -> SimpleNamespace:
+def _make_resource_quota(
+    name: str,
+    hard: dict[str, str],
+    used: dict[str, str],
+    scopes: list[str] | None = None,
+) -> SimpleNamespace:
     return SimpleNamespace(
         metadata=SimpleNamespace(name=name),
+        spec=SimpleNamespace(scopes=scopes),
         status=SimpleNamespace(hard=hard, used=used),
     )
 
@@ -175,6 +181,47 @@ class TestResourceQuotaChecks:
         assert err.error_code == ErrorCode.QUOTA_EXCEEDED
         assert "requested 2 pod(s), but only 1 available" in err.error
         assert err.details["resource"] == "count/pods"
+
+    def test_check_resource_quota_best_effort_scope_skipped_with_cpu(self) -> None:
+        quota = _make_resource_quota(
+            name="best-effort-quota",
+            hard={"pods": "0"},
+            used={"pods": "0"},
+            scopes=["BestEffort"],
+        )
+        mock_api = MagicMock()
+        mock_api.list_namespaced_resource_quota.return_value = SimpleNamespace(items=[quota])
+
+        # Workload requesting CPU has Burstable QoS, skipping BestEffort quota
+        err = check_resource_quota(
+            namespace="kubeflow-user",
+            resources_per_node={"cpu": "2"},
+            num_nodes=1,
+            core_v1_api=mock_api,
+        )
+        assert err is None
+
+    def test_check_resource_quota_best_effort_scope_enforced_with_gpu_only(self) -> None:
+        quota = _make_resource_quota(
+            name="best-effort-quota",
+            hard={"count/pods": "1"},
+            used={"count/pods": "1"},
+            scopes=["BestEffort"],
+        )
+        mock_api = MagicMock()
+        mock_api.list_namespaced_resource_quota.return_value = SimpleNamespace(items=[quota])
+
+        # Workload requesting GPU without CPU or memory maintains BestEffort QoS in k8s;
+        # BestEffort pod quota must be evaluated and block the request.
+        err = check_resource_quota(
+            namespace="kubeflow-user",
+            resources_per_node={"gpu": 1},
+            num_nodes=1,
+            core_v1_api=mock_api,
+        )
+        assert err is not None
+        assert err.error_code == ErrorCode.QUOTA_EXCEEDED
+        assert "Resource quota 'best-effort-quota' exceeded" in err.error
 
 
 class TestGetNamespaceResourceQuotas:

@@ -368,8 +368,9 @@ def check_resource_quota(
         q_name, hard, used, scopes = _extract_quota_data(q)
         if not hard:
             continue
-        # Skip BestEffort-only quotas if workload requests explicit resources
-        if scopes == ["BestEffort"] and (req_cpu or req_mem or req_gpu):
+        # Skip BestEffort-only quotas if workload requests compute resources (CPU or memory).
+        # In Kubernetes, pods without CPU/memory requests or limits have BestEffort QoS.
+        if scopes == ["BestEffort"] and (req_cpu or req_mem):
             continue
 
         err = _check_single_quota(
