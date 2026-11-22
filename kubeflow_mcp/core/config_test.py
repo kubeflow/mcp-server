@@ -204,7 +204,7 @@ def test_find_config_file_prefers_project_local_config(tmp_path):
         assert _find_config_file() == local_config
 
 
-def test_auth_config_oidc_issuer_default_and_custom():
+def test_auth_config_oidc_issuer_default_and_custom() -> None:
     from kubeflow_mcp.core.config import AuthConfig
 
     cfg = AuthConfig()
@@ -214,7 +214,7 @@ def test_auth_config_oidc_issuer_default_and_custom():
     assert custom.oidc_issuer == "https://accounts.google.com"
 
 
-def test_load_config_oidc_issuer_env_override(monkeypatch):
+def test_load_config_oidc_issuer_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("KUBEFLOW_MCP_OIDC_ISSUER", "https://keycloak.example.com/realms/kf")
     with patch("kubeflow_mcp.core.config._find_config_file", return_value=None):
         cfg = load_config()

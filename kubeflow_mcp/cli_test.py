@@ -466,7 +466,7 @@ def test_serve_auth_token_passed_to_create_server():
     assert kwargs["auth_provider"] is not None
 
 
-def test_serve_oidc_issuer_passed_to_build_auth_provider():
+def test_serve_oidc_issuer_passed_to_build_auth_provider() -> None:
     """--oidc-issuer passes the issuer to build_auth_provider."""
     mock_server, mock_create_server, modules_patch = _make_serve_mocks()
     fake_auth_mod = modules_patch["kubeflow_mcp.core.auth"]

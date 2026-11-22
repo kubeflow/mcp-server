@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import hmac
 import logging
+import urllib.parse
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -45,6 +46,31 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _validate_metadata(
+    data: Any,
+    endpoint_url: str,
+    expected_issuer: str,
+) -> dict[str, Any]:
+    """Validate that discovered IdP metadata contains a valid HTTPS jwks_uri and matching issuer."""
+    if not isinstance(data, dict):
+        raise ValueError(f"OIDC discovery response at {endpoint_url} must be a JSON object")
+
+    jwks_uri = data.get("jwks_uri")
+    if not (isinstance(jwks_uri, str) and jwks_uri.startswith("https://")):
+        raise ValueError(
+            f"OIDC discovery at {endpoint_url} returned metadata without a valid HTTPS 'jwks_uri'"
+        )
+
+    meta_issuer = data.get("issuer")
+    if not isinstance(meta_issuer, str) or meta_issuer.rstrip("/") != expected_issuer:
+        raise ValueError(
+            f"OIDC discovery at {endpoint_url} returned issuer {meta_issuer!r}, "
+            f"which does not match expected issuer {expected_issuer!r}"
+        )
+
+    return data
+
+
 def discover_oidc_configuration(
     issuer: str,
     *,
@@ -54,23 +80,34 @@ def discover_oidc_configuration(
     """Perform RFC 8414 / OpenID Connect Discovery to discover IdP metadata.
 
     Attempts ``/.well-known/openid-configuration`` first, then falls back to
-    ``/.well-known/oauth-authorization-server``.
+    RFC 8414 OAuth 2.0 Authorization Server metadata.
 
-    Returns the parsed JSON dictionary containing at least ``jwks_uri``.
+    Returns the parsed JSON dictionary containing at least ``jwks_uri`` and matching ``issuer``.
 
     Raises:
-        ValueError: If issuer URL is invalid, endpoints return errors, or metadata lacks ``jwks_uri``.
+        ValueError: If issuer URL is invalid, non-HTTPS, endpoints return errors,
+            or metadata lacks a valid HTTPS ``jwks_uri`` or has a mismatched issuer.
     """
     if not issuer or not isinstance(issuer, str):
         raise ValueError("OIDC issuer must be a non-empty URL string")
 
     clean_issuer = issuer.strip().rstrip("/")
-    if not (clean_issuer.startswith("https://") or clean_issuer.startswith("http://")):
-        raise ValueError(f"OIDC issuer URL must start with http:// or https://, got: {issuer!r}")
+    if not clean_issuer.startswith("https://"):
+        raise ValueError(f"OIDC issuer URL must start with https://, got: {issuer!r}")
 
+    parsed = urllib.parse.urlsplit(clean_issuer)
+    if not parsed.netloc:
+        raise ValueError(f"OIDC issuer URL is missing host: {issuer!r}")
+
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    issuer_path = parsed.path.rstrip("/")
+
+    # RFC 8414 Section 3 defines authorization server metadata path by inserting
+    # /.well-known/oauth-authorization-server between the origin and path component,
+    # whereas OpenID Connect Discovery concatenates /.well-known/openid-configuration.
     urls_to_try = [
         f"{clean_issuer}/.well-known/openid-configuration",
-        f"{clean_issuer}/.well-known/oauth-authorization-server",
+        f"{origin}/.well-known/oauth-authorization-server{issuer_path}",
     ]
 
     last_error: Exception | None = None
@@ -90,22 +127,10 @@ def discover_oidc_configuration(
                         raise ValueError(
                             f"OIDC discovery response at {url} is not valid JSON: {e}"
                         ) from e
-
-                    if not isinstance(data, dict):
-                        raise ValueError(f"OIDC discovery response at {url} must be a JSON object")
-
-                    jwks_uri = data.get("jwks_uri")
-                    if not jwks_uri or not isinstance(jwks_uri, str):
-                        raise ValueError(
-                            f"OIDC discovery at {url} returned metadata without a valid 'jwks_uri'"
-                        )
-
-                    return data
+                    return _validate_metadata(data, url, clean_issuer)
                 elif resp.status_code != 404:
                     resp.raise_for_status()
-            except httpx.HTTPStatusError as e:
-                last_error = e
-            except httpx.RequestError as e:
+            except (httpx.HTTPStatusError, httpx.RequestError) as e:
                 last_error = e
     finally:
         if close_client:
@@ -170,7 +195,18 @@ def build_auth_provider(
 
         metadata = discover_oidc_configuration(effective_issuer, client=http_client)
         discovered_jwks_uri = metadata["jwks_uri"]
-        discovered_issuer = metadata.get("issuer") or effective_issuer
+        discovered_issuer = metadata.get("issuer")
+        if not isinstance(discovered_issuer, str) or not discovered_issuer:
+            raise ValueError(
+                f"OIDC discovery metadata for '{effective_issuer}' lacks a valid 'issuer'"
+            )
+
+        if auth_config.issuer and auth_config.issuer.rstrip("/") != discovered_issuer.rstrip("/"):
+            raise ValueError(
+                f"Configured issuer '{auth_config.issuer}' does not match "
+                f"discovered metadata issuer '{discovered_issuer}'"
+            )
+
         expected_issuer = auth_config.issuer or discovered_issuer
 
         logger.info(
