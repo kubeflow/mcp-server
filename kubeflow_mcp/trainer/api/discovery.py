@@ -148,7 +148,8 @@ def list_training_jobs(
     Returns:
         dict: Response containing:
 
-        - ``jobs`` (list): List of jobs with ``name``, ``status``, ``runtime``, and ``created_at``
+        - ``jobs`` (list): Matching jobs newest-first by ``created_at`` (jobs without a
+          creation time last), each with ``name``, ``status``, ``runtime`` and ``created_at``
         - ``total`` (int): Total matching jobs
         - ``returned`` (int): Number of jobs included in the response
         - ``has_more`` (bool): Whether matching jobs were omitted by ``limit``
@@ -216,6 +217,15 @@ def list_training_jobs(
 
         if normalized_status is not None:
             job_list = [j for j in job_list if j.get("status") == normalized_status]
+
+        # Kubernetes lists custom objects by name, so without ordering ``limit`` would
+        # keep an arbitrary name-ordered page and drop the most recent jobs. Sort
+        # newest-first before truncating; jobs without a creation time sort last.
+        # (Same reasoning as get_training_events in #439 and health.py log tailing.)
+        job_list.sort(
+            key=lambda j: (j["created_at"] is not None, j["created_at"] or ""),
+            reverse=True,
+        )
 
         truncated_jobs = job_list[:limit]
         return ToolResponse(
