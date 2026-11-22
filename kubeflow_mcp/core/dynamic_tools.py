@@ -186,9 +186,13 @@ def _tool_parameters(name: str) -> dict[str, Any]:
         param_info: dict[str, Any] = {"type": "any"}
         if param.annotation != inspect.Parameter.empty:
             param_info["type"] = str(param.annotation)
-        field = fields[param_name]
-        if not field.is_required():
-            param_info["default"] = field.get_default(call_default_factory=True)
+        # pydantic keeps a parameter whose name starts with "_" out of model_fields.
+        field = fields.get(param_name)
+        if field is not None:
+            if not field.is_required():
+                param_info["default"] = field.get_default(call_default_factory=True)
+        elif param.default != inspect.Parameter.empty:
+            param_info["default"] = param.default
         params[param_name] = param_info
     return params
 

@@ -551,6 +551,20 @@ def test_parameters_report_field_defaults_by_value():
     assert params["tags"]["default"] == []  # default_factory is called, not left unset
 
 
+def underscore_param_tool(name: str, _trace: bool = False) -> dict:
+    """Tool with a parameter pydantic keeps out of model_fields."""
+    return {"name": name}
+
+
+def test_parameters_include_underscore_parameters():
+    dynamic_tools.init_dynamic_tools([underscore_param_tool], {})
+
+    params = dynamic_tools.describe_tools(["underscore_param_tool"])["tools"][0]["parameters"]
+
+    assert list(params) == ["name", "_trace"]
+    assert params["_trace"]["default"] is False
+
+
 @pytest.mark.parametrize(
     ("meta_tool", "arguments"),
     [
