@@ -62,7 +62,7 @@ Authorization: Bearer your-secure-mcp-token
 | `server.persona` | Role persona (`readonly`, `data-scientist`, `ml-engineer`, `platform-admin`) | `ml-engineer` |
 | `server.mode` | Tool loading mode (`full`, `progressive`, `semantic`) | `full` |
 | `server.transport` | Protocol transport (`http` or `stdio`) | `http` |
-| `server.instructionTier` | Instruction detail level (`minimal`, `standard`, `detailed`) | `standard` |
+| `server.instructionTier` | Instruction detail level (`full`, `compact`, `minimal`) | `full` |
 | `auth.enabled` | Enable HTTP authentication | `true` |
 | `auth.token` | Literal bearer token string | `""` |
 | `auth.existingSecret` | Name of pre-existing Secret containing token | `""` |

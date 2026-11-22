@@ -16,6 +16,9 @@ spec:
     metadata:
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if and .Values.auth.enabled .Values.auth.token (not .Values.auth.existingSecret) }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- end }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -41,16 +44,12 @@ spec:
           args:
             - --transport
             - {{ .Values.server.transport | default "http" | quote }}
-            - --host
-            - {{ .Values.server.host | default "0.0.0.0" | quote }}
-            - --port
-            - {{ .Values.server.port | default 8000 | quote }}
             - --persona
             - {{ .Values.server.persona | default "ml-engineer" | quote }}
             - --mode
             - {{ .Values.server.mode | default "full" | quote }}
             - --instruction-tier
-            - {{ .Values.server.instructionTier | default "standard" | quote }}
+            - {{ .Values.server.instructionTier | default "full" | quote }}
             - --clients
             - {{ join "," .Values.server.clients | quote }}
             {{- if .Values.server.readOnly }}
@@ -66,9 +65,15 @@ spec:
           env:
             - name: PYTHONUNBUFFERED
               value: "1"
-            - name: KUBEFLOW_MCP_CONFIG_PATH
-              value: "/etc/kubeflow-mcp/config.yaml"
-            {{- if .Values.auth.enabled }}
+            - name: FASTMCP_HOST
+              value: {{ .Values.server.host | default "0.0.0.0" | quote }}
+            - name: FASTMCP_PORT
+              value: {{ .Values.server.port | default 8000 | quote }}
+            - name: FASTMCP_STATELESS_HTTP
+              value: "true"
+            - name: KUBEFLOW_MCP_ALLOWED_HOSTS
+              value: {{ printf "%s,localhost,127.0.0.1,[::1],%s:*,localhost:*,127.0.0.1:*,[::1]:*" (include "kubeflow-mcp.fullname" .) (include "kubeflow-mcp.fullname" .) | quote }}
+            {{- if and .Values.auth.enabled (or .Values.auth.token .Values.auth.existingSecret) }}
             - name: KUBEFLOW_MCP_AUTH_TOKEN
               valueFrom:
                 secretKeyRef:
@@ -90,7 +95,8 @@ spec:
             {{- toYaml .Values.resources | nindent 12 }}
           volumeMounts:
             - name: config-volume
-              mountPath: /etc/kubeflow-mcp
+              mountPath: /app/.kubeflow-mcp.yaml
+              subPath: config.yaml
               readOnly: true
             - name: tmp-volume
               mountPath: /tmp

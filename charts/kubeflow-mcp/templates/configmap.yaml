@@ -13,7 +13,7 @@ data:
       port: {{ .Values.server.port | default 8000 }}
       persona: {{ .Values.server.persona | default "ml-engineer" | quote }}
       mode: {{ .Values.server.mode | default "full" | quote }}
-      instruction_tier: {{ .Values.server.instructionTier | default "standard" | quote }}
+      instruction_tier: {{ .Values.server.instructionTier | default "full" | quote }}
       clients:
         {{- range .Values.server.clients }}
         - {{ . | quote }}

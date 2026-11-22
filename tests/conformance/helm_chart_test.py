@@ -143,17 +143,24 @@ class TestKustomizeOverlays:
             hpa = yaml.safe_load(f)
         assert hpa["kind"] == "HorizontalPodAutoscaler"
         assert hpa["spec"]["minReplicas"] >= 2
+        assert hpa["metadata"].get("namespace") == "kubeflow-user-example-com"
 
         ingress_file = overlay / "ingress.yaml"
         with open(ingress_file, encoding="utf-8") as f:
             ing = yaml.safe_load(f)
         assert ing["kind"] == "Ingress"
+        assert ing["metadata"].get("namespace") == "kubeflow-user-example-com"
 
         patch_file = overlay / "patch-replicas.yaml"
         with open(patch_file, encoding="utf-8") as f:
             patch = yaml.safe_load(f)
         assert patch["kind"] == "Deployment"
         assert patch["spec"]["replicas"] >= 2
+        assert patch["metadata"].get("namespace") == "kubeflow-user-example-com"
+        container = patch["spec"]["template"]["spec"]["containers"][0]
+        assert container["name"] == "server"
+        stateless_env = {e["name"]: e.get("value") for e in container["env"]}
+        assert stateless_env.get("FASTMCP_STATELESS_HTTP") == "true"
 
     def test_oidc_overlay_valid(self):
         overlay = OVERLAYS_DIR / "oidc"
@@ -169,7 +176,10 @@ class TestKustomizeOverlays:
         with open(patch_file, encoding="utf-8") as f:
             patch = yaml.safe_load(f)
         assert patch["kind"] == "Deployment"
-        env = patch["spec"]["template"]["spec"]["containers"][0]["env"]
+        assert patch["metadata"].get("namespace") == "kubeflow-user-example-com"
+        container = patch["spec"]["template"]["spec"]["containers"][0]
+        assert container["name"] == "server"
+        env = container["env"]
         env_names = [e["name"] for e in env]
         assert "KUBEFLOW_MCP_OIDC_ISSUER" in env_names
         assert "KUBEFLOW_MCP_OIDC_AUDIENCE" in env_names

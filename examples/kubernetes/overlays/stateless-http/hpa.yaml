@@ -2,6 +2,7 @@ apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
   name: kubeflow-mcp
+  namespace: kubeflow-user-example-com
 spec:
   scaleTargetRef:
     apiVersion: apps/v1

@@ -29,8 +29,8 @@ server:
   # Host and port to bind
   host: "0.0.0.0"
   port: 8000
-  # Instruction tier: minimal, standard, detailed
-  instructionTier: standard
+  # Instruction tier: full, compact, minimal
+  instructionTier: full
   # Read-only policy override
   readOnly: false
   # Additional arguments passed to kubeflow-mcp serve
@@ -74,9 +74,10 @@ rbac:
 podAnnotations: {}
 
 podSecurityContext:
-  fsGroup: 1000
+  fsGroup: 65532
   runAsNonRoot: true
-  runAsUser: 1000
+  runAsUser: 65532
+  runAsGroup: 65532
   seccompProfile:
     type: RuntimeDefault
 
@@ -84,7 +85,8 @@ securityContext:
   allowPrivilegeEscalation: false
   readOnlyRootFilesystem: true
   runAsNonRoot: true
-  runAsUser: 1000
+  runAsUser: 65532
+  runAsGroup: 65532
   capabilities:
     drop:
       - ALL

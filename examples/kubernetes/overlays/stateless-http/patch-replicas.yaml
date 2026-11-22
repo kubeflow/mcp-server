@@ -2,5 +2,15 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: kubeflow-mcp
+  namespace: kubeflow-user-example-com
 spec:
   replicas: 2
+  template:
+    spec:
+      containers:
+        - name: server
+          env:
+            - name: FASTMCP_STATELESS_HTTP
+              value: "true"
+            - name: KUBEFLOW_MCP_ALLOWED_HOSTS
+              value: "kubeflow-mcp.example.com,kubeflow-mcp:*,localhost:*,127.0.0.1:*,[::1]:*"

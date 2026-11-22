@@ -20,7 +20,7 @@ spec:
         - namespaceSelector: {}
       ports:
         - protocol: TCP
-          port: {{ .Values.service.port }}
+          port: {{ .Values.server.port | default 8000 }}
       {{- with .Values.networkPolicy.ingress }}
       {{- toYaml . | nindent 4 }}
       {{- end }}
