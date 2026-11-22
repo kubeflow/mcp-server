@@ -556,6 +556,23 @@ def underscore_param_tool(name: str, _trace: bool = False) -> dict:
     return {"name": name}
 
 
+def data_factory_tool(
+    name: str,
+    slug: Annotated[str, Field(default_factory=lambda data: data["name"])],
+) -> dict:
+    """Tool whose default is built from the other validated arguments."""
+    return {"slug": slug}
+
+
+def test_parameters_skip_defaults_built_from_other_arguments():
+    dynamic_tools.init_dynamic_tools([data_factory_tool], {})
+
+    params = dynamic_tools.describe_tools(["data_factory_tool"])["tools"][0]["parameters"]
+
+    assert "default" not in params["slug"]  # no value until name is known
+    assert dynamic_tools.execute_tool("data_factory_tool", {"name": "llama"}) == {"slug": "llama"}
+
+
 def test_parameters_include_underscore_parameters():
     dynamic_tools.init_dynamic_tools([underscore_param_tool], {})
 

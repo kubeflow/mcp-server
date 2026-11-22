@@ -171,6 +171,26 @@ def list_tools(prefix: str = "") -> dict[str, Any]:
     }
 
 
+def _factory_needs_validated_data(factory: Callable[..., Any] | None) -> bool:
+    """Whether a default_factory takes the validated data, as pydantic decides it.
+
+    Such a factory has no value until the other arguments are known, so discovery
+    can't report one. Mirrors pydantic's private ``takes_validated_data_argument``.
+    """
+    if factory is None:
+        return False
+    try:
+        params = list(inspect.signature(factory).parameters.values())
+    except (TypeError, ValueError):
+        return False
+    return (
+        len(params) == 1
+        and params[0].kind
+        in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        and params[0].default is inspect.Parameter.empty
+    )
+
+
 def _tool_parameters(name: str) -> dict[str, Any]:
     """Parameter names, types and defaults of a registered tool.
 
@@ -189,7 +209,7 @@ def _tool_parameters(name: str) -> dict[str, Any]:
         # pydantic keeps a parameter whose name starts with "_" out of model_fields.
         field = fields.get(param_name)
         if field is not None:
-            if not field.is_required():
+            if not field.is_required() and not _factory_needs_validated_data(field.default_factory):
                 param_info["default"] = field.get_default(call_default_factory=True)
         elif param.default != inspect.Parameter.empty:
             param_info["default"] = param.default
