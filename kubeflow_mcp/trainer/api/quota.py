@@ -61,6 +61,32 @@ def _format_quantity(val: Decimal) -> str:
     return str(val.normalize())
 
 
+def _extract_quota_items(quota_list: Any) -> list[Any]:
+    """Safely extract list of quota items handling both K8s models and dictionaries."""
+    if isinstance(quota_list, dict):
+        items = quota_list.get("items", [])
+    else:
+        items = getattr(quota_list, "items", [])
+    if callable(items) or not isinstance(items, (list, tuple)):
+        return []
+    return list(items)
+
+
+def _extract_quota_data(q: Any) -> tuple[str, dict[str, Any], dict[str, Any]]:
+    """Safely extract quota name, hard, and used dicts from a model or dict."""
+    if isinstance(q, dict):
+        q_name = q.get("metadata", {}).get("name", "quota")
+        status = q.get("status", {}) or {}
+        hard = status.get("hard", {}) or {}
+        used = status.get("used", {}) or {}
+        return q_name, hard, used
+    q_name = getattr(q.metadata, "name", "quota") if hasattr(q, "metadata") else "quota"
+    status = getattr(q, "status", None)
+    hard = getattr(status, "hard", {}) or {} if status else {}
+    used = getattr(status, "used", {}) or {} if status else {}
+    return q_name, hard, used
+
+
 def get_namespace_resource_quotas(
     namespace: str | None = None,
     *,
@@ -95,12 +121,9 @@ def get_namespace_resource_quotas(
         return []
 
     quotas_info: list[dict[str, Any]] = []
-    items = getattr(quota_list, "items", []) or []
+    items = _extract_quota_items(quota_list)
     for q in items:
-        name = getattr(q.metadata, "name", "unknown") if hasattr(q, "metadata") else "unknown"
-        status = getattr(q, "status", None)
-        hard = getattr(status, "hard", {}) or {}
-        used = getattr(status, "used", {}) or {}
+        name, hard, used = _extract_quota_data(q)
 
         quota_entry: dict[str, Any] = {
             "name": name,
@@ -121,7 +144,9 @@ def get_namespace_resource_quotas(
                 quota_entry["used"][res_key] = used_val_str
                 quota_entry["available"][res_key] = _format_quantity(avail_dec)
             except Exception as parse_err:
-                logger.debug("Failed to parse quantity for %s in quota %s: %s", res_key, name, parse_err)
+                logger.debug(
+                    "Failed to parse quantity for %s in quota %s: %s", res_key, name, parse_err
+                )
 
         quotas_info.append(quota_entry)
 
@@ -146,7 +171,13 @@ def _extract_requested_resources(
             break
 
     req_gpu: Decimal | None = None
-    for k in ("gpu", "nvidia.com/gpu", "requests.nvidia.com/gpu", "amd.com/gpu", "requests.amd.com/gpu"):
+    for k in (
+        "gpu",
+        "nvidia.com/gpu",
+        "requests.nvidia.com/gpu",
+        "amd.com/gpu",
+        "requests.amd.com/gpu",
+    ):
         if k in resources and resources[k] is not None:
             req_gpu = _to_decimal(resources[k]) * nodes_dec
             break
@@ -317,7 +348,7 @@ def check_resource_quota(
         )
         return None
 
-    items = getattr(quota_list, "items", []) or []
+    items = _extract_quota_items(quota_list)
     if not items:
         return None
 
@@ -325,12 +356,9 @@ def check_resource_quota(
     req_cpu, req_mem, req_gpu = _extract_requested_resources(resources_per_node or {}, nodes_dec)
 
     for q in items:
-        q_name = getattr(q.metadata, "name", "quota") if hasattr(q, "metadata") else "quota"
-        status = getattr(q, "status", None)
-        if not status:
+        q_name, hard, used = _extract_quota_data(q)
+        if not hard:
             continue
-        hard = getattr(status, "hard", {}) or {}
-        used = getattr(status, "used", {}) or {}
 
         err = _check_single_quota(
             q_name=q_name,
