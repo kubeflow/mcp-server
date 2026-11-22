@@ -200,8 +200,8 @@ Custom personas can also be defined in `~/.kf-mcp-policy.yaml` (see [Architectur
 | `KUBEFLOW_MCP_INSTRUCTION_TIER` | `full` | Instruction verbosity (`full`, `compact`, `minimal`) |
 | `KUBEFLOW_MCP_AUTH_TOKEN` | _(none)_ | Bearer token for HTTP auth (dev/staging) |
 | `KUBEFLOW_MCP_JWKS_URI` | _(none)_ | JWKS endpoint for JWT verification (production) |
-| `KUBEFLOW_MCP_JWT_ISSUER` | _(none)_ | Expected JWT issuer |
-| `KUBEFLOW_MCP_JWT_AUDIENCE` | _(none)_ | Expected JWT audience |
+| `KUBEFLOW_MCP_JWT_ISSUER` | _(none)_ | Expected JWT issuer (required with `KUBEFLOW_MCP_JWKS_URI`) |
+| `KUBEFLOW_MCP_JWT_AUDIENCE` | _(none)_ | Expected JWT audience (required with `KUBEFLOW_MCP_JWKS_URI`) |
 | `KUBEFLOW_MCP_ALLOWED_HOSTS` | _(loopback)_ | Allowed `Host` headers for DNS rebinding protection |
 | `KUBEFLOW_MCP_ALLOWED_ORIGINS` | _(loopback)_ | Allowed `Origin` headers |
 | `KUBEFLOW_MCP_DNS_REBINDING_PROTECTION` | `true` | Set `false` to disable Host/Origin checks (not recommended) |
@@ -210,6 +210,7 @@ Custom personas can also be defined in `~/.kf-mcp-policy.yaml` (see [Architectur
 | `KUBEFLOW_MCP_PIPELINES_NAMESPACE` | _(auto)_ | Override Kubeflow Pipelines namespace |
 | `LOG_FORMAT` / `LOG_LEVEL` | `auto` / `INFO` | Logging format and level |
 
+`KUBEFLOW_MCP_JWT_ISSUER` and `KUBEFLOW_MCP_JWT_AUDIENCE` are required with `KUBEFLOW_MCP_JWKS_URI`; the server refuses to start without them.
 Without `--auth-token` or JWT settings on `--transport http`, the server logs a warning that the endpoint is open.
 
 </details>

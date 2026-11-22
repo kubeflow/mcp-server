@@ -5,7 +5,9 @@ that agents can reach it over HTTP and drive
 [Kubeflow Trainer](https://github.com/kubeflow/trainer) in your own namespace.
 
 It contains one Deployment, one ClusterIP Service, a ServiceAccount, and
-least-privilege RBAC. Ingress, OIDC, and Helm are outside this profile.
+least-privilege RBAC. Ingress and Helm are outside this profile. It authenticates
+clients with a shared bearer token; to use your identity provider instead, see
+[Using JWT (OIDC) instead of the shared token](#using-jwt-oidc-instead-of-the-shared-token).
 
 ## Quick start
 
@@ -81,6 +83,38 @@ names for this reason. Setting the variable replaces the built-in loopback defau
 rather than adding to them, so dropping those two entries makes port-forwarded
 clients fail with HTTP 421 while `/health` and `/ready` keep working.
 
+## Using JWT (OIDC) instead of the shared token
+
+For production, have clients send access tokens from your identity provider instead
+of sharing one static token. Point the server at the provider's JWKS, issuer and an
+audience reserved for this server:
+
+```bash
+kubectl set env deploy/kubeflow-mcp -n "$NAMESPACE" \
+  KUBEFLOW_MCP_JWKS_URI=https://idp.example.com/.well-known/jwks.json \
+  KUBEFLOW_MCP_JWT_ISSUER=https://idp.example.com \
+  KUBEFLOW_MCP_JWT_AUDIENCE=kubeflow-mcp
+```
+
+All three are required. With only the JWKS URI the pod exits at startup, because the
+server would otherwise accept any token the provider signs, including tokens it
+issued to other applications. Use the issuer exactly as it appears in the tokens'
+`iss` claim, and as the audience the value the provider puts in `aud` for tokens
+meant for this server (usually the client ID or API identifier you registered for
+it), not one shared with other applications. Tokens must also carry an `exp` claim.
+The pod needs network access to the JWKS URI.
+
+The JWKS URI takes precedence over the shared token, so once JWT works you can
+drop the token from the Deployment and delete its Secret:
+
+```bash
+kubectl set env deploy/kubeflow-mcp -n "$NAMESPACE" KUBEFLOW_MCP_AUTH_TOKEN-
+kubectl delete secret kubeflow-mcp-auth -n "$NAMESPACE"
+```
+
+`manifests.yaml` has the same three variables commented out next to
+`KUBEFLOW_MCP_AUTH_TOKEN` if you prefer to set them there.
+
 ## Deploying into a different namespace
 
 The server is deployed into the user's Profile namespace on purpose: in-cluster the
@@ -120,6 +154,14 @@ Set `KUBEFLOW_MCP_PERSONA` to `data-scientist` or higher.
 
 **Every authenticated request returns 401** — the client is sending a different
 token than the one stored in the Secret.
+
+**The pod exits at startup with `JWT auth needs an issuer and an audience`** —
+`KUBEFLOW_MCP_JWKS_URI` is set without both `KUBEFLOW_MCP_JWT_ISSUER` and
+`KUBEFLOW_MCP_JWT_AUDIENCE`. Set both, as shown in the JWT section above.
+
+**JWT requests return 401** — the token was issued for another audience or by
+another issuer, has no `exp`, or has expired. Compare its `iss` and `aud` claims
+with `KUBEFLOW_MCP_JWT_ISSUER` and `KUBEFLOW_MCP_JWT_AUDIENCE`.
 
 **Pod stuck in `CreateContainerConfigError`** — the `kubeflow-mcp-auth` Secret does
 not exist yet. Create it as shown in the quick start.
