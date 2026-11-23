@@ -44,6 +44,7 @@ _TIMEOUT_HINT = (
     "the API server (a network path or endpoint problem) rather than a slow "
     "cluster. Run katib_pre_flight(), which probes the webhook directly."
 )
+_RBAC_HINT = "Check the service account's RBAC for the target namespace."
 
 # Collection responses are truncated so a large experiment cannot exhaust the
 # agent's context window. Matches the trainer client's list bounds.
@@ -195,6 +196,14 @@ def resource_error(exc: Exception, name: str, kind: str = "Experiment") -> ToolE
                 f"with delete_hpo_experiment('{name}', confirmed=True)."
             ),
         )
+    if _api_status(exc) == 403:
+        # A namespace the server may not touch is a configuration problem, not an
+        # outage, so it must not trip the circuit breaker for every namespace.
+        return ToolError(
+            error=f"Permission denied for {kind} '{name}': {api_message(exc)}",
+            error_code=ErrorCode.PERMISSION_DENIED,
+            hint=_RBAC_HINT,
+        )
     # Everything from here on is an infrastructure failure rather than a
     # caller mistake, so it is logged once here, for every tool, with the trace.
     logger.warning("%s '%s': API call failed: %s", kind, name, exc, exc_info=True)
@@ -234,7 +243,7 @@ def collection_error(exc: Exception) -> ToolError:
         return ToolError(
             error=f"Not authorized to list this resource: {exc}",
             error_code=ErrorCode.PERMISSION_DENIED,
-            hint="Check the service account's RBAC for the target namespace.",
+            hint=_RBAC_HINT,
         )
     logger.warning("List call failed: %s", exc, exc_info=True)
     return ToolError(
