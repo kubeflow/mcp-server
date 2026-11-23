@@ -164,7 +164,7 @@ _TOOL_KWARGS: dict[str, dict] = {
         "name": "exp",
         "objective_metric": "acc",
         "search_space": {"lr": {"min": 0.1, "max": 1}},
-        "trial_template": {"kind": "TrainJob"},
+        "trial_template": {"kind": "TrainJob", "spec": {"args": ["--lr=${trialParameters.lr}"]}},
         "confirmed": True,
     },
     "create_hpo_experiment_from_spec": {

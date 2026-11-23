@@ -27,6 +27,7 @@ avoids all three limits, and additionally reaches Katib algorithms the SDK's
 typed classes cannot express (tpe, cmaes, hyperband, ...).
 """
 
+import json
 import re
 from typing import Any
 
@@ -49,6 +50,9 @@ from kubeflow_mcp.optimizer.constants import (
 
 # Katib suggestion algorithms. Superset of what the SDK's typed algorithm
 # classes expose (RandomSearch/GridSearch), reachable because we build the CR.
+# hyperband is left out: Katib's Hyperband service requires the r_l and
+# resource_name algorithm settings, which create_hpo_experiment cannot pass,
+# so it would always fail. create_hpo_experiment_from_spec can set them.
 ALGORITHMS = frozenset(
     {
         "random",
@@ -58,7 +62,6 @@ ALGORITHMS = frozenset(
         "multivariate-tpe",
         "cmaes",
         "sobol",
-        "hyperband",
     }
 )
 OBJECTIVE_TYPES = frozenset({"maximize", "minimize"})
@@ -66,6 +69,14 @@ OBJECTIVE_TYPES = frozenset({"maximize", "minimize"})
 # Guard rails against an agent requesting a runaway experiment.
 MAX_TRIAL_COUNT_LIMIT = 1000
 MAX_PARALLEL_TRIAL_LIMIT = 100
+
+# Trial workload kinds Katib fills successCondition and failureCondition in for
+# (setDefaultTrialTemplate). Its validator requires both, and
+# create_hpo_experiment has no way to pass them, so it accepts only these kinds;
+# anything else, a bare Pod say, needs create_hpo_experiment_from_spec.
+DEFAULTED_TRIAL_KINDS = frozenset(
+    {"Job", "TFJob", "PyTorchJob", "XGBoostJob", "MPIJob", "TrainJob"}
+)
 
 
 def _build_parameter(name: str, spec: dict[str, Any]) -> models.V1beta1ParameterSpec:
@@ -161,10 +172,9 @@ def _resolve_primary_container(trial_template: dict[str, Any], override: str | N
 
     # batch/v1 Job and friends nest the pod under spec.template; a bare Pod
     # trialSpec carries containers directly.
-    pod_spec = (
-        spec.get("template", {}).get("spec") if isinstance(spec.get("template"), dict) else None
-    )
-    containers = (pod_spec or spec).get("containers")
+    template = spec.get("template")
+    pod_spec = template.get("spec") if isinstance(template, dict) else None
+    containers = (pod_spec if isinstance(pod_spec, dict) else spec).get("containers")
     if not isinstance(containers, list):
         return trainer_constants.NODE
 
@@ -181,6 +191,9 @@ def _resolve_primary_container(trial_template: dict[str, Any], override: str | N
 # image may legitimately carry one (a tuned tag, say). Each is swapped for a
 # token that is valid anywhere in a reference before the rest is checked.
 _TRIAL_PARAMETER_REF = re.compile(r"\$\{trialParameters\.[^}]*\}")
+# A reference used as a digest (img@sha256:${trialParameters.digest}) needs a
+# placeholder that is itself a valid digest, or every such image is rejected.
+_DIGEST_PARAMETER_REF = re.compile(r"(@[a-z0-9]+(?:[+._-][a-z0-9]+)*:)\$\{trialParameters\.[^}]*\}")
 
 
 def _trial_spec_images(trial_spec: Any, field: str) -> list[tuple[str, Any]]:
@@ -223,12 +236,53 @@ def _validate_trial_images(trial_spec: Any, field: str) -> ToolError | None:
     pull it, long after the experiment was accepted.
     """
     for path, image in _trial_spec_images(trial_spec, field):
-        candidate = _TRIAL_PARAMETER_REF.sub("x", image) if isinstance(image, str) else image
+        candidate = image
+        if isinstance(image, str):
+            candidate = _DIGEST_PARAMETER_REF.sub(lambda m: m.group(1) + "0" * 64, image)
+            candidate = _TRIAL_PARAMETER_REF.sub("x", candidate)
         err = validate_image_reference(candidate, path)
         if err is not None:
             err.details = {"value": image}
             return err
     return None
+
+
+def _template_problem(trial_template: Any) -> str | None:
+    """Describe why create_hpo_experiment cannot use a trial template, if it cannot."""
+    if not isinstance(trial_template, dict) or not trial_template:
+        return "trial_template must be a Kubernetes resource manifest (an object)"
+    kind = trial_template.get("kind")
+    if kind not in DEFAULTED_TRIAL_KINDS:
+        return (
+            f"trial_template.kind must be one of {sorted(DEFAULTED_TRIAL_KINDS)}, got {kind!r}. "
+            "Katib needs successCondition and failureCondition for any other kind; set them "
+            "with create_hpo_experiment_from_spec()"
+        )
+    # A Job nests its pod under spec.template.spec; each level present must be
+    # an object, or container resolution fails on it later.
+    node: dict[str, Any] = trial_template
+    path: list[str] = []
+    for key in ("spec", "template", "spec"):
+        path.append(key)
+        child = node.get(key)
+        if child is None:
+            break
+        if not isinstance(child, dict):
+            return f"trial_template.{'.'.join(path)} must be an object, got {type(child).__name__}"
+        node = child
+    return None
+
+
+def _unreferenced_parameters(
+    search_space: dict[str, Any], trial_template: dict[str, Any]
+) -> list[str]:
+    """Search parameters the template never references.
+
+    Katib rejects an Experiment whose trialParameters are not all used in the
+    trial template, which is every search_space key here.
+    """
+    text = json.dumps(trial_template)
+    return [name for name in search_space if f"${{trialParameters.{name}}}" not in text]
 
 
 def _build_experiment(
@@ -374,9 +428,9 @@ def create_hpo_experiment(
     if image_err is not None:
         return image_err.model_dump()
 
-    ns_err = check_optimizer_namespace(namespace)
-    if ns_err is not None:
-        return ns_err.model_dump()
+    template_problem = _template_problem(trial_template)
+    if template_problem is not None:
+        return ToolError(error=template_problem, error_code=ErrorCode.VALIDATION_ERROR).model_dump()
 
     # (is_invalid, message) pairs, evaluated in order; the first failure wins.
     # Kept as a table so adding a rule does not add another return path.
@@ -389,8 +443,10 @@ def create_hpo_experiment(
             algorithm not in ALGORITHMS,
             f"algorithm must be one of {sorted(ALGORITHMS)}, got '{algorithm}'",
         ),
-        (not search_space, "search_space must define at least one parameter"),
-        (not trial_template, "trial_template must define the workload to run per trial"),
+        (
+            not isinstance(search_space, dict) or not search_space,
+            "search_space must define at least one parameter",
+        ),
         (
             not 1 <= max_trial_count <= MAX_TRIAL_COUNT_LIMIT,
             f"max_trial_count must be between 1 and {MAX_TRIAL_COUNT_LIMIT}, got {max_trial_count}",
@@ -416,6 +472,23 @@ def create_hpo_experiment(
     for is_invalid, message in problems:
         if is_invalid:
             return ToolError(error=message, error_code=ErrorCode.VALIDATION_ERROR).model_dump()
+
+    unreferenced = _unreferenced_parameters(search_space, trial_template)
+    if unreferenced:
+        return ToolError(
+            error=(
+                f"search_space parameters not referenced in trial_template: {unreferenced}. "
+                "Katib rejects an experiment with a parameter the template never uses"
+            ),
+            error_code=ErrorCode.VALIDATION_ERROR,
+            hint="Reference each as ${trialParameters.<name>} in trial_template, or remove it.",
+        ).model_dump()
+
+    # Input checks above run first, as in create_hpo_experiment_from_spec, so a bad
+    # request gets the same error whatever namespace it names.
+    ns_err = check_optimizer_namespace(namespace)
+    if ns_err is not None:
+        return ns_err.model_dump()
 
     try:
         ns = mcp_utils.get_optimizer_effective_namespace(namespace)
@@ -484,6 +557,25 @@ def _manifest_problem(manifest: dict[str, Any]) -> str | None:
             return f"spec.spec.{'.'.join(path)} is required"
     if not body.get("parameters") and not body.get("nasConfig"):
         return "spec.spec.parameters (or spec.spec.nasConfig) is required"
+    for field, limit in (
+        ("maxTrialCount", MAX_TRIAL_COUNT_LIMIT),
+        ("parallelTrialCount", MAX_PARALLEL_TRIAL_LIMIT),
+    ):
+        value = body.get(field)
+        if isinstance(value, int) and not isinstance(value, bool) and value > limit:
+            return f"spec.spec.{field} must be at most {limit}, got {value}"
+    template = body["trialTemplate"]
+    trial_spec = template.get("trialSpec") if isinstance(template, dict) else None
+    kind = trial_spec.get("kind") if isinstance(trial_spec, dict) else None
+    if (
+        kind is not None
+        and kind not in DEFAULTED_TRIAL_KINDS
+        and not (template.get("successCondition") and template.get("failureCondition"))
+    ):
+        return (
+            f"spec.spec.trialTemplate needs successCondition and failureCondition for a "
+            f"{kind} trial; Katib only fills them in for {sorted(DEFAULTED_TRIAL_KINDS)}"
+        )
     return None
 
 
@@ -523,9 +615,9 @@ def create_hpo_experiment_from_spec(
         ).model_dump()
 
     name = spec["metadata"].get("name")
-    if not name:
+    if not isinstance(name, str) or not name:
         return ToolError(
-            error="spec.metadata.name is required",
+            error="spec.metadata.name is required and must be a string",
             error_code=ErrorCode.VALIDATION_ERROR,
         ).model_dump()
     name_err = validate_k8s_name(name)

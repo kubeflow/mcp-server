@@ -24,14 +24,28 @@ from kubeflow_mcp.optimizer.api import optimization as opt
 
 _UTILS = "kubeflow_mcp.common.utils"
 
+# Katib rejects a searched parameter the template never references, so every
+# template here references both SEARCH_SPACE keys.
+ARGS = ["--lr=${trialParameters.lr}", "--batch-size=${trialParameters.batch_size}"]
 TRIAL_TEMPLATE = {
     "apiVersion": "trainer.kubeflow.org/v1alpha1",
     "kind": "TrainJob",
     "spec": {
         "runtimeRef": {"name": "torch-distributed"},
-        "trainer": {"image": "my/trainer:1", "args": ["--lr=${trialParameters.lr}"]},
+        "trainer": {"image": "my/trainer:1", "args": ARGS},
     },
 }
+
+
+def _template_for(*names):
+    """A TrainJob template referencing exactly the given search parameters."""
+    args = [f"--{n}=${{trialParameters.{n}}}" for n in names]
+    return {
+        **TRIAL_TEMPLATE,
+        "spec": {**TRIAL_TEMPLATE["spec"], "trainer": {"image": "my/trainer:1", "args": args}},
+    }
+
+
 SEARCH_SPACE = {
     "lr": {"min": 0.001, "max": 0.1, "type": "loguniform"},
     "batch_size": {"choices": [16, 32, 64]},
@@ -97,9 +111,10 @@ def test_search_space_encoding_matches_sdk():
 
 def test_uniform_is_the_default_distribution():
     with cluster():
-        params = _create(search_space={"momentum": {"min": 0.5, "max": 0.99}})["config"]["spec"][
-            "parameters"
-        ]
+        params = _create(
+            search_space={"momentum": {"min": 0.5, "max": 0.99}},
+            trial_template=_template_for("momentum"),
+        )["config"]["spec"]["parameters"]
     assert params[0]["feasibleSpace"]["distribution"] == "uniform"
 
 
@@ -172,9 +187,10 @@ def test_all_advertised_algorithms_are_accepted():
 def test_int_parameter_is_typed_int_not_double():
     """Katib supports "int"; the SDK's Search helpers only emit double."""
     with cluster():
-        params = _create(search_space={"layers": {"min": 2, "max": 8, "type": "int"}})["config"][
-            "spec"
-        ]["parameters"]
+        params = _create(
+            search_space={"layers": {"min": 2, "max": 8, "type": "int"}},
+            trial_template=_template_for("layers"),
+        )["config"]["spec"]["parameters"]
 
     assert params[0]["parameterType"] == "int"
     # Bounds keep the SDK's own string encoding.
@@ -184,9 +200,10 @@ def test_int_parameter_is_typed_int_not_double():
 
 def test_int_parameter_accepts_step():
     with cluster():
-        params = _create(search_space={"layers": {"min": 2, "max": 8, "type": "int", "step": 2}})[
-            "config"
-        ]["spec"]["parameters"]
+        params = _create(
+            search_space={"layers": {"min": 2, "max": 8, "type": "int", "step": 2}},
+            trial_template=_template_for("layers"),
+        )["config"]["spec"]["parameters"]
     assert params[0]["feasibleSpace"]["step"] == "2"
 
 
@@ -214,7 +231,11 @@ JOB_TEMPLATE = {
     "kind": "Job",
     "spec": {
         "template": {
-            "spec": {"containers": [{"name": "training-container", "image": "katib/random:1"}]}
+            "spec": {
+                "containers": [
+                    {"name": "training-container", "image": "katib/random:1", "args": ARGS}
+                ]
+            }
         }
     },
 }
@@ -237,7 +258,12 @@ def test_primary_container_defaults_to_node_for_a_trainjob():
 
 def test_primary_container_prefers_node_over_a_sidecar():
     template = {
-        "spec": {"template": {"spec": {"containers": [{"name": "istio-proxy"}, {"name": "node"}]}}}
+        "kind": "Job",
+        "spec": {
+            "template": {
+                "spec": {"containers": [{"name": "istio-proxy"}, {"name": "node", "args": ARGS}]}
+            }
+        },
     }
     with cluster():
         spec = _create(trial_template=template)["config"]["spec"]
@@ -422,7 +448,10 @@ def test_from_spec_explicit_namespace_wins():
 
 
 def _trainjob(image):
-    return {**TRIAL_TEMPLATE, "spec": {**TRIAL_TEMPLATE["spec"], "trainer": {"image": image}}}
+    return {
+        **TRIAL_TEMPLATE,
+        "spec": {**TRIAL_TEMPLATE["spec"], "trainer": {"image": image, "args": ARGS}},
+    }
 
 
 def _job(image, init_image="busybox:1.36"):
@@ -433,7 +462,7 @@ def _job(image, init_image="busybox:1.36"):
             "template": {
                 "spec": {
                     "initContainers": [{"name": "setup", "image": init_image}],
-                    "containers": [{"name": "train", "image": image}],
+                    "containers": [{"name": "train", "image": image, "args": ARGS}],
                 }
             }
         },
@@ -570,3 +599,131 @@ def test_from_spec_names_the_missing_field_before_the_namespace_check(manifest, 
     assert field in result["error"]
     ns_check.assert_not_called()
     api.create_namespaced_custom_object.assert_not_called()
+
+
+# ─── Templates Katib can run ───────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("kind", ["Pod", "RayJob", None])
+def test_kinds_katib_has_no_completion_conditions_for_are_rejected(kind):
+    """Katib requires successCondition/failureCondition and only fills them in for
+    Job and the Kubeflow job kinds; the flat tool cannot pass them."""
+    template = {"kind": kind, "spec": {"containers": [{"name": "c", "args": ARGS}]}}
+    with cluster() as api:
+        result = _create(trial_template=template, confirmed=True)
+    assert result["error_code"] == "VALIDATION_ERROR"
+    assert "create_hpo_experiment_from_spec" in result["error"]
+    api.create_namespaced_custom_object.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("spec", "path"),
+    [
+        ("not-an-object", "trial_template.spec"),
+        ({"template": ["x"]}, "trial_template.spec.template"),
+        ({"template": {"spec": "containers"}}, "trial_template.spec.template.spec"),
+    ],
+)
+def test_a_malformed_nested_template_is_a_validation_error(spec, path):
+    """Regression: a string spec.template.spec raised an uncaught AttributeError."""
+    with cluster() as api:
+        result = _create(trial_template={"kind": "Job", "spec": spec}, confirmed=True)
+    assert result["error_code"] == "VALIDATION_ERROR"
+    assert result["error"].startswith(f"{path} must be an object")
+    api.create_namespaced_custom_object.assert_not_called()
+
+
+def test_a_trial_template_that_is_not_an_object_is_rejected():
+    with cluster():
+        result = _create(trial_template=["TrainJob"])
+    assert result["error_code"] == "VALIDATION_ERROR"
+
+
+def test_a_searched_parameter_the_template_never_uses_is_rejected():
+    """Katib rejects the experiment at admission, so the preview must not pass."""
+    with cluster() as api:
+        result = _create(trial_template=_template_for("lr"), confirmed=True)
+    assert result["error_code"] == "VALIDATION_ERROR"
+    assert "['batch_size']" in result["error"]
+    api.create_namespaced_custom_object.assert_not_called()
+
+
+def test_a_parameterized_image_digest_is_accepted():
+    """Each digest choice is a valid hash, so the placeholder must not fail the check."""
+    space = {**SEARCH_SPACE, "digest": {"choices": ["a" * 64, "b" * 64]}}
+    template = _trainjob("my/trainer@sha256:${trialParameters.digest}")
+    with cluster():
+        result = _create(search_space=space, trial_template=template)
+    assert result["status"] == "preview", result
+
+
+def test_hyperband_is_not_offered_by_the_flat_tool():
+    """Katib's Hyperband needs r_l and resource_name settings this tool cannot pass."""
+    with cluster():
+        result = _create(algorithm="hyperband")
+    assert result["error_code"] == "VALIDATION_ERROR"
+    assert "hyperband" not in opt.ALGORITHMS
+
+
+def test_input_is_validated_before_the_namespace_policy():
+    """A bad request gets the same error whatever namespace it names."""
+    with patch("kubeflow_mcp.optimizer.api.optimization.check_optimizer_namespace") as ns_check:
+        result = _create(max_trial_count=2, parallel_trial_count=3)
+    assert result["error_code"] == "VALIDATION_ERROR"
+    ns_check.assert_not_called()
+
+
+# ─── create_hpo_experiment_from_spec: names, caps and completion conditions ─
+
+
+def test_from_spec_rejects_a_non_string_name():
+    manifest = _manifest()
+    manifest["metadata"]["name"] = 123
+    with cluster():
+        result = opt.create_hpo_experiment_from_spec(spec=manifest)
+    assert result["error_code"] == "VALIDATION_ERROR"
+    assert "must be a string" in result["error"]
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "limit"),
+    [("maxTrialCount", 1_000_000, opt.MAX_TRIAL_COUNT_LIMIT), ("parallelTrialCount", 10_000, 100)],
+)
+def test_from_spec_applies_the_same_trial_caps(field, value, limit):
+    manifest = _manifest()
+    manifest["spec"][field] = value
+    with cluster() as api:
+        result = opt.create_hpo_experiment_from_spec(spec=manifest, confirmed=True)
+    assert result["error_code"] == "VALIDATION_ERROR"
+    assert f"spec.spec.{field} must be at most {limit}" in result["error"]
+    api.create_namespaced_custom_object.assert_not_called()
+
+
+def test_from_spec_needs_completion_conditions_for_a_pod_trial():
+    pod = {"apiVersion": "v1", "kind": "Pod", "spec": {"containers": [{"name": "c"}]}}
+    manifest = _manifest()
+    manifest["spec"]["trialTemplate"] = {"trialSpec": pod}
+    with cluster():
+        refused = opt.create_hpo_experiment_from_spec(spec=manifest)
+        manifest["spec"]["trialTemplate"].update(
+            successCondition="status.phase == 'Succeeded'",
+            failureCondition="status.phase == 'Failed'",
+        )
+        accepted = opt.create_hpo_experiment_from_spec(spec=manifest)
+    assert refused["error_code"] == "VALIDATION_ERROR"
+    assert "successCondition and failureCondition" in refused["error"]
+    assert accepted["status"] == "preview"
+
+
+def test_from_spec_still_allows_hyperband_with_its_settings():
+    manifest = _manifest()
+    manifest["spec"]["algorithm"] = {
+        "algorithmName": "hyperband",
+        "algorithmSettings": [
+            {"name": "resource_name", "value": "lr"},
+            {"name": "r_l", "value": "9"},
+        ],
+    }
+    with cluster():
+        result = opt.create_hpo_experiment_from_spec(spec=manifest)
+    assert result["status"] == "preview"
