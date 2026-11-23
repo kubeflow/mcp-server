@@ -394,42 +394,6 @@ def get_optimizer_effective_namespace(namespace: str | None = None) -> str:
     return "default"
 
 
-def get_optimizer_ownership(name: str, namespace: str) -> str | None:
-    """Classify an Experiment for the MCP ownership gate.
-
-    Returns:
-        ``OWNERSHIP_MANAGED`` if the experiment carries the MCP ownership label,
-        ``OWNERSHIP_UNMANAGED`` if it exists without the label,
-        ``OWNERSHIP_MISSING`` if no such experiment exists, or
-        ``None`` if the check could not be performed (API error, permissions).
-    """
-    from kubeflow_mcp.optimizer.constants import (
-        EXPERIMENT_PLURAL,
-        KATIB_API_GROUP,
-        KATIB_API_VERSION,
-    )
-
-    try:
-        api = get_custom_objects_api()
-        obj = api.get_namespaced_custom_object(
-            group=KATIB_API_GROUP,
-            version=KATIB_API_VERSION,
-            namespace=namespace,
-            plural=EXPERIMENT_PLURAL,
-            name=name,
-            _request_timeout=K8S_TIMEOUT,
-        )
-        labels = obj.get("metadata", {}).get("labels", {})
-        managed = labels.get(MCP_MANAGED_LABEL) == MCP_MANAGED_VALUE
-        return OWNERSHIP_MANAGED if managed else OWNERSHIP_UNMANAGED
-    except Exception as e:
-        from kubeflow_mcp.common.types import is_k8s_not_found
-
-        if is_k8s_not_found(e):
-            return OWNERSHIP_MISSING
-        return None
-
-
 _SPARK_CONNECT_GROUP = "sparkoperator.k8s.io"
 _SPARK_CONNECT_VERSION = "v1alpha1"
 _SPARK_CONNECT_PLURAL = "sparkconnects"

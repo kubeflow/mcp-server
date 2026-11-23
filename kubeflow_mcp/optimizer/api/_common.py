@@ -21,6 +21,7 @@ enforcing MCP ownership before a mutating operation.
 
 import json
 import logging
+from typing import Any
 
 from kubeflow_mcp.common import utils as mcp_utils
 from kubeflow_mcp.common.constants import ErrorCode
@@ -243,8 +244,14 @@ def collection_error(exc: Exception) -> ToolError:
     )
 
 
-def require_mcp_ownership(name: str, namespace: str, action: str) -> ToolError | None:
+def require_mcp_ownership(experiment: dict[str, Any], name: str, action: str) -> ToolError | None:
     """Block non-admin personas from mutating experiments MCP did not create.
+
+    Takes the Experiment the caller read, rather than reading it again, so the
+    decision is about the exact version the caller then writes with that
+    version as a precondition: a label removed after this check makes the write
+    fail instead of slipping through. A missing experiment never reaches here;
+    the caller's read reports it as not found.
 
     Returns ``None`` when the operation is allowed (admin persona, or the
     experiment carries the MCP ownership label), otherwise the ``ToolError``
@@ -253,22 +260,8 @@ def require_mcp_ownership(name: str, namespace: str, action: str) -> ToolError |
     if get_effective_persona() == "platform-admin":
         return None
 
-    ownership = mcp_utils.get_optimizer_ownership(name, namespace)
-    if ownership is None:
-        return ToolError(
-            error=f"Cannot verify ownership of experiment '{name}' (API error)",
-            error_code=ErrorCode.SDK_ERROR,
-            hint="Retry, or use the platform-admin persona to bypass the check.",
-        )
-    if ownership == mcp_utils.OWNERSHIP_MISSING:
-        # Report the real problem. Falling through to the ownership message
-        # would blame permissions for what is usually a mistyped name.
-        return ToolError(
-            error=f"Experiment '{name}' not found",
-            error_code=ErrorCode.RESOURCE_NOT_FOUND,
-            hint=_FIND_HINT,
-        )
-    if ownership == mcp_utils.OWNERSHIP_UNMANAGED:
+    labels = (experiment.get("metadata") or {}).get("labels") or {}
+    if labels.get(mcp_utils.MCP_MANAGED_LABEL) != mcp_utils.MCP_MANAGED_VALUE:
         return ToolError(
             error=f"Experiment '{name}' was not created by MCP",
             error_code=ErrorCode.VALIDATION_ERROR,

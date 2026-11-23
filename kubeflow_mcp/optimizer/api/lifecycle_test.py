@@ -14,6 +14,7 @@
 
 """Unit tests for optimizer lifecycle tools (confirmation, ownership, budget edits)."""
 
+import copy
 from unittest.mock import patch
 
 import pytest
@@ -103,13 +104,68 @@ def test_admin_bypasses_ownership_check(katib):
     assert lc.delete_hpo_experiment("external", confirmed=True)["success"] is True
 
 
-def test_ownership_check_failure_is_reported(katib, admin):
-    """An ownership lookup that fails must refuse the change, not allow it."""
+def test_ownership_check_failure_is_reported(katib, admin, monkeypatch):
+    """A read that fails, so ownership cannot be decided, must refuse the change."""
     admin.return_value = "data-scientist"
-    with patch.object(mcp_utils, "get_optimizer_ownership", return_value=None):
-        result = lc.delete_hpo_experiment("unknown", confirmed=True)
+
+    def unreachable(**_):
+        raise RuntimeError("connection reset")
+
+    monkeypatch.setattr(katib.custom, "get_namespaced_custom_object", unreachable)
+    result = lc.delete_hpo_experiment("unknown", confirmed=True)
     assert result["error_code"] == "SDK_ERROR"
     assert _writes(katib) == []
+
+
+def _lose_the_label_after_the_check(katib, monkeypatch, name):
+    """Hand the tool the checked version, then change the stored experiment, as a
+    concurrent actor removing the ownership label in between would."""
+    read = katib.custom.get_namespaced_custom_object
+
+    def read_then_relabel(**kw):
+        checked = copy.deepcopy(read(**kw))
+        stored = katib.custom.experiments[name]
+        stored["metadata"]["labels"] = {}
+        stored["metadata"]["resourceVersion"] = "8"
+        return checked
+
+    monkeypatch.setattr(katib.custom, "get_namespaced_custom_object", read_then_relabel)
+
+
+@pytest.mark.parametrize(
+    ("call", "verb"),
+    [
+        (lambda: lc.delete_hpo_experiment("ours", confirmed=True), "deleted"),
+        (lambda: lc.update_hpo_experiment("ours", max_trial_count=20, confirmed=True), "updated"),
+    ],
+)
+def test_a_label_removed_after_the_check_blocks_the_write(katib, admin, monkeypatch, call, verb):
+    """The write is conditional on the version that passed the ownership check,
+    so a label removed in between makes the API server refuse it."""
+    admin.return_value = "ml-engineer"
+    katib.add_experiment(experiment_cr("ours", resource_version="7"))
+    _lose_the_label_after_the_check(katib, monkeypatch, "ours")
+
+    result = call()
+
+    assert result["error_code"] == "VALIDATION_ERROR"
+    assert f"changed after it was checked, so it was not {verb}" in result["error"]
+
+
+def test_delete_is_conditional_on_the_checked_object(katib):
+    katib.add_experiment(experiment_cr("demo", resource_version="42"))
+    lc.delete_hpo_experiment("demo", confirmed=True)
+    ((_, kw),) = katib.custom.writes()
+    assert kw["body"] == {"preconditions": {"uid": "uid-demo", "resourceVersion": "42"}}
+
+
+def test_update_reads_the_experiment_once(katib, admin):
+    """Ownership, rule checks and the patch precondition come from one read."""
+    admin.return_value = "ml-engineer"
+    katib.add_experiment(experiment_cr("demo", parallel=3))
+    lc.update_hpo_experiment("demo", parallel_trial_count=4, confirmed=True)
+    reads = [kw for name, kw in katib.custom.calls if name == "get"]
+    assert len(reads) == 1
 
 
 @pytest.mark.parametrize(
@@ -161,7 +217,7 @@ def test_update_refuses_a_stale_read(katib):
     katib.custom.patch_error = ApiException(status=409, reason="Conflict")
     result = lc.update_hpo_experiment("demo", parallel_trial_count=4, confirmed=True)
     assert result["error_code"] == "VALIDATION_ERROR"
-    assert "changed while this update was being applied" in result["error"]
+    assert "changed after it was checked, so it was not updated" in result["error"]
     assert "already exists" not in result["error"]
 
 

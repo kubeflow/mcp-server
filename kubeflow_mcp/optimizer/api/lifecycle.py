@@ -233,6 +233,18 @@ def _deletion_warning(lowering: bool, doomed: list[dict[str, Any]], exact: bool 
     )
 
 
+def _changed_since_read(name: str, action: str) -> dict[str, Any]:
+    """The refusal for a write whose precondition no longer matches the experiment."""
+    return ToolError(
+        error=(
+            f"Experiment '{name}' changed after it was checked, so it was not {action}d; "
+            "nothing was changed"
+        ),
+        error_code=ErrorCode.VALIDATION_ERROR,
+        hint="Call the tool again to re-check the experiment's current state.",
+    ).model_dump()
+
+
 def _update_response(
     name: str,
     namespace: str,
@@ -287,8 +299,8 @@ def delete_hpo_experiment(
 
     try:
         ns = mcp_utils.get_optimizer_effective_namespace(namespace)
-
-        owner_err = require_mcp_ownership(name, ns, "delete")
+        current = _katib.read_experiment(name, ns)
+        owner_err = require_mcp_ownership(current, name, "delete")
         if owner_err is not None:
             return owner_err.model_dump()
 
@@ -301,14 +313,29 @@ def delete_hpo_experiment(
                 config={"experiment": name, "namespace": ns},
             ).model_dump()
 
-        mcp_utils.get_custom_objects_api().delete_namespaced_custom_object(
-            group=KATIB_API_GROUP,
-            version=KATIB_API_VERSION,
-            namespace=ns,
-            plural=EXPERIMENT_PLURAL,
-            name=name,
-            _request_timeout=mcp_utils.K8S_WRITE_TIMEOUT,
-        )
+        # Preconditions bind the delete to the object checked above: if it was
+        # replaced or changed since (its ownership label removed, say), the API
+        # server refuses with 409 instead of deleting something not checked.
+        metadata = current.get("metadata") or {}
+        preconditions = {
+            key: metadata[field]
+            for key, field in (("uid", "uid"), ("resourceVersion", "resourceVersion"))
+            if metadata.get(field)
+        }
+        try:
+            mcp_utils.get_custom_objects_api().delete_namespaced_custom_object(
+                group=KATIB_API_GROUP,
+                version=KATIB_API_VERSION,
+                namespace=ns,
+                plural=EXPERIMENT_PLURAL,
+                name=name,
+                body={"preconditions": preconditions},
+                _request_timeout=mcp_utils.K8S_WRITE_TIMEOUT,
+            )
+        except Exception as e:
+            if not is_conflict(e):
+                raise
+            return _changed_since_read(name, "delete")
 
         return ToolResponse(
             data={
@@ -385,8 +412,10 @@ def update_hpo_experiment(
 
     try:
         ns = mcp_utils.get_optimizer_effective_namespace(namespace)
-
-        owner_err = require_mcp_ownership(name, ns, "update")
+        # One read serves the ownership check, the rule checks and the patch's
+        # resourceVersion precondition, so all three describe the same version.
+        current = _katib.read_experiment(name, ns)
+        owner_err = require_mcp_ownership(current, name, "update")
         if owner_err is not None:
             return owner_err.model_dump()
 
@@ -398,9 +427,6 @@ def update_hpo_experiment(
             "plural": EXPERIMENT_PLURAL,
             "name": name,
         }
-        current = api.get_namespaced_custom_object(
-            **target_ref, _request_timeout=mcp_utils.K8S_TIMEOUT
-        )
         spec = current.get("spec") or {}
 
         changes: dict[str, dict[str, Any]] = {}
@@ -463,14 +489,7 @@ def update_hpo_experiment(
         except Exception as e:
             if not is_conflict(e):
                 raise
-            return ToolError(
-                error=(
-                    f"Experiment '{name}' changed while this update was being applied; "
-                    "nothing was changed"
-                ),
-                error_code=ErrorCode.VALIDATION_ERROR,
-                hint="Call update_hpo_experiment again to re-check its current state.",
-            ).model_dump()
+            return _changed_since_read(name, "update")
         return _update_response(name, ns, changes, f"updated ({summary}).{warning}", doomed, exact)
 
     except Exception as e:

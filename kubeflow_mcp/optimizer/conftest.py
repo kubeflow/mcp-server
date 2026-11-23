@@ -86,6 +86,7 @@ def experiment_cr(
             "name": name,
             "namespace": NAMESPACE,
             "resourceVersion": resource_version,
+            "uid": f"uid-{name}",
             "creationTimestamp": "2026-11-01T00:00:00Z",
             "labels": {MCP_MANAGED_LABEL: MCP_MANAGED_VALUE} if managed else {},
         },
@@ -199,12 +200,21 @@ class FakeCustomObjects:
         self.calls.append(("patch", kw))
         if self.patch_error is not None:
             raise self.patch_error
+        stored = self._store(kw["plural"]).get(kw["name"]) or {}
+        expected = (kw["body"].get("metadata") or {}).get("resourceVersion")
+        if expected and expected != stored.get("metadata", {}).get("resourceVersion"):
+            raise ApiException(status=409, reason="Conflict")
         return {}
 
     def delete_namespaced_custom_object(self, **kw: Any) -> dict[str, Any]:
         self.calls.append(("delete", kw))
-        if kw["name"] not in self._store(kw["plural"]):
+        stored = self._store(kw["plural"]).get(kw["name"])
+        if stored is None:
             raise _not_found(kw["plural"], kw["name"])
+        metadata = stored["metadata"]
+        preconditions = (kw.get("body") or {}).get("preconditions") or {}
+        if any(metadata.get(key) != value for key, value in preconditions.items()):
+            raise ApiException(status=409, reason="Conflict")
         return {}
 
     def create_namespaced_custom_object(self, **kw: Any) -> dict[str, Any]:
