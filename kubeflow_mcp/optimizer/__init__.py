@@ -108,7 +108,10 @@ CLIENT_TOOL_DESCRIPTIONS: dict[str, str] = {
         "Returns up to `limit` (default 50); `total` reports the full count."
     ),
     "list_suggestions": "List suggestion resources for algorithm debugging.",
-    "get_hpo_experiment_trials": ("List trials for an experiment with optional status filter."),
+    "get_hpo_experiment_trials": (
+        "List trials for an experiment with optional status filter. "
+        "Returns up to `limit` (default 50); `total` reports the full count."
+    ),
     "get_best_trial": "Best trial with optimal hyperparameters and metrics.",
     "get_suggestion": "Suggestion algorithm status and request/reply counts.",
     "wait_for_hpo_experiment": (
@@ -326,12 +329,14 @@ OPTIMIZER DISCOVERY (before creating experiments):
 - list_hpo_experiments() → find existing experiments in namespace
 - get_hpo_experiment(name) → inspect spec, status, trials, best trial
 - get_hpo_experiment_status(name) → lightweight status poll
-- get_successful_trials(name) → compare all successful trial hyperparameters""",
+- get_successful_trials(name) → compare successful trials' hyperparameters. Returns up to
+  limit (default 50, at most 500); if total is larger, the list is not complete""",
     },
     "optimizer_monitoring": {
         "full": """\
 OPTIMIZER MONITORING:
-- get_hpo_experiment_trials(name) → list all trials with status and parameters
+- get_hpo_experiment_trials(name) → trials with status and parameters, up to limit
+  (default 50, at most 500); if total is larger, the list is not complete
 - get_best_trial(name) → optimal hyperparameters and metrics from best trial
 - get_hpo_experiment_trial_logs(name) → pod logs with failure pattern detection
 - get_hpo_experiment_events(name) → K8s events for debugging scheduling/image issues
@@ -343,9 +348,10 @@ OPTIMIZER MONITORING:
         "full": """OPTIMIZER LIFECYCLE:
 - wait_for_hpo_experiment(name) → block until Complete/Failed (timeout capped at 3600s)
 - delete_hpo_experiment(name) → preview, then confirmed=True to remove it permanently
-- update_hpo_experiment(name, max_trial_count=N, confirmed=True) → extend the budget, or
-  change parallel_trial_count. Katib cannot pause; lowering parallelism deletes trials,
-  newest first and whatever their state, so check trials_to_delete in the preview""",
+- update_hpo_experiment(name, max_trial_count=N) → preview a budget or
+  parallel_trial_count change, show it, then repeat with confirmed=True after approval.
+  Katib cannot pause; lowering parallelism deletes trials, newest first and whatever
+  their state, so show trials_to_delete from the preview before confirming""",
     },
     "optimizer_optimization": {
         "full": """\

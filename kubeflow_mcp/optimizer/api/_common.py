@@ -192,8 +192,8 @@ def resource_error(exc: Exception, name: str, kind: str = "Experiment") -> ToolE
             error=f"{kind} '{name}' already exists",
             error_code=ErrorCode.VALIDATION_ERROR,
             hint=(
-                "Choose a different name, or delete the existing experiment "
-                f"with delete_hpo_experiment('{name}', confirmed=True)."
+                "Choose a different name, or delete the existing experiment with "
+                f"delete_hpo_experiment('{name}'): preview it, then confirm."
             ),
         )
     if _api_status(exc) == 403:

@@ -26,7 +26,7 @@ checks container readiness for this reason and reports `controller_ready`.
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `Experiment 'x' already exists` | Name collision | Pick another name, or `delete_hpo_experiment(name, confirmed=True)`. Reported as a validation error — it does not trip the circuit breaker |
+| `Experiment 'x' already exists` | Name collision | Pick another name, or delete it with `delete_hpo_experiment(name)` (preview, then confirm). Reported as a validation error — it does not trip the circuit breaker |
 | `Namespace 'x' not allowed by policy` | Namespace outside the server's allowlist | Pass an allowed `namespace=`, or run the server without the restriction |
 | `Experiment 'x' was not created by MCP` | Non-admin persona touching an external experiment | Expected. `data-scientist`/`ml-engineer` may only mutate MCP-created experiments; use `platform-admin` |
 | Stuck in `Created`, no trials | Suggestion not ready, or the trial template is invalid | `get_suggestion(name)` for algorithm state, then `get_hpo_experiment_events(name)` |
