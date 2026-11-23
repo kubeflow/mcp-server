@@ -366,3 +366,79 @@ def test_events_invalid_limit(katib):
 def test_events_missing_experiment(katib):
     result = monitoring.get_hpo_experiment_events("missing")
     assert result["error_code"] == "RESOURCE_NOT_FOUND"
+
+
+@pytest.mark.parametrize(
+    ("collector", "container", "expected"),
+    [
+        (None, _COLLECTOR, "stdout via sidecar"),
+        ("StdOut", _COLLECTOR, "stdout via sidecar"),
+        ("File", "node", "Traceback: boom"),
+        ("TensorFlowEvent", "node", "Traceback: boom"),
+    ],
+)
+def test_logs_follow_the_metrics_collector_kind(katib, collector, container, expected):
+    """Only the StdOut collector redirects training output to its sidecar; with a
+    File collector the traceback stays in the primary container."""
+    katib.add_experiment(experiment_cr())
+    trial = trial_cr("t1", "Failed")
+    if collector:
+        trial["spec"]["metricsCollector"] = {"collector": {"kind": collector}}
+    katib.add_trials(trial)
+    katib.core.pods.append(_trial_pod("t1"))
+    katib.core.logs[("t1-pod", _COLLECTOR)] = "stdout via sidecar"
+    katib.core.logs[("t1-pod", "node")] = "Traceback: boom"
+    data = monitoring.get_hpo_experiment_trial_logs("exp-1", trial="t1")["data"]
+    assert (data["container"], data["logs"]) == (container, expected)
+
+
+def test_logs_keep_the_newest_lines_when_the_byte_cap_applies(katib, monkeypatch):
+    """The API server caps bytes from the start of the tail window, which would
+    cut off the newest lines; the read shrinks the window until they fit."""
+    katib.add_experiment(experiment_cr())
+    katib.add_trials(trial_cr("t1", "Failed"))
+    katib.core.pods.append(_trial_pod("t1"))
+    lines = [f"step {i} " + "x" * 2000 for i in range(1000)] + ["OOMKilled: the last line"]
+    limit = monitoring.MAX_LOG_BYTES
+    tails = []
+
+    def api_server(**kw):
+        tails.append(kw["tail_lines"])
+        return "\n".join(lines[-kw["tail_lines"] :]).encode()[: kw["limit_bytes"]].decode()
+
+    monkeypatch.setattr(katib.core, "read_namespaced_pod_log", api_server)
+    data = monitoring.get_hpo_experiment_trial_logs("exp-1", trial="t1")["data"]
+    assert data["logs"].endswith("OOMKilled: the last line")
+    assert tails[0] == monitoring.MAX_LOG_LINES
+    assert len(tails) <= 6
+    assert len("\n".join(lines[-tails[-1] :]).encode()) < limit
+
+
+def test_events_match_kind_as_well_as_name(katib):
+    """An unrelated Deployment named like the experiment must not show up, while
+    a TrainJob trial's JobSet, which shares the trial's name, must."""
+    katib.add_experiment(experiment_cr())
+    katib.add_trials(trial_cr("t1", kind="TrainJob"))
+    katib.core.events.extend(
+        [
+            event("exp-1", "Deployment", "ScalingReplicaSet", "2026-11-01T00:00:01Z"),
+            event("exp-1", "Suggestion", "SuggestionCreated", "2026-11-01T00:00:02Z"),
+            event("t1", "JobSet", "SuccessfulCreate", "2026-11-01T00:00:03Z"),
+        ]
+    )
+    data = monitoring.get_hpo_experiment_events("exp-1")["data"]
+    assert [e["involved_object_kind"] for e in data["events"]] == ["Suggestion", "JobSet"]
+
+
+def test_wait_checks_once_more_at_the_deadline(katib, clock, monkeypatch):
+    """With a 20s timeout and a 15s interval, an experiment finishing at 18s must be
+    reported as finished, not as a timeout after 15s."""
+    running = experiment_cr(status={"trialsRunning": 1})
+    done = experiment_cr(conditions=_COMPLETE)
+    states = iter([running, running, done])
+    monkeypatch.setattr(katib.custom, "get_namespaced_custom_object", lambda **_: next(states))
+    data = monitoring.wait_for_hpo_experiment("exp-1", timeout_seconds=20, polling_interval=15)[
+        "data"
+    ]
+    assert data["reached"] is True
+    assert clock == [15, 5]

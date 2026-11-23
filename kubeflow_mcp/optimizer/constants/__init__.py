@@ -41,6 +41,7 @@ METRICS_COLLECTOR_CONTAINER = sdk_constants.METRICS_COLLECTOR_CONTAINER
 # The SDK does not expose a Suggestion plural constant, so it is defined here.
 # Used for direct CustomObjectsApi access (list_suggestions, get_suggestion).
 SUGGESTION_PLURAL = "suggestions"
+SUGGESTION_KIND = "Suggestion"
 
 # Katib's pod webhook adds this label, naming the trial, to every trial pod
 # (consts.LabelTrialName in Katib). The SDK has no constant for it.

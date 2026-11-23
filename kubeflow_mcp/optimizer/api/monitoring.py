@@ -302,9 +302,12 @@ def wait_for_hpo_experiment(
                         **summary,
                     }
                 ).model_dump()
-            if time.monotonic() + polling_interval > deadline:
+            # Sleep at most until the deadline, then check once more, so an
+            # experiment finishing in the last interval is still reported.
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 break
-            time.sleep(polling_interval)
+            time.sleep(min(polling_interval, remaining))
 
         return ToolResponse(
             data={
@@ -455,12 +458,11 @@ def get_hpo_experiment_events(
     try:
         ns = get_optimizer_effective_namespace(namespace)
         _katib.read_experiment(name, ns)
-        names = {name}
-        names |= {(t.get("metadata") or {}).get("name") for t in _katib.list_trials(name, ns)}
-        names |= {p.metadata.name for p in _katib.list_experiment_pods(name, ns)}
-
+        objects = _katib.experiment_objects(
+            name, _katib.list_trials(name, ns), _katib.list_experiment_pods(name, ns)
+        )
         events = sorted(
-            (event_to_dict(e) for e in _katib.list_events_for(names, ns)),
+            (event_to_dict(e) for e in _katib.list_events_for(objects, ns)),
             key=lambda e: e["event_time"],
         )
         # Keep the most recent ones when limiting: those explain the current state.

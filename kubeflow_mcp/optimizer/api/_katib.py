@@ -30,14 +30,21 @@ from typing import Any
 
 from kubeflow_mcp.common import utils as mcp_utils
 from kubeflow_mcp.optimizer.constants import (
+    EXPERIMENT_KIND,
     EXPERIMENT_LABEL,
     EXPERIMENT_PLURAL,
     KATIB_API_GROUP,
     KATIB_API_VERSION,
     METRICS_COLLECTOR_CONTAINER,
+    SUGGESTION_KIND,
+    TRIAL_KIND,
     TRIAL_LABEL,
     TRIAL_PLURAL,
 )
+
+# Katib's default metrics collector, and the only one that redirects the
+# primary container's output to its sidecar.
+STDOUT_COLLECTOR = "StdOut"
 
 # Labels each workload kind's own controller puts on its pods, keyed by the
 # trial's runSpec kind and named after the workload (Katib names the workload
@@ -108,13 +115,21 @@ def find_trial_pods(trial: dict[str, Any], namespace: str) -> list[Any]:
 def pick_log_source(trial: dict[str, Any], pods: list[Any]) -> tuple[Any, str] | None:
     """Choose the pod and container whose log shows the trial's output.
 
-    Katib's StdOut metrics collector redirects the primary container's output to
-    a file and echoes it from its sidecar, so the sidecar's log is the trial's
-    output whenever it is present (this is also what the SDK reads). Without a
-    sidecar, the trial's primary container is used, then the first container.
+    Only Katib's StdOut collector (the default) redirects the primary
+    container's output to a file and echoes it from its sidecar, so only then is
+    the sidecar's log the trial's output. Every other collector, File included,
+    leaves the training output, tracebacks and all, in the primary container,
+    and the sidecar shares the same name. Failing both, the first container.
     """
-    primary = (trial.get("spec") or {}).get("primaryContainerName")
-    for preferred in (METRICS_COLLECTOR_CONTAINER, primary):
+    spec = trial.get("spec") or {}
+    primary = spec.get("primaryContainerName")
+    collector = ((spec.get("metricsCollector") or {}).get("collector") or {}).get("kind")
+    order = (
+        (METRICS_COLLECTOR_CONTAINER, primary)
+        if collector in (None, STDOUT_COLLECTOR)
+        else (primary, METRICS_COLLECTOR_CONTAINER)
+    )
+    for preferred in order:
         for pod in pods:
             names = [c.name for c in (pod.spec.containers or [])]
             if preferred and preferred in names:
@@ -131,16 +146,28 @@ def read_pod_log(
     """Read the end of one container's log, bounded on the server side.
 
     ``tail_lines`` and ``limit_bytes`` are applied by the API server, so a large
-    log is never transferred or held in memory in full.
+    log is never transferred or held in memory in full. The byte limit counts
+    from the start of the tail window, so when the last ``tail_lines`` lines are
+    longer than it, the newest output (often the traceback) would be cut off.
+    The read is then repeated over fewer lines, down to one, so what comes back
+    is always the end of the log; that is at most six reads for 1000 lines.
     """
-    return mcp_utils.get_core_v1_api().read_namespaced_pod_log(
-        name=pod.metadata.name,
-        namespace=namespace,
-        container=container,
-        tail_lines=tail_lines,
-        limit_bytes=limit_bytes,
-        _request_timeout=mcp_utils.K8S_TIMEOUT,
-    )
+    lines = tail_lines
+    while True:
+        text = (
+            mcp_utils.get_core_v1_api().read_namespaced_pod_log(
+                name=pod.metadata.name,
+                namespace=namespace,
+                container=container,
+                tail_lines=lines,
+                limit_bytes=limit_bytes,
+                _request_timeout=mcp_utils.K8S_TIMEOUT,
+            )
+            or ""
+        )
+        if lines == 1 or len(text.encode()) < limit_bytes:
+            return text
+        lines = max(1, lines // 4)
 
 
 def list_experiment_pods(name: str, namespace: str) -> list[Any]:
@@ -156,13 +183,41 @@ def list_experiment_pods(name: str, namespace: str) -> list[Any]:
     )
 
 
-def list_events_for(names: set[str], namespace: str) -> list[Any]:
-    """Namespace events about any of the named objects."""
+def list_events_for(objects: set[tuple[str, str]], namespace: str) -> list[Any]:
+    """Namespace events about any of the given ``(kind, name)`` objects.
+
+    Matching on kind as well as name keeps out an unrelated object that happens
+    to share a name, such as a Deployment named like the experiment.
+    """
     events = (
         mcp_utils.get_core_v1_api()
         .list_namespaced_event(namespace=namespace, _request_timeout=mcp_utils.K8S_TIMEOUT)
         .items
     )
-    return [
-        e for e in events if getattr(getattr(e, "involved_object", None), "name", None) in names
-    ]
+    return [e for e in events if _involved(e) in objects]
+
+
+def _involved(event: Any) -> tuple[str | None, str | None]:
+    involved = getattr(event, "involved_object", None)
+    return getattr(involved, "kind", None), getattr(involved, "name", None)
+
+
+def experiment_objects(
+    name: str, trials: list[dict[str, Any]], pods: list[Any]
+) -> set[tuple[str, str]]:
+    """The ``(kind, name)`` of every object an experiment's events can be about.
+
+    The Suggestion shares the Experiment's name, and each trial's workload
+    shares the trial's; a TrainJob's JobSet shares it too.
+    """
+    objects = {(EXPERIMENT_KIND, name), (SUGGESTION_KIND, name)}
+    for trial in trials:
+        trial_name = (trial.get("metadata") or {}).get("name")
+        kind = ((trial.get("spec") or {}).get("runSpec") or {}).get("kind")
+        objects.add((TRIAL_KIND, trial_name))
+        if kind:
+            objects.add((kind, trial_name))
+        if kind == "TrainJob":
+            objects.add(("JobSet", trial_name))
+    objects |= {("Pod", p.metadata.name) for p in pods}
+    return objects
