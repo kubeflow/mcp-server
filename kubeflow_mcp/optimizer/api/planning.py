@@ -46,6 +46,14 @@ logger = logging.getLogger(__name__)
 # name keeps it obvious in an audit log that this was a readiness check.
 _PROBE_NAME = "katib-pre-flight-probe"
 
+# Katib's webhooks are named validator/defaulter.experiment.katib.kubeflow.org,
+# and the API server quotes the name in every denial they issue, so its presence
+# proves the probe reached Katib rather than being stopped by another webhook.
+_KATIB_WEBHOOK_MARK = "experiment.katib.kubeflow.org"
+# Katib's validating webhook rejects every Experiment in a namespace without
+# this label, before looking at the Experiment itself.
+_INJECTION_LABEL = "katib.kubeflow.org/metrics-collector-injection"
+
 
 class CheckResult(NamedTuple):
     """What one sub-check learned, plus anything that blocks or merely warns.
@@ -242,11 +250,9 @@ def _check_webhook() -> CheckResult:
         )
     except Exception as e:
         status = getattr(e, "status", None)
-        # The probe spec is deliberately minimal, so the validating webhook may
-        # reject it on content. That still proves the webhook was reached, which
-        # is all this check is asking.
+        message = api_message(e)
         if status in (400, 422):
-            return CheckResult(info={"webhook_reachable": True})
+            return _classify_probe_rejection(message)
         if status == 403:
             return CheckResult(
                 info={"webhook_reachable": None},
@@ -262,6 +268,33 @@ def _check_webhook() -> CheckResult:
                 f"experiment can be created: {api_message(e)} A Ready controller pod is "
                 "not sufficient; check that the API server can reach the katib-controller "
                 "Service on its webhook port.",
+            ),
+        )
+    return CheckResult(info={"webhook_reachable": True})
+
+
+def _classify_probe_rejection(message: str) -> CheckResult:
+    """Interpret the probe being refused at admission.
+
+    The probe spec is deliberately incomplete, so Katib's validating webhook
+    refusing it on content proves the webhook is reachable. A refusal Katib did
+    not issue (another admission webhook ran first) proves nothing either way.
+    """
+    if _KATIB_WEBHOOK_MARK not in message:
+        return CheckResult(
+            info={"webhook_reachable": None},
+            warnings=(
+                "Could not confirm Katib's admission webhooks: the dry-run probe was "
+                f"rejected before Katib answered ({message}).",
+            ),
+        )
+    if _INJECTION_LABEL in message:
+        return CheckResult(
+            info={"webhook_reachable": True},
+            blockers=(
+                f"Katib rejects every Experiment in the default namespace: {message} "
+                f"Label it with {_INJECTION_LABEL}=enabled, or pass a labelled namespace "
+                "to the creation tools.",
             ),
         )
     return CheckResult(info={"webhook_reachable": True})

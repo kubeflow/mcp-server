@@ -14,6 +14,7 @@
 
 """Unit tests for katib_pre_flight (CRD + controller + trainer detection)."""
 
+import json
 from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -215,17 +216,60 @@ def test_pre_flight_webhook_probe_is_a_dry_run():
     assert kwargs["plural"] == "experiments"
 
 
-def test_pre_flight_webhook_rejection_still_counts_as_reachable():
-    """A 400/422 means the webhook answered, which is all the probe asks."""
+def _denied(status, message):
+    """An admission denial as the API server returns it."""
+    err = ApiException(status=status, reason="Bad Request")
+    err.body = json.dumps({"message": message})
+    return err
+
+
+_KATIB_DENIAL = (
+    'admission webhook "validator.experiment.katib.kubeflow.org" denied the request: '
+    "spec.trialTemplate: Required value"
+)
+
+
+@pytest.mark.parametrize("status", [400, 422])
+def test_pre_flight_katib_rejecting_the_probe_counts_as_reachable(status):
+    """Katib refusing the deliberately incomplete probe proves its webhook answered."""
     apiext, core = _healthy_cluster()
     webhook = MagicMock()
-    webhook.create_namespaced_custom_object.side_effect = ApiException(
-        status=422, reason="Unprocessable Entity"
+    webhook.create_namespaced_custom_object.side_effect = _denied(status, _KATIB_DENIAL)
+    with _patch(apiext, core, webhook=webhook):
+        data = katib_pre_flight()["data"]
+    assert data["ready"] is True
+    assert data["webhook_reachable"] is True
+
+
+def test_pre_flight_a_rejection_before_katib_proves_nothing():
+    """Another mutating webhook can refuse the probe before Katib ever sees it."""
+    apiext, core = _healthy_cluster()
+    webhook = MagicMock()
+    webhook.create_namespaced_custom_object.side_effect = _denied(
+        400, 'admission webhook "policy.example.com" denied the request: labels required'
     )
     with _patch(apiext, core, webhook=webhook):
-        result = katib_pre_flight()
-    assert result["data"]["ready"] is True
-    assert result["data"]["webhook_reachable"] is True
+        data = katib_pre_flight()["data"]
+    assert data["webhook_reachable"] is None
+    assert any("rejected before Katib answered" in w for w in data["warnings"])
+
+
+def test_pre_flight_blocks_on_a_namespace_katib_will_not_accept():
+    """Katib rejects every Experiment in a namespace without its injection label,
+    so creation cannot work there however healthy everything else is."""
+    apiext, core = _healthy_cluster()
+    webhook = MagicMock()
+    webhook.create_namespaced_custom_object.side_effect = _denied(
+        400,
+        'admission webhook "validator.experiment.katib.kubeflow.org" denied the request: '
+        'Cannot create the Experiment "katib-pre-flight-probe" in namespace "default": '
+        'the namespace lacks label "katib.kubeflow.org/metrics-collector-injection: enabled"',
+    )
+    with _patch(apiext, core, webhook=webhook):
+        data = katib_pre_flight()["data"]
+    assert data["webhook_reachable"] is True
+    assert data["ready"] is False
+    assert any("metrics-collector-injection=enabled" in b for b in data["blockers"])
 
 
 def test_pre_flight_webhook_forbidden_warns_rather_than_blocks():
