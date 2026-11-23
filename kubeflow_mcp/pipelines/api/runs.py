@@ -24,6 +24,8 @@ from kubeflow_mcp.common.utils import get_pipelines_client
 from kubeflow_mcp.pipelines.api._common import (
     TERMINAL_RUN_STATES,
     _get_run_api,
+    check_experiment_namespace,
+    check_resource_namespace,
     check_run_namespace,
     pipelines_error,
     resolve_namespace,
@@ -75,6 +77,40 @@ def _validate_params(params: dict[str, Any] | None) -> ToolError | None:
     return None
 
 
+def _resolve_run_targets(
+    client: Any,
+    pipeline: str,
+    version: str | None,
+    experiment: str | None,
+    ns: str,
+) -> tuple[Any | None, ToolError | None]:
+    """Look up and namespace-check the pipeline, version, and optional experiment."""
+    # Resolve the pipeline to its object before running it. Passing the object, not
+    # the name, keeps the SDK from ever treating the string as a local file path.
+    pipeline_obj = client.get_pipeline(pipeline)
+    pipeline_ns_err = check_resource_namespace(pipeline_obj, ns, "Pipeline")
+    if pipeline_ns_err is not None:
+        return None, pipeline_ns_err
+    if version is not None:
+        client.get_pipeline_version(pipeline, version)
+    else:
+        versions = client.list_pipeline_versions(pipeline, page_size=1)
+        available_versions = getattr(versions, "pipeline_versions", None)
+        if isinstance(versions, dict):
+            available_versions = versions.get("pipeline_versions")
+        if not available_versions:
+            return None, ToolError(
+                error=f"Pipeline '{pipeline}' has no registered versions",
+                error_code=ErrorCode.RESOURCE_NOT_FOUND,
+            )
+    if experiment is not None:
+        exp_obj = client.get_experiment(experiment)
+        exp_ns_err = check_experiment_namespace(exp_obj, ns)
+        if exp_ns_err is not None:
+            return None, exp_ns_err
+    return pipeline_obj, None
+
+
 def create_pipeline_run(
     pipeline: str,
     version: str | None = None,
@@ -124,25 +160,11 @@ def create_pipeline_run(
 
     try:
         client = get_pipelines_client(ns)
-        # Resolve the pipeline to its object before running it. Passing the object, not
-        # the name, keeps the SDK from ever treating the string as a local file path.
-        pipeline_obj = client.get_pipeline(pipeline)
-        if version is not None:
-            client.get_pipeline_version(pipeline, version)
-        else:
-            versions = client.list_pipeline_versions(pipeline, page_size=1)
-            available_versions = getattr(versions, "pipeline_versions", None)
-            if isinstance(versions, dict):
-                available_versions = versions.get("pipeline_versions")
-            if not available_versions:
-                return ToolError(
-                    error=f"Pipeline '{pipeline}' has no registered versions",
-                    error_code=ErrorCode.RESOURCE_NOT_FOUND,
-                ).model_dump()
-        if experiment is not None:
-            client.get_experiment(experiment)
+        pipeline_obj, target_err = _resolve_run_targets(client, pipeline, version, experiment, ns)
     except Exception as e:
         return pipelines_error(e, f"look up pipeline '{pipeline}'").model_dump()
+    if target_err is not None:
+        return target_err.model_dump()
 
     if not confirmed:
         return PreviewResponse(

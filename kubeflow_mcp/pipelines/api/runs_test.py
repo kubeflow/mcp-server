@@ -25,6 +25,7 @@ from kubeflow_mcp.pipelines.api.runs import (
 from kubeflow_mcp.pipelines.conftest import (
     RUN_ID,
     ApiException,
+    make_experiment,
     make_page,
     make_pipeline,
     make_run,
@@ -88,6 +89,7 @@ class TestCreatePipelineRun:
     def test_confirmed_runs_the_pipeline_object_not_the_name(self, kfp_client):
         pipeline = make_pipeline()
         kfp_client.get_pipeline.return_value = pipeline
+        kfp_client.get_experiment.return_value = make_experiment("exp")
         kfp_client.run.return_value = make_run("PENDING")
 
         result = create_pipeline_run(
@@ -170,6 +172,82 @@ class TestCreatePipelineRun:
         assert "boolean" in result["error"]
         kfp_client.get_pipeline.assert_not_called()
         kfp_client.run.assert_not_called()
+
+    @pytest.mark.parametrize("confirmed", [False, True])
+    def test_pipeline_in_another_namespace_is_refused(self, kfp_client, confirmed):
+        other = make_pipeline()
+        other.namespace = "team-b"
+        kfp_client.get_pipeline.return_value = other
+
+        result = create_pipeline_run("churn-prediction", confirmed=confirmed)
+
+        assert result["error_code"] == "PERMISSION_DENIED"
+        assert "not in namespace 'team-a'" in result["error"]
+        kfp_client.list_pipeline_versions.assert_not_called()
+        kfp_client.run.assert_not_called()
+
+    @pytest.mark.parametrize("confirmed", [False, True])
+    def test_shared_pipeline_is_refused_with_allowlist(self, kfp_client, monkeypatch, confirmed):
+        monkeypatch.setattr(
+            "kubeflow_mcp.pipelines.api._common.get_allowed_namespaces", lambda: ["team-a"]
+        )
+        shared = make_pipeline()
+        shared.namespace = ""
+        kfp_client.get_pipeline.return_value = shared
+
+        result = create_pipeline_run("churn-prediction", confirmed=confirmed)
+
+        assert result["error_code"] == "PERMISSION_DENIED"
+        assert "no namespace" in result["error"]
+        kfp_client.run.assert_not_called()
+
+    @pytest.mark.parametrize("confirmed", [False, True])
+    def test_experiment_in_another_namespace_is_refused(self, kfp_client, confirmed):
+        kfp_client.get_pipeline.return_value = make_pipeline()
+        kfp_client.list_pipeline_versions.return_value = make_page(
+            "pipeline_versions", [make_version()]
+        )
+        kfp_client.get_experiment.return_value = make_experiment("exp", namespace="team-b")
+
+        result = create_pipeline_run("churn-prediction", experiment="exp", confirmed=confirmed)
+
+        assert result["error_code"] == "PERMISSION_DENIED"
+        assert "not in namespace 'team-a'" in result["error"]
+        kfp_client.run.assert_not_called()
+
+    @pytest.mark.parametrize("confirmed", [False, True])
+    def test_unnamespaced_experiment_is_refused_with_allowlist(
+        self, kfp_client, monkeypatch, confirmed
+    ):
+        monkeypatch.setattr(
+            "kubeflow_mcp.pipelines.api._common.get_allowed_namespaces", lambda: ["team-a"]
+        )
+        kfp_client.get_pipeline.return_value = make_pipeline()
+        kfp_client.list_pipeline_versions.return_value = make_page(
+            "pipeline_versions", [make_version()]
+        )
+        kfp_client.get_experiment.return_value = make_experiment("exp", namespace="")
+
+        result = create_pipeline_run("churn-prediction", experiment="exp", confirmed=confirmed)
+
+        assert result["error_code"] == "PERMISSION_DENIED"
+        assert "no namespace" in result["error"]
+        kfp_client.run.assert_not_called()
+
+    def test_single_user_empty_namespaces_succeed_without_allowlist(self, kfp_client):
+        pipeline = make_pipeline()
+        pipeline.namespace = ""
+        kfp_client.get_pipeline.return_value = pipeline
+        kfp_client.list_pipeline_versions.return_value = make_page(
+            "pipeline_versions", [make_version()]
+        )
+        kfp_client.get_experiment.return_value = make_experiment("exp", namespace="")
+        kfp_client.run.return_value = make_run("PENDING")
+
+        result = create_pipeline_run("churn-prediction", experiment="exp", confirmed=True)
+
+        assert result["success"] is True
+        kfp_client.run.assert_called_once()
 
 
 class TestConfirmGateThroughDynamicModes:
