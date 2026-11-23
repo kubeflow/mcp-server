@@ -135,6 +135,12 @@ class TestJobLogs:
         assert out["data"]["lines"] == 4
         assert out["data"]["logs"].splitlines()[1:] == ["", "b", "c", "d"]
 
+    def test_long_blank_run_is_not_materialized(self, mock_spark_client):
+        """Blank lines are replayed lazily, so a huge run inside the log stays cheap."""
+        mock_spark_client.get_job_logs.return_value = iter(["a", *[""] * 1_000_000, "b"])
+        out = monitoring.get_spark_job_logs("x", tail_lines=2)
+        assert out["data"]["logs"].splitlines()[1:] == ["", "b"]
+
     def test_invalid_name_is_rejected_before_sdk_call(self, mock_spark_client):
         out = monitoring.get_spark_job_logs("Not a valid/name")
         assert out["error_code"] == "VALIDATION_ERROR"
@@ -165,9 +171,10 @@ class TestJobLogs:
     def test_deleted_driver_pod_is_not_reported_as_missing_job(self, mock_spark_client):
         """The job exists but its pod is gone: say so, not "job not found"."""
         mock_spark_client.get_job_logs.return_value = _failing_stream(_wrapped_pod_404())
-        out = monitoring.get_spark_job_logs("x")
+        out = monitoring.get_spark_job_logs("x", namespace="analytics")
         assert out["error_code"] == "VALIDATION_ERROR"
         assert "no longer exists" in out["error"]
+        assert "get_spark_job(name='x', namespace='analytics')" in out["hint"]
 
     def test_other_read_failure_stays_sdk_error(self, mock_spark_client):
         mock_spark_client.get_job_logs.return_value = _failing_stream(

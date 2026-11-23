@@ -221,6 +221,12 @@ class TestGetJob:
         out = discovery.get_spark_job("x")
         assert out["data"]["next_steps"][0].startswith(f"{tool}(name='x')")
 
+    @pytest.mark.parametrize("status", ["Failed", "Running"])
+    def test_next_steps_keep_the_callers_namespace(self, mock_spark_client, status):
+        mock_spark_client.get_job.return_value = make_spark_job("x", status=status)
+        out = discovery.get_spark_job("x", namespace="analytics")
+        assert "(name='x', namespace='analytics')" in out["data"]["next_steps"][0]
+
     def test_invalid_name_is_rejected_before_sdk_call(self, mock_spark_client):
         out = discovery.get_spark_job("Not a valid/name")
         assert out["error_code"] == "VALIDATION_ERROR"

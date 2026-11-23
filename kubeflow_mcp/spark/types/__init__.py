@@ -66,6 +66,15 @@ def session_info_to_dict(info: Any) -> dict[str, Any]:
     }
 
 
+def job_hint_args(name: str, namespace: str | None) -> str:
+    """Arguments for a follow-up hint, repeating the caller's namespace when given.
+
+    Without it, following a hint for a job in another namespace would read a job of
+    the same name in the default namespace.
+    """
+    return f"name='{name}'" + (f", namespace='{namespace}'" if namespace else "")
+
+
 def job_to_dict(job: Any) -> dict[str, Any]:
     """Convert a ``SparkJob`` (a SparkApplication batch job) into a JSON-safe dict.
 
@@ -95,4 +104,4 @@ def job_to_dict(job: Any) -> dict[str, Any]:
     }
 
 
-__all__ = ["job_to_dict", "session_info_to_dict"]
+__all__ = ["job_hint_args", "job_to_dict", "session_info_to_dict"]
