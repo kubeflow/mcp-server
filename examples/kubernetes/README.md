@@ -16,8 +16,10 @@ standard Kubeflow install creates.
 The Spark session tools are optional. To use them, also install the
 [Spark Operator](https://github.com/kubeflow/spark-operator), which adds the `SparkConnect`
 CRD and provisions the sessions, and add `spark` to `KUBEFLOW_MCP_CLIENTS` in the
-Deployment (the example loads only `trainer`). The Role already grants `sparkconnects`.
-TrainJob tools need neither.
+Deployment (the example loads only `trainer`). The published image is built without the
+`spark` extra, so also use an image that has it, for example one built from this repo's
+`Dockerfile` with `--extra spark` added to its `uv sync` lines. The Role already grants
+`sparkconnects`. TrainJob tools need none of this.
 
 The bearer token is not part of `manifests.yaml`, so create it first:
 
