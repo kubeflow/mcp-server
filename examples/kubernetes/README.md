@@ -86,14 +86,19 @@ clients fail with HTTP 421 while `/health` and `/ready` keep working.
 ## Using JWT (OIDC) instead of the shared token
 
 For production, have clients send access tokens from your identity provider instead
-of sharing one static token. Point the server at the provider's JWKS, issuer and an
-audience reserved for this server:
+of sharing one static token. Clients must send these tokens only over TLS, since
+anyone who can read one on the wire can replay it until it expires. This example
+serves plain HTTP and has no Ingress, so put TLS in front of it (for example an
+Ingress or a service mesh) before using it in production.
+
+The example is deployed with `kubectl apply -k`, so make the change in
+`manifests.yaml`. Uncomment `KUBEFLOW_MCP_JWKS_URI`, `KUBEFLOW_MCP_JWT_ISSUER` and
+`KUBEFLOW_MCP_JWT_AUDIENCE`, set them to the provider's JWKS URI, its issuer and an
+audience reserved for this server, and apply:
 
 ```bash
-kubectl set env deploy/kubeflow-mcp -n "$NAMESPACE" \
-  KUBEFLOW_MCP_JWKS_URI=https://idp.example.com/.well-known/jwks.json \
-  KUBEFLOW_MCP_JWT_ISSUER=https://idp.example.com \
-  KUBEFLOW_MCP_JWT_AUDIENCE=kubeflow-mcp
+kubectl apply -k examples/kubernetes
+kubectl rollout status deploy/kubeflow-mcp -n "$NAMESPACE"
 ```
 
 All three are required. With only the JWKS URI the pod exits at startup, because the
@@ -104,16 +109,17 @@ meant for this server (usually the client ID or API identifier you registered fo
 it), not one shared with other applications. Tokens must also carry an `exp` claim.
 The pod needs network access to the JWKS URI.
 
-The JWKS URI takes precedence over the shared token, so once JWT works you can
-drop the token from the Deployment and delete its Secret:
+The JWKS URI takes precedence over the shared token, so once JWT works, remove the
+`KUBEFLOW_MCP_AUTH_TOKEN` entry from `manifests.yaml` and apply again. Delete the
+Secret only after that. If you delete it while the Deployment still references it,
+any new pod (from the next `kubectl apply -k`, a restart or a reschedule) fails with
+`CreateContainerConfigError`.
 
 ```bash
-kubectl set env deploy/kubeflow-mcp -n "$NAMESPACE" KUBEFLOW_MCP_AUTH_TOKEN-
+kubectl apply -k examples/kubernetes
+kubectl rollout status deploy/kubeflow-mcp -n "$NAMESPACE"
 kubectl delete secret kubeflow-mcp-auth -n "$NAMESPACE"
 ```
-
-`manifests.yaml` has the same three variables commented out next to
-`KUBEFLOW_MCP_AUTH_TOKEN` if you prefer to set them there.
 
 ## Deploying into a different namespace
 
