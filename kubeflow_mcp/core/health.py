@@ -127,7 +127,8 @@ HEALTH_TOOLS = [health_check, get_server_logs]
 
 # Kubernetes permissions each health tool's requests need (#565).
 HEALTH_TOOL_PERMISSIONS: dict[str, tuple[ToolPermission, ...]] = {
-    "health_check": (ToolPermission("list", "", "namespaces", cluster_wide=True),),
+    # Its namespace list only probes connectivity; a refusal reports "degraded".
+    "health_check": (),
     "get_server_logs": (),  # reads the server's own log buffer
 }
 

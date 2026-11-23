@@ -35,7 +35,8 @@ from kubeflow_mcp.core.server import CLIENT_MODULES
 _VERBS = {"get", "list", "watch", "create", "update", "patch", "delete", "deletecollection"}
 _WRITE_VERBS = {"create", "update", "patch", "delete", "deletecollection"}
 _RESOURCE = re.compile(r"^[a-z][a-z0-9]*(/[a-z]+)?$")
-_GROUP = re.compile(r"^([a-z0-9-]+(\.[a-z0-9-]+)+)?$")
+# "" (core), single-label groups such as "apps" and "batch", and dotted ones.
+_GROUP = re.compile(r"^([a-z0-9-]+(\.[a-z0-9-]+)*)?$")
 
 # Read-only tools whose requests still write, and why. Keep this list short.
 _READ_ONLY_TOOLS_THAT_WRITE = {
@@ -103,13 +104,14 @@ def test_permissions_are_well_formed(client, tool, permissions, annotations):
 
 @pytest.mark.parametrize("client,tool,permissions,annotations", list(_all_tools()), ids=_tool_id)
 def test_conditional_permissions_name_a_parameter(client, tool, permissions, annotations):
-    """``when`` must name a real parameter, or a check would skip the request forever."""
+    """``when`` / ``unless`` must name a real parameter, or a check would be wrong forever."""
     parameters = set(inspect.signature(tool).parameters)
     for permission in permissions:
-        if permission.when is not None:
-            assert permission.when in parameters, (
-                f"{tool.__name__}: when={permission.when!r} is not a parameter"
-            )
+        assert not (permission.when and permission.unless), f"{tool.__name__}: {permission}"
+        for field in ("when", "unless"):
+            value = getattr(permission, field)
+            if value is not None:
+                assert value in parameters, f"{tool.__name__}: {field}={value!r} is not a parameter"
 
 
 @pytest.mark.parametrize("client,tool,permissions,annotations", list(_all_tools()), ids=_tool_id)
@@ -134,4 +136,14 @@ def test_read_only_writes_are_conditional():
             continue
         for permission in permissions:
             if permission.verb in _WRITE_VERBS:
-                assert permission.when, f"{tool.__name__} writes {permission} on every call"
+                assert permission.when, f"{tool.__name__} writes {permission} unless opted in"
+
+
+@pytest.mark.parametrize("group", ["", "apps", "batch", "trainer.kubeflow.org"])
+def test_group_pattern_accepts_real_api_groups(group):
+    assert _GROUP.match(group)
+
+
+@pytest.mark.parametrize("group", ["Apps", "trainer..kubeflow.org", ".io", "a b"])
+def test_group_pattern_rejects_malformed_groups(group):
+    assert not _GROUP.match(group)

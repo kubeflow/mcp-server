@@ -468,9 +468,14 @@ CLIENT_TOOL_PERMISSIONS: dict[str, tuple[ToolPermission, ...]] = {
         _OWNED_JOB_GET,
         ToolPermission("patch", "trainer.kubeflow.org", "trainjobs"),
     ),
+    # Without a name it lists every CRD; with one it reads only that CRD.
     "inspect_crd": (
         ToolPermission(
-            "list", "apiextensions.k8s.io", "customresourcedefinitions", cluster_wide=True
+            "list",
+            "apiextensions.k8s.io",
+            "customresourcedefinitions",
+            cluster_wide=True,
+            unless="name",
         ),
         ToolPermission(
             "get",
@@ -492,7 +497,9 @@ CLIENT_TOOL_PERMISSIONS: dict[str, tuple[ToolPermission, ...]] = {
     ),
     "create_runtime": (ToolPermission("create", *_CLUSTER_RUNTIME, cluster_wide=True),),
     "delete_runtime": (
-        # Refuses while a TrainJob in any namespace still uses the runtime.
+        # The preview lists TrainJobs that still use the runtime and deletes anyway.
+        # The tool tolerates a failed list, but then the preview says no TrainJob is
+        # affected, so the list is declared: the warning before a delete must be true.
         ToolPermission("list", "trainer.kubeflow.org", "trainjobs", cluster_wide=True),
         ToolPermission("delete", *_CLUSTER_RUNTIME, cluster_wide=True),
     ),

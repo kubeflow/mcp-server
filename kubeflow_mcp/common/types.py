@@ -113,6 +113,8 @@ class ToolPermission(NamedTuple):
     cluster_wide: bool = False  # cluster-scoped, or across all namespaces
     # Parameter that triggers the request; None means every call makes it.
     when: str | None = None
+    # Parameter whose absence triggers the request (it is skipped when the argument is set).
+    unless: str | None = None
 
 
 class ToolResponse(BaseModel):
