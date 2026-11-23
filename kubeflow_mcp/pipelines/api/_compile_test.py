@@ -564,7 +564,10 @@ class TestRealCompile:
             (tmp_path / "pipeline.yaml").stat().st_size <= 1024
         )
 
-    @pytest.mark.skipif(not hasattr(os, "fork"), reason="OS limits need POSIX (resource module)")
+    @pytest.mark.skipif(
+        sys.platform != "linux",
+        reason="RLIMIT_AS is only enforced on Linux (skipped on macOS and Windows)",
+    )
     def test_memory_limit_stops_the_worker(self, tmp_path, monkeypatch):
         monkeypatch.setattr(_compile, "MAX_COMPILE_MEMORY_BYTES", 64 * 1024 * 1024)
 
