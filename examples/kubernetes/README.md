@@ -86,10 +86,11 @@ clients fail with HTTP 421 while `/health` and `/ready` keep working.
 ## Using JWT (OIDC) instead of the shared token
 
 For production, have clients send access tokens from your identity provider instead
-of sharing one static token. Clients must send these tokens only over TLS, since
-anyone who can read one on the wire can replay it until it expires. This example
-serves plain HTTP and has no Ingress, so put TLS in front of it (for example an
-Ingress or a service mesh) before using it in production.
+of sharing one static token. Anyone who can read a token on the wire can replay it
+until it expires, so it must stay encrypted all the way to the pod. This example
+serves plain HTTP, so before using it in production, encrypt every hop, for example
+with a service mesh that uses mTLS between pods. An Ingress that terminates TLS is
+not enough on its own, because it forwards the token to the pod in plain text.
 
 The example is deployed with `kubectl apply -k`, so make the change in
 `manifests.yaml`. Uncomment `KUBEFLOW_MCP_JWKS_URI`, `KUBEFLOW_MCP_JWT_ISSUER` and
@@ -113,12 +114,13 @@ The JWKS URI takes precedence over the shared token, so once JWT works, remove t
 `KUBEFLOW_MCP_AUTH_TOKEN` entry from `manifests.yaml` and apply again. Delete the
 Secret only after that. If you delete it while the Deployment still references it,
 any new pod (from the next `kubectl apply -k`, a restart or a reschedule) fails with
-`CreateContainerConfigError`.
+`CreateContainerConfigError`. The `&&` stops before the delete if the apply or the
+rollout fails:
 
 ```bash
-kubectl apply -k examples/kubernetes
-kubectl rollout status deploy/kubeflow-mcp -n "$NAMESPACE"
-kubectl delete secret kubeflow-mcp-auth -n "$NAMESPACE"
+kubectl apply -k examples/kubernetes \
+  && kubectl rollout status deploy/kubeflow-mcp -n "$NAMESPACE" \
+  && kubectl delete secret kubeflow-mcp-auth -n "$NAMESPACE"
 ```
 
 ## Deploying into a different namespace
