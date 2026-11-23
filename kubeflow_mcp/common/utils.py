@@ -361,37 +361,24 @@ def get_trainer_ownership(name: str, namespace: str) -> str | None:
 
 
 # =============================================================================
-# Optimizer (Katib) client factories
-# Mirrors the TrainerClient pattern above.
+# Optimizer (Katib) namespace resolution
 # =============================================================================
 
 
-@lru_cache(maxsize=1)
-def get_optimizer_client() -> Any:
-    """Get or create OptimizerClient singleton.
-
-    Uses default KubernetesBackendConfig with current kubeconfig context. The
-    optimizer tools read and write Katib resources directly; the client is kept
-    so the default namespace resolves exactly as the SDK resolves it.
-    """
-    from kubeflow.optimizer import OptimizerClient
-
-    return OptimizerClient()
-
-
 def get_optimizer_effective_namespace(namespace: str | None = None) -> str:
-    """Namespace for OptimizationJob operations: explicit arg, then SDK backend, else ``default``.
+    """Namespace for Katib operations: the explicit argument, else the kubeconfig default.
 
-    Aligns direct CustomObjects calls with :class:`OptimizerClient` (Kubernetes backend).
+    The optimizer tools call the Katib API directly, so the default comes from
+    the kubeconfig (or in-cluster ServiceAccount) those calls already use,
+    resolved locally. ``OptimizerClient`` is not built for it: its constructor
+    also builds a Trainer backend that reads a ConfigMap with no request timeout,
+    so an API server that accepts the connection and never answers would hang
+    the call before any bounded Katib request is made.
+
+    Raises:
+        RuntimeError: No kubeconfig is found and the server is not in-cluster.
     """
-    if namespace:
-        return namespace
-    client = get_optimizer_client()
-    backend = client.backend
-    ns = getattr(backend, "namespace", None)
-    if ns is not None:
-        return str(ns)
-    return "default"
+    return namespace or get_default_kubeconfig_namespace()
 
 
 _SPARK_CONNECT_GROUP = "sparkoperator.k8s.io"
@@ -546,7 +533,6 @@ def get_spark_client_for_namespace(namespace: str | None = None) -> Any:
 def reset_clients() -> None:
     """Reset all cached clients (for testing or kubeconfig rotation)."""
     get_trainer_client.cache_clear()
-    get_optimizer_client.cache_clear()
     get_spark_client.cache_clear()
     _get_api_client.cache_clear()
     with _ns_client_lock:
