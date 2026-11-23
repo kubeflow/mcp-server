@@ -27,6 +27,11 @@ logger = logging.getLogger(__name__)
 
 MAX_LIST_LIMIT = 500
 
+# SparkConnectState values in kubeflow[spark] 0.5.0. A filter outside them can
+# never match, so it is refused instead of silently returning nothing. Pinned by
+# ``sdk_contracts_test.py``.
+SESSION_STATES = ("Provisioning", "Ready", "Running", "NotReady", "Failed")
+
 
 def list_spark_sessions(
     state: str | None = None,
@@ -37,7 +42,8 @@ def list_spark_sessions(
 
     Args:
         state: Filter by session state: ``Provisioning``, ``Ready``, ``Running``,
-            ``NotReady``, ``Failed``. Case-insensitive.
+            ``NotReady``, ``Failed``. Case-insensitive. Any other value is
+            rejected with ``VALIDATION_ERROR``.
         namespace: K8s namespace. Uses default from kubeconfig when omitted.
         limit: Maximum sessions to return. Defaults to 50.
 
@@ -58,6 +64,16 @@ def list_spark_sessions(
     if ns_err is not None:
         return ns_err.model_dump()
 
+    want = None
+    if state is not None:
+        want = state.strip().lower()
+        if want not in {s.lower() for s in SESSION_STATES}:
+            return ToolError(
+                error=f"Unsupported state '{state}'",
+                error_code=ErrorCode.VALIDATION_ERROR,
+                details={"supported_states": sorted(SESSION_STATES)},
+            ).model_dump()
+
     if limit < 1:
         return ToolError(
             error=f"limit must be >= 1, got {limit}",
@@ -69,8 +85,7 @@ def list_spark_sessions(
         client = get_spark_client_for_namespace(namespace)
         sessions = [session_info_to_dict(s) for s in client.list_sessions()]
 
-        if state:
-            want = state.strip().lower()
+        if want is not None:
             sessions = [s for s in sessions if (s.get("state") or "").lower() == want]
 
         shown = sessions[:limit]
