@@ -290,6 +290,7 @@ def test_preview_lists_the_running_trial_katib_deletes(katib):
     )
     result = lc.update_hpo_experiment("demo", parallel_trial_count=1)
     assert result["config"]["trials_to_delete"] == [{"name": "new", "status": "Running"}]
+    assert result["config"]["trials_to_delete_exact"] is True
     assert "it would delete 1: new (Running)" in result["message"]
     assert _writes(katib) == []
 
@@ -312,6 +313,37 @@ def test_preview_counts_a_newer_completed_trial_katib_deletes_first(katib):
     ]
     assert "it would delete 2" in result["message"]
     assert "including 1 that already finished, whose results are lost" in result["message"]
+
+
+def test_a_trial_without_conditions_counts_as_pending(katib):
+    """Regression: a running trial, a conditionless one and a newer completed one
+    gave an empty preview, though Katib counts the conditionless trial as pending
+    and so deletes the completed trial first, then the conditionless one."""
+    _demo(
+        katib,
+        ("running", "Running", "2026-11-01T00:00:01Z"),
+        ("fresh", "Created", "2026-11-01T00:00:02Z"),
+        ("done", "Complete", "2026-11-01T00:00:03Z"),
+    )
+    katib.custom.trials[1]["status"]["conditions"] = []
+    result = lc.update_hpo_experiment("demo", parallel_trial_count=1)
+    assert result["config"]["trials_to_delete"] == [
+        {"name": "done", "status": "Complete"},
+        {"name": "fresh", "status": "Created"},
+    ]
+    assert result["config"]["trials_to_delete_exact"] is True
+
+
+def test_preview_is_flagged_inexact_when_a_cut_splits_same_second_trials(katib):
+    """Katib sorts by creation time alone and timestamps have one-second
+    resolution, so which tied trial it deletes is undetermined."""
+    same = "2026-11-01T00:00:01Z"
+    _demo(
+        katib, ("a", "Running", same), ("b", "Running", same), ("c", "Complete", same), parallel=3
+    )
+    result = lc.update_hpo_experiment("demo", parallel_trial_count=1)
+    assert result["config"]["trials_to_delete_exact"] is False
+    assert "undetermined" in result["message"]
 
 
 def test_pending_trials_count_as_active(katib):

@@ -38,11 +38,29 @@ def test_trial_status_prefers_the_terminal_condition():
     assert ser.trial_status(trial) == "Complete"
 
 
-def test_trial_status_ignores_false_conditions_and_unknown_shapes():
+def test_a_trial_without_a_true_condition_is_pending_as_katib_counts_it():
+    """Katib's status summary counts every unmatched trial as pending, including
+    a freshly created one with no conditions yet."""
     trial = trial_cr("t", "Running")
     trial["status"]["conditions"] = [{"type": "Running", "status": "False"}]
-    assert ser.trial_status(trial) == "Unknown"
-    assert ser.trial_status({}) == "Unknown"
+    assert ser.trial_status(trial) == "Created"
+    trial["status"]["conditions"] = []
+    assert ser.trial_status(trial) == "Created"
+    assert ser.trial_status({}) == "Created"
+
+
+@pytest.mark.parametrize(
+    ("conditions", "state"),
+    [
+        (["Running", "MetricsUnavailable"], "Running"),
+        (["Succeeded", "Killed"], "Killed"),
+        (["Failed", "EarlyStopped"], "Failed"),
+    ],
+)
+def test_trial_status_follows_katibs_order_when_conditions_overlap(conditions, state):
+    trial = trial_cr("t", "Created")
+    trial["status"]["conditions"] = [{"type": c, "status": "True"} for c in conditions]
+    assert ser.trial_status(trial) == state
 
 
 @pytest.mark.parametrize(("kind", "trainjob"), [("TrainJob", "t1"), ("Job", None)])

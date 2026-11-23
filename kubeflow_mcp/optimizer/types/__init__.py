@@ -42,31 +42,33 @@ from kubeflow_mcp.optimizer.constants import (
 # SDK reports the resulting job status as "Complete".
 _CR_CONDITION_SUCCEEDED = "Succeeded"
 
-# Trial states, from the Trial CR's true conditions, checked in this order:
-# Katib leaves earlier conditions in place as a trial progresses, so a finished
-# trial still carries Created and may carry Running. A succeeded trial is
-# reported as "Complete", the word the trial status filter and the TrainJob tools
-# already use, so a filter written for one client works for the other.
+# Trial states, from the Trial CR's true conditions, checked in the order
+# Katib's own status summary checks them (updateTrialsSummary). Katib leaves
+# earlier conditions in place as a trial progresses, so the order decides, and
+# a trial matching none of them, including one with no conditions yet, is
+# pending. A succeeded trial is reported as "Complete", the word the trial
+# status filter and the TrainJob tools already use, so a filter written for one
+# client works for the other.
 _TRIAL_STATES: tuple[tuple[str, str], ...] = (
-    ("EarlyStopped", "EarlyStopped"),
-    ("Succeeded", JobStatus.COMPLETE),
-    ("Failed", JobStatus.FAILED),
     ("Killed", "Killed"),
-    ("MetricsUnavailable", "MetricsUnavailable"),
+    ("Failed", JobStatus.FAILED),
+    ("Succeeded", JobStatus.COMPLETE),
+    ("EarlyStopped", "EarlyStopped"),
     ("Running", JobStatus.RUNNING),
-    ("Created", JobStatus.CREATED),
+    ("MetricsUnavailable", "MetricsUnavailable"),
 )
 TRIAL_SUCCEEDED = JobStatus.COMPLETE
-# Katib counts a trial as active (it occupies a parallelTrialCount slot) until
-# it reaches one of the terminal conditions above.
-ACTIVE_TRIAL_STATES = frozenset({JobStatus.CREATED, JobStatus.RUNNING})
+TRIAL_PENDING = JobStatus.CREATED
+# Katib counts a trial as active (it occupies a parallelTrialCount slot) while
+# it is pending or running.
+ACTIVE_TRIAL_STATES = frozenset({TRIAL_PENDING, JobStatus.RUNNING})
 
 # trial status -> the response counter it feeds
 _TRIAL_STATE_COUNTERS = {
     JobStatus.RUNNING: "running_trials",
     TRIAL_SUCCEEDED: "succeeded_trials",
     JobStatus.FAILED: "failed_trials",
-    JobStatus.CREATED: "pending_trials",
+    TRIAL_PENDING: "pending_trials",
     "Killed": "killed_trials",
     "EarlyStopped": "early_stopped_trials",
 }
@@ -105,12 +107,12 @@ def parameters_from_assignments(assignments: list[dict[str, Any]] | None) -> dic
 
 
 def trial_status(trial: dict[str, Any]) -> str:
-    """Derive a trial's state from the Trial CR's conditions."""
+    """Derive a trial's state from the Trial CR's conditions, as Katib classifies it."""
     true = _true_conditions(trial.get("status") or {})
     for condition, state in _TRIAL_STATES:
         if condition in true:
             return state
-    return "Unknown"
+    return TRIAL_PENDING
 
 
 def trial_to_dict(trial: dict[str, Any]) -> dict[str, Any]:

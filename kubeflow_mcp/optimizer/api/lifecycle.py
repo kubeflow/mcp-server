@@ -55,8 +55,9 @@ from kubeflow_mcp.optimizer.types import ACTIVE_TRIAL_STATES, experiment_phase, 
 # The parameters update_hpo_experiment accepts, the Experiment spec field each one
 # patches, and its bounds. These are exactly the fields Katib's validating
 # webhook lets a live Experiment change. Katib has no pause: the webhook
-# rejects parallelTrialCount <= 0, so throttling to 1 is the closest there is.
-# Upper bounds match create_hpo_experiment's guard rails.
+# rejects parallelTrialCount <= 0, and lowering it deletes trials (see
+# _trials_katib_will_delete). Upper bounds match create_hpo_experiment's guard
+# rails.
 EDITABLE_FIELDS: tuple[tuple[str, str, int, int], ...] = (
     ("parallel_trial_count", "parallelTrialCount", 1, MAX_PARALLEL_TRIAL_LIMIT),
     ("max_trial_count", "maxTrialCount", 1, MAX_TRIAL_COUNT_LIMIT),
@@ -85,9 +86,9 @@ def _check_requested(values: dict[str, Any]) -> ToolError | None:
         value = values[param]
         if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
             hint = (
-                "Katib cannot pause an experiment. Lowering parallel_trial_count limits "
-                "how many trials run at once, but Katib deletes any active trials above "
-                "the new value. Use delete_hpo_experiment() to stop it."
+                "Katib cannot pause an experiment. Lowering parallel_trial_count makes "
+                "Katib delete trials, newest first and whatever their state, until the "
+                "active ones fit the new value. Use delete_hpo_experiment() to stop it."
                 if param == "parallel_trial_count" and value == 0
                 else None
             )
@@ -152,7 +153,9 @@ def _katib_rule_violation(spec: dict[str, Any], status: dict[str, Any]) -> str |
     return None
 
 
-def _trials_katib_will_delete(trials: list[dict[str, Any]], parallel: int) -> list[dict[str, Any]]:
+def _trials_katib_will_delete(
+    trials: list[dict[str, Any]], parallel: int
+) -> tuple[list[dict[str, Any]], bool]:
     """The trials Katib deletes after ``parallelTrialCount`` drops to ``parallel``.
 
     Replays Katib's experiment controller (``ReconcileTrials`` and
@@ -164,10 +167,14 @@ def _trials_katib_will_delete(trials: list[dict[str, Any]], parallel: int) -> li
     running one in a later round.
 
     ``trials`` is oldest first, as :func:`_katib.list_trials` returns it. The
-    result is newest first, in the order Katib deletes them.
+    result is newest first, plus whether it is exact. Katib orders by creation
+    time alone, which Kubernetes records to the second, and does not break ties.
+    When a cut falls between trials created in the same second, which of them
+    Katib deletes is undetermined, so the list is one possible outcome.
     """
     remaining = list(trials)
     doomed: list[dict[str, Any]] = []
+    exact = True
     while True:
         active = sum(trial_status(t) in ACTIVE_TRIAL_STATES for t in remaining)
         excess = active - parallel
@@ -175,12 +182,20 @@ def _trials_katib_will_delete(trials: list[dict[str, Any]], parallel: int) -> li
             return [
                 {"name": (t.get("metadata") or {}).get("name"), "status": trial_status(t)}
                 for t in doomed
-            ]
+            ], exact
+        if excess < len(remaining) and _created(remaining[-excess - 1]) == _created(
+            remaining[-excess]
+        ):
+            exact = False
         doomed.extend(reversed(remaining[-excess:]))
         remaining = remaining[:-excess]
 
 
-def _deletion_warning(lowering: bool, doomed: list[dict[str, Any]]) -> str:
+def _created(trial: dict[str, Any]) -> str | None:
+    return (trial.get("metadata") or {}).get("creationTimestamp")
+
+
+def _deletion_warning(lowering: bool, doomed: list[dict[str, Any]], exact: bool = True) -> str:
     """Sentence appended to update_hpo_experiment messages when parallelism drops.
 
     Always present for a reduction, even when no trial is expected to go: the
@@ -202,11 +217,19 @@ def _deletion_warning(lowering: bool, doomed: list[dict[str, Any]]) -> str:
         if completed
         else ""
     )
+    ties = (
+        ""
+        if exact
+        else (
+            " Some of these were created in the same second as trials not listed, and Katib's "
+            "choice among those is undetermined, so the trials it deletes may differ."
+        )
+    )
     return (
         " Lowering parallel_trial_count makes Katib delete trials newest first, whatever "
         "their state, until the active ones fit, without letting them finish. Based on the "
-        f"trials now, it would delete {len(doomed)}: {listed}{note}. Deleted trials are not "
-        "counted as killed."
+        f"trials now, it would delete {len(doomed)}: {listed}{note}.{ties} Deleted trials are "
+        "not counted as killed."
     )
 
 
@@ -216,6 +239,7 @@ def _update_response(
     changes: dict[str, dict[str, Any]],
     outcome: str,
     trials_to_delete: list[dict[str, Any]] | None = None,
+    trials_to_delete_exact: bool = True,
 ) -> dict[str, Any]:
     """Single response shape for every update_hpo_experiment outcome."""
     return ToolResponse(
@@ -224,6 +248,7 @@ def _update_response(
             "namespace": namespace,
             "changes": changes,
             "trials_to_delete": trials_to_delete or [],
+            "trials_to_delete_exact": trials_to_delete_exact,
             "message": f"Experiment '{name}' {outcome}",
         }
     ).model_dump()
@@ -333,7 +358,9 @@ def update_hpo_experiment(
         dict: Preview, or a response with ``experiment``, ``namespace``,
         ``changes`` mapping each changed parameter to ``{"from", "to"}``, and
         ``trials_to_delete``, the ``{"name", "status"}`` of each trial Katib is
-        expected to delete, estimated from the trials when the call ran.
+        expected to delete, estimated from the trials when the call ran, and
+        ``trials_to_delete_exact``, false when trials created in the same second
+        make Katib's choice among them undetermined.
 
     Raises:
         ToolError: If the experiment is not found or the edit is invalid.
@@ -397,12 +424,12 @@ def update_hpo_experiment(
         summary = ", ".join(f"{p} {c['from']} -> {c['to']}" for p, c in changes.items())
         new_parallel = patch.get("parallelTrialCount")
         lowering = new_parallel is not None and new_parallel < (spec.get("parallelTrialCount") or 0)
-        doomed = (
+        doomed, exact = (
             _trials_katib_will_delete(_katib.list_trials(name, ns), new_parallel)
             if lowering
-            else []
+            else ([], True)
         )
-        warning = _deletion_warning(lowering, doomed)
+        warning = _deletion_warning(lowering, doomed, exact)
         if not confirmed:
             return PreviewResponse(
                 message=(
@@ -414,6 +441,7 @@ def update_hpo_experiment(
                     "namespace": ns,
                     "changes": changes,
                     "trials_to_delete": doomed,
+                    "trials_to_delete_exact": exact,
                 },
             ).model_dump()
 
@@ -443,7 +471,7 @@ def update_hpo_experiment(
                 error_code=ErrorCode.VALIDATION_ERROR,
                 hint="Call update_hpo_experiment again to re-check its current state.",
             ).model_dump()
-        return _update_response(name, ns, changes, f"updated ({summary}).{warning}", doomed)
+        return _update_response(name, ns, changes, f"updated ({summary}).{warning}", doomed, exact)
 
     except Exception as e:
         return experiment_error(e, name).model_dump()
