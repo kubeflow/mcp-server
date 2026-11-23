@@ -11,8 +11,15 @@ least-privilege RBAC. Ingress, OIDC, and Helm are outside this profile.
 
 Requires a cluster with Kubeflow Trainer installed, `kubectl`, and an existing
 namespace — the example uses `kubeflow-user-example-com`, the Profile namespace a
-standard Kubeflow install creates. The bearer token is not part of `manifests.yaml`,
-so create it first:
+standard Kubeflow install creates.
+
+The Spark session tools are optional. To use them, also install the
+[Spark Operator](https://github.com/kubeflow/spark-operator), which adds the `SparkConnect`
+CRD and provisions the sessions, and add `spark` to `KUBEFLOW_MCP_CLIENTS` in the
+Deployment (the example loads only `trainer`). The Role already grants `sparkconnects`.
+TrainJob tools need neither.
+
+The bearer token is not part of `manifests.yaml`, so create it first:
 
 ```bash
 NAMESPACE=kubeflow-user-example-com
