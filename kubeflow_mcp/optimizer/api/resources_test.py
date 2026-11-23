@@ -94,10 +94,13 @@ def test_every_algorithm_is_documented(hpo_patterns):
 
 
 def test_guide_does_not_claim_algorithms_need_the_raw_spec(hpo_patterns):
-    """Regression: the guide used to say tpe/cmaes/hyperband were unreachable
-    from create_hpo_experiment. Building the CR directly made that false."""
+    """Regression: the guide used to say tpe/cmaes were unreachable from
+    create_hpo_experiment. Building the CR directly made that false; only an
+    algorithm the tool does not accept (hyperband) may point at the spec tool."""
     table = hpo_patterns.split("## Algorithm selection", 1)[1].split("##", 1)[0]
-    assert "create_hpo_experiment_from_spec" not in table
+    for row in table.splitlines():
+        if "create_hpo_experiment_from_spec" in row:
+            assert not any(f'"{a}"' in row for a in ALGORITHMS), row
 
 
 def test_guides_only_reference_real_tools(hpo_patterns, troubleshooting):

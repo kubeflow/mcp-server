@@ -24,7 +24,7 @@ generates its own Experiment name and sets no metadata labels, so MCP could
 neither honour a caller-supplied name nor stamp the ownership label that
 ``delete_hpo_experiment``/``update_hpo_experiment`` rely on. Building the CR directly
 avoids all three limits, and additionally reaches Katib algorithms the SDK's
-typed classes cannot express (tpe, cmaes, hyperband, ...).
+typed classes cannot express (tpe, cmaes, sobol, ...).
 """
 
 import json

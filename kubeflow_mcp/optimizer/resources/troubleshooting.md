@@ -32,7 +32,7 @@ checks container readiness for this reason and reports `controller_ready`.
 | Stuck in `Created`, no trials | Suggestion not ready, or the trial template is invalid | `get_suggestion(name)` for algorithm state, then `get_hpo_experiment_events(name)` |
 | All trials fail immediately | Bad image, bad command, or unresolvable `runtimeRef` | `get_hpo_experiment_trial_logs(name)`; failure patterns (OOM, missing module, permissions) are auto-detected and returned in `failure_hint` |
 | Trials run but no metrics | The objective metric name does not match what the script prints, the derived `primaryContainerName` is not the container that prints it, or the namespace lacks `katib.kubeflow.org/metrics-collector-injection=enabled` | Ensure the script emits the metric named in `objective_metric`; pass `primary_container_name` when a sidecar is listed first; label the namespace |
-| Results look flat / identical | A searched parameter is never referenced in the template | Every `search_space` key needs a `${trialParameters.<key>}` reference in `trial_template` |
+| `search_space parameters not referenced in trial_template` | A searched parameter is never used in the template; Katib would reject the experiment | Reference it as `${trialParameters.<key>}` in `trial_template`, or remove it from `search_space` |
 | `Timeout after Ns` from `wait_for_hpo_experiment` | Trials slower than the timeout | Not a failure — the experiment is still running. Poll `get_hpo_experiment_status()`, or raise `timeout_seconds` (max 3600) |
 
 ## Status values
@@ -102,6 +102,7 @@ time of the call; wait for trials to finish first if their results matter.
 
 ## Cleanup
 
-`delete_hpo_experiment(name, confirmed=True)` removes the experiment along with its
-trials and suggestion. It is irreversible — the first call returns a preview.
-Retained trial pods are removed with the experiment.
+`delete_hpo_experiment(name)` previews the deletion; once the user agrees,
+`delete_hpo_experiment(name, confirmed=True)` removes the experiment along with
+its trials and suggestion. It is irreversible. Retained trial pods are removed
+with the experiment.

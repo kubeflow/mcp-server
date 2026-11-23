@@ -122,8 +122,8 @@ CLIENT_TOOL_DESCRIPTIONS: dict[str, str] = {
     "create_hpo_experiment": (
         "Create HPO experiment from flat params. Search types: uniform, "
         "loguniform, int, choice. Algorithms: random, grid, bayesianoptimization, "
-        "tpe, multivariate-tpe, cmaes, sobol, hyperband. "
-        "Set confirmed=True to submit."
+        "tpe, multivariate-tpe, cmaes, sobol. Trial template: a TrainJob, batch/v1 Job "
+        "or Kubeflow training job. Set confirmed=True to submit."
     ),
     "create_hpo_experiment_from_spec": (
         "Create experiment from raw V1beta1Experiment JSON spec. "
@@ -342,7 +342,7 @@ OPTIMIZER MONITORING:
     "optimizer_lifecycle": {
         "full": """OPTIMIZER LIFECYCLE:
 - wait_for_hpo_experiment(name) → block until Complete/Failed (timeout capped at 3600s)
-- delete_hpo_experiment(name, confirmed=True) → remove permanently (preview first)
+- delete_hpo_experiment(name) → preview, then confirmed=True to remove it permanently
 - update_hpo_experiment(name, max_trial_count=N, confirmed=True) → extend the budget, or
   change parallel_trial_count. Katib cannot pause; lowering parallelism deletes trials,
   newest first and whatever their state, so check trials_to_delete in the preview""",
@@ -356,8 +356,9 @@ OPTIMIZER TOOL SELECTION:
   - Prefer int over choice for ordered whole numbers: categorical values carry no
     ordering, so the algorithm cannot tell that 4 lies between 2 and 8
   - Algorithms: random (default), grid, bayesianoptimization, tpe, multivariate-tpe,
-    cmaes, sobol, hyperband
-  - trial_template is the Katib trialSpec; reference params as ${trialParameters.<name>}
+    cmaes, sobol (hyperband needs algorithm settings: use the spec tool)
+  - trial_template is the Katib trialSpec (a TrainJob, batch/v1 Job or Kubeflow training
+    job); reference every searched param as ${trialParameters.<name>}
   - primary_container_name is derived from trial_template; set it only when the
     container Katib should collect metrics from is not the one it picks
   - ALWAYS preview first (confirmed=False), then show preview and wait for approval

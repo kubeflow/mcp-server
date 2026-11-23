@@ -478,7 +478,7 @@ def _select_trial(
     trials: list[dict[str, Any]], requested: str | None, experiment: dict[str, Any]
 ) -> dict[str, Any] | None:
     """The trial to read logs from: the requested one, else the best, else the oldest."""
-    by_name = {(t.get("metadata") or {}).get("name"): t for t in trials}
+    by_name = {_katib.name_of(t): t for t in trials}
     if requested is not None:
         return by_name.get(requested)
     best = optimal_trial_to_dict(experiment.get("status") or {})

@@ -124,8 +124,8 @@ def get_hpo_experiment(
         name: Experiment name.
         namespace: K8s namespace. Uses default from kubeconfig when omitted.
         limit: Maximum embedded trials to return. Defaults to 50, capped at 500.
-            ``total_trials`` always reports the true count; use
-            ``get_hpo_experiment_trials()`` to page through them.
+            ``total_trials`` always reports the true count. There is no offset;
+            ``get_hpo_experiment_trials(name, status=...)`` narrows the list.
 
     Returns:
         dict: Response containing ``name``, ``status``, ``creation_timestamp``,

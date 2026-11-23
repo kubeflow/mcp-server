@@ -213,8 +213,9 @@ def test_get_experiment_status_counts_include_early_stopped(katib):
     ],
 )
 def test_get_experiment_status_derives_phase_like_the_sdk(katib, status, expected):
-    conditions = status.pop("conditions", None)
-    katib.add_experiment(experiment_cr(conditions=conditions, status=status))
+    # Copy rather than pop: the parametrized dict is shared by every run of the case.
+    counters = {k: v for k, v in status.items() if k != "conditions"}
+    katib.add_experiment(experiment_cr(conditions=status.get("conditions"), status=counters))
     assert discovery.get_hpo_experiment_status("exp-1")["data"]["status"] == expected
 
 

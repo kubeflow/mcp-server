@@ -44,7 +44,7 @@ from kubeflow_mcp.optimizer.constants import (
 
 # Katib's default metrics collector, and the only one that redirects the
 # primary container's output to its sidecar.
-STDOUT_COLLECTOR = "StdOut"
+_STDOUT_COLLECTOR = "StdOut"
 
 # Labels each workload kind's own controller puts on its pods, keyed by the
 # trial's runSpec kind and named after the workload (Katib names the workload
@@ -54,6 +54,21 @@ _WORKLOAD_POD_LABELS = {
     "Job": "batch.kubernetes.io/job-name",
     "TrainJob": "jobset.sigs.k8s.io/jobset-name",
 }
+
+
+def name_of(resource: dict[str, Any]) -> str | None:
+    """``metadata.name`` of a raw custom resource."""
+    return (resource.get("metadata") or {}).get("name")
+
+
+def created_at(resource: dict[str, Any]) -> str | None:
+    """``metadata.creationTimestamp`` of a raw custom resource (RFC 3339, to the second)."""
+    return (resource.get("metadata") or {}).get("creationTimestamp")
+
+
+def workload_kind(trial: dict[str, Any]) -> str | None:
+    """Kind of the workload a Trial runs (TrainJob, Job, ...), named after the trial."""
+    return ((trial.get("spec") or {}).get("runSpec") or {}).get("kind")
 
 
 def read_experiment(name: str, namespace: str) -> dict[str, Any]:
@@ -83,19 +98,13 @@ def list_trials(name: str, namespace: str) -> list[dict[str, Any]]:
         _request_timeout=mcp_utils.K8S_TIMEOUT,
     )
     trials = resp.get("items") or []
-    return sorted(
-        trials,
-        key=lambda t: (
-            (t.get("metadata") or {}).get("creationTimestamp") or "",
-            (t.get("metadata") or {}).get("name") or "",
-        ),
-    )
+    return sorted(trials, key=lambda t: (created_at(t) or "", name_of(t) or ""))
 
 
 def find_trial_pods(trial: dict[str, Any], namespace: str) -> list[Any]:
     """Pods running a trial, found by Katib's trial label or the workload's own."""
-    name = (trial.get("metadata") or {}).get("name")
-    kind = ((trial.get("spec") or {}).get("runSpec") or {}).get("kind")
+    name = name_of(trial)
+    kind = workload_kind(trial)
     selectors = [f"{TRIAL_LABEL}={name}"]
     if kind in _WORKLOAD_POD_LABELS:
         selectors.append(f"{_WORKLOAD_POD_LABELS[kind]}={name}")
@@ -126,7 +135,7 @@ def pick_log_source(trial: dict[str, Any], pods: list[Any]) -> tuple[Any, str] |
     collector = ((spec.get("metricsCollector") or {}).get("collector") or {}).get("kind")
     order = (
         (METRICS_COLLECTOR_CONTAINER, primary)
-        if collector in (None, STDOUT_COLLECTOR)
+        if collector in (None, _STDOUT_COLLECTOR)
         else (primary, METRICS_COLLECTOR_CONTAINER)
     )
     for preferred in order:
@@ -212,8 +221,8 @@ def experiment_objects(
     """
     objects = {(EXPERIMENT_KIND, name), (SUGGESTION_KIND, name)}
     for trial in trials:
-        trial_name = (trial.get("metadata") or {}).get("name")
-        kind = ((trial.get("spec") or {}).get("runSpec") or {}).get("kind")
+        trial_name = name_of(trial)
+        kind = workload_kind(trial)
         objects.add((TRIAL_KIND, trial_name))
         if kind:
             objects.add((kind, trial_name))

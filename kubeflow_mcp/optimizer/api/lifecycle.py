@@ -17,9 +17,13 @@
 Both tools act on the Experiment CR through ``CustomObjectsApi`` with explicit
 request timeouts:
 
-    - delete_namespaced_custom_object()           → delete_hpo_experiment
-    - get/patch_namespaced_custom_object(), plus
+    - get + delete_namespaced_custom_object()     → delete_hpo_experiment
+    - get + patch_namespaced_custom_object(), plus
       the experiment's Trial CRs                  → update_hpo_experiment
+
+Each reads the experiment once, decides ownership from that read, and writes
+with that version as a precondition, so the write applies only to the state
+that was checked.
 
 ``OptimizerClient.delete_job()`` is not used because it sends no request
 timeout, so a confirmed delete could hang indefinitely on an unresponsive API
@@ -179,20 +183,13 @@ def _trials_katib_will_delete(
         active = sum(trial_status(t) in ACTIVE_TRIAL_STATES for t in remaining)
         excess = active - parallel
         if excess <= 0:
-            return [
-                {"name": (t.get("metadata") or {}).get("name"), "status": trial_status(t)}
-                for t in doomed
-            ], exact
-        if excess < len(remaining) and _created(remaining[-excess - 1]) == _created(
-            remaining[-excess]
-        ):
+            return [{"name": _katib.name_of(t), "status": trial_status(t)} for t in doomed], exact
+        cut, kept = remaining[-excess:], remaining[:-excess]
+        # Katib breaks no ties, so a cut between same-second trials is undetermined.
+        if kept and _katib.created_at(kept[-1]) == _katib.created_at(cut[0]):
             exact = False
-        doomed.extend(reversed(remaining[-excess:]))
-        remaining = remaining[:-excess]
-
-
-def _created(trial: dict[str, Any]) -> str | None:
-    return (trial.get("metadata") or {}).get("creationTimestamp")
+        doomed.extend(reversed(cut))
+        remaining = kept
 
 
 def _deletion_warning(lowering: bool, doomed: list[dict[str, Any]], exact: bool = True) -> str:
@@ -274,7 +271,8 @@ def delete_hpo_experiment(
     """Delete a Katib experiment permanently.
 
     Removes the experiment along with its trials and suggestion. Irreversible,
-    so it requires ``confirmed=True``; the first call returns a preview.
+    so it requires ``confirmed=True``; the first call returns a preview. The
+    delete is refused if the experiment changed after it was checked.
 
     Non-admin personas may only delete experiments created through MCP.
 

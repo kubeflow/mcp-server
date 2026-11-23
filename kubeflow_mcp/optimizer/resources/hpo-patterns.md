@@ -82,20 +82,23 @@ trial. It is *not* a Katib-specific wrapper — it is a complete resource
 manifest with `apiVersion`, `kind` and `spec`.
 
 Every tuned parameter must be referenced with `${trialParameters.<name>}`, and
-the name must match a key in `search_space`. A parameter that is searched but
-never referenced is silently ignored — trials all run with the same config and
-the results look flat.
+the name must match a key in `search_space`. Katib rejects an experiment with a
+searched parameter the template never references, so `create_hpo_experiment`
+refuses it before the preview: add the reference, or remove the key.
 
-The template can describe a **TrainJob**, a plain `batch/v1` Job, or a bare pod
-spec. `create_hpo_experiment` derives `primaryContainerName` from it (see
-[Metrics collection](#metrics-collection)), so no other tool is needed for a Job.
+The template can describe a **TrainJob**, a plain `batch/v1` Job, or a Kubeflow
+training job (`TFJob`, `PyTorchJob`, `XGBoostJob`, `MPIJob`): the kinds Katib
+knows how to tell finished from failed. `create_hpo_experiment` derives
+`primaryContainerName` from it (see [Metrics collection](#metrics-collection)).
+Any other kind, a bare Pod say, needs `successCondition` and `failureCondition`
+on the trial template, so use `create_hpo_experiment_from_spec()`.
 
 Use `list_runtimes()` (trainer client) to find a valid `runtimeRef`.
 
 ## Algorithm selection
 
-All algorithms below are available directly from `create_hpo_experiment` via
-the `algorithm=` parameter.
+All algorithms below except Hyperband are available directly from
+`create_hpo_experiment` via the `algorithm=` parameter.
 
 | Algorithm | `algorithm=` | Best for | Notes |
 |---|---|---|---|
@@ -106,7 +109,7 @@ the `algorithm=` parameter.
 | Multivariate TPE | `"multivariate-tpe"` | Correlated parameters | Models parameter interactions |
 | CMA-ES | `"cmaes"` | Continuous parameters, few dimensions | Continuous only — no categoricals |
 | Sobol | `"sobol"` | Even coverage of a continuous space | Quasi-random; deterministic sequence |
-| Hyperband | `"hyperband"` | Long trials where early stopping pays | Manages its own budget across brackets |
+| Hyperband | `create_hpo_experiment_from_spec()` only | Long trials where early stopping pays | Needs the `resource_name` and `r_l` algorithm settings, which the flat tool cannot pass |
 
 Rules of thumb: start with `random` to establish a baseline; move to `tpe` or
 `bayesianoptimization` when each trial is expensive; use `grid` only when the
@@ -146,7 +149,9 @@ collects nothing, and the experiment stalls without an error.
 - `parallel_trial_count` capped at **100**
 - `max_failed_trials` optional — the experiment fails once it is exceeded
 - Collection tools accept `limit` (default **50**, max **500**). `total` always
-  reports the true count, so compare the two to detect truncation.
+  reports the true count, so compare the two to detect truncation. There is no
+  offset or page token: beyond 500, narrow the result instead, for example
+  `get_hpo_experiment_trials(name, status="Complete")` or `get_best_trial()`.
 
 Trial pods are retained (`retain=true`) so logs remain readable after a trial
 finishes. A large experiment therefore leaves one pod per trial behind — keep
