@@ -230,6 +230,17 @@ class FakeCustomObjects:
 
 
 @dataclass
+class RawResponse:
+    """The undecoded body the client returns for ``_preload_content=False``."""
+
+    data: bytes
+    released: bool = False
+
+    def release_conn(self) -> None:
+        self.released = True
+
+
+@dataclass
 class FakeCoreV1:
     """``CoreV1Api`` over in-memory pods, logs and events."""
 
@@ -237,6 +248,7 @@ class FakeCoreV1:
     logs: dict[tuple[str, str], str] = field(default_factory=dict)
     events: list[SimpleNamespace] = field(default_factory=list)
     calls: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
+    log_responses: list[RawResponse] = field(default_factory=list)
 
     def list_namespaced_pod(self, **kw: Any) -> SimpleNamespace:
         self.calls.append(("list_pods", kw))
@@ -245,9 +257,15 @@ class FakeCoreV1:
             items=[p for p in self.pods if _matches(p.metadata.labels, selector)]
         )
 
-    def read_namespaced_pod_log(self, **kw: Any) -> str:
+    def read_namespaced_pod_log(self, **kw: Any) -> str | RawResponse:
+        """Like the client: decoded strictly unless ``_preload_content=False``."""
         self.calls.append(("read_log", kw))
-        return self.logs.get((kw["name"], kw["container"]), "")
+        body = self.logs.get((kw["name"], kw["container"]), "").encode()
+        if kw.get("_preload_content", True):
+            return body.decode()
+        response = RawResponse(body)
+        self.log_responses.append(response)
+        return response
 
     def list_namespaced_event(self, **kw: Any) -> SimpleNamespace:
         self.calls.append(("list_events", kw))

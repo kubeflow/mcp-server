@@ -20,7 +20,14 @@ import pytest
 
 from kubeflow_mcp.optimizer.api import monitoring
 from kubeflow_mcp.optimizer.api.optimization import ALGORITHMS
-from kubeflow_mcp.optimizer.conftest import event, experiment_cr, metric, pod, trial_cr
+from kubeflow_mcp.optimizer.conftest import (
+    RawResponse,
+    event,
+    experiment_cr,
+    metric,
+    pod,
+    trial_cr,
+)
 
 _MON = "kubeflow_mcp.optimizer.api.monitoring"
 _COMPLETE = [{"type": "Succeeded", "status": "True", "reason": "ExperimentMaxTrialsReached"}]
@@ -405,7 +412,7 @@ def test_logs_keep_the_newest_lines_when_the_byte_cap_applies(katib, monkeypatch
 
     def api_server(**kw):
         tails.append(kw["tail_lines"])
-        return "\n".join(lines[-kw["tail_lines"] :]).encode()[: kw["limit_bytes"]].decode()
+        return RawResponse("\n".join(lines[-kw["tail_lines"] :]).encode()[: kw["limit_bytes"]])
 
     monkeypatch.setattr(katib.core, "read_namespaced_pod_log", api_server)
     data = monitoring.get_hpo_experiment_trial_logs("exp-1", trial="t1")["data"]
@@ -413,6 +420,42 @@ def test_logs_keep_the_newest_lines_when_the_byte_cap_applies(katib, monkeypatch
     assert tails[0] == monitoring.MAX_LOG_LINES
     assert len(tails) <= 6
     assert len("\n".join(lines[-tails[-1] :]).encode()) < limit
+
+
+def test_logs_survive_the_byte_cap_cutting_a_character_in_half(katib, monkeypatch):
+    """The API server caps bytes, not characters. Strict decoding of a body cut
+    inside a multibyte character raised before the read could be retried."""
+    katib.add_experiment(experiment_cr())
+    katib.add_trials(trial_cr("t1", "Failed"))
+    katib.core.pods.append(_trial_pod("t1"))
+    lines = ["é" * 1500 for _ in range(1000)] + ["Traceback: the last line"]
+    responses = []
+
+    def api_server(**kw):
+        responses.append(RawResponse("\n".join(lines[-kw["tail_lines"] :]).encode()[:2999]))
+        # The client decodes strictly unless told to hand over the raw body.
+        return responses[-1] if kw.get("_preload_content") is False else responses[-1].data.decode()
+
+    monkeypatch.setattr(katib.core, "read_namespaced_pod_log", api_server)
+    # Each é is two bytes, so an odd cap inside the first line splits one.
+    monkeypatch.setattr(monitoring, "MAX_LOG_BYTES", 2999)
+    result = monitoring.get_hpo_experiment_trial_logs("exp-1", trial="t1")
+
+    with pytest.raises(UnicodeDecodeError):
+        responses[0].data.decode()
+    assert result["success"] is True
+    assert result["data"]["logs"].endswith("Traceback: the last line")
+    assert all(r.released for r in responses)
+
+
+def test_log_reads_release_their_connection(katib):
+    katib.add_experiment(experiment_cr())
+    katib.add_trials(trial_cr("t1"))
+    katib.core.pods.append(_trial_pod("t1"))
+    katib.core.logs[("t1-pod", _COLLECTOR)] = "accuracy=0.93"
+    monitoring.get_hpo_experiment_trial_logs("exp-1", trial="t1")
+    assert katib.core.log_responses
+    assert all(r.released for r in katib.core.log_responses)
 
 
 def test_events_match_kind_as_well_as_name(katib):

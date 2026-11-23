@@ -160,22 +160,28 @@ def read_pod_log(
     longer than it, the newest output (often the traceback) would be cut off.
     The read is then repeated over fewer lines, down to one, so what comes back
     is always the end of the log; that is at most six reads for 1000 lines.
+
+    The body is read as bytes and decoded leniently: the byte limit can cut a
+    multibyte character in half, which the client's own strict decoding would
+    raise on before the read could be retried.
     """
     lines = tail_lines
     while True:
-        text = (
-            mcp_utils.get_core_v1_api().read_namespaced_pod_log(
-                name=pod.metadata.name,
-                namespace=namespace,
-                container=container,
-                tail_lines=lines,
-                limit_bytes=limit_bytes,
-                _request_timeout=mcp_utils.K8S_TIMEOUT,
-            )
-            or ""
+        response = mcp_utils.get_core_v1_api().read_namespaced_pod_log(
+            name=pod.metadata.name,
+            namespace=namespace,
+            container=container,
+            tail_lines=lines,
+            limit_bytes=limit_bytes,
+            _request_timeout=mcp_utils.K8S_TIMEOUT,
+            _preload_content=False,
         )
-        if lines == 1 or len(text.encode()) < limit_bytes:
-            return text
+        try:
+            body = response.data or b""
+        finally:
+            response.release_conn()
+        if lines == 1 or len(body) < limit_bytes:
+            return body.decode("utf-8", errors="replace")
         lines = max(1, lines // 4)
 
 
