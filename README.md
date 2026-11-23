@@ -160,6 +160,7 @@ Requires `kubeflow[spark]` extra.
 | **Discovery** | `list_spark_sessions`, `get_spark_session` | Browse SparkConnect sessions |
 | **Sessions** | `create_spark_session`, `delete_spark_session` | Provision and delete MCP-managed SparkConnect sessions |
 | **Monitoring** | `get_spark_session_logs` | Read Spark driver logs |
+| **Batch jobs** | `list_spark_jobs`, `get_spark_job`, `get_spark_job_logs` | Browse Spark batch jobs (SparkApplications) and read their driver logs |
 
 ## Personas & Configuration
 
