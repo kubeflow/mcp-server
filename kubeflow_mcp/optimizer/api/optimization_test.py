@@ -208,20 +208,55 @@ def test_int_parameter_accepts_step():
 
 
 @pytest.mark.parametrize(
-    "space",
+    ("space", "message"),
     [
-        {"layers": {"min": 2.5, "max": 8, "type": "int"}},
-        {"layers": {"min": 2, "max": "8", "type": "int"}},
-        {"layers": {"min": 2, "max": 8, "type": "int", "step": 0}},
-        {"layers": {"min": 2, "max": 8, "type": "int", "step": 1.5}},
+        ({"min": 2.5, "max": 8}, "search_space['layers'].min must be an integer"),
+        ({"min": 2, "max": "8"}, "search_space['layers'].max must be an integer"),
+        ({"min": 8, "max": 2}, "search_space['layers'].min (8) must not exceed max (2)"),
+        ({"min": 2, "max": 8, "step": 0}, "search_space['layers'].step must be a positive"),
+        ({"min": 2, "max": 8, "step": 1.5}, "search_space['layers'].step must be a positive"),
     ],
 )
-def test_int_parameter_rejects_non_integers(space):
+def test_int_parameter_rejects_bad_bounds_and_steps(space, message):
     with cluster() as api:
-        result = _create(search_space=space)
-    assert result["success"] is False
+        result = _create(
+            search_space={"layers": {**space, "type": "int"}},
+            trial_template=_template_for("layers"),
+        )
     assert result["error_code"] == "VALIDATION_ERROR"
+    assert message in result["error"]
     api.create_namespaced_custom_object.assert_not_called()
+
+
+@pytest.mark.parametrize("distribution", ["uniform", "loguniform"])
+@pytest.mark.parametrize(
+    ("bounds", "message"),
+    [
+        ({"min": "bad", "max": 0.1}, "search_space['lr'].min must be a number"),
+        ({"min": 0.01, "max": None}, "search_space['lr'].max must be a number"),
+        ({"min": True, "max": 0.1}, "search_space['lr'].min must be a number"),
+        ({"min": 0.01, "max": float("inf")}, "search_space['lr'].max must be a number"),
+        ({"min": 0.1, "max": 0.01}, "search_space['lr'].min (0.1) must not exceed max (0.01)"),
+    ],
+)
+def test_continuous_range_needs_numeric_bounds_in_order(distribution, bounds, message):
+    """The SDK only stringifies these and Katib only checks they are set."""
+    with cluster() as api:
+        result = _create(
+            search_space={"lr": {**bounds, "type": distribution}},
+            trial_template=_template_for("lr"),
+        )
+    assert result["error_code"] == "VALIDATION_ERROR"
+    assert message in result["error"]
+    api.create_namespaced_custom_object.assert_not_called()
+
+
+def test_continuous_range_accepts_integer_bounds():
+    with cluster():
+        result = _create(
+            search_space={"lr": {"min": 1, "max": 2}}, trial_template=_template_for("lr")
+        )
+    assert result["status"] == "preview"
 
 
 # ─── primaryContainerName resolution ───────────────────────────────────────
@@ -242,8 +277,8 @@ JOB_TEMPLATE = {
 
 
 def test_primary_container_follows_a_job_template():
-    """Katib collects metrics from this container; hardcoding Trainer's "node"
-    would silently collect nothing from a plain batch/v1 Job."""
+    """Katib rejects every trial pod without this container, so hardcoding
+    Trainer's "node" would keep a plain batch/v1 Job from ever starting."""
     with cluster():
         spec = _create(trial_template=JOB_TEMPLATE)["config"]["spec"]
     assert spec["trialTemplate"]["primaryContainerName"] == "training-container"
@@ -268,6 +303,57 @@ def test_primary_container_prefers_node_over_a_sidecar():
     with cluster():
         spec = _create(trial_template=template)["config"]["spec"]
     assert spec["trialTemplate"]["primaryContainerName"] == "node"
+
+
+def _replica(container, image="my/trainer:1"):
+    return {"template": {"spec": {"containers": [{"name": container, "image": image}]}}}
+
+
+@pytest.mark.parametrize(
+    ("kind", "replicas_key", "primary"),
+    [
+        ("PyTorchJob", "pytorchReplicaSpecs", "Master"),
+        ("TFJob", "tfReplicaSpecs", "Chief"),
+        ("XGBoostJob", "xgbReplicaSpecs", "Master"),
+        ("MPIJob", "mpiReplicaSpecs", "Launcher"),
+    ],
+)
+def test_primary_container_comes_from_the_primary_replica(kind, replicas_key, primary):
+    """Katib's default primaryPodLabels pick the job-role=master pod: the
+    Master, Chief or Launcher replica, whatever order the replicas are listed in."""
+    template = {
+        "apiVersion": "kubeflow.org/v1",
+        "kind": kind,
+        "spec": {
+            replicas_key: {
+                "Worker": _replica("worker-main"),
+                primary: _replica("main", image="my/trainer:${trialParameters.lr}"),
+            }
+        },
+    }
+    with cluster():
+        spec = _create(search_space={"lr": {"min": 1, "max": 2}}, trial_template=template)[
+            "config"
+        ]["spec"]
+    assert spec["trialTemplate"]["primaryContainerName"] == "main"
+
+
+def test_a_pytorchjob_does_not_default_to_node():
+    template = {
+        "apiVersion": "kubeflow.org/v1",
+        "kind": "PyTorchJob",
+        "spec": {
+            "pytorchReplicaSpecs": {
+                "Master": _replica("pytorch", image="my/torch:${trialParameters.lr}"),
+                "Worker": _replica("pytorch"),
+            }
+        },
+    }
+    with cluster():
+        spec = _create(search_space={"lr": {"min": 1, "max": 2}}, trial_template=template)[
+            "config"
+        ]["spec"]
+    assert spec["trialTemplate"]["primaryContainerName"] == "pytorch"
 
 
 def test_explicit_primary_container_wins():
@@ -382,6 +468,7 @@ def _manifest(**meta):
         "spec": {
             "objective": {"objectiveMetricName": "loss", "type": "minimize"},
             "algorithm": {"algorithmName": "cmaes"},
+            "maxTrialCount": 6,
             "parameters": [
                 {
                     "name": "lr",
@@ -480,6 +567,19 @@ def _job(image, init_image="busybox:1.36"):
             {"kind": "Pod", "spec": {"containers": [{"name": "c", "image": "img@sha256:short"}]}},
             "trial_template.spec.containers[0].image",
         ),
+        (
+            {
+                "kind": "PyTorchJob",
+                "spec": {
+                    "pytorchReplicaSpecs": {
+                        "Master": _replica("pytorch"),
+                        "Worker": _replica("pytorch", image="Bad/Image:1"),
+                    }
+                },
+            },
+            "trial_template.spec.pytorchReplicaSpecs.Worker.template.spec.containers[0].image",
+        ),
+        (_trainjob("registry.example.com:99999/trainer:1"), "trial_template.spec.trainer.image"),
     ],
 )
 def test_malformed_trial_image_is_rejected_before_any_call(template, field):
@@ -503,6 +603,7 @@ def test_trial_image_rejected_before_namespace_policy():
     [
         "my/trainer:${trialParameters.tag}",
         "${trialParameters.image}",
+        "registry.example.com:${trialParameters.port}/trainer:1",
         "registry.example.com:5000/team/trainer:v2",
         "localhost:5000/a/b@sha256:" + "a" * 64,
     ],
@@ -665,12 +766,68 @@ def test_hyperband_is_not_offered_by_the_flat_tool():
     assert "hyperband" not in opt.ALGORITHMS
 
 
-def test_input_is_validated_before_the_namespace_policy():
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"max_trial_count": 2, "parallel_trial_count": 3},
+        {"search_space": {"lr": {"min": 0.1, "max": 0.01}}, "trial_template": _template_for("lr")},
+    ],
+)
+def test_input_is_validated_before_the_namespace_policy(overrides):
     """A bad request gets the same error whatever namespace it names."""
     with patch("kubeflow_mcp.optimizer.api.optimization.check_optimizer_namespace") as ns_check:
-        result = _create(max_trial_count=2, parallel_trial_count=3)
+        result = _create(**overrides)
     assert result["error_code"] == "VALIDATION_ERROR"
     ns_check.assert_not_called()
+
+
+@pytest.mark.parametrize("name", ["1-hpo", "a" * 41])
+def test_names_katib_refuses_are_rejected_before_the_preview(name):
+    """Katib wants a leading letter and at most 40 characters; Kubernetes allows both."""
+    with cluster() as api:
+        result = _create(name=name)
+    assert result["error_code"] == "VALIDATION_ERROR"
+    assert "name must start with a letter and be at most 40 characters" in result["error"]
+    api.create_namespaced_custom_object.assert_not_called()
+
+
+def test_a_forty_character_name_is_accepted():
+    with cluster():
+        assert _create(name="a" * 40)["status"] == "preview"
+
+
+def test_from_spec_applies_katib_name_rules():
+    manifest = _manifest()
+    manifest["metadata"]["name"] = "1-hpo"
+    with cluster():
+        result = opt.create_hpo_experiment_from_spec(spec=manifest)
+    assert result["error_code"] == "VALIDATION_ERROR"
+    assert result["error"].startswith("spec.metadata.name must start with a letter")
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda: _create(confirmed=True),
+        lambda: opt.create_hpo_experiment_from_spec(spec=_manifest(), confirmed=True),
+    ],
+    ids=["flat", "from_spec"],
+)
+def test_an_unresolvable_namespace_is_a_structured_error(call):
+    """Without an allowlist the default is first resolved here, and can fail."""
+    api = MagicMock()
+    with (
+        patch(
+            f"{_UTILS}.get_optimizer_effective_namespace",
+            side_effect=RuntimeError("Cannot determine default namespace: no kubeconfig found"),
+        ),
+        patch(f"{_UTILS}.get_custom_objects_api", return_value=api),
+    ):
+        result = call()
+    assert result["success"] is False
+    assert result["error_code"] == "SDK_ERROR"
+    assert "Cannot determine default namespace" in result["error"]
+    api.create_namespaced_custom_object.assert_not_called()
 
 
 # ─── create_hpo_experiment_from_spec: names, caps and completion conditions ─
@@ -696,6 +853,21 @@ def test_from_spec_applies_the_same_trial_caps(field, value, limit):
         result = opt.create_hpo_experiment_from_spec(spec=manifest, confirmed=True)
     assert result["error_code"] == "VALIDATION_ERROR"
     assert f"spec.spec.{field} must be at most {limit}" in result["error"]
+    api.create_namespaced_custom_object.assert_not_called()
+
+
+@pytest.mark.parametrize("budget", ["omitted", None])
+def test_from_spec_requires_a_trial_budget(budget):
+    """Katib runs trials with no limit when maxTrialCount is not set."""
+    manifest = _manifest()
+    if budget == "omitted":
+        del manifest["spec"]["maxTrialCount"]
+    else:
+        manifest["spec"]["maxTrialCount"] = budget
+    with cluster() as api:
+        result = opt.create_hpo_experiment_from_spec(spec=manifest)
+    assert result["error_code"] == "VALIDATION_ERROR"
+    assert "spec.spec.maxTrialCount is required" in result["error"]
     api.create_namespaced_custom_object.assert_not_called()
 
 

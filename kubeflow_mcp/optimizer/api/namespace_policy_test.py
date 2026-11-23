@@ -177,6 +177,7 @@ _TOOL_KWARGS: dict[str, dict] = {
             "spec": {
                 "objective": {"type": "maximize", "objectiveMetricName": "acc"},
                 "algorithm": {"algorithmName": "random"},
+                "maxTrialCount": 2,
                 "parameters": [
                     {
                         "name": "lr",

@@ -28,6 +28,7 @@ typed classes cannot express (tpe, cmaes, sobol, ...).
 """
 
 import json
+import math
 import re
 from typing import Any
 
@@ -70,6 +71,10 @@ OBJECTIVE_TYPES = frozenset({"maximize", "minimize"})
 MAX_TRIAL_COUNT_LIMIT = 1000
 MAX_PARALLEL_TRIAL_LIMIT = 100
 
+# Katib's validator is stricter than Kubernetes about Experiment names: it
+# requires a leading letter and at most 40 characters.
+MAX_EXPERIMENT_NAME_LENGTH = 40
+
 # Trial workload kinds Katib fills successCondition and failureCondition in for
 # (setDefaultTrialTemplate). Its validator requires both, and
 # create_hpo_experiment has no way to pass them, so it accepts only these kinds;
@@ -108,8 +113,10 @@ def _build_parameter(name: str, spec: dict[str, Any]) -> models.V1beta1Parameter
             )
         distribution = spec.get("type", "uniform")
         if distribution == "uniform":
+            _check_range(name, spec, distribution)
             param = Search.uniform(spec["min"], spec["max"])
         elif distribution == "loguniform":
+            _check_range(name, spec, distribution)
             param = Search.loguniform(spec["min"], spec["max"])
         elif distribution == "int":
             param = _build_int_parameter(name, spec)
@@ -123,6 +130,35 @@ def _build_parameter(name: str, spec: dict[str, Any]) -> models.V1beta1Parameter
     return param
 
 
+def _check_range(name: str, spec: dict[str, Any], distribution: str) -> None:
+    """Require a range's bounds to be numbers, in order.
+
+    The SDK's ``Search`` helpers only stringify the bounds and Katib's webhook
+    only checks that they are set, so a non-numeric or reversed range would
+    otherwise be admitted and handed to the suggestion service as is.
+
+    Raises:
+        ValueError: A bound is not a finite number (an integer for ``int``), or
+            ``min`` exceeds ``max``.
+    """
+    integer = distribution == "int"
+    for bound in ("min", "max"):
+        value = spec[bound]
+        is_number = isinstance(value, int) or (
+            not integer and isinstance(value, float) and math.isfinite(value)
+        )
+        if isinstance(value, bool) or not is_number:
+            raise ValueError(
+                f"search_space['{name}'].{bound} must be "
+                f"{'an integer' if integer else 'a number'} when type is '{distribution}', "
+                f"got {value!r}"
+            )
+    if spec["min"] > spec["max"]:
+        raise ValueError(
+            f"search_space['{name}'].min ({spec['min']}) must not exceed max ({spec['max']})"
+        )
+
+
 def _build_int_parameter(name: str, spec: dict[str, Any]) -> models.V1beta1ParameterSpec:
     """Build an integer parameter, which the SDK's ``Search`` cannot express.
 
@@ -132,14 +168,7 @@ def _build_int_parameter(name: str, spec: dict[str, Any]) -> models.V1beta1Param
     feasible-space encoding and retypes it, so the string coercion still matches
     the SDK's own output exactly.
     """
-    for bound in ("min", "max"):
-        value = spec[bound]
-        if isinstance(value, bool) or not isinstance(value, int):
-            raise ValueError(
-                f"search_space['{name}'].{bound} must be an integer when type is "
-                f"'int', got {value!r}"
-            )
-
+    _check_range(name, spec, "int")
     param = Search.uniform(spec["min"], spec["max"])
     param.parameter_type = INT_PARAMETER
 
@@ -154,42 +183,68 @@ def _build_int_parameter(name: str, spec: dict[str, Any]) -> models.V1beta1Param
     return param
 
 
+# Replicas a training-operator job labels training.kubeflow.org/job-role=master,
+# the label Katib defaults primaryPodLabels to for those kinds.
+_PRIMARY_REPLICAS = ("Master", "Chief", "Launcher")
+
+
+def _pod_specs(trial_spec: Any, field: str) -> list[tuple[str, dict[str, Any]]]:
+    """``(field path, pod spec)`` for every pod spec written out in a trial spec.
+
+    A bare Pod is its own pod spec and a batch/v1 Job nests one under
+    ``spec.template``. A training-operator job (PyTorchJob, TFJob, ...) nests one
+    per replica under ``spec.<x>ReplicaSpecs.<replica>.template``, listed here
+    primary replica first. A TrainJob has none: its pods come from the runtime.
+    """
+    spec = trial_spec.get("spec") if isinstance(trial_spec, dict) else None
+    if not isinstance(spec, dict):
+        return []
+    if "containers" in spec:
+        return [(f"{field}.spec", spec)]
+
+    templates: list[tuple[str, Any]] = [(f"{field}.spec.template", spec.get("template"))]
+    for key, replicas in spec.items():
+        if not (key.endswith("ReplicaSpecs") and isinstance(replicas, dict)):
+            continue
+        for replica in sorted(replicas, key=lambda r: r not in _PRIMARY_REPLICAS):
+            entry = replicas[replica]
+            template = entry.get("template") if isinstance(entry, dict) else None
+            templates.append((f"{field}.spec.{key}.{replica}.template", template))
+    return [
+        (f"{path}.spec", template["spec"])
+        for path, template in templates
+        if isinstance(template, dict) and isinstance(template.get("spec"), dict)
+    ]
+
+
 def _resolve_primary_container(trial_template: dict[str, Any], override: str | None) -> str:
     """Name the container Katib should collect metrics from.
 
-    Katib injects its metrics collector into the container named by
-    ``primaryContainerName``; if that name matches nothing in the trial's pod,
-    no metrics are ever collected and the experiment stalls with no error.
-    Defaulting to Trainer's ``node`` is only right for TrainJob templates, so
-    the name is read off the template when it carries an inline pod spec.
+    Katib looks ``primaryContainerName`` up in every trial pod and rejects a pod
+    that lacks it, so a wrong name means no trial ever starts. The name is read
+    off the first pod spec the template writes out, which for a training-operator
+    job is the primary replica's (its framework container, e.g. ``pytorch``).
     """
     if override:
         return override
 
-    spec = trial_template.get("spec")
-    if not isinstance(spec, dict):
-        return trainer_constants.NODE
-
-    # batch/v1 Job and friends nest the pod under spec.template; a bare Pod
-    # trialSpec carries containers directly.
-    template = spec.get("template")
-    pod_spec = template.get("spec") if isinstance(template, dict) else None
-    containers = (pod_spec if isinstance(pod_spec, dict) else spec).get("containers")
-    if not isinstance(containers, list):
-        return trainer_constants.NODE
-
-    names = [c["name"] for c in containers if isinstance(c, dict) and c.get("name")]
-    if not names:
-        # TrainJob and other runtime-backed templates have no inline containers;
-        # Trainer names the workload container "node".
-        return trainer_constants.NODE
-    # A sidecar can sort first, so prefer the conventional name when present.
-    return trainer_constants.NODE if trainer_constants.NODE in names else names[0]
+    for _, pod_spec in _pod_specs(trial_template, "trial_template"):
+        containers = pod_spec.get("containers")
+        if not isinstance(containers, list):
+            continue
+        names = [c["name"] for c in containers if isinstance(c, dict) and c.get("name")]
+        if names:
+            # A sidecar can sort first, so prefer the conventional name when present.
+            return trainer_constants.NODE if trainer_constants.NODE in names else names[0]
+    # TrainJob and other runtime-backed templates have no inline containers;
+    # Trainer names the workload container "node".
+    return trainer_constants.NODE
 
 
 # Katib substitutes ${trialParameters.<name>} throughout the trial spec, so an
-# image may legitimately carry one (a tuned tag, say). Each is swapped for a
-# token that is valid anywhere in a reference before the rest is checked.
+# image may legitimately carry one (a tuned tag, say). Each is swapped for "1",
+# which is valid anywhere in a reference, a registry port included, before the
+# rest is checked.
 _TRIAL_PARAMETER_REF = re.compile(r"\$\{trialParameters\.[^}]*\}")
 # A reference used as a digest (img@sha256:${trialParameters.digest}) needs a
 # placeholder that is itself a valid digest, or every such image is rejected.
@@ -199,26 +254,16 @@ _DIGEST_PARAMETER_REF = re.compile(r"(@[a-z0-9]+(?:[+._-][a-z0-9]+)*:)\$\{trialP
 def _trial_spec_images(trial_spec: Any, field: str) -> list[tuple[str, Any]]:
     """List ``(field path, image)`` for every container image in a trial spec.
 
-    Covers the shapes ``_resolve_primary_container`` handles: a TrainJob's
-    ``spec.trainer.image``, and the containers of a Job's pod template or of a
-    bare pod spec.
+    Covers a TrainJob's ``spec.trainer.image`` and the containers of every pod
+    spec :func:`_pod_specs` finds.
     """
     spec = trial_spec.get("spec") if isinstance(trial_spec, dict) else None
-    if not isinstance(spec, dict):
-        return []
+    trainer = spec.get("trainer") if isinstance(spec, dict) else None
 
     images: list[tuple[str, Any]] = []
-    trainer = spec.get("trainer")
     if isinstance(trainer, dict) and "image" in trainer:
         images.append((f"{field}.spec.trainer.image", trainer["image"]))
-
-    template = spec.get("template")
-    pod_spec, pod_path = (
-        (template.get("spec"), f"{field}.spec.template.spec")
-        if isinstance(template, dict)
-        else (spec, f"{field}.spec")
-    )
-    if isinstance(pod_spec, dict):
+    for pod_path, pod_spec in _pod_specs(trial_spec, field):
         for key in ("initContainers", "containers"):
             containers = pod_spec.get(key)
             if not isinstance(containers, list):
@@ -239,11 +284,27 @@ def _validate_trial_images(trial_spec: Any, field: str) -> ToolError | None:
         candidate = image
         if isinstance(image, str):
             candidate = _DIGEST_PARAMETER_REF.sub(lambda m: m.group(1) + "0" * 64, image)
-            candidate = _TRIAL_PARAMETER_REF.sub("x", candidate)
+            candidate = _TRIAL_PARAMETER_REF.sub("1", candidate)
         err = validate_image_reference(candidate, path)
         if err is not None:
             err.details = {"value": image}
             return err
+    return None
+
+
+def _experiment_name_error(name: str, field: str) -> ToolError | None:
+    """Reject a name Kubernetes or Katib would refuse, before any preview."""
+    err = validate_k8s_name(name, field)
+    if err is not None:
+        return err
+    if len(name) > MAX_EXPERIMENT_NAME_LENGTH or not name[0].isalpha():
+        return ToolError(
+            error=(
+                f"{field} must start with a letter and be at most "
+                f"{MAX_EXPERIMENT_NAME_LENGTH} characters, as Katib requires, got '{name}'"
+            ),
+            error_code=ErrorCode.VALIDATION_ERROR,
+        )
     return None
 
 
@@ -291,7 +352,7 @@ def _build_experiment(
     namespace: str,
     objective_metric: str,
     objective_type: str,
-    search_space: dict[str, Any],
+    parameters: list[models.V1beta1ParameterSpec],
     trial_template: dict[str, Any],
     algorithm: str,
     max_trial_count: int,
@@ -309,7 +370,7 @@ def _build_experiment(
             labels={mcp_utils.MCP_MANAGED_LABEL: mcp_utils.MCP_MANAGED_VALUE},
         ),
         spec=models.V1beta1ExperimentSpec(
-            parameters=[_build_parameter(key, spec) for key, spec in search_space.items()],
+            parameters=parameters,
             maxTrialCount=max_trial_count,
             parallelTrialCount=parallel_trial_count,
             maxFailedTrialCount=max_failed_trials,
@@ -324,8 +385,8 @@ def _build_experiment(
                     trial_template, primary_container_name
                 ),
                 trialParameters=[
-                    models.V1beta1TrialParameterSpec(name=key, reference=key)
-                    for key in search_space
+                    models.V1beta1TrialParameterSpec(name=p.name, reference=p.name)
+                    for p in parameters
                 ],
                 trialSpec=trial_template,
             ),
@@ -420,7 +481,7 @@ def create_hpo_experiment(
     Returns:
         dict: Preview of the Experiment CR, or the creation result.
     """
-    name_err = validate_k8s_name(name)
+    name_err = _experiment_name_error(name, "name")
     if name_err is not None:
         return name_err.model_dump()
 
@@ -473,6 +534,11 @@ def create_hpo_experiment(
         if is_invalid:
             return ToolError(error=message, error_code=ErrorCode.VALIDATION_ERROR).model_dump()
 
+    try:
+        parameters = [_build_parameter(key, spec) for key, spec in search_space.items()]
+    except (TypeError, ValueError) as e:
+        return ToolError(error=str(e), error_code=ErrorCode.VALIDATION_ERROR).model_dump()
+
     unreferenced = _unreferenced_parameters(search_space, trial_template)
     if unreferenced:
         return ToolError(
@@ -492,12 +558,16 @@ def create_hpo_experiment(
 
     try:
         ns = mcp_utils.get_optimizer_effective_namespace(namespace)
+    except Exception as e:
+        return experiment_error(e, name).model_dump()
+
+    try:
         experiment = _build_experiment(
             name=name,
             namespace=ns,
             objective_metric=objective_metric,
             objective_type=objective_type,
-            search_space=search_space,
+            parameters=parameters,
             trial_template=trial_template,
             algorithm=algorithm,
             max_trial_count=max_trial_count,
@@ -557,6 +627,11 @@ def _manifest_problem(manifest: dict[str, Any]) -> str | None:
             return f"spec.spec.{'.'.join(path)} is required"
     if not body.get("parameters") and not body.get("nasConfig"):
         return "spec.spec.parameters (or spec.spec.nasConfig) is required"
+    if body.get("maxTrialCount") is None:
+        return (
+            "spec.spec.maxTrialCount is required: without it Katib keeps starting trials "
+            "with no limit"
+        )
     for field, limit in (
         ("maxTrialCount", MAX_TRIAL_COUNT_LIMIT),
         ("parallelTrialCount", MAX_PARALLEL_TRIAL_LIMIT),
@@ -593,7 +668,8 @@ def create_hpo_experiment_from_spec(
 
     Args:
         spec: Full ``V1beta1Experiment`` manifest (``apiVersion``, ``kind``,
-            ``metadata.name``, ``spec``).
+            ``metadata.name``, ``spec``). ``spec.maxTrialCount`` is required, at
+            most 1000, so the experiment cannot run without limit.
         namespace: K8s namespace. Overrides ``metadata.namespace`` when given.
         confirmed: Set ``True`` to submit. ``False`` returns a preview.
 
@@ -620,7 +696,7 @@ def create_hpo_experiment_from_spec(
             error="spec.metadata.name is required and must be a string",
             error_code=ErrorCode.VALIDATION_ERROR,
         ).model_dump()
-    name_err = validate_k8s_name(name)
+    name_err = _experiment_name_error(name, "spec.metadata.name")
     if name_err is not None:
         return name_err.model_dump()
 
@@ -662,7 +738,10 @@ def create_hpo_experiment_from_spec(
             error_code=ErrorCode.VALIDATION_ERROR,
         ).model_dump()
 
-    ns = mcp_utils.get_optimizer_effective_namespace(target_namespace)
+    try:
+        ns = mcp_utils.get_optimizer_effective_namespace(target_namespace)
+    except Exception as e:
+        return experiment_error(e, name).model_dump()
 
     body = experiment.to_dict()
     metadata = body.setdefault("metadata", {})

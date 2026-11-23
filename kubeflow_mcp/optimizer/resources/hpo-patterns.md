@@ -137,15 +137,17 @@ genuinely unordered options such as optimizer names or activation functions.
 ## Metrics collection
 
 `primary_container_name` names the container Katib collects metrics from, and it
-is derived from `trial_template`: the container in the template's pod spec, or
-`node` when the template has none (a `TrainJob`). Set it explicitly only when the
+is derived from `trial_template`: the container in the template's pod spec (for a
+Kubeflow training job, the Master, Chief or Launcher replica's), or `node` when
+the template has none (a `TrainJob`). Set it explicitly only when the
 metric-producing container is not the one that gets picked, such as a pod whose
-first container is a sidecar. A name matching no container in the trial pod
-collects nothing, and the experiment stalls without an error.
+first container is a sidecar. Katib rejects every trial pod that has no container
+of that name, so no trial starts.
 
 ## Budget and response limits
 
-- `max_trial_count` is required, capped at **1000**
+- `max_trial_count` is required, capped at **1000**; so is `spec.maxTrialCount` in a
+  `create_hpo_experiment_from_spec` manifest, since Katib runs without limit when it is unset
 - `parallel_trial_count` capped at **100**
 - `max_failed_trials` optional — the experiment fails once it is exceeded
 - Collection tools accept `limit` (default **50**, max **500**). `total` always
