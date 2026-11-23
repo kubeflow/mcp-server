@@ -581,21 +581,47 @@ class TestUserRateLimiter:
         assert limiter.acquire(user_id="user_3") is False
         assert limiter.acquire(user_id="user_1") is False
 
-    def test_global_token_refund_when_user_bucket_denies(self):
+    def test_global_token_refund_when_user_bucket_denies(self, clock):
         """If user bucket denies, acquired global tokens are refunded."""
         limiter = UserRateLimiter(
             user_rate=1.0,
             user_capacity=1.0,
-            global_rate=10.0,
-            global_capacity=10.0,
+            global_rate=1.0,
+            global_capacity=2.0,
         )
 
+        # user_a succeeds, consuming 1 global token (1 remaining) and 1 user token
         assert limiter.acquire(user_id="user_a") is True
-        # user_a is now exhausted, but global still had capacity
+        # user_a is now exhausted, but global acquires then refunds on denial
         assert limiter.acquire(user_id="user_a") is False
 
-        # user_b should still be able to acquire from global
+        # user_b succeeds using the refunded global token; would fail if token was leaked
         assert limiter.acquire(user_id="user_b") is True
+
+    def test_evicted_depleted_user_retains_depletion_state(self, clock):
+        """Eviction must not grant a depleted user fresh tokens."""
+        limiter = UserRateLimiter(
+            user_rate=1.0,
+            user_capacity=2.0,
+            max_buckets=2,
+        )
+
+        # User 1 exhausts all 2 tokens
+        assert limiter.acquire(user_id="u1") is True
+        assert limiter.acquire(user_id="u1") is True
+        assert limiter.acquire(user_id="u1") is False
+
+        # User 2 and User 3 acquire tokens, causing LRU eviction of u1
+        assert limiter.acquire(user_id="u2") is True
+        assert limiter.acquire(user_id="u3") is True
+
+        # u1 was evicted; calling immediately without time advancing must still deny u1
+        assert limiter.acquire(user_id="u1") is False
+
+        # Advance clock by 1 second -> u1 should have refilled 1 token
+        clock(1.0)
+        assert limiter.acquire(user_id="u1") is True
+        assert limiter.acquire(user_id="u1") is False
 
     @pytest.mark.parametrize(
         ("kwargs", "err"),

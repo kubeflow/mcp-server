@@ -93,7 +93,7 @@ def configure_resilience(
         capacity = (
             per_user_rate_capacity
             if per_user_rate_capacity is not None
-            else per_user_rate_limit * 2
+            else max(1.0, per_user_rate_limit * 2)
         )
         _rate_limiter = UserRateLimiter(
             user_rate=per_user_rate_limit,

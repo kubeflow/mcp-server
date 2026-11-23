@@ -51,6 +51,43 @@ def get_user_id() -> str | None:
     return _user_id_var.get()
 
 
+def _extract_caller_user_id(context: Any, fastmcp_ctx: Any) -> str | None:
+    """Extract user identity (from auth or transport metadata)."""
+    try:
+        request_context = None
+        if fastmcp_ctx is not None:
+            request_context = getattr(fastmcp_ctx, "request_context", None)
+        if request_context is None:
+            request_context = getattr(context, "request_context", None)
+
+        if request_context is None:
+            return None
+
+        meta = getattr(request_context, "meta", None)
+        if meta is not None:
+            if isinstance(meta, dict):
+                user_id = meta.get("user_id") or meta.get("sub")
+            else:
+                user_id = getattr(meta, "user_id", None) or getattr(meta, "sub", None)
+            if user_id is not None:
+                return str(user_id)
+
+        token = getattr(request_context, "token", None) or getattr(
+            request_context, "access_token", None
+        )
+        if token is not None:
+            claims = getattr(token, "claims", {})
+            if isinstance(claims, dict):
+                user_id = claims.get("sub") or claims.get("user_id")
+                if user_id is not None:
+                    return str(user_id)
+            if hasattr(token, "client_id") and token.client_id:
+                return str(token.client_id)
+    except Exception:
+        pass
+    return None
+
+
 class AuditIdentityMiddleware:
     """FastMCP-compatible middleware that captures identity into ContextVars.
 
@@ -90,33 +127,9 @@ class AuditIdentityMiddleware:
             except Exception:
                 pass
 
-        # Extract user identity (from auth or transport metadata)
-        try:
-            request_context = getattr(context, "request_context", None)
-            if request_context is not None:
-                user_id = None
-                meta = getattr(request_context, "meta", None)
-                if meta is not None:
-                    if isinstance(meta, dict):
-                        user_id = meta.get("user_id") or meta.get("sub")
-                    else:
-                        user_id = getattr(meta, "user_id", None) or getattr(meta, "sub", None)
-
-                if user_id is None:
-                    token = getattr(request_context, "token", None) or getattr(
-                        request_context, "access_token", None
-                    )
-                    if token is not None:
-                        claims = getattr(token, "claims", {})
-                        if isinstance(claims, dict):
-                            user_id = claims.get("sub") or claims.get("user_id")
-                        if user_id is None and hasattr(token, "client_id") and token.client_id:
-                            user_id = getattr(token, "client_id", None)
-
-                if user_id is not None:
-                    _user_id_var.set(str(user_id))
-        except Exception:
-            pass
+        user_id = _extract_caller_user_id(context, fastmcp_ctx)
+        if user_id is not None:
+            _user_id_var.set(user_id)
 
         try:
             return await call_next(context)

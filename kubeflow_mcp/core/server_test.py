@@ -578,7 +578,9 @@ async def test_full_mode_instructions_have_no_tool_access_block():
 
 class TestServerRateLimiting:
     @pytest.fixture(autouse=True)
-    def clean_limiter(self):
+    def clean_limiter(self, monkeypatch: pytest.MonkeyPatch):
+        now = [1000.0]
+        monkeypatch.setattr("kubeflow_mcp.core.resilience.time.monotonic", lambda: now[0])
         reset_rate_limiter()
         yield
         reset_rate_limiter()

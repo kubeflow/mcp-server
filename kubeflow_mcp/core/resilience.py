@@ -19,7 +19,7 @@ import logging
 import random
 import threading
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
@@ -370,26 +370,55 @@ class UserRateLimiter:
             self._global_limiter = None
 
         self._buckets = {}
-        self._last_access = {}
+        self._last_access = OrderedDict()
+        self._depleted: dict[str, tuple[float, float]] = {}
         self._lock = threading.Lock()
 
-    def _evict_expired_locked(self, now: float) -> int:
-        """Evict buckets inactive for longer than bucket_ttl. Caller must hold _lock."""
+    def _save_depletion_state_locked(self, uid: str, bucket: RateLimiter, now: float) -> None:
+        """Preserve un-refilled depletion state upon bucket eviction."""
+        with bucket._lock:
+            elapsed = max(0.0, now - bucket._last_update)
+            current_tokens = min(bucket.capacity, bucket._tokens + elapsed * bucket.rate)
+        if current_tokens < self.user_capacity:
+            self._depleted[uid] = (current_tokens, now)
+
+    def _cleanup_depleted_locked(self, now: float) -> None:
+        """Purge depletion records that have reached full capacity over time."""
+        full_refill_duration = self.user_capacity / self.user_rate
         expired = [
-            uid for uid, last_time in self._last_access.items() if now - last_time > self.bucket_ttl
+            uid
+            for uid, (_, saved_time) in self._depleted.items()
+            if now - saved_time >= full_refill_duration
         ]
         for uid in expired:
-            self._buckets.pop(uid, None)
-            self._last_access.pop(uid, None)
-        return len(expired)
+            self._depleted.pop(uid, None)
 
-    def _evict_lru_locked(self) -> None:
-        """Evict the least recently used user bucket. Caller must hold _lock."""
+    def _evict_expired_locked(self, now: float) -> int:
+        """Evict buckets inactive for longer than bucket_ttl from the oldest end."""
+        self._cleanup_depleted_locked(now)
+        evicted = 0
+        while self._last_access:
+            oldest_uid = next(iter(self._last_access))
+            last_time = self._last_access[oldest_uid]
+            if now - last_time > self.bucket_ttl:
+                self._last_access.pop(oldest_uid)
+                bucket = self._buckets.pop(oldest_uid, None)
+                if bucket is not None:
+                    self._save_depletion_state_locked(oldest_uid, bucket, now)
+                evicted += 1
+            else:
+                break
+        return evicted
+
+    def _evict_lru_locked(self, now: float) -> None:
+        """Evict the least recently used user bucket."""
         if not self._last_access:
             return
-        oldest_user = min(self._last_access, key=self._last_access.get)  # type: ignore[arg-type]
-        self._buckets.pop(oldest_user, None)
-        self._last_access.pop(oldest_user, None)
+        oldest_uid = next(iter(self._last_access))
+        self._last_access.pop(oldest_uid)
+        bucket = self._buckets.pop(oldest_uid, None)
+        if bucket is not None:
+            self._save_depletion_state_locked(oldest_uid, bucket, now)
 
     def acquire(self, tokens: float = 1.0, user_id: str | None = None) -> bool:
         """Try to acquire tokens for a specific user.
@@ -415,11 +444,22 @@ class UserRateLimiter:
             bucket = self._buckets.get(user_key)
             if bucket is None:
                 if len(self._buckets) >= self.max_buckets:
-                    self._evict_lru_locked()
+                    self._evict_lru_locked(now)
+
+                initial_tokens = self.user_capacity
+                if user_key in self._depleted:
+                    dep_tokens, dep_time = self._depleted.pop(user_key)
+                    elapsed = max(0.0, now - dep_time)
+                    initial_tokens = min(self.user_capacity, dep_tokens + elapsed * self.user_rate)
+
                 bucket = RateLimiter(rate=self.user_rate, capacity=self.user_capacity)
+                with bucket._lock:
+                    bucket._tokens = initial_tokens
+                    bucket._last_update = now
                 self._buckets[user_key] = bucket
 
             self._last_access[user_key] = now
+            self._last_access.move_to_end(user_key)
             acquired = bucket.acquire(tokens)
 
             # Refund global limiter if user bucket denies
@@ -448,6 +488,7 @@ class UserRateLimiter:
         with self._lock:
             self._buckets.clear()
             self._last_access.clear()
+            self._depleted.clear()
             if self._global_limiter is not None:
                 with self._global_limiter._lock:
                     self._global_limiter._tokens = self._global_limiter.capacity
