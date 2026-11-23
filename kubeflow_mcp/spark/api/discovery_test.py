@@ -240,7 +240,9 @@ class TestGetJob:
         mock_spark_client.get_job.side_effect = exc
         out = discovery.get_spark_job("missing")
         assert out["error_code"] == "RESOURCE_NOT_FOUND"
-        assert "list_spark_jobs" in out["hint"]
+        assert out["hint"] == "Find jobs with list_spark_jobs()"
+        out = discovery.get_spark_job("missing", namespace="analytics")
+        assert out["hint"] == "Find jobs with list_spark_jobs(namespace='analytics')"
 
     def test_other_failure_stays_sdk_error(self, mock_spark_client):
         mock_spark_client.get_job.side_effect = RuntimeError("Failed to get Spark job")

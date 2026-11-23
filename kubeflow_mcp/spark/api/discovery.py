@@ -21,7 +21,12 @@ from kubeflow_mcp.common.constants import ErrorCode
 from kubeflow_mcp.common.types import ToolError, ToolResponse, exception_details, is_k8s_not_found
 from kubeflow_mcp.common.utils import get_spark_client_for_namespace
 from kubeflow_mcp.core.security import check_namespace_allowed, validate_k8s_name
-from kubeflow_mcp.spark.types import job_hint_args, job_to_dict, session_info_to_dict
+from kubeflow_mcp.spark.types import (
+    job_hint_args,
+    job_to_dict,
+    missing_job_hint,
+    session_info_to_dict,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -294,7 +299,7 @@ def get_spark_job(name: str, namespace: str | None = None) -> dict[str, Any]:
             return ToolError(
                 error=f"Spark job '{name}' not found",
                 error_code=ErrorCode.RESOURCE_NOT_FOUND,
-                hint="Find jobs with list_spark_jobs()",
+                hint=missing_job_hint(namespace),
             ).model_dump()
         return ToolError(
             error=str(e),

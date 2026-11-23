@@ -75,6 +75,13 @@ def job_hint_args(name: str, namespace: str | None) -> str:
     return f"name='{name}'" + (f", namespace='{namespace}'" if namespace else "")
 
 
+def missing_job_hint(namespace: str | None) -> str:
+    """Hint for a job that was not found: list the jobs where the caller looked."""
+    return (
+        "Find jobs with list_spark_jobs(" + (f"namespace='{namespace}'" if namespace else "") + ")"
+    )
+
+
 def job_to_dict(job: Any) -> dict[str, Any]:
     """Convert a ``SparkJob`` (a SparkApplication batch job) into a JSON-safe dict.
 
@@ -104,4 +111,4 @@ def job_to_dict(job: Any) -> dict[str, Any]:
     }
 
 
-__all__ = ["job_hint_args", "job_to_dict", "session_info_to_dict"]
+__all__ = ["job_hint_args", "job_to_dict", "missing_job_hint", "session_info_to_dict"]

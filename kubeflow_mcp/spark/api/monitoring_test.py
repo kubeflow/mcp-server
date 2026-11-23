@@ -157,8 +157,9 @@ class TestJobLogs:
         exc = RuntimeError("Spark job not found: default/x")
         exc.__cause__ = ApiException(status=404)
         mock_spark_client.get_job_logs.side_effect = exc
-        out = monitoring.get_spark_job_logs("x")
+        out = monitoring.get_spark_job_logs("x", namespace="analytics")
         assert out["error_code"] == "RESOURCE_NOT_FOUND"
+        assert out["hint"] == "Find jobs with list_spark_jobs(namespace='analytics')"
 
     def test_job_without_driver_pod_is_validation_error(self, mock_spark_client):
         mock_spark_client.get_job_logs.side_effect = RuntimeError(
