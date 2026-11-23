@@ -14,12 +14,13 @@
 
 """Unit tests for E2E helpers. These run without a cluster, unlike the E2E suite."""
 
+import asyncio
 import json
 from types import SimpleNamespace
 
 import pytest
 
-from tests.e2e.test_kubernetes_e2e import _cleanup_trainjob
+from tests.e2e.test_kubernetes_e2e import _cleanup_trainjob, _job_diagnostics
 
 
 class _FakeSession:
@@ -60,3 +61,17 @@ async def test_cleanup_trainjob_reports_failures(session, expected):
     else:
         assert expected in error
         assert "job-a" in error
+
+
+class _HangingSession:
+    async def call_tool(self, name, arguments=None):
+        await asyncio.sleep(5)
+
+
+async def test_cleanup_and_diagnostics_bound_hung_requests():
+    cleanup_err = await _cleanup_trainjob(_HangingSession(), "job-hung", "default", timeout=0.05)
+    assert cleanup_err is not None
+    assert "timed out" in cleanup_err
+
+    diag = await _job_diagnostics(_HangingSession(), "job-hung", "default", timeout=0.05)
+    assert "timed out" in diag

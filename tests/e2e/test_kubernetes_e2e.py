@@ -60,6 +60,12 @@ COMPLETION_TRAIN_SCRIPT = (
 # Covers the image pull on a cold Kind node plus the run itself.
 COMPLETION_TIMEOUT_SECONDS = 600
 COMPLETION_POLL_SECONDS = 5
+COMPLETION_REQUEST_TIMEOUT_SECONDS = 30.0
+
+# Capture E2E target env vars at import time because the root autouse
+# _isolate_mcp_env fixture strips KUBEFLOW_MCP_* before each test runs.
+_INITIAL_E2E_URL = os.getenv("KUBEFLOW_MCP_E2E_URL")
+_INITIAL_E2E_TOKEN = os.getenv("KUBEFLOW_MCP_E2E_TOKEN")
 
 INVALID_K8S_NAME = "INVALID_UPPERCASE_NAME"
 NON_EXISTENT_JOB = "non-existent-e2e-job-999"
@@ -76,9 +82,9 @@ async def _server_streams() -> AsyncIterator[tuple[Any, Any]]:
     already running, such as the runtime image deployed in the cluster, sending
     ``KUBEFLOW_MCP_E2E_TOKEN`` as a bearer token when it is set.
     """
-    url = os.getenv("KUBEFLOW_MCP_E2E_URL")
+    url = os.getenv("KUBEFLOW_MCP_E2E_URL") or _INITIAL_E2E_URL
     if url:
-        token = os.getenv("KUBEFLOW_MCP_E2E_TOKEN")
+        token = os.getenv("KUBEFLOW_MCP_E2E_TOKEN") or _INITIAL_E2E_TOKEN
         headers = {"Authorization": f"Bearer {token}"} if token else None
         async with (
             create_mcp_http_client(headers=headers) as http_client,
@@ -675,7 +681,12 @@ async def test_e2e_monitoring(mcp_session: ClientSession) -> None:
             logger.warning("cleanup failed for %s", job_name, exc_info=True)
 
 
-async def _cleanup_trainjob(session: Any, name: str, namespace: str) -> str | None:
+async def _cleanup_trainjob(
+    session: Any,
+    name: str,
+    namespace: str,
+    timeout: float = COMPLETION_REQUEST_TIMEOUT_SECONDS,
+) -> str | None:
     """Delete a TrainJob and return why cleanup failed, or None if it is gone.
 
     A tool error comes back as a result with ``is_error`` set rather than an
@@ -683,10 +694,15 @@ async def _cleanup_trainjob(session: Any, name: str, namespace: str) -> str | No
     as cleaned up.
     """
     try:
-        resp = await session.call_tool(
-            "delete_training_job",
-            arguments={"name": name, "namespace": namespace, "confirmed": True},
+        resp = await asyncio.wait_for(
+            session.call_tool(
+                "delete_training_job",
+                arguments={"name": name, "namespace": namespace, "confirmed": True},
+            ),
+            timeout=timeout,
         )
+    except asyncio.TimeoutError:
+        return f"cleanup of TrainJob {name} timed out after {timeout}s"
     except Exception as exc:
         return f"cleanup of TrainJob {name} raised: {exc}"
     if not resp.is_error:
@@ -700,13 +716,23 @@ async def _cleanup_trainjob(session: Any, name: str, namespace: str) -> str | No
     return f"cleanup of TrainJob {name} failed: {text[:500]}"
 
 
-async def _job_diagnostics(session: ClientSession, name: str, namespace: str) -> str:
+async def _job_diagnostics(
+    session: Any,
+    name: str,
+    namespace: str,
+    timeout: float = COMPLETION_REQUEST_TIMEOUT_SECONDS,
+) -> str:
     """Collect job status, steps, events and logs to explain a failed or slow job."""
     parts = []
     for tool in ("get_training_job", "get_training_events", "get_training_logs"):
         try:
-            resp = await session.call_tool(tool, arguments={"name": name, "namespace": namespace})
+            resp = await asyncio.wait_for(
+                session.call_tool(tool, arguments={"name": name, "namespace": namespace}),
+                timeout=timeout,
+            )
             parts.append(f"{tool}: {resp.content[0].text[:2000]}")
+        except asyncio.TimeoutError:
+            parts.append(f"{tool}: timed out after {timeout}s")
         except Exception as exc:
             parts.append(f"{tool}: failed to collect ({exc})")
     return "\n".join(parts)
@@ -719,6 +745,7 @@ async def test_e2e_cpu_trainjob_reaches_completion(mcp_session: ClientSession) -
     job_name = f"e2e-done-{uuid.uuid4().hex[:6]}"
     namespace = "default"
     passed = False
+    diagnostics_collected = False
 
     try:
         create_resp = await _call_tool(
@@ -738,29 +765,47 @@ async def test_e2e_cpu_trainjob_reaches_completion(mcp_session: ClientSession) -
         status = None
         loop = asyncio.get_running_loop()
         deadline = loop.time() + COMPLETION_TIMEOUT_SECONDS
-        while loop.time() < deadline:
-            job_resp = await _call_tool(
-                mcp_session,
-                "get_training_job",
-                {"name": job_name, "namespace": namespace},
-            )
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            try:
+                job_resp = await asyncio.wait_for(
+                    _call_tool(
+                        mcp_session,
+                        "get_training_job",
+                        {"name": job_name, "namespace": namespace},
+                    ),
+                    timeout=min(remaining, COMPLETION_REQUEST_TIMEOUT_SECONDS),
+                )
+            except asyncio.TimeoutError:
+                if loop.time() >= deadline:
+                    break
+                continue
             assert job_resp.get("success") is True, job_resp
             status = job_resp["data"]["status"]
             if status in ("Complete", "Failed"):
                 break
-            await asyncio.sleep(COMPLETION_POLL_SECONDS)
+            sleep_for = min(COMPLETION_POLL_SECONDS, deadline - loop.time())
+            if sleep_for <= 0:
+                break
+            await asyncio.sleep(sleep_for)
 
         if status != "Complete":
+            diagnostics_collected = True
             details = await _job_diagnostics(mcp_session, job_name, namespace)
             pytest.fail(
                 f"TrainJob {job_name} ended as {status!r} instead of Complete "
                 f"(timeout {COMPLETION_TIMEOUT_SECONDS}s)\n{details}"
             )
 
-        logs_resp = await _call_tool(
-            mcp_session,
-            "get_training_logs",
-            {"name": job_name, "namespace": namespace},
+        logs_resp = await asyncio.wait_for(
+            _call_tool(
+                mcp_session,
+                "get_training_logs",
+                {"name": job_name, "namespace": namespace},
+            ),
+            timeout=COMPLETION_REQUEST_TIMEOUT_SECONDS,
         )
         assert logs_resp.get("success") is True, logs_resp
         logs = logs_resp["data"]["logs"]
@@ -768,6 +813,14 @@ async def test_e2e_cpu_trainjob_reaches_completion(mcp_session: ClientSession) -
             f"Completion marker missing from logs of {job_name}:\n{logs[-2000:]}"
         )
         passed = True
+    except BaseException:
+        if not diagnostics_collected:
+            try:
+                details = await _job_diagnostics(mcp_session, job_name, namespace)
+                logger.error("Diagnostics for %s before cleanup:\n%s", job_name, details)
+            except Exception:
+                logger.warning("Diagnostics collection failed for %s", job_name, exc_info=True)
+        raise
     finally:
         cleanup_error = await _cleanup_trainjob(mcp_session, job_name, namespace)
         if cleanup_error:
