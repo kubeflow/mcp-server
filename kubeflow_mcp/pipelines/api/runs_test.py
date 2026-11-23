@@ -199,6 +199,7 @@ class TestCreatePipelineRun:
 
         assert result["error_code"] == "PERMISSION_DENIED"
         assert "no namespace" in result["error"]
+        kfp_client.list_pipeline_versions.assert_not_called()
         kfp_client.run.assert_not_called()
 
     @pytest.mark.parametrize("confirmed", [False, True])
@@ -212,7 +213,9 @@ class TestCreatePipelineRun:
         result = create_pipeline_run("churn-prediction", experiment="exp", confirmed=confirmed)
 
         assert result["error_code"] == "PERMISSION_DENIED"
+        assert "Experiment" in result["error"]
         assert "not in namespace 'team-a'" in result["error"]
+        kfp_client.get_experiment.assert_called_once_with("exp")
         kfp_client.run.assert_not_called()
 
     @pytest.mark.parametrize("confirmed", [False, True])
@@ -231,7 +234,9 @@ class TestCreatePipelineRun:
         result = create_pipeline_run("churn-prediction", experiment="exp", confirmed=confirmed)
 
         assert result["error_code"] == "PERMISSION_DENIED"
+        assert "Experiment" in result["error"]
         assert "no namespace" in result["error"]
+        kfp_client.get_experiment.assert_called_once_with("exp")
         kfp_client.run.assert_not_called()
 
     def test_single_user_empty_namespaces_succeed_without_allowlist(self, kfp_client):
