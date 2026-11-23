@@ -53,6 +53,9 @@ _KATIB_WEBHOOK_MARK = "experiment.katib.kubeflow.org"
 # Katib's validating webhook rejects every Experiment in a namespace without
 # this label, before looking at the Experiment itself.
 _INJECTION_LABEL = "katib.kubeflow.org/metrics-collector-injection"
+# How the API server words a webhook it could not call, whatever the reason
+# (no endpoints, connection refused, timeout).
+_WEBHOOK_CALL_FAILED = "failed calling webhook"
 
 
 class CheckResult(NamedTuple):
@@ -90,6 +93,7 @@ def _check_experiment_crd() -> CheckResult:
                     f"Install Katib: {_INSTALL_HINT}",
                 ),
             )
+        logger.warning("katib_pre_flight: cannot read the Experiment CRD", exc_info=True)
         return CheckResult(
             info={"katib_crd_found": False},
             blockers=(f"Cannot check Katib CRD: {e}",),
@@ -138,6 +142,7 @@ def _check_controller() -> CheckResult:
     try:
         pod = _find_controller_pod()
     except Exception as e:
+        logger.warning("katib_pre_flight: cannot list the Katib controller pods", exc_info=True)
         return CheckResult(
             info={"controller_status": "check_failed"},
             warnings=(f"Cannot check Katib controller pods: {e}",),
@@ -205,7 +210,7 @@ def _check_webhook() -> CheckResult:
 
     Uses a server-side dry run: admission runs in full, nothing is persisted.
     The probe targets the default namespace, so it is skipped, with a warning,
-    when policy does not allow that namespace.
+    when policy does not allow that namespace or it cannot be resolved.
     """
     ns_err = check_optimizer_namespace(None)
     if ns_err is not None:
@@ -239,6 +244,17 @@ def _check_webhook() -> CheckResult:
 
     try:
         namespace = mcp_utils.get_optimizer_effective_namespace(None)
+    except Exception as e:
+        logger.warning("katib_pre_flight: cannot resolve the default namespace", exc_info=True)
+        return CheckResult(
+            info={"webhook_reachable": None},
+            warnings=(
+                "Skipped the Katib admission webhook check: the default namespace could not "
+                f"be resolved ({e}).",
+            ),
+        )
+
+    try:
         mcp_utils.get_custom_objects_api().create_namespaced_custom_object(
             group=KATIB_API_GROUP,
             version=KATIB_API_VERSION,
@@ -249,28 +265,68 @@ def _check_webhook() -> CheckResult:
             _request_timeout=mcp_utils.K8S_WRITE_TIMEOUT,
         )
     except Exception as e:
-        status = getattr(e, "status", None)
-        message = api_message(e)
-        if status in (400, 422):
-            return _classify_probe_rejection(message)
-        if status == 403:
-            return CheckResult(
-                info={"webhook_reachable": None},
-                warnings=(
-                    "Cannot verify Katib admission webhooks: no permission to dry-run "
-                    "an Experiment create. Creation may still fail at runtime.",
-                ),
-            )
+        return _classify_probe_failure(e)
+    # A healthy Katib always refuses the incomplete probe, so an admitted one
+    # means its validating webhook never ran.
+    return CheckResult(
+        info={"webhook_reachable": None},
+        warnings=(
+            "Katib's validating webhook did not answer: a dry run of a deliberately invalid "
+            "Experiment was admitted. Check that Katib's ValidatingWebhookConfiguration and "
+            "MutatingWebhookConfiguration (katib.kubeflow.org) exist; without them experiments "
+            "are neither defaulted nor validated.",
+        ),
+    )
+
+
+def _classify_probe_failure(exc: Exception) -> CheckResult:
+    """Interpret the probe failing for any reason other than being admitted.
+
+    Only Katib's own refusal proves its webhook answered, and only the API
+    server reporting that it could not call a webhook proves an outage. Anything
+    else (bad credentials, a timeout, an unrelated server error) proves neither,
+    so it is reported without claiming a webhook problem.
+    """
+    status = getattr(exc, "status", None)
+    message = api_message(exc)
+    if status in (400, 422):
+        return _classify_probe_rejection(message)
+    if _WEBHOOK_CALL_FAILED in message:
+        katib = _KATIB_WEBHOOK_MARK in message
         return CheckResult(
-            info={"webhook_reachable": False},
+            info={"webhook_reachable": False if katib else None},
             blockers=(
-                "Katib's admission webhooks are not reachable by the API server, so no "
-                f"experiment can be created: {api_message(e)} A Ready controller pod is "
-                "not sufficient; check that the API server can reach the katib-controller "
-                "Service on its webhook port.",
+                "The API server cannot call an admission webhook on Experiment creates, so no "
+                f"experiment can be created: {message}"
+                + (
+                    " A Ready controller pod is not sufficient; check that the API server can "
+                    "reach the katib-controller Service on its webhook port."
+                    if katib
+                    else ""
+                ),
             ),
         )
-    return CheckResult(info={"webhook_reachable": True})
+
+    logger.warning("katib_pre_flight: the webhook probe failed", exc_info=exc)
+    if status in (401, 403):
+        reason = (
+            "the API server rejected this server's credentials"
+            if status == 401
+            else "no permission to dry-run an Experiment create"
+        )
+        return CheckResult(
+            info={"webhook_reachable": None},
+            warnings=(
+                f"Cannot verify Katib admission webhooks: {reason}. Creation may still fail "
+                "at runtime.",
+            ),
+        )
+    return CheckResult(
+        info={"webhook_reachable": None},
+        blockers=(
+            f"A dry-run Experiment create failed, so creation is likely to fail too: {message}",
+        ),
+    )
 
 
 def _classify_probe_rejection(message: str) -> CheckResult:
@@ -311,6 +367,7 @@ def _check_trainer() -> CheckResult:
     try:
         mcp_utils.get_trainer_client()
     except Exception:
+        logger.warning("katib_pre_flight: cannot initialize the Trainer SDK client", exc_info=True)
         return CheckResult(
             info={"trainer_sdk_available": False},
             warnings=(

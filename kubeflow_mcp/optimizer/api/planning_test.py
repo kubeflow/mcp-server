@@ -42,13 +42,34 @@ def _pod(phase="Running", namespace="kubeflow", name="katib-controller-abc", rea
     )
 
 
+def _denied(status, message):
+    """An admission denial as the API server returns it."""
+    err = ApiException(status=status, reason="Bad Request")
+    err.body = json.dumps({"message": message})
+    return err
+
+
+_KATIB_DENIAL = (
+    'admission webhook "validator.experiment.katib.kubeflow.org" denied the request: '
+    "spec.trialTemplate: Required value"
+)
+
+
+def _katib_webhook():
+    """The probe's API as a healthy Katib answers it: refusing the incomplete probe."""
+    webhook = MagicMock()
+    webhook.create_namespaced_custom_object.side_effect = _denied(400, _KATIB_DENIAL)
+    return webhook
+
+
 @contextmanager
 def _patch(apiext, core, trainer_ok=True, webhook=None):
     """Patch every cluster call pre-flight makes.
 
-    ``webhook`` is the CustomObjects API backing the dry-run admission probe. It
-    is always patched: leaving it out lets the check reach a real cluster, which
-    both slows the suite and makes results depend on the developer's kubeconfig.
+    ``webhook`` is the CustomObjects API backing the dry-run admission probe,
+    healthy Katib by default. It is always patched: leaving it out lets the
+    check reach a real cluster, which both slows the suite and makes results
+    depend on the developer's kubeconfig.
     """
     trainer_ctx = (
         patch(f"{_UTILS}.get_trainer_client", return_value=MagicMock())
@@ -59,7 +80,7 @@ def _patch(apiext, core, trainer_ok=True, webhook=None):
         patch(f"{_UTILS}.get_apiextensions_api", return_value=apiext),
         patch(f"{_UTILS}.get_core_v1_api", return_value=core),
         trainer_ctx,
-        patch(f"{_UTILS}.get_custom_objects_api", return_value=webhook or MagicMock()),
+        patch(f"{_UTILS}.get_custom_objects_api", return_value=webhook or _katib_webhook()),
         patch(f"{_UTILS}.get_optimizer_effective_namespace", return_value="default"),
     ):
         yield
@@ -80,6 +101,8 @@ def test_pre_flight_all_healthy():
     assert data["katib_crd_versions"] == ["v1beta1"]
     assert data["controller_status"] == "Running"
     assert data["trainer_sdk_available"] is True
+    assert data["webhook_reachable"] is True
+    assert data["warnings"] == []
 
 
 def test_pre_flight_crd_missing():
@@ -193,40 +216,34 @@ def test_pre_flight_blocks_when_webhook_is_unreachable():
     """
     apiext, core = _healthy_cluster()
     webhook = MagicMock()
-    webhook.create_namespaced_custom_object.side_effect = ApiException(
-        status=500, reason="Internal Server Error"
-    )
+    webhook.create_namespaced_custom_object.side_effect = _denied(500, _KATIB_UNREACHABLE)
     with _patch(apiext, core, webhook=webhook):
         result = katib_pre_flight()
     data = result["data"]
     assert data["ready"] is False
     assert data["webhook_reachable"] is False
     assert data["controller_ready"] is True, "the pod itself is healthy; only admission is broken"
-    assert any("admission webhooks are not reachable" in b for b in data["blockers"])
+    assert any("cannot call an admission webhook" in b for b in data["blockers"])
+    assert any("katib-controller Service" in b for b in data["blockers"])
+
+
+# What the API server answered on the live test cluster when it could not reach Katib.
+_KATIB_UNREACHABLE = (
+    'Internal error occurred: failed calling webhook "defaulter.experiment.katib.kubeflow.org": '
+    'failed to call webhook: Post "https://katib-controller.kubeflow.svc:443/mutate-experiment'
+    '?timeout=10s": context deadline exceeded'
+)
 
 
 def test_pre_flight_webhook_probe_is_a_dry_run():
     """The probe must never persist an Experiment."""
     apiext, core = _healthy_cluster()
-    webhook = MagicMock()
+    webhook = _katib_webhook()
     with _patch(apiext, core, webhook=webhook):
         katib_pre_flight()
     kwargs = webhook.create_namespaced_custom_object.call_args.kwargs
     assert kwargs["dry_run"] == "All"
     assert kwargs["plural"] == "experiments"
-
-
-def _denied(status, message):
-    """An admission denial as the API server returns it."""
-    err = ApiException(status=status, reason="Bad Request")
-    err.body = json.dumps({"message": message})
-    return err
-
-
-_KATIB_DENIAL = (
-    'admission webhook "validator.experiment.katib.kubeflow.org" denied the request: '
-    "spec.trialTemplate: Required value"
-)
 
 
 @pytest.mark.parametrize("status", [400, 422])
@@ -285,6 +302,85 @@ def test_pre_flight_webhook_forbidden_warns_rather_than_blocks():
     assert data["ready"] is True
     assert data["webhook_reachable"] is None
     assert any("Cannot verify Katib admission webhooks" in w for w in data["warnings"])
+
+
+def test_pre_flight_an_admitted_probe_means_katib_never_answered():
+    """A healthy Katib always refuses the incomplete probe, so admission proves
+    only that its webhook registrations are missing."""
+    apiext, core = _healthy_cluster()
+    with _patch(apiext, core, webhook=MagicMock()):
+        data = katib_pre_flight()["data"]
+    assert data["webhook_reachable"] is None
+    assert any("validating webhook did not answer" in w for w in data["warnings"])
+
+
+def test_pre_flight_rejected_credentials_are_not_a_webhook_outage():
+    apiext, core = _healthy_cluster()
+    webhook = MagicMock()
+    webhook.create_namespaced_custom_object.side_effect = ApiException(
+        status=401, reason="Unauthorized"
+    )
+    with _patch(apiext, core, webhook=webhook):
+        data = katib_pre_flight()["data"]
+    assert data["webhook_reachable"] is None
+    assert not any("webhook" in b for b in data["blockers"])
+    assert any("rejected this server's credentials" in w for w in data["warnings"])
+
+
+def test_pre_flight_another_failing_webhook_blocks_without_blaming_katib():
+    """Any webhook the API server cannot call stops every create, but only
+    Katib's own points at the katib-controller Service."""
+    apiext, core = _healthy_cluster()
+    webhook = MagicMock()
+    webhook.create_namespaced_custom_object.side_effect = _denied(
+        500,
+        'Internal error occurred: failed calling webhook "policy.example.com": connection refused',
+    )
+    with _patch(apiext, core, webhook=webhook):
+        data = katib_pre_flight()["data"]
+    assert data["ready"] is False
+    assert data["webhook_reachable"] is None
+    assert any("policy.example.com" in b for b in data["blockers"])
+    assert not any("katib-controller" in b for b in data["blockers"])
+
+
+def test_pre_flight_an_unexplained_probe_failure_blocks_without_a_diagnosis():
+    apiext, core = _healthy_cluster()
+    webhook = MagicMock()
+    webhook.create_namespaced_custom_object.side_effect = _denied(503, "etcd is unavailable")
+    with _patch(apiext, core, webhook=webhook):
+        data = katib_pre_flight()["data"]
+    assert data["ready"] is False
+    assert data["webhook_reachable"] is None
+    assert data["blockers"] == [
+        "A dry-run Experiment create failed, so creation is likely to fail too: etcd is unavailable"
+    ]
+
+
+def test_pre_flight_skips_the_probe_when_the_namespace_cannot_be_resolved():
+    apiext, core = _healthy_cluster()
+    webhook = _katib_webhook()
+    with (
+        _patch(apiext, core, webhook=webhook),
+        patch(
+            f"{_UTILS}.get_optimizer_effective_namespace",
+            side_effect=RuntimeError("no kubeconfig found"),
+        ),
+    ):
+        data = katib_pre_flight()["data"]
+    webhook.create_namespaced_custom_object.assert_not_called()
+    assert data["webhook_reachable"] is None
+    assert data["ready"] is True
+    assert any("default namespace could not be resolved" in w for w in data["warnings"])
+
+
+def test_pre_flight_logs_why_a_sub_check_failed(caplog):
+    """A sub-check's failure is reported as a warning; its cause goes to the log."""
+    apiext, core = _healthy_cluster()
+    with caplog.at_level("WARNING"), _patch(apiext, core, trainer_ok=False):
+        katib_pre_flight()
+    (record,) = [r for r in caplog.records if "Trainer SDK client" in r.getMessage()]
+    assert record.exc_info[1].args == ("no trainer",)
 
 
 def test_pre_flight_controller_falls_back_to_all_namespaces():
