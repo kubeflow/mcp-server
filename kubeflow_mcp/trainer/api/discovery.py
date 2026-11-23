@@ -133,7 +133,7 @@ def _trainjob_steps_to_mcp(job: object) -> tuple[list[dict[str, Any]], dict[str,
 MAX_PROGRESS_METRICS = 32
 
 _NO_PROGRESS_REASON = (
-    "No progress reported. It needs Kubeflow Trainer 2.4+ with the TrainJobStatus "
+    "No progress reported. It needs Kubeflow Trainer 2.2+ with the TrainJobStatus "
     "feature gate, and a training script that sends its status (KEP-2779)."
 )
 
@@ -328,7 +328,7 @@ def get_training_job(name: str, namespace: str | None = None) -> dict[str, Any]:
         - ``step_summary`` (step counts by status)
         - ``pods`` (readiness, restarts, container failures and scheduling conditions)
           and ``blocking_reasons`` (best-effort, bounded diagnostics).
-        - ``progress``: what the job reports in ``status.trainerStatus`` (Trainer 2.4+,
+        - ``progress``: what the job reports in ``status.trainerStatus`` (Trainer 2.2+,
           KEP-2779): ``progress_percentage``, ``estimated_remaining_seconds``,
           ``metrics`` (``name``/``value`` strings, at most ``MAX_PROGRESS_METRICS``),
           ``last_updated_time`` and ``seconds_since_update``. ``reported`` is ``False``
@@ -354,37 +354,36 @@ def get_training_job(name: str, namespace: str | None = None) -> dict[str, Any]:
         steps, step_summary = _trainjob_steps_to_mcp(job)
         progress = _trainjob_progress_to_mcp(name, namespace)
 
+        # Repeat the caller's namespace, so following a hint reads this job and not
+        # one with the same name in the default namespace.
+        args = f"name='{name}'" + (f", namespace='{namespace}'" if namespace else "")
         next_steps: list[str] = []
         if status == "Failed":
             next_steps = [
-                f"get_training_events(name='{name}') — check for OOM/scheduling issues",
-                f"get_training_logs(name='{name}') — check error output",
+                f"get_training_events({args}) — check for OOM/scheduling issues",
+                f"get_training_logs({args}) — check error output",
                 "Read trainer://guides/troubleshooting",
             ]
         elif status == "Running" and progress["reported"]:
             next_steps = [
-                f"get_training_job(name='{name}') — poll again to follow progress",
-                f"get_training_logs(name='{name}') — check output",
+                f"get_training_job({args}) — poll again to follow progress",
+                f"get_training_logs({args}) — check output",
             ]
         elif status == "Running":
-            next_steps = [f"get_training_logs(name='{name}') — check progress"]
+            next_steps = [f"get_training_logs({args}) — check progress"]
         elif status == "Created":
             next_steps = [
-                f"get_training_events(name='{name}') — check if scheduling or suspended",
+                f"get_training_events({args}) — check if scheduling or suspended",
             ]
 
         # Point at the step that needs attention, which the job status alone hides.
         failed = [s["name"] for s in steps if s["status"] == "Failed"]
         if failed:
-            next_steps.insert(
-                0, f"get_training_logs(name='{name}', step='{failed[0]}') — failed step"
-            )
+            next_steps.insert(0, f"get_training_logs({args}, step='{failed[0]}') — failed step")
         elif "Pending" in step_summary["by_status"] and not any(
             hint.startswith("get_training_events") for hint in next_steps
         ):
-            next_steps.append(
-                f"get_training_events(name='{name}') — pods pending, check scheduling"
-            )
+            next_steps.append(f"get_training_events({args}) — pods pending, check scheduling")
 
         data: dict[str, Any] = {
             "name": job.name,

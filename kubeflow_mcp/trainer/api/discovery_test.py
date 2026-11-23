@@ -888,7 +888,7 @@ def test_job_details_include_pod_diagnostics():
 
 
 # ---------------------------------------------------------------------------
-# get_training_job progress (status.trainerStatus, Trainer 2.4+, KEP-2779)
+# get_training_job progress (status.trainerStatus, Trainer 2.2+, KEP-2779)
 # ---------------------------------------------------------------------------
 
 
@@ -984,11 +984,28 @@ class TestTrainingJobProgress:
             {"status": {"trainerStatus": trainer_status}}, trainjob_object_api
         )
         next_steps = verify_tool_success(result)["next_steps"]
-        assert next_steps[0].startswith("get_training_job(name='job-a')")
-        assert any("get_training_logs" in step for step in next_steps)
+        # The caller's namespace is repeated, so the hint reads this job.
+        assert next_steps[0].startswith("get_training_job(name='job-a', namespace='team-a')")
+        assert any(
+            step.startswith("get_training_logs(name='job-a', namespace='team-a')")
+            for step in next_steps
+        )
 
     def test_running_job_without_progress_keeps_the_logs_hint(self, trainjob_object_api):
         result = _get_job_with_trainjob_object({}, trainjob_object_api)
+        assert verify_tool_success(result)["next_steps"] == [
+            "get_training_logs(name='job-a', namespace='team-a') — check progress"
+        ]
+
+    def test_hints_omit_the_namespace_when_the_caller_did(self, trainjob_object_api):
+        trainjob_object_api.get_namespaced_custom_object.return_value = {}
+        client = MagicMock()
+        client.get_job.return_value = _fake_job("job-a")
+        with patch(
+            "kubeflow_mcp.trainer.api.discovery.get_trainer_client_for_namespace",
+            return_value=client,
+        ):
+            result = get_training_job("job-a")
         assert verify_tool_success(result)["next_steps"] == [
             "get_training_logs(name='job-a') — check progress"
         ]
