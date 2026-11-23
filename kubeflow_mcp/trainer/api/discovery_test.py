@@ -947,7 +947,7 @@ class TestTrainingJobProgress:
         ids=["no-status", "no-trainer-status", "empty-trainer-status", "not-a-dict"],
     )
     def test_says_why_nothing_was_reported(self, obj, trainjob_object_api):
-        """Trainer 2.3, the feature gate off, or a script that does not report."""
+        """Trainer before 2.2, the feature gate off, or a script that does not report."""
         result = _get_job_with_trainjob_object(obj, trainjob_object_api)
         progress = verify_tool_success(result)["progress"]
         assert progress["reported"] is False

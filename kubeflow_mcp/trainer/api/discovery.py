@@ -156,7 +156,7 @@ def _trainjob_progress_to_mcp(name: str, namespace: str | None) -> dict[str, Any
     """Return the progress a TrainJob reports in ``status.trainerStatus`` (KEP-2779).
 
     The SDK's ``TrainJob`` does not carry this field yet, so the TrainJob object is
-    read directly. Never raises: a missing field (Trainer 2.3, feature gate off, or a
+    read directly. Never raises: a missing field (Trainer before 2.2, feature gate off, or a
     script that does not report) and a failed read both return ``reported: False``
     with a reason, so the rest of ``get_training_job`` is unaffected.
     """
