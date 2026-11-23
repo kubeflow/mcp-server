@@ -68,6 +68,10 @@ class TestIdentity:
         identity = identity_from_claims({"sub": "alice", "groups": ["team-a", 7, ""]}, config)
         assert identity == CallerIdentity("oidc:alice", ("oidc:team-a", "system:authenticated"))
 
+    @pytest.mark.parametrize("groups", [7, {"team-a": True}, 3.5])
+    def test_malformed_groups_claim_gives_no_identity(self, groups):
+        assert identity_from_claims({"sub": "alice", "groups": groups}, AuthzConfig()) is None
+
     def test_reserved_groups_are_dropped(self):
         claims = {"sub": "mallory", "groups": ["system:masters", "team-a"]}
         identity = identity_from_claims(claims, AuthzConfig(mode="sar"))
@@ -123,6 +127,41 @@ class TestRequiredChecks:
             raise AssertionError("not needed")
 
         assert required_checks((LIST_NODES,), {}, unresolvable) == [(LIST_NODES, None)]
+
+    @pytest.mark.parametrize(
+        ("value", "needed"),
+        [(True, True), ("true", True), (1, True), (False, False), ("false", False), (0, False)],
+    )
+    def test_boolean_when_is_read_like_the_tool_reads_it(self, value, needed):
+        checks = required_checks(
+            (GET_JOB, CREATE_POD),
+            {"include_packages": value},
+            _default_namespace,
+            {"include_packages"},
+        )
+        assert ((CREATE_POD, "default") in checks) is needed
+
+    def test_unparseable_boolean_is_refused(self):
+        with pytest.raises(InvalidArguments):
+            required_checks(
+                (CREATE_POD,),
+                {"include_packages": "maybe"},
+                _default_namespace,
+                {"include_packages"},
+            )
+
+    def test_unless_skips_when_the_argument_is_given(self):
+        list_crds = ToolPermission(
+            "list", "apiextensions.k8s.io", "customresourcedefinitions", True, unless="name"
+        )
+        get_crd = ToolPermission(
+            "get", "apiextensions.k8s.io", "customresourcedefinitions", True, when="name"
+        )
+        perms = (list_crds, get_crd)
+        assert required_checks(perms, {}, _default_namespace) == [(list_crds, None)]
+        # Any name, even empty, takes the tool's single-CRD path.
+        for name in ("trainjobs.trainer.kubeflow.org", ""):
+            assert required_checks(perms, {"name": name}, _default_namespace) == [(get_crd, None)]
 
     def test_resolver_without_a_namespace_checks_cluster_wide(self):
         assert required_checks((POD_LOG,), {}, lambda namespace: None) == [(POD_LOG, None)]
@@ -249,7 +288,7 @@ class TestReviewer:
         assert len(api.reviews) == 2
 
 
-def _server(api, claims, calls):
+def _server(api, claims, calls, empty=False):
     """A server with one guarded tool, execute_tool and an unguarded meta-tool."""
     mcp = FastMCP("authz-test")
 
@@ -270,7 +309,7 @@ def _server(api, claims, calls):
     mcp.add_middleware(
         SarAuthorizationMiddleware(
             AuthzConfig(mode="sar"),
-            {"delete_training_job": (DELETE_JOB,)},
+            {"delete_training_job": (DELETE_JOB,), **({"find_tools": ()} if empty else {})},
             {"delete_training_job": _default_namespace},
             SubjectAccessReviewer(lambda: api, cache_ttl=0),
             lambda: claims,
@@ -331,6 +370,25 @@ class TestMiddleware:
             )
         assert result.is_error and calls == []
 
+    async def test_tool_with_an_empty_declaration_needs_no_identity(self):
+        calls = []
+        api = FakeAuthorizationApi()
+        mcp = _server(api, None, calls, empty=True)
+        async with Client(mcp) as client:
+            result = await client.call_tool("find_tools", {"query": "jobs"})
+        assert not result.is_error and api.reviews == []
+
+    async def test_identity_refusal_is_audited_without_the_claims(self, caplog):
+        mcp = _server(FakeAuthorizationApi(), {"sub": "system:admin", "email": "x@y"}, [])
+        with caplog.at_level("WARNING", logger="kubeflow_mcp.core.authz"):
+            async with Client(mcp) as client:
+                await client.call_tool(
+                    "delete_training_job", {"name": "j", "namespace": "a"}, raise_on_error=False
+                )
+        records = [r for r in caplog.records if r.getMessage() == "authz_no_identity"]
+        assert len(records) == 1 and records[0].audit is True
+        assert "x@y" not in str(records[0].__dict__)
+
     async def test_tool_without_permissions_passes_through(self):
         calls = []
         api = FakeAuthorizationApi()
@@ -348,7 +406,7 @@ class TestMiddleware:
                 "delete_training_job", {"name": "j", "namespace": "team-a"}, raise_on_error=False
             )
         assert result.is_error and calls == []
-        assert "no usable verified 'sub' claim" in result.structured_content["error"]
+        assert "no usable verified identity" in result.structured_content["error"]
 
     async def test_review_failure_refuses_the_call(self):
         calls = []
@@ -419,8 +477,14 @@ def test_builder_maps_each_registered_tool_to_its_namespace_resolver():
         AuthzConfig(mode="sar"),
         {"trainer": trainer},
         JWTVerifier(jwks_uri="https://issuer.invalid/jwks.json"),
-        {"inspect_controller", "list_training_jobs"},
+        {"inspect_controller", "list_training_jobs", "get_runtime"},
     )
-    assert set(middleware._permissions) == {"inspect_controller", "list_training_jobs"}
+    assert set(middleware._permissions) == {
+        "inspect_controller",
+        "list_training_jobs",
+        "get_runtime",
+    }
+    assert "include_packages" in middleware._bool_params["get_runtime"]
     assert middleware._resolvers["inspect_controller"] is _controller_namespace
     assert middleware._resolvers["list_training_jobs"] is utils.get_trainer_effective_namespace
+    assert "include_packages" not in middleware._bool_params.get("list_training_jobs", ())

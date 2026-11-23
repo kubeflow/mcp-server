@@ -342,7 +342,12 @@ def load_config(config_path: Path | None = None) -> Config:
         audience=os.getenv("KUBEFLOW_MCP_JWT_AUDIENCE", auth_file.get("audience")),
     )
 
-    authz_file = file_config.get("authz", {}) or {}
+    authz_file = file_config.get("authz")
+    if authz_file is None:
+        authz_file = {}
+    elif not isinstance(authz_file, dict):
+        # `authz: []` or `authz: false` must not quietly turn authorization off.
+        raise ValueError("Invalid authz config: the 'authz' section must be a mapping")
     try:
         authz = AuthzConfig(
             **{

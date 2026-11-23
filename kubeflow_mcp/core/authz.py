@@ -32,12 +32,13 @@ import threading
 import time
 from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, get_type_hints
 
 import anyio
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
 from mcp.types import TextContent
+from pydantic import TypeAdapter, ValidationError
 
 from kubeflow_mcp.common.constants import ErrorCode
 from kubeflow_mcp.common.types import ToolError, ToolPermission
@@ -53,6 +54,9 @@ _RESERVED_PREFIX = "system:"
 # Callers choose namespace strings, so the cache is bounded: expired entries go first,
 # then everything if a burst of fresh ones still exceeds the cap.
 MAX_CACHE_ENTRIES = 10_000
+
+# Lax, like the tools' own argument validation: "false" and 0 are False.
+_BOOL = TypeAdapter(bool)
 
 # A permission to check, and the namespace to check it in (None: cluster-wide).
 Check = tuple[ToolPermission, str | None]
@@ -75,8 +79,9 @@ class CallerIdentity:
 def identity_from_claims(claims: Mapping[str, Any], config: AuthzConfig) -> CallerIdentity | None:
     """Map verified token claims to the Kubernetes user and groups to ask about.
 
-    Returns None when there is no usable user: missing, empty, or a reserved
-    ``system:`` name. Reserved group names are dropped.
+    Returns None when there is no usable identity: the user is missing, empty or a
+    reserved ``system:`` name, or the groups claim is neither a string nor a list.
+    Reserved group names are dropped.
     """
     user = claims.get(config.user_claim)
     if not isinstance(user, str) or not user:
@@ -87,6 +92,8 @@ def identity_from_claims(claims: Mapping[str, Any], config: AuthzConfig) -> Call
     groups = claims.get(config.groups_claim) or []
     if isinstance(groups, str):
         groups = [groups]
+    if not isinstance(groups, (list, tuple)):
+        return None
     named = (config.groups_prefix + g for g in groups if isinstance(g, str) and g)
     # The API server adds this group to every authenticated request, but a
     # SubjectAccessReview only knows the groups it is sent.
@@ -99,22 +106,45 @@ def identity_from_claims(claims: Mapping[str, Any], config: AuthzConfig) -> Call
     )
 
 
+def _given(param: str, arguments: Mapping[str, Any], bool_params: Collection[str]) -> bool:
+    """Whether the call sets *param*, read the way the tool's argument validation will.
+
+    A boolean parameter counts when it validates to True ("false" does not); any
+    other parameter counts when it is present and not None (an empty name is given).
+    """
+    value = arguments.get(param)
+    if param not in bool_params:
+        return value is not None
+    if value is None:
+        return False
+    try:
+        return _BOOL.validate_python(value)
+    except ValidationError as e:
+        raise InvalidArguments(f"{param} must be a boolean") from e
+
+
 def required_checks(
     permissions: tuple[ToolPermission, ...],
     arguments: Mapping[str, Any],
     resolve_namespace: Callable[[str | None], str | None],
+    bool_params: Collection[str] = frozenset(),
 ) -> list[Check]:
     """Return the permissions this call needs and the namespace of each.
 
-    A permission with ``when`` is needed only if that argument is truthy in this call.
-    A resolver that returns None (the tool finds its namespace itself) means the
-    namespaced permissions are checked cluster-wide.
+    A permission with ``when`` is needed only if the call sets that argument, one with
+    ``unless`` only if it does not. A resolver that returns None (the tool finds its
+    namespace itself) means the namespaced permissions are checked cluster-wide.
 
     Raises:
         InvalidArguments: the namespace argument is not a valid namespace name. The
             middleware runs before the tool validates it, so it is checked here first.
     """
-    needed = [p for p in permissions if p.when is None or arguments.get(p.when)]
+    needed = [
+        p
+        for p in permissions
+        if (p.when is None or _given(p.when, arguments, bool_params))
+        and (p.unless is None or not _given(p.unless, arguments, bool_params))
+    ]
     if not any(not p.cluster_wide for p in needed):
         return [(p, None) for p in needed]
     namespace = arguments.get("namespace")
@@ -236,12 +266,14 @@ class SarAuthorizationMiddleware(Middleware):
         namespace_resolvers: Mapping[str, Callable[[str | None], str]],
         reviewer: SubjectAccessReviewer,
         get_claims: Callable[[], Mapping[str, Any] | None],
+        bool_params: Mapping[str, Collection[str]] | None = None,
     ) -> None:
         self._config = config
         self._permissions = permissions
         self._resolvers = namespace_resolvers
         self._reviewer = reviewer
         self._get_claims = get_claims
+        self._bool_params = bool_params or {}
 
     async def on_call_tool(self, context: Any, call_next: Any) -> ToolResult:
         tool = context.message.name
@@ -255,15 +287,22 @@ class SarAuthorizationMiddleware(Middleware):
                     "execute_tool needs tool_name as a string and arguments as an object",
                     error_code=ErrorCode.VALIDATION_ERROR,
                 )
-        if tool not in self._permissions:
+        # Nothing declared (unknown, hidden, or no Kubernetes request): nothing to ask.
+        if not self._permissions.get(tool):
             return await call_next(context)
 
         claims = self._get_claims()
         identity = identity_from_claims(claims or {}, self._config)
         if identity is None:
+            # Logged without the claims themselves, which may carry personal data.
+            logger.warning(
+                "authz_no_identity",
+                extra={"audit": True, "tool": tool, "error": "no usable verified identity"},
+            )
             return _refuse(
                 f"Cannot authorize '{tool}': the request carries no usable verified "
-                f"'{self._config.user_claim}' claim (missing, or a reserved 'system:' name)"
+                f"identity (the '{self._config.user_claim}' claim is missing or reserved, "
+                f"or the '{self._config.groups_claim}' claim is malformed)"
             )
         try:
             missing = await anyio.to_thread.run_sync(self._check, tool, arguments, identity)
@@ -295,7 +334,9 @@ class SarAuthorizationMiddleware(Middleware):
     ) -> list[str]:
         resolver = self._resolvers.get(tool) or _no_default_namespace
         try:
-            checks = required_checks(self._permissions[tool], arguments, resolver)
+            checks = required_checks(
+                self._permissions[tool], arguments, resolver, self._bool_params.get(tool, ())
+            )
         except InvalidArguments:
             raise
         except Exception as e:
@@ -350,7 +391,7 @@ def build_authz_middleware(
     """
     from kubeflow_mcp.common.utils import get_authorization_api
     from kubeflow_mcp.core.auth import APIKeyVerifier
-    from kubeflow_mcp.core.health import HEALTH_TOOL_PERMISSIONS
+    from kubeflow_mcp.core.health import HEALTH_TOOL_PERMISSIONS, HEALTH_TOOLS
 
     if auth_provider is None or isinstance(auth_provider, APIKeyVerifier):
         raise ValueError(
@@ -372,10 +413,17 @@ def build_authz_middleware(
                 tool_resolvers[tool] = resolvers[client]
     if "inspect_controller" in permissions:
         tool_resolvers["inspect_controller"] = _controller_namespace
+    functions = [f for m in loaded_modules.values() for f in getattr(m, "TOOLS", [])]
+    bool_params = {
+        f.__name__: frozenset(n for n, t in get_type_hints(f).items() if t is bool)
+        for f in [*functions, *HEALTH_TOOLS]
+        if f.__name__ in permissions
+    }
     return SarAuthorizationMiddleware(
         config,
         permissions,
         tool_resolvers,
         SubjectAccessReviewer(get_authorization_api, config.cache_ttl),
         _verified_claims,
+        bool_params,
     )

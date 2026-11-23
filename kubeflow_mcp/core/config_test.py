@@ -210,6 +210,12 @@ def test_authz_is_off_by_default():
     assert cfg.authz.mode == "none"
 
 
+def test_empty_authz_section_keeps_the_defaults(tmp_path):
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("authz:\n")
+    assert load_config(config_path=config_file).authz.mode == "none"
+
+
 def test_authz_from_file_and_env_mode(tmp_path):
     config_file = tmp_path / "config.yaml"
     config_file.write_text(
@@ -220,7 +226,9 @@ def test_authz_from_file_and_env_mode(tmp_path):
     assert (cfg.authz.mode, cfg.authz.user_claim, cfg.authz.cache_ttl) == ("sar", "email", 0)
 
 
-@pytest.mark.parametrize("authz", [{"mode": "rbac"}, {"cache_ttl": -1}, {"unknown_key": 1}])
+@pytest.mark.parametrize(
+    "authz", [{"mode": "rbac"}, {"cache_ttl": -1}, {"unknown_key": 1}, [], False, 0, ""]
+)
 def test_invalid_authz_config_is_rejected(tmp_path, authz):
     config_file = tmp_path / "config.yaml"
     config_file.write_text(yaml.dump({"authz": authz}))
