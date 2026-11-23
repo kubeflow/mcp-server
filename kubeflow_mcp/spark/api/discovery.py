@@ -22,6 +22,7 @@ from kubeflow_mcp.common.types import (
     ToolError,
     ToolResponse,
     exception_details,
+    has_k8s_status,
     is_k8s_forbidden,
     is_k8s_not_found,
 )
@@ -116,6 +117,19 @@ def list_spark_sessions(
                 error_code=ErrorCode.PERMISSION_DENIED,
                 details=exception_details(e),
                 hint="Check RBAC: listing sessions needs 'list' on sparkconnects in the namespace.",
+            ).model_dump()
+        # Listing in a namespace that does not exist returns an empty list, so a
+        # 404 here means the API server does not serve the SparkConnect resource
+        # type at all. That is a cluster setup problem, not an outage, so it must
+        # not count against the tool's circuit breaker.
+        if has_k8s_status(e, 404):
+            return ToolError(
+                error="SparkConnect is not available on this cluster: the API server does not "
+                "serve the sparkconnects.sparkoperator.k8s.io resource",
+                error_code=ErrorCode.RESOURCE_NOT_FOUND,
+                details=exception_details(e),
+                hint="Install the Kubeflow Spark Operator with SparkConnect support, "
+                "or disable the spark client on this server.",
             ).model_dump()
         return ToolError(
             error=str(e),

@@ -267,3 +267,56 @@ class TestForbiddenDoesNotOpenSharedBreaker:
                 blocked = await self._call(client, "full", "team-a")
 
         assert blocked["error_code"] == "CIRCUIT_OPEN"
+
+
+def _missing_crd() -> Exception:
+    """A list against a resource type the API server does not serve, as the SDK raises it."""
+    from kubernetes.client.exceptions import ApiException
+
+    exc = RuntimeError("Failed to list SparkConnects in namespace: team-a")
+    exc.__cause__ = ApiException(status=404, reason="Not Found")
+    return exc
+
+
+class TestMissingCrd:
+    """Without the SparkConnect CRD every list call 404s. That is a setup problem,
+    so it must say so and must not open the breaker with "K8s API may be degraded"."""
+
+    def test_list_without_crd_explains_the_setup_problem(self):
+        client = MagicMock()
+        client.list_sessions.side_effect = _missing_crd()
+        with patch.object(discovery, "get_spark_client_for_namespace", return_value=client):
+            out = discovery.list_spark_sessions(namespace="team-a")
+        assert out["success"] is False
+        assert out["error_code"] == "RESOURCE_NOT_FOUND"
+        assert "sparkconnects.sparkoperator.k8s.io" in out["error"]
+        assert "Spark Operator" in out["hint"]
+
+    def test_other_failures_stay_sdk_error(self):
+        client = MagicMock()
+        client.list_sessions.side_effect = RuntimeError("connection refused")
+        with patch.object(discovery, "get_spark_client_for_namespace", return_value=client):
+            out = discovery.list_spark_sessions(namespace="team-a")
+        assert out["error_code"] == "SDK_ERROR"
+
+    async def test_missing_crd_does_not_open_breaker(self, spark_persona):
+        from fastmcp import Client
+
+        from kubeflow_mcp.core.resilience import CircuitState, get_breaker
+        from kubeflow_mcp.core.server import create_server
+
+        spark_persona("data-scientist")
+        client = MagicMock()
+        client.list_sessions.side_effect = _missing_crd()
+        threshold = get_breaker("list_spark_sessions").failure_threshold
+        with patch.object(discovery, "get_spark_client_for_namespace", return_value=client):
+            async with Client(
+                create_server(clients=["spark"], persona="data-scientist", mode="full")
+            ) as mcp:
+                for _ in range(threshold + 1):
+                    out = await mcp.call_tool(
+                        "list_spark_sessions", {"namespace": "team-a"}, raise_on_error=False
+                    )
+                    assert out.structured_content["error_code"] == "RESOURCE_NOT_FOUND"
+
+        assert get_breaker("list_spark_sessions").state == CircuitState.CLOSED
