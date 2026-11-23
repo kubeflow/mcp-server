@@ -82,17 +82,24 @@ def test_trial_to_dict(kind, trainjob):
 def test_trial_counts_from_trials_match_the_cr_counter_keys():
     trials = [
         ser.trial_to_dict(trial_cr(n, s))
-        for n, s in [("a", "Complete"), ("b", "Running"), ("c", "Created"), ("d", "Killed")]
+        for n, s in [
+            ("a", "Complete"),
+            ("b", "Running"),
+            ("c", "Created"),
+            ("d", "Killed"),
+            ("e", "MetricsUnavailable"),
+        ]
     ]
     counts = ser.trial_counts_from_trials(trials)
     assert counts == {
-        "total_trials": 4,
+        "total_trials": 5,
         "running_trials": 1,
         "succeeded_trials": 1,
         "failed_trials": 0,
         "pending_trials": 1,
         "killed_trials": 1,
         "early_stopped_trials": 0,
+        "metrics_unavailable_trials": 1,
     }
     cr_keys = set(ser.trial_counts_from_cr({f: 1 for f in ser._CR_TRIAL_COUNTERS}))
     assert set(counts) == cr_keys
@@ -142,6 +149,19 @@ def test_event_to_dict_prefers_the_latest_timestamp():
         "message": "Back-off restarting",
         "event_time": when.isoformat(),
     }
+
+
+def test_event_to_dict_uses_the_latest_occurrence_of_an_event_series():
+    """An events.k8s.io/v1 series keeps its first occurrence in eventTime, so
+    sorting on that would drop a warning that is still recurring."""
+    first, latest = (datetime(2026, 11, d, tzinfo=timezone.utc) for d in (1, 3))
+    ev = SimpleNamespace(
+        last_timestamp=None,
+        event_time=first,
+        first_timestamp=None,
+        series=SimpleNamespace(last_observed_time=latest, count=7),
+    )
+    assert ser.event_to_dict(ev)["event_time"] == latest.isoformat()
 
 
 def test_event_to_dict_tolerates_missing_fields():

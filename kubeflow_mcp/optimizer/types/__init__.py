@@ -71,6 +71,7 @@ _TRIAL_STATE_COUNTERS = {
     TRIAL_PENDING: "pending_trials",
     "Killed": "killed_trials",
     "EarlyStopped": "early_stopped_trials",
+    "MetricsUnavailable": "metrics_unavailable_trials",
 }
 
 
@@ -201,7 +202,10 @@ def event_to_dict(event: Any) -> dict[str, Any]:
     """Serialize a Kubernetes ``CoreV1Event``."""
     involved = getattr(event, "involved_object", None)
     when = (
-        getattr(event, "last_timestamp", None)
+        # A repeated event written through events.k8s.io/v1 keeps its first
+        # occurrence in eventTime and only its latest in series.lastObservedTime.
+        getattr(getattr(event, "series", None), "last_observed_time", None)
+        or getattr(event, "last_timestamp", None)
         or getattr(event, "event_time", None)
         or getattr(event, "first_timestamp", None)
     )
@@ -228,6 +232,8 @@ _CR_TRIAL_COUNTERS = {
     "trialsPending": "pending_trials",
     "trialsKilled": "killed_trials",
     "trialsEarlyStopped": "early_stopped_trials",
+    # Katib counts these against maxFailedTrialCount along with failed trials.
+    "trialMetricsUnavailable": "metrics_unavailable_trials",
 }
 
 

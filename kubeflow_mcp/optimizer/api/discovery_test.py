@@ -202,6 +202,16 @@ def test_get_experiment_status_counts_include_early_stopped(katib):
     assert [c[0] for c in katib.custom.calls] == ["get"]
 
 
+def test_get_experiment_status_counts_trials_without_metrics(katib):
+    """Katib counts these against maxFailedTrialCount, so they must show up."""
+    katib.add_experiment(
+        experiment_cr(status={"trials": 2, "trialsFailed": 1, "trialMetricsUnavailable": 1})
+    )
+    data = discovery.get_hpo_experiment_status("exp-1")["data"]
+    assert data["metrics_unavailable_trials"] == 1
+    assert data["failed_trials"] == 1
+
+
 @pytest.mark.parametrize(
     ("status", "expected"),
     [

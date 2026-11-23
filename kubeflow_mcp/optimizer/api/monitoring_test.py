@@ -66,6 +66,7 @@ def test_get_experiment_trials_lists_every_state(katib):
         "pending_trials": 1,
         "killed_trials": 0,
         "early_stopped_trials": 1,
+        "metrics_unavailable_trials": 0,
     }
 
 

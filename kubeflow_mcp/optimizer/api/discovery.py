@@ -178,7 +178,8 @@ def get_hpo_experiment_status(
         dict: Response containing ``name``, ``status`` and the CR trial
         counters (``total_trials``, ``running_trials``, ``succeeded_trials``,
         ``failed_trials``, ``pending_trials``, ``killed_trials``,
-        ``early_stopped_trials``), omitting any the CR does not report.
+        ``early_stopped_trials``, ``metrics_unavailable_trials``), omitting any
+        the CR does not report.
     """
     name_err = validate_k8s_name(name)
     if name_err is not None:
