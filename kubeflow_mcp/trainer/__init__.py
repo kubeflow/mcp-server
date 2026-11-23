@@ -497,9 +497,9 @@ CLIENT_TOOL_PERMISSIONS: dict[str, tuple[ToolPermission, ...]] = {
     ),
     "create_runtime": (ToolPermission("create", *_CLUSTER_RUNTIME, cluster_wide=True),),
     "delete_runtime": (
-        # The preview lists TrainJobs that still use the runtime and deletes anyway.
-        # The tool tolerates a failed list, but then the preview says no TrainJob is
-        # affected, so the list is declared: the warning before a delete must be true.
+        # Lists the TrainJobs that still use the runtime. If that list fails, the
+        # preview says the check failed and a confirmed delete is refused, so the
+        # delete needs it.
         ToolPermission("list", "trainer.kubeflow.org", "trainjobs", cluster_wide=True),
         ToolPermission("delete", *_CLUSTER_RUNTIME, cluster_wide=True),
     ),

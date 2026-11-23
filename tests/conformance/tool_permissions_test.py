@@ -147,3 +147,17 @@ def test_group_pattern_accepts_real_api_groups(group):
 @pytest.mark.parametrize("group", ["Apps", "trainer..kubeflow.org", ".io", "a b"])
 def test_group_pattern_rejects_malformed_groups(group):
     assert not _GROUP.match(group)
+
+
+def test_inspect_crd_declares_each_branch():
+    """Without a name inspect_crd lists CRDs; with one it reads only that CRD."""
+    import kubeflow_mcp.trainer as trainer
+
+    crd = ("apiextensions.k8s.io", "customresourcedefinitions")
+    by_verb = {
+        p.verb: p
+        for p in trainer.CLIENT_TOOL_PERMISSIONS["inspect_crd"]
+        if (p.group, p.resource) == crd
+    }
+    assert (by_verb["list"].when, by_verb["list"].unless) == (None, "name")
+    assert (by_verb["get"].when, by_verb["get"].unless) == ("name", None)
