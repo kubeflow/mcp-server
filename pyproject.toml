@@ -16,12 +16,19 @@ classifiers = [
 ]
 dependencies = [
     "fastmcp==4.0.10",
-    "authlib>=1.9.0", # CVE-2026-96760
+    "authlib>=1.9.1", # CVE-2026-96760, CVE-2026-114616, CVE-2026-116672
     "pydantic>=2.0",
     "pyyaml>=6.0",
     "click>=8.0",
     "kubeflow>=0.5.0,<0.6.0",
     "huggingface-hub>=0.20",
+    # Floors for transitive runtime dependencies, so pip installs also get the fixed releases.
+    "joserfc>=1.7.6",  # CVE-2026-119283, CVE-2026-119284
+    "oauthlib>=4.0.1", # CVE-2026-49272
+    "opentelemetry-api>=1.45.2", # CVE-2026-114603, CVE-2026-126360: FastMCP parses traceparent and tracestate from request _meta
+    # The fixed filelock and dnspython releases need Python 3.11, so 3.10 keeps the current ones.
+    "filelock>=4.2.1; python_version >= '3.11'",  # CVE-2026-112907, -112909, -112910, -112913, -112915, -112935, -112936, -112939, -112940
+    "dnspython>=2.9.2; python_version >= '3.11'", # CVE-2026-114605, CVE-2026-128089
 ]
 
 [project.optional-dependencies]
@@ -98,6 +105,12 @@ constraint-dependencies = [
     "pydantic-settings>=2.14.2",
     "python-multipart>=0.0.31",
     "kubernetes>=27.2.0,<36.0.0",
+    "virtualenv>=21.14.10", # dev tooling (pre-commit): PYSEC-2026-4372 to PYSEC-2026-4387
+    "soupsieve>=4.0.0; python_full_version >= '3.11.5'", # docs build: CVE-2026-126190 to CVE-2026-126193
+    "soupsieve>=2.10.0; python_full_version < '3.11.5'", # docs build: CVE-2026-126192
+    # No filelock release with the fixes supports Python 3.10, and every later one that does
+    # has more open advisories than 3.29.x, so keep 3.10 there.
+    "filelock<3.30; python_version < '3.11'",
 ]
 environments = [
     "python_version < '3.13'",
