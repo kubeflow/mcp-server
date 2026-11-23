@@ -26,6 +26,8 @@ from kubeflow_mcp.common.types import (
     ToolError,
     ToolResponse,
     exception_details,
+    has_k8s_status,
+    is_k8s_forbidden,
     is_k8s_not_found,
 )
 from kubeflow_mcp.common.utils import (
@@ -128,21 +130,6 @@ def _validate_session_name(name: str) -> str | None:
     return None
 
 
-def _has_api_status(exc: Exception, status: int) -> bool:
-    """Recognize API status codes wrapped by the SDK, without matching text."""
-    pending = [exc]
-    seen: set[int] = set()
-    while pending:
-        current = pending.pop()
-        if id(current) in seen:
-            continue
-        seen.add(id(current))
-        if getattr(current, "status", None) == status:
-            return True
-        pending.extend(e for e in (current.__cause__, current.__context__) if e is not None)
-    return False
-
-
 def _provisioned_session_or_none(
     exc: Exception, session_name: str, namespace: str | None, creation_id: str
 ) -> dict[str, Any] | None:
@@ -154,7 +141,7 @@ def _provisioned_session_or_none(
     Reporting only the error would leave a running, MCP-labelled session that the
     caller does not know about.
     """
-    if _has_api_status(exc, 409) or _has_api_status(exc, 403):
+    if has_k8s_status(exc, 409, 403):
         return None
     try:
         effective_ns = get_spark_effective_namespace(namespace)
@@ -439,7 +426,7 @@ def create_spark_session(
         provisioned = _provisioned_session_or_none(e, session_name, namespace, creation_id)
         if provisioned is not None:
             return provisioned
-        denied = _has_api_status(e, 403)
+        denied = has_k8s_status(e, 403)
         return ToolError(
             error=str(e),
             error_code=ErrorCode.PERMISSION_DENIED if denied else ErrorCode.SDK_ERROR,
@@ -448,10 +435,56 @@ def create_spark_session(
                 "Check namespace RBAC and admission permission to use the selected ServiceAccount."
                 if denied
                 else "Choose another name or inspect the existing session."
-                if _has_api_status(e, 409)
+                if has_k8s_status(e, 409)
                 else None
             ),
         ).model_dump()
+
+
+def _ownership_guard_error(name: str, ns: str | None) -> ToolError | None:
+    """Return why a non-admin persona may not delete *name*, or ``None`` if it may.
+
+    Each outcome needs its own code: a 403 on the ownership read is the caller's
+    RBAC (``PERMISSION_DENIED``, neutral for the circuit breaker), while an
+    unreachable API (``SDK_ERROR``) is an infrastructure failure.
+    """
+    if ns is None:
+        return ToolError(
+            error=f"Cannot verify ownership of SparkConnect session '{name}' "
+            "(namespace could not be resolved)",
+            error_code=ErrorCode.SDK_ERROR,
+            details={"hint": "Pass an explicit namespace, or use platform-admin persona."},
+        )
+    ownership = get_spark_session_ownership(name, ns)
+    if ownership == "not_found":
+        return ToolError(
+            error=f"SparkConnect session '{name}' not found",
+            error_code=ErrorCode.RESOURCE_NOT_FOUND,
+        )
+    if ownership == "forbidden":
+        return ToolError(
+            error=f"Permission denied reading SparkConnect session '{name}' to verify ownership",
+            error_code=ErrorCode.PERMISSION_DENIED,
+            hint="Check RBAC: deleting a session needs 'get' and 'delete' on sparkconnects.",
+        )
+    if ownership == "unknown":
+        return ToolError(
+            error=f"Cannot verify ownership of SparkConnect session '{name}' (API error)",
+            error_code=ErrorCode.SDK_ERROR,
+            details={"hint": "Retry, or use platform-admin persona to bypass."},
+        )
+    if ownership == "unmanaged":
+        return ToolError(
+            error=f"SparkConnect session '{name}' was not created by MCP",
+            error_code=ErrorCode.VALIDATION_ERROR,
+            details={
+                "hint": (
+                    "Data scientists can only delete sessions created through MCP tools. "
+                    "Use platform-admin persona to delete externally created sessions."
+                ),
+            },
+        )
+    return None
 
 
 def delete_spark_session(
@@ -495,36 +528,9 @@ def delete_spark_session(
 
     # Ownership guard: non-admin personas may only delete sessions MCP created.
     if get_effective_persona() not in ("platform-admin",):
-        if ns is None:
-            return ToolError(
-                error=f"Cannot verify ownership of SparkConnect session '{name}' "
-                "(namespace could not be resolved)",
-                error_code=ErrorCode.SDK_ERROR,
-                details={"hint": "Pass an explicit namespace, or use platform-admin persona."},
-            ).model_dump()
-        ownership = get_spark_session_ownership(name, ns)
-        if ownership == "not_found":
-            return ToolError(
-                error=f"SparkConnect session '{name}' not found",
-                error_code=ErrorCode.RESOURCE_NOT_FOUND,
-            ).model_dump()
-        if ownership == "unknown":
-            return ToolError(
-                error=f"Cannot verify ownership of SparkConnect session '{name}' (API error)",
-                error_code=ErrorCode.SDK_ERROR,
-                details={"hint": "Retry, or use platform-admin persona to bypass."},
-            ).model_dump()
-        if ownership == "unmanaged":
-            return ToolError(
-                error=f"SparkConnect session '{name}' was not created by MCP",
-                error_code=ErrorCode.VALIDATION_ERROR,
-                details={
-                    "hint": (
-                        "Data scientists can only delete sessions created through MCP tools. "
-                        "Use platform-admin persona to delete externally created sessions."
-                    ),
-                },
-            ).model_dump()
+        guard_err = _ownership_guard_error(name, ns)
+        if guard_err is not None:
+            return guard_err.model_dump()
 
     if not confirmed:
         return PreviewResponse(
@@ -552,6 +558,13 @@ def delete_spark_session(
             return ToolError(
                 error=f"SparkConnect session '{name}' not found",
                 error_code=ErrorCode.RESOURCE_NOT_FOUND,
+            ).model_dump()
+        if is_k8s_forbidden(e):
+            return ToolError(
+                error=f"Permission denied deleting SparkConnect session '{name}'",
+                error_code=ErrorCode.PERMISSION_DENIED,
+                details=exception_details(e),
+                hint="Check RBAC: deleting a session needs 'delete' on sparkconnects.",
             ).model_dump()
         return ToolError(
             error=str(e),

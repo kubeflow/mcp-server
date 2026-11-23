@@ -24,6 +24,8 @@ from kubeflow_mcp.common.types import (
     ToolError,
     ToolResponse,
     exception_details,
+    has_k8s_status,
+    is_k8s_forbidden,
     is_k8s_not_found,
 )
 
@@ -68,6 +70,54 @@ class TestIsK8sNotFound:
         exc = RuntimeError("wrapper")
         exc.__context__ = context
         assert is_k8s_not_found(exc) is True
+
+
+class TestIsK8sForbidden:
+    """401/403 mean the caller lacks access; they must not be read as an outage."""
+
+    def test_returns_true_for_api_403(self):
+        from kubernetes.client.exceptions import ApiException
+
+        assert is_k8s_forbidden(ApiException(status=403)) is True
+
+    def test_returns_true_for_api_401(self):
+        from kubernetes.client.exceptions import ApiException
+
+        assert is_k8s_forbidden(ApiException(status=401)) is True
+
+    def test_returns_false_for_api_404_and_500(self):
+        from kubernetes.client.exceptions import ApiException
+
+        assert is_k8s_forbidden(ApiException(status=404)) is False
+        assert is_k8s_forbidden(ApiException(status=500)) is False
+
+    def test_returns_false_for_text_that_mentions_forbidden(self):
+        assert is_k8s_forbidden(RuntimeError("403 Forbidden")) is False
+
+    def test_finds_403_wrapped_more_than_one_level_deep(self):
+        """The SDK can wrap an ApiException twice; one level is not enough."""
+        from kubernetes.client.exceptions import ApiException
+
+        inner = RuntimeError("SDK wrapper")
+        inner.__cause__ = ApiException(status=403)
+        outer = RuntimeError("Failed to list SparkConnect sessions")
+        outer.__context__ = inner
+        assert is_k8s_forbidden(outer) is True
+
+    def test_cyclic_chain_terminates(self):
+        a = RuntimeError("a")
+        b = RuntimeError("b")
+        a.__cause__ = b
+        b.__cause__ = a
+        assert is_k8s_forbidden(a) is False
+
+
+class TestHasK8sStatus:
+    def test_matches_any_of_several_statuses(self):
+        from kubernetes.client.exceptions import ApiException
+
+        assert has_k8s_status(ApiException(status=409), 403, 409) is True
+        assert has_k8s_status(ApiException(status=500), 403, 409) is False
 
 
 class TestExceptionDetails:

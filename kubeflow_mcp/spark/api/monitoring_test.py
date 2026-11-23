@@ -92,6 +92,18 @@ class TestLogs:
             out = monitoring.get_spark_session_logs("x")
         assert out["error_code"] == "VALIDATION_ERROR"
 
+    def test_forbidden_logs_are_permission_denied(self):
+        from kubernetes.client.exceptions import ApiException
+
+        client = MagicMock()
+        wrapped = RuntimeError("Failed to get logs for SparkConnect: team-b/x")
+        wrapped.__cause__ = ApiException(status=403, reason="Forbidden")
+        client.get_session_logs.side_effect = wrapped
+        with patch.object(monitoring, "get_spark_client_for_namespace", return_value=client):
+            out = monitoring.get_spark_session_logs("x", namespace="team-b")
+        assert out["error_code"] == "PERMISSION_DENIED"
+        assert "pods/log" in out["hint"]
+
     def test_unrelated_sdk_failure_stays_sdk_error(self):
         client = MagicMock()
         client.get_session_logs.side_effect = RuntimeError("connection refused")
