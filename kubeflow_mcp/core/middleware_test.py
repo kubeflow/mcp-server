@@ -47,18 +47,17 @@ def _make_context(
     if has_fastmcp_ctx:
         fastmcp_ctx = SimpleNamespace()
         fastmcp_ctx.request_id = request_id
+        fastmcp_ctx.request_context = None
         ctx.fastmcp_context = fastmcp_ctx
+
+        if user_id is not None:
+            if meta_as_dict:
+                meta = {"user_id": user_id}
+            else:
+                meta = SimpleNamespace(user_id=user_id)
+            fastmcp_ctx.request_context = SimpleNamespace(meta=meta)
     else:
         ctx.fastmcp_context = None
-
-    if user_id is not None:
-        if meta_as_dict:
-            meta = {"user_id": user_id}
-        else:
-            meta = SimpleNamespace(user_id=user_id)
-        ctx.request_context = SimpleNamespace(meta=meta)
-    else:
-        ctx.request_context = None
 
     return ctx
 
@@ -122,6 +121,40 @@ class TestAuditIdentityMiddleware:
 
         await mw(context, call_next)
         assert captured["user"] == "bob@example.com"
+
+    async def test_empty_meta_dict_leaves_user_id_none(self) -> None:
+        """Middleware handles empty meta dictionary gracefully."""
+        context = _make_context()
+        context.fastmcp_context.request_context = SimpleNamespace(meta={})
+        mw = AuditIdentityMiddleware()
+
+        captured: dict[str, str | None] = {}
+
+        async def call_next(_ctx):
+            captured["user"] = get_user_id()
+            return "ok"
+
+        await mw(context, call_next)
+        assert captured["user"] is None
+
+    async def test_live_client_user_id_propagation(self) -> None:
+        """Integration test with real FastMCP client verifying user_id in tool call."""
+        mcp = FastMCP("test-identity-server")
+        mcp.add_middleware(AuditIdentityMiddleware())
+
+        captured: dict[str, str | None] = {}
+
+        @mcp.tool
+        def identity_tool() -> str:
+            captured["user"] = get_user_id()
+            captured["request"] = get_mcp_request_id()
+            return "ok"
+
+        async with Client(mcp) as client:
+            await client.call_tool("identity_tool", {}, meta={"user_id": "real-agent@example.com"})
+
+        assert captured["user"] == "real-agent@example.com"
+        assert captured["request"] is not None
 
     async def test_cleanup_after_request(self) -> None:
         """ContextVars are reset after the middleware completes."""
