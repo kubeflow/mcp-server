@@ -103,8 +103,8 @@ class AuthConfig(BaseModel):
 
     Supports two modes:
     - **API key**: set ``auth_token`` for simple bearer token auth (dev/staging).
-    - **JWT**: set ``jwks_uri`` (+ optional ``issuer``, ``audience``) for
-      production JWT verification via FastMCP's ``JWTVerifier``.
+    - **JWT**: set ``jwks_uri``, ``issuer`` and ``audience`` (all three are
+      required) for production JWT verification via FastMCP's ``JWTVerifier``.
 
     Ignored when ``transport=stdio`` (stdio inherits OS-level security).
     """
