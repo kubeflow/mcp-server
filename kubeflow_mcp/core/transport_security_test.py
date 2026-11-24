@@ -14,6 +14,8 @@
 
 """Tests for DNS rebinding protection on the HTTP transport."""
 
+from unittest.mock import MagicMock
+
 import pytest
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
@@ -151,6 +153,24 @@ def test_get_stream_without_origin_allowed():
     client = _make_client(SecurityConfig())
     resp = client.get("/mcp", headers={"host": "127.0.0.1:8000"})
     assert resp.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_non_http_scope_passthrough():
+    app_called = False
+
+    async def dummy_app(scope, receive, send):
+        nonlocal app_called
+        app_called = True
+
+    settings = build_transport_security_settings(SecurityConfig())
+    middleware = DNSRebindingProtectionMiddleware(dummy_app, settings)
+
+    scope = {"type": "lifespan"}
+    receive = MagicMock()
+    send = MagicMock()
+    await middleware(scope, receive, send)
+    assert app_called is True
 
 
 class TestLoadConfigSecurityEnvVars:

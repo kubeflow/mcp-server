@@ -101,6 +101,8 @@ def _is_blocked(result: dict[str, Any]) -> bool:
     data = result.get("data")
     if not isinstance(data, dict):
         return False
+    if data.get("reached") is False or data.get("packages_error"):
+        return True
     scopes = [data]
     nested = data.get("compatibility")  # pre_flight nests the compatibility report
     if isinstance(nested, dict):
@@ -287,6 +289,8 @@ CLIENT_MODULES = {
     "trainer": "kubeflow_mcp.trainer",
     "optimizer": "kubeflow_mcp.optimizer",
     "hub": "kubeflow_mcp.hub",
+    "spark": "kubeflow_mcp.spark",
+    "pipelines": "kubeflow_mcp.pipelines",
 }
 
 _GLOBAL_HEADER = f"""\
@@ -306,9 +310,33 @@ IMPORTANT:
 - Use get_training_events() to debug stuck/failed jobs
 """
 
+# In progressive and semantic mode only the meta-tools are registered, so the tool
+# calls named in the instructions have to go through them.
+_DYNAMIC_MODE_TOOL_ACCESS = {
+    "progressive": """\
+TOOL ACCESS (progressive mode):
+- The tool calls named in these instructions are not registered directly.
+  list_tools() shows the categories and list_tools("<category>") the tools in one;
+  read their parameters with describe_tools([...]), then run them with
+  execute_tool(tool_name, {args}).
+- e.g. pre_flight(model="...") means execute_tool("pre_flight", {"model": "..."}).
+""",
+    "semantic": """\
+TOOL ACCESS (semantic mode):
+- The tool calls named in these instructions are not registered directly. Find them
+  with find_tools("what you want to do"), then run them with
+  execute_tool(tool_name, {args}).
+- e.g. pre_flight(model="...") means execute_tool("pre_flight", {"model": "..."}).
+""",
+}
 
-def _derive_tier(full_text: str, tier: str) -> str:
-    """Derive compact/minimal instruction content from full tier."""
+
+def _derive_tier(full_text: str, tier: str, allowed: set[str] | None = None) -> str:
+    """Derive compact/minimal instruction content from full tier.
+
+    ``allowed`` limits the minimal tier's tool list to the persona's tools
+    (``None`` means unrestricted).
+    """
     if tier == "full":
         return full_text
     if tier == "compact":
@@ -316,7 +344,9 @@ def _derive_tier(full_text: str, tier: str) -> str:
             line for line in full_text.splitlines() if line.strip() and "trainer://" not in line
         )
     tools = re.findall(r"\b(\w+)\(", full_text)
-    return f"Tools: {', '.join(dict.fromkeys(tools))}"
+    if allowed is not None:
+        tools = [t for t in tools if t in allowed]
+    return f"Tools: {', '.join(dict.fromkeys(tools))}" if tools else ""
 
 
 # Ordering used for a client that maps phases to sections but exports no
@@ -374,9 +404,19 @@ def _build_server_instructions(
     loaded_modules: dict[str, Any],
     persona: str,
     tier: str,
+    allowed: set[str] | None = None,
+    mode: str = "full",
 ) -> str:
-    """Build server instructions from client module sections, filtered by persona and tier."""
+    """Build server instructions from client module sections, filtered by persona and tier.
+
+    ``allowed`` is the final set of registered tools (persona, policy and read_only
+    filters applied). When omitted, the persona's tools are used. In progressive and
+    semantic ``mode`` a TOOL ACCESS block follows the header, since the tools named in
+    the sections are reachable only through the meta-tools.
+    """
     sections = _sections_for_persona(persona)
+    if allowed is None:
+        allowed = get_allowed_tools(persona)
 
     fragments = []
     for module in loaded_modules.values():
@@ -384,8 +424,9 @@ def _build_server_instructions(
         for section_name in sections:
             section = instruction_sections.get(section_name, {})
             full_text = section.get("full", "")
-            if full_text:
-                fragments.append(_derive_tier(full_text, tier))
+            derived = _derive_tier(full_text, tier, allowed) if full_text else ""
+            if derived:
+                fragments.append(derived)
 
     resource_lines = []
     for module in loaded_modules.values():
@@ -393,6 +434,9 @@ def _build_server_instructions(
             resource_lines.append(f"- {uri} -> {desc}")
 
     result = _GLOBAL_HEADER
+    tool_access = _DYNAMIC_MODE_TOOL_ACCESS.get(mode)
+    if tool_access:
+        result += "\n" + tool_access
     if fragments:
         result += "\n" + "\n\n".join(fragments) + "\n"
     if resource_lines and tier == "full":
@@ -412,7 +456,7 @@ def create_server(  # noqa: C901
 
     Args:
         clients: List of client modules to load (default: ["trainer"])
-                 Options: "trainer", "optimizer", "hub"
+                 Options: "trainer", "pipelines", "optimizer", "hub"
         persona: User role for tool filtering
         mode: Tool loading mode:
               - "full": register all tools directly (default)
@@ -444,20 +488,6 @@ def create_server(  # noqa: C901
         except ImportError as e:
             clients_ready = False
             logger.warning(f"Failed to import client '{client_name}': {e}")
-
-    # Build instructions (persona + tier aware)
-    instructions = _build_server_instructions(loaded_modules, persona, instruction_tier)
-    mcp_kwargs: dict[str, Any] = {"instructions": instructions}
-    if auth_provider is not None:
-        mcp_kwargs["auth"] = auth_provider
-        logger.info("HTTP auth provider attached to server")
-    mcp: FastMCP = FastMCP("kubeflow-mcp-server", version=__version__, **mcp_kwargs)
-
-    # Bridge FastMCP async context into sync _audit_wrap via ContextVars
-    from kubeflow_mcp.core.middleware import AuditIdentityMiddleware, ToolErrorMiddleware
-
-    mcp.add_middleware(AuditIdentityMiddleware())
-    mcp.add_middleware(ToolErrorMiddleware())
 
     # Merge tool metadata from client modules
     all_descriptions: dict[str, str] = {}
@@ -502,6 +532,23 @@ def create_server(  # noqa: C901
         write_tools = final_allowed - read_tools
         final_allowed = final_allowed & read_tools
         logger.info(f"read_only policy active, excluded {len(write_tools)} write tools")
+
+    # Build instructions (persona + tier + mode aware), listing only the tools that
+    # survive the persona, policy and read_only filters above
+    instructions = _build_server_instructions(
+        loaded_modules, persona, instruction_tier, final_allowed, mode
+    )
+    mcp_kwargs: dict[str, Any] = {"instructions": instructions}
+    if auth_provider is not None:
+        mcp_kwargs["auth"] = auth_provider
+        logger.info("HTTP auth provider attached to server")
+    mcp: FastMCP = FastMCP("kubeflow-mcp-server", version=__version__, **mcp_kwargs)
+
+    # Bridge FastMCP async context into sync _audit_wrap via ContextVars
+    from kubeflow_mcp.core.middleware import AuditIdentityMiddleware, ToolErrorMiddleware
+
+    mcp.add_middleware(AuditIdentityMiddleware())
+    mcp.add_middleware(ToolErrorMiddleware())
 
     # Filter tool funcs to only those allowed by persona + policy
     allowed_funcs = [f for f in all_tool_funcs if f.__name__ in final_allowed]

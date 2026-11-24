@@ -34,7 +34,9 @@ import logging
 import threading
 import warnings
 from collections.abc import Callable
-from typing import Any
+from typing import Any, get_type_hints
+
+from pydantic import BaseModel, ConfigDict, ValidationError, create_model
 
 from kubeflow_mcp.common.constants import (
     TOOL_PHASES,
@@ -49,6 +51,40 @@ logger = logging.getLogger(__name__)
 # Populated by init_dynamic_tools() after server knows which tools are loaded.
 TOOL_REGISTRY: dict[str, dict[str, Any]] = {}
 TOOL_HIERARCHY: dict[str, list[str]] = {}
+
+
+def _build_args_model(func: Callable) -> type[BaseModel]:
+    """Build a pydantic model of a tool's parameters for execute_tool to validate against.
+
+    Full mode validates through FastMCP, which coerces input such as ``"false"`` to
+    ``False``. Without the same coercion here, ``confirmed="false"`` reaches the tool
+    as a truthy string and skips the confirm gate. The model only validates, so
+    execute_tool can reject bad arguments before it touches the circuit breaker.
+    """
+    # include_extras keeps Annotated metadata such as Field(ge=1); without it the
+    # constraint is dropped and execute_tool accepts values full mode rejects.
+    hints = get_type_hints(func, include_extras=True)
+    fields: dict[str, Any] = {}
+    for name, param in inspect.signature(func).parameters.items():
+        default = ... if param.default is inspect.Parameter.empty else param.default
+        fields[name] = (hints.get(name, Any), default)
+    return create_model(
+        f"{func.__name__}_arguments",
+        __config__=ConfigDict(extra="forbid", protected_namespaces=()),
+        **fields,
+    )
+
+
+def _format_validation_error(error: ValidationError) -> str:
+    """Summarize validation errors as ``field: message``.
+
+    Built from the error list rather than ``str(error)``, which echoes the rejected
+    input and could put a token passed in the wrong field into the response.
+    """
+    return "; ".join(
+        f"{'.'.join(str(part) for part in err['loc']) or 'arguments'}: {err['msg']}"
+        for err in error.errors()
+    )
 
 
 def init_dynamic_tools(
@@ -79,6 +115,7 @@ def init_dynamic_tools(
             "description": short_desc,
             "full_doc": doc,
             "func": func,
+            "args_model": _build_args_model(func),
         }
         TOOL_HIERARCHY.setdefault(category, []).append(name)
 
@@ -134,6 +171,20 @@ def list_tools(prefix: str = "") -> dict[str, Any]:
     }
 
 
+def _tool_parameters(name: str) -> dict[str, Any]:
+    """Parameter names, types and defaults of a registered tool."""
+    sig = inspect.signature(TOOL_REGISTRY[name]["func"])
+    params: dict[str, Any] = {}
+    for param_name, param in sig.parameters.items():
+        param_info: dict[str, Any] = {"type": "any"}
+        if param.annotation != inspect.Parameter.empty:
+            param_info["type"] = str(param.annotation)
+        if param.default != inspect.Parameter.empty:
+            param_info["default"] = param.default
+        params[param_name] = param_info
+    return params
+
+
 def describe_tools(tool_names: list[str]) -> dict[str, Any]:
     """Get detailed schema for specific tools.
 
@@ -155,22 +206,12 @@ def describe_tools(tool_names: list[str]) -> dict[str, Any]:
             continue
 
         tool = TOOL_REGISTRY[name]
-        sig = inspect.signature(tool["func"])
-        params: dict[str, Any] = {}
-        for param_name, param in sig.parameters.items():
-            param_info: dict[str, Any] = {"type": "any"}
-            if param.annotation != inspect.Parameter.empty:
-                param_info["type"] = str(param.annotation)
-            if param.default != inspect.Parameter.empty:
-                param_info["default"] = param.default
-            params[param_name] = param_info
-
         results.append(
             {
                 "name": name,
                 "category": tool["category"],
                 "description": tool["full_doc"],
-                "parameters": params,
+                "parameters": _tool_parameters(name),
             }
         )
 
@@ -180,7 +221,8 @@ def describe_tools(tool_names: list[str]) -> dict[str, Any]:
 def execute_tool(tool_name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
     """Execute a discovered tool by name.
 
-    Call after list_tools() and describe_tools() to run the actual tool.
+    Look up the tool's parameters first: describe_tools() in progressive mode,
+    or the find_tools() results in semantic mode.
 
     Args:
         tool_name: Name of the tool to execute.
@@ -193,18 +235,20 @@ def execute_tool(tool_name: str, arguments: dict[str, Any] | None = None) -> dic
         return {"error": f"Tool '{tool_name}' not found", "available": list(TOOL_REGISTRY.keys())}
 
     func = TOOL_REGISTRY[tool_name]["func"]
-    args = arguments or {}
 
-    # Reject bad arguments before touching the breaker: they are a caller mistake,
-    # and returning after acquire() would also leak a half-open probe slot.
+    # Validate and coerce before touching the breaker: bad arguments are a caller
+    # mistake, and returning after acquire() would also leak a half-open probe slot.
     try:
-        inspect.signature(func).bind(**args)
-    except TypeError as e:
+        validated = TOOL_REGISTRY[tool_name]["args_model"].model_validate(arguments or {})
+    except ValidationError as e:
         return {
-            "error": f"Invalid arguments for '{tool_name}': {e}",
+            "error": f"Invalid arguments for '{tool_name}': {_format_validation_error(e)}",
             "error_code": ErrorCode.VALIDATION_ERROR,
             "tool": tool_name,
         }
+    # Pass every field, defaults included, as full mode does: a parameter whose default is
+    # a pydantic Field() would otherwise receive the FieldInfo object instead of its value.
+    args = {name: getattr(validated, name) for name in type(validated).model_fields}
 
     breaker = get_breaker(tool_name)
     generation = breaker.acquire()
@@ -365,7 +409,10 @@ def find_tools(query: str, top_k: int = 5) -> dict[str, Any]:
                 {"name": name, "description": info["description"], "category": info["category"]}
                 for name, info in TOOL_REGISTRY.items()
             ],
-            "hint": "Use execute_tool(tool_name, {args}) to run a tool",
+            "hint": (
+                "Search for a tool by name or task to see its parameters, "
+                "then use execute_tool(tool_name, {args}) to run it"
+            ),
         }
 
     embeddings, model = _embedding_cache.get()
@@ -398,6 +445,7 @@ def find_tools(query: str, top_k: int = 5) -> dict[str, Any]:
                 "description": TOOL_REGISTRY[name]["description"],
                 "category": TOOL_REGISTRY[name]["category"],
                 "relevance": f"{score:.2f}",
+                "parameters": _tool_parameters(name),
             }
             for name, score in sorted_tools
         ],
@@ -426,6 +474,7 @@ def _keyword_search(query: str, top_k: int = 5) -> dict[str, Any]:
                 "name": name,
                 "description": TOOL_REGISTRY[name]["description"],
                 "category": TOOL_REGISTRY[name]["category"],
+                "parameters": _tool_parameters(name),
             }
             for name, _ in sorted_tools
         ],

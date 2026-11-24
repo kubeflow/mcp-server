@@ -111,6 +111,7 @@ class TestRecordToolResult:
 class TestToolPhases:
     def test_contains_all_expected_phases(self):
         expected = {
+            # Trainer client phases
             "planning",
             "discovery",
             "training",
@@ -118,6 +119,23 @@ class TestToolPhases:
             "lifecycle",
             "platform",
             "health",
+            # Spark client phases
+            "spark_discovery",
+            "spark_sessions",
+            "spark_monitoring",
+            # Pipelines client phases
+            "pipelines_discovery",
+            "pipelines_monitoring",
+            "pipelines_runs",
+            "pipelines_lifecycle",
+            "pipelines_authoring",
+            # Optimizer phases are namespaced so they cannot collide with the
+            # trainer phases above.
+            "optimizer_planning",
+            "optimizer_discovery",
+            "optimizer_optimization",
+            "optimizer_monitoring",
+            "optimizer_lifecycle",
         }
         assert set(TOOL_PHASES.keys()) == expected
 

@@ -1,0 +1,9 @@
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayParameters
+metadata:
+  name: kagent-model-gateway
+  namespace: agentgateway-system
+spec:
+  service:
+    spec:
+      type: ClusterIP

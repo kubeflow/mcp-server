@@ -4,8 +4,10 @@ A minimal, self-contained example for running the MCP Server inside Kubernetes s
 that agents can reach it over HTTP and drive
 [Kubeflow Trainer](https://github.com/kubeflow/trainer) in your own namespace.
 
-It is intentionally small: one Deployment, one ClusterIP Service, a ServiceAccount
-and least-privilege RBAC. No Ingress, no OIDC, no Helm chart.
+It contains one Deployment, one ClusterIP Service, a ServiceAccount, and
+least-privilege RBAC. Ingress and Helm are outside this profile. It authenticates
+clients with a shared bearer token; to use your identity provider instead, see
+[Using JWT (OIDC) instead of the shared token](#using-jwt-oidc-instead-of-the-shared-token).
 
 ## Quick start
 
@@ -20,7 +22,7 @@ NAMESPACE=kubeflow-user-example-com
 kubectl create secret generic kubeflow-mcp-auth -n "$NAMESPACE" \
   --from-literal=token="$(openssl rand -hex 32)"
 
-kubectl apply -f manifests.yaml
+kubectl apply -k examples/kubernetes
 kubectl rollout status deploy/kubeflow-mcp -n "$NAMESPACE"
 ```
 
@@ -81,6 +83,46 @@ names for this reason. Setting the variable replaces the built-in loopback defau
 rather than adding to them, so dropping those two entries makes port-forwarded
 clients fail with HTTP 421 while `/health` and `/ready` keep working.
 
+## Using JWT (OIDC) instead of the shared token
+
+For production, have clients send access tokens from your identity provider instead
+of sharing one static token. Anyone who can read a token on the wire can replay it
+until it expires, so it must stay encrypted all the way to the pod. This example
+serves plain HTTP, so before using it in production, encrypt every hop, for example
+with a service mesh that uses mTLS between pods. An Ingress that terminates TLS is
+not enough on its own, because it forwards the token to the pod in plain text.
+
+The example is deployed with `kubectl apply -k`, so make the change in
+`manifests.yaml`. Uncomment `KUBEFLOW_MCP_JWKS_URI`, `KUBEFLOW_MCP_JWT_ISSUER` and
+`KUBEFLOW_MCP_JWT_AUDIENCE`, set them to the provider's JWKS URI, its issuer and an
+audience reserved for this server, and apply:
+
+```bash
+kubectl apply -k examples/kubernetes
+kubectl rollout status deploy/kubeflow-mcp -n "$NAMESPACE"
+```
+
+All three are required. With only the JWKS URI the pod exits at startup, because the
+server would otherwise accept any token the provider signs, including tokens it
+issued to other applications. Use the issuer exactly as it appears in the tokens'
+`iss` claim, and as the audience the value the provider puts in `aud` for tokens
+meant for this server (usually the client ID or API identifier you registered for
+it), not one shared with other applications. Tokens must also carry an `exp` claim.
+The pod needs network access to the JWKS URI.
+
+The JWKS URI takes precedence over the shared token, so once JWT works, remove the
+`KUBEFLOW_MCP_AUTH_TOKEN` entry from `manifests.yaml` and apply again. Delete the
+Secret only after that. If you delete it while the Deployment still references it,
+any new pod (from the next `kubectl apply -k`, a restart or a reschedule) fails with
+`CreateContainerConfigError`. The `&&` stops before the delete if the apply or the
+rollout fails:
+
+```bash
+kubectl apply -k examples/kubernetes \
+  && kubectl rollout status deploy/kubeflow-mcp -n "$NAMESPACE" \
+  && kubectl delete secret kubeflow-mcp-auth -n "$NAMESPACE"
+```
+
 ## Deploying into a different namespace
 
 The server is deployed into the user's Profile namespace on purpose: in-cluster the
@@ -105,41 +147,52 @@ backup suffix and fails without one.
 **Requests return HTTP 421** — DNS rebinding protection allows loopback `Host`
 headers by default, so anything arriving via the Service is rejected.
 `KUBEFLOW_MCP_ALLOWED_HOSTS` must list the exact hostname clients use; only the
-`:*` port wildcard is supported, not a host wildcard. Note that `port-forward`
-does *not* reproduce this, because it sends a loopback `Host` header.
+`:*` port wildcard is supported, not a host wildcard. `port-forward` does not
+reproduce this because it sends a loopback `Host` header.
 
 **A browser-based client returns 403** — the `Origin` header is not allowed. Add it
 to `KUBEFLOW_MCP_ALLOWED_ORIGINS`; setting hosts alone leaves origins at their
 loopback-only defaults. Non-browser MCP clients send no `Origin` and are unaffected.
 
-**Tools report an empty namespace, or a 403 listing runtimes** — the pod is running
-outside the namespace whose TrainJobs you expect. See the section above.
+**Tools report an empty namespace or a 403 listing runtimes** — the pod is running
+outside the namespace whose TrainJobs you expect. See the namespace section above.
 
 **The agent has no tool for submitting a TrainJob** — the persona is `readonly`.
 Set `KUBEFLOW_MCP_PERSONA` to `data-scientist` or higher.
 
-**Log line: `Trainer control-plane version info is not available ... (404)`** — the
-SDK reads the Trainer version from the `kubeflow-trainer-public` ConfigMap in
-`kubeflow-system`, which older Trainer releases do not create. Harmless: every
-`check_compatibility` check still passes, including the CRD and API version. If the
-same message shows `(403)` instead, the `kubeflow-mcp-trainer-version` Role is
-missing or Trainer runs in a different namespace than `kubeflow-system`.
-
 **Every authenticated request returns 401** — the client is sending a different
 token than the one stored in the Secret.
+
+**The pod exits at startup with `JWT auth needs an issuer and an audience`** —
+`KUBEFLOW_MCP_JWKS_URI` is set without both `KUBEFLOW_MCP_JWT_ISSUER` and
+`KUBEFLOW_MCP_JWT_AUDIENCE`. Set both, as shown in the JWT section above.
+
+**JWT requests return 401** — the token was issued for another audience or by
+another issuer, has no `exp`, or has expired. Compare its `iss` and `aud` claims
+with `KUBEFLOW_MCP_JWT_ISSUER` and `KUBEFLOW_MCP_JWT_AUDIENCE`.
 
 **Pod stuck in `CreateContainerConfigError`** — the `kubeflow-mcp-auth` Secret does
 not exist yet. Create it as shown in the quick start.
 
-**`kubectl apply` fails with `namespaces "kubeflow-system" not found`** — Trainer
-runs somewhere else, so the two `kubeflow-mcp-trainer-version` documents have
-nowhere to go while the Deployment and Service are still created. Point those two
-documents at the Trainer namespace and set `KUBEFLOW_SYSTEM_NAMESPACE` to match.
+**Trainer control-plane version information is unavailable** — older Trainer
+releases may not create the `kubeflow-trainer-public` ConfigMap in
+`kubeflow-system`. This warning is harmless when the CRD and API checks pass. A
+403 instead usually means the version Role is missing or Trainer runs in a
+different namespace.
+
+**Applying the manifests reports that `kubeflow-system` does not exist** — point
+the Trainer version Role and RoleBinding at the namespace where Trainer is
+installed, and update `KUBEFLOW_SYSTEM_NAMESPACE` to match.
 
 **The pod is not `Ready` (`/ready` returns 503)** — `/ready` dynamically checks
 Kubernetes API reachability, Trainer CRD existence/version, and essential RBAC permissions.
 If the pod fails readiness, check `kubectl logs <pod>` to see the specific diagnostic failure.
 
-**A service mesh blocks traffic to the pod** — the Deployment sets
-`sidecar.istio.io/inject: "false"`. If your mesh enforces strict mTLS, remove that
-annotation and allow the traffic with a `PeerAuthentication`/`DestinationRule`.
+**The pod is `Ready` but calls still fail** — `/ready` re-checks Kubernetes API
+reachability, the Trainer CRD, and essential RBAC on each probe, but it does not cover
+every permission or dependency a tool may need. Check the server logs and run
+`check_compatibility()` for a full report.
+
+**A service mesh blocks traffic to the pod** — the Deployment disables automatic
+sidecar injection. If the mesh enforces strict mTLS, remove that annotation and
+allow the traffic with the mesh's peer-authentication and destination rules.

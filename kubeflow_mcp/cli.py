@@ -36,7 +36,7 @@ def cli() -> None:
     "--clients",
     "-c",
     default=None,
-    help="Comma-separated client modules (trainer, optimizer, hub). "
+    help="Comma-separated client modules (trainer, spark, pipelines, optimizer, hub). "
     "Falls back to KUBEFLOW_MCP_CLIENTS env var, config file, then 'trainer'.",
 )
 @click.option(
@@ -154,7 +154,10 @@ def serve(
     if otel_endpoint:
         cfg.observability.otel_endpoint = otel_endpoint
 
-    logger = setup_logging(level=log_level, format=log_format)
+    try:
+        logger = setup_logging(level=log_level, format=log_format)
+    except ValueError as e:
+        raise click.ClickException(str(e)) from e
     tracing_enabled = setup_tracing(endpoint=cfg.observability.otel_endpoint)
     logger.info(
         "Starting kubeflow-mcp",
@@ -180,12 +183,16 @@ def serve(
     auth_provider = None
     http_middleware = None
     if transport != "stdio":
-        auth_provider = build_auth_provider(cfg.auth)
+        try:
+            auth_provider = build_auth_provider(cfg.auth)
+        except ValueError as e:
+            raise click.ClickException(str(e)) from e
         if auth_provider is None:
             logger.warning(
                 "HTTP transport with no auth configured — server is open. "
                 "Set --auth-token or KUBEFLOW_MCP_AUTH_TOKEN for bearer auth, "
-                "or KUBEFLOW_MCP_JWKS_URI for JWT verification."
+                "or KUBEFLOW_MCP_JWKS_URI with KUBEFLOW_MCP_JWT_ISSUER and "
+                "KUBEFLOW_MCP_JWT_AUDIENCE for JWT verification."
             )
 
         from starlette.middleware import Middleware

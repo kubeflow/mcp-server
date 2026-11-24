@@ -17,6 +17,7 @@
 import ast
 import ipaddress
 import re
+from collections.abc import Callable
 from typing import Any
 
 from kubeflow_mcp.common.constants import ErrorCode
@@ -136,6 +137,19 @@ def _normalize_bracketed_ipv6_host(image: str) -> tuple[str, str | None]:
     return "localhost" + (host.group(2) or "") + image[host.end() - 1 :], None
 
 
+def _validate_registry_port(host_part: str) -> str | None:
+    """Validate port component if present in a registry host part.
+
+    Returns an error message if invalid, or None if valid.
+    """
+    if ":" not in host_part:
+        return None
+    _, _, port = host_part.partition(":")
+    if not (port.isascii() and port.isdigit() and len(port) <= 5 and 1 <= int(port) <= 65535):
+        return "has an invalid registry port (expected 1-65535)"
+    return None
+
+
 def validate_image_reference(image: str | None, field: str = "image") -> ToolError | None:
     """Reject empty, whitespace-only and clearly malformed container image references.
 
@@ -184,12 +198,12 @@ def validate_image_reference(image: str | None, field: str = "image") -> ToolErr
 
     # Docker/OCI requires the repository path to be lowercase, while registry hosts
     # (domain or port) may contain uppercase. Tags can also contain uppercase.
-    if "/" in name:
-        first_part, rest = name.split("/", 1)
-        if "." in first_part or ":" in first_part or first_part == "localhost":
-            repo_path = rest.split(":", 1)[0]
-        else:
-            repo_path = name.split(":", 1)[0]
+    first_part, has_slash, rest = name.partition("/")
+    if has_slash and ("." in first_part or ":" in first_part or first_part == "localhost"):
+        port_err = _validate_registry_port(first_part)
+        if port_err:
+            return _invalid(port_err)
+        repo_path = rest.split(":", 1)[0]
     else:
         repo_path = name.split(":", 1)[0]
 
@@ -204,19 +218,27 @@ def validate_namespace(namespace: str) -> ToolError | None:
     return validate_k8s_name(namespace, "namespace")
 
 
-def check_namespace_allowed(namespace: str | None) -> ToolError | None:
+def check_namespace_allowed(
+    namespace: str | None,
+    resolver: Callable[[str | None], str] | None = None,
+) -> ToolError | None:
     """Check that a namespace is well formed and allowed by policy.
 
     A caller-supplied namespace is format-checked first. Without an allowlist
     the policy check accepts any string, so a malformed value would otherwise
     reach the Kubernetes API and come back as a misleading "not found".
 
-    When *namespace* is ``None`` the effective default namespace from the
-    TrainerClient backend is resolved and checked against the allowlist so
-    that implicit-default usage cannot bypass namespace restrictions.
+    When *namespace* is ``None`` the effective default namespace is resolved and
+    checked against the allowlist so that implicit-default usage cannot bypass
+    namespace restrictions.
 
     Args:
         namespace: Namespace to check. ``None`` resolves to the effective default.
+        resolver: Resolves the effective default namespace for the client the
+            caller operates through. Defaults to the trainer client's resolver.
+            Callers acting on another client's resources **must** pass that
+            client's resolver. Otherwise the namespace validated here is not the
+            namespace the operation targets, and the allowlist can be bypassed.
 
     Returns:
         ToolError if namespace is malformed or restricted, None if allowed
@@ -236,9 +258,11 @@ def check_namespace_allowed(namespace: str | None) -> ToolError | None:
     effective = namespace
     if effective is None:
         try:
-            from kubeflow_mcp.common.utils import get_trainer_effective_namespace
+            if resolver is None:
+                from kubeflow_mcp.common.utils import get_trainer_effective_namespace
 
-            effective = get_trainer_effective_namespace(None)
+                resolver = get_trainer_effective_namespace
+            effective = resolver(None)
         except Exception:
             return ToolError(
                 error="Cannot resolve effective namespace; refusing request (fail closed)",

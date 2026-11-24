@@ -74,6 +74,7 @@ def _get_policy_paths() -> list[Path]:
 PERSONAS: dict[str, dict[str, Any]] = {
     "readonly": {
         "tools": [
+            # Trainer
             "pre_flight",
             "check_compatibility",
             "get_cluster_resources",
@@ -86,30 +87,93 @@ PERSONAS: dict[str, dict[str, Any]] = {
             "get_training_events",
             "health_check",
             "get_server_logs",
+            # Spark (read-only session inspection)
+            "list_spark_sessions",
+            "get_spark_session",
+            "get_spark_session_logs",
+            # Pipelines
+            "list_pipelines",
+            "get_pipeline",
+            "list_pipeline_runs",
+            "get_pipeline_run",
+            "get_pipeline_logs",
+            "list_experiments",
+            "get_experiment",
+            # Optimizer (12 read-only tools: planning, discovery and monitoring)
+            "katib_pre_flight",
+            "list_hpo_experiments",
+            "get_hpo_experiment",
+            "get_hpo_experiment_status",
+            "get_trial",
+            "get_successful_trials",
+            "list_suggestions",
+            "get_hpo_experiment_trials",
+            "get_best_trial",
+            "get_suggestion",
+            "get_hpo_experiment_trial_logs",
+            "get_hpo_experiment_events",
         ]
     },
     "data-scientist": {
         "inherit": "readonly",
         "tools": [
+            # Trainer
             "fine_tune",
             "run_custom_training",
             "wait_for_training",
             "delete_training_job",
+            # Spark (session lifecycle)
+            "create_spark_session",
+            "delete_spark_session",
+            # Pipelines
+            "create_pipeline_run",
+            "create_experiment",
+            # Optimizer
+            "create_hpo_experiment",
+            # Waiting holds the MCP connection open, so like wait_for_training
+            # it is granted to the persona that submits experiments.
+            "wait_for_hpo_experiment",
+            "delete_hpo_experiment",
         ],
     },
     "ml-engineer": {
         "inherit": "data-scientist",
         "tools": [
+            # Trainer
             "run_container_training",
             "update_training_job",
             "inspect_crd",
             "inspect_controller",
+            # Pipelines: KFP runs carry no MCP ownership label, so these act on any
+            # run in the namespace and sit above data-scientist.
+            "stop_pipeline_run",
+            "retry_pipeline_run",
+            # Compiling agent-written code runs its pipeline body on the server, and an
+            # existing name gets a new version whoever registered it.
+            "create_pipeline",
+            # Optimizer
+            "create_hpo_experiment_from_spec",
+            "update_hpo_experiment",
         ],
     },
     "platform-admin": {"tools": "*"},
 }
 
-DESTRUCTIVE_TOOLS = {"delete_training_job", "delete_runtime"}
+DESTRUCTIVE_TOOLS = {
+    "delete_training_job",
+    "delete_runtime",
+    "delete_spark_session",
+    "stop_pipeline_run",
+    # platform-admin only: KFP experiments and pipelines carry no MCP ownership label.
+    "delete_experiment",
+    "delete_pipeline",
+    "delete_hpo_experiment",
+    # Lowering parallel_trial_count makes Katib delete trials, including completed ones.
+    "update_hpo_experiment",
+}
+
+# Tools matched by each ``risk:<level>`` policy pattern.
+RISK_LEVELS: dict[str, set[str]] = {"destructive": DESTRUCTIVE_TOOLS}
 
 # ─── Runtime persona ───────────────────────
 # Set once at server startup by create_server(); tools read via get_effective_persona().
@@ -217,6 +281,19 @@ def _validate_categories(patterns: list[str], key: str, path: Path) -> None:
                 )
 
 
+def _validate_risks(patterns: list[str], key: str, path: Path) -> None:
+    """Reject unknown ``risk:`` references, which would otherwise match no tool."""
+    valid_risks = ", ".join(sorted(RISK_LEVELS))
+    for pattern in patterns:
+        if pattern.startswith("risk:"):
+            risk = pattern.removeprefix("risk:")
+            if risk not in RISK_LEVELS:
+                raise PolicyFileError(
+                    f"Invalid policy file {path}: unknown risk {risk!r} in '{key}'. "
+                    f"Valid risks: {valid_risks}"
+                )
+
+
 def _validate_policy_section(policy: dict[str, Any], path: Path) -> None:
     """Check the ``policy:`` mapping in place."""
     for key in ("allow", "deny"):
@@ -226,6 +303,7 @@ def _validate_policy_section(policy: dict[str, Any], path: Path) -> None:
             else:
                 _check_string_list(policy[key], f"policy.{key}", path)
                 _validate_categories(policy[key], f"policy.{key}", path)
+                _validate_risks(policy[key], f"policy.{key}", path)
 
     # An empty ``namespaces:`` keeps meaning "no namespace restriction".
     if policy.get("namespaces") is not None:
@@ -301,10 +379,7 @@ def _expand_category(category: str) -> list[str]:
 def _matches_pattern(tool: str, pattern: str) -> bool:
     """Check if tool matches a pattern (supports wildcards)."""
     if pattern.startswith("risk:"):
-        risk = pattern[5:]
-        if risk == "destructive":
-            return tool in DESTRUCTIVE_TOOLS
-        return False
+        return tool in RISK_LEVELS.get(pattern[5:], set())
     return fnmatch.fnmatch(tool, pattern)
 
 

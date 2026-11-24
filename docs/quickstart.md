@@ -174,6 +174,10 @@ server:
 
 auth:
   auth_token: my-secret-token   # dev/staging bearer token
+  # Production JWT/OIDC instead; jwks_uri needs both issuer and audience:
+  # jwks_uri: https://auth.example.com/.well-known/jwks.json
+  # issuer: https://auth.example.com
+  # audience: kubeflow-mcp
 
 logging:
   level: INFO
@@ -233,6 +237,13 @@ export KUBEFLOW_MCP_JWT_ISSUER=https://auth.example.com
 export KUBEFLOW_MCP_JWT_AUDIENCE=kubeflow-mcp
 kubeflow-mcp serve --transport http
 ```
+
+All three are required: with a JWKS URI but no issuer or audience the server refuses to start,
+because it would otherwise accept any token the identity provider signs, including tokens issued
+to other applications. Set the audience to the value your identity provider puts in the `aud`
+claim of tokens meant for this server (for example the client ID or API identifier you registered
+for it), not one shared with other applications. Tokens must also carry an `exp` claim, and tokens
+whose `nbf` or `iat` is in the future are rejected (60 seconds of clock skew is allowed).
 
 For a defence-in-depth setup, place the server behind an authenticating reverse proxy with TLS in
 addition to the built-in token/JWT check. See
@@ -336,6 +347,8 @@ make inspector
 | `HTTP 421 Misdirected Request` | DNS rebinding protection blocked the `Host` header | Add the hostname to `KUBEFLOW_MCP_ALLOWED_HOSTS` (see [Authentication](#authentication)) |
 | `HTTP 403` from a browser-based client | `Origin` header not in allowlist | Add to `KUBEFLOW_MCP_ALLOWED_ORIGINS`; host and origin allowlists are independent |
 | `HTTP 401 Unauthorized` | Wrong bearer token | Verify `KUBEFLOW_MCP_AUTH_TOKEN` matches the token sent by the client |
+| `HTTP 401 Unauthorized` with a JWT | The token was issued for another audience or by another issuer, has no `exp`, or is expired or not yet valid | Compare the token's `iss` and `aud` claims with `KUBEFLOW_MCP_JWT_ISSUER` and `KUBEFLOW_MCP_JWT_AUDIENCE`, and check its `exp` and `nbf` |
+| Server exits with `JWT auth needs an issuer and an audience` | `KUBEFLOW_MCP_JWKS_URI` is set without `KUBEFLOW_MCP_JWT_ISSUER` and `KUBEFLOW_MCP_JWT_AUDIENCE` | Set both to the `iss` and `aud` values your identity provider puts in tokens for this server |
 | Connection refused on port 8000 | Server started with `stdio` not `http` | Restart with `--transport http` |
 | Agent says "no tools available" | Client config points to wrong URL | Check client URL; test with `curl http://localhost:8000/health` |
 | Pod stuck in `CreateContainerConfigError` | `kubeflow-mcp-auth` Secret not created | Create the Secret before applying manifests (see [`examples/kubernetes/`](../examples/kubernetes/)) |
