@@ -106,8 +106,9 @@ For local clusters (e.g., Kind/Minikube) whose kubeconfig points to `127.0.0.1`,
 
 `/ready` returns HTTP 200 `{"status": "ready"}` only when configured client modules are loaded,
 packaged resources are present, and readiness diagnostics (Kubernetes API reachability,
-Trainer CRD registration/version, and essential RBAC permissions scoped to the configured
-persona) succeed. These checks are refreshed on each probe, so the pod recovers once cluster
+Trainer CRD registration/version, and essential RBAC permissions scoped to the tools the
+server exposes) succeed. TrainJob `create` is only required when a job-creation tool is
+registered, and a ServiceAccount that cannot read CRDs gets a warning rather than a 503. These checks are refreshed on each probe, so the pod recovers once cluster
 dependencies become available. On failure it returns HTTP 503 `{"status": "not_ready"}` and
 logs the details (check, resource, verb, namespace, category) to the server logs rather than
 exposing cluster internals over unauthenticated HTTP. For authenticated, on-demand checks at

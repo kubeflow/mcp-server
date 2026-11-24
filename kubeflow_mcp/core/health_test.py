@@ -696,6 +696,111 @@ class TestReadinessDiagnostics:
         assert not any("rbac:" in d.check for d in diagnostics)
         assert mock_auth.return_value.create_self_subject_access_review.call_count == 0
 
+    @patch("kubeflow_mcp.common.utils.get_trainer_effective_namespace", return_value="default")
+    @patch("kubeflow_mcp.common.utils.get_authorization_v1_api")
+    @patch("kubeflow_mcp.common.utils.get_apiextensions_api")
+    @patch("kubeflow_mcp.common.utils.get_version_api")
+    def test_crd_read_forbidden_warns_without_blocking(
+        self,
+        mock_version: MagicMock,
+        mock_apiext: MagicMock,
+        mock_auth: MagicMock,
+        mock_ns: MagicMock,
+    ) -> None:
+        from kubernetes.client.exceptions import ApiException
+
+        mock_apiext.return_value.read_custom_resource_definition.side_effect = ApiException(
+            status=403, reason="Forbidden"
+        )
+        mock_auth.return_value.create_self_subject_access_review.return_value = MagicMock(
+            status=MagicMock(allowed=True)
+        )
+
+        ok, diagnostics = run_readiness_diagnostics(persona="readonly")
+
+        assert ok is True
+        crd_diag = next(d for d in diagnostics if d.check == "trainer_crd")
+        assert crd_diag.status == "warn"
+        assert crd_diag.category == "permission_denied"
+        # RBAC checks still run after a forbidden CRD read
+        assert any(d.check.startswith("rbac:") for d in diagnostics)
+
+    @patch("kubeflow_mcp.common.utils.get_trainer_effective_namespace", return_value="default")
+    @patch("kubeflow_mcp.common.utils.get_authorization_v1_api")
+    @patch("kubeflow_mcp.common.utils.get_apiextensions_api")
+    @patch("kubeflow_mcp.common.utils.get_version_api")
+    def test_crd_not_found_api_exception_fails(
+        self,
+        mock_version: MagicMock,
+        mock_apiext: MagicMock,
+        mock_auth: MagicMock,
+        mock_ns: MagicMock,
+    ) -> None:
+        from kubernetes.client.exceptions import ApiException
+
+        mock_apiext.return_value.read_custom_resource_definition.side_effect = ApiException(
+            status=404, reason="Not Found"
+        )
+        mock_auth.return_value.create_self_subject_access_review.return_value = MagicMock(
+            status=MagicMock(allowed=True)
+        )
+
+        ok, diagnostics = run_readiness_diagnostics()
+
+        assert ok is False
+        crd_diag = next(d for d in diagnostics if d.check == "trainer_crd")
+        assert crd_diag.status == "fail"
+        assert crd_diag.category == "crd_missing"
+
+    @patch("kubeflow_mcp.common.utils.get_trainer_effective_namespace", return_value="default")
+    @patch("kubeflow_mcp.common.utils.get_authorization_v1_api")
+    @patch("kubeflow_mcp.common.utils.get_apiextensions_api")
+    @patch("kubeflow_mcp.common.utils.get_version_api")
+    def test_readiness_skips_create_rbac_when_creation_tools_not_registered(
+        self,
+        mock_version: MagicMock,
+        mock_apiext: MagicMock,
+        mock_auth: MagicMock,
+        mock_ns: MagicMock,
+    ) -> None:
+        mock_crd = MagicMock()
+        v_mock = MagicMock()
+        v_mock.name = "v1alpha1"
+        v_mock.served = True
+        mock_crd.spec.versions = [v_mock]
+        mock_apiext.return_value.read_custom_resource_definition.return_value = mock_crd
+
+        def ssar(body: Any, **kwargs: Any) -> MagicMock:
+            verb = body.spec.resource_attributes.verb
+            return MagicMock(status=MagicMock(allowed=verb != "create"))
+
+        mock_auth.return_value.create_self_subject_access_review.side_effect = ssar
+
+        # Persona allows creation, but policy filtering removed every creation tool.
+        ok, diagnostics = run_readiness_diagnostics(
+            persona="data-scientist",
+            available_tools={"list_training_jobs", "get_training_logs"},
+        )
+
+        assert ok is True
+        assert not any(d.verb == "create" for d in diagnostics)
+
+    def test_get_trainer_rbac_checks_uses_available_tools(self) -> None:
+        from kubeflow_mcp.core.health import get_trainer_rbac_checks
+
+        without_creation = get_trainer_rbac_checks(
+            "test-ns", persona="data-scientist", available_tools={"list_training_jobs"}
+        )
+        assert not any(c[1] == "create" for c in without_creation)
+
+        with_creation = get_trainer_rbac_checks(
+            "test-ns", persona="readonly", available_tools={"fine_tune"}
+        )
+        assert any(c[1] == "create" for c in with_creation)
+
+        empty = get_trainer_rbac_checks("test-ns", persona=None, available_tools=set())
+        assert not any(c[1] == "create" for c in empty)
+
     def test_get_trainer_rbac_checks_persona_scoping(self) -> None:
         from kubeflow_mcp.core.health import get_trainer_rbac_checks
 

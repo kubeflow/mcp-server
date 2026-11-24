@@ -15,6 +15,7 @@
 """Health check tools for server monitoring."""
 
 import logging
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -228,12 +229,26 @@ def _check_rbac_permission(
         )
 
 
-def _requires_job_creation(persona: str | None) -> bool:
-    """Determine if the configured persona requires TrainJob creation permissions."""
+_JOB_CREATION_TOOLS = frozenset({"fine_tune", "run_custom_training", "run_container_training"})
+
+
+def _requires_job_creation(
+    persona: str | None,
+    available_tools: Collection[str] | None = None,
+) -> bool:
+    """Determine whether readiness must verify TrainJob ``create`` permission.
+
+    When ``available_tools`` (the tools the server actually registered after persona and
+    policy filtering) is given, it is authoritative: ``create`` is only required if a
+    job-creation tool is exposed. Otherwise fall back to the persona allowlist.
+    """
     from kubeflow_mcp.core.policy import get_allowed_tools, is_read_only
 
     if is_read_only():
         return False
+
+    if available_tools is not None:
+        return not _JOB_CREATION_TOOLS.isdisjoint(available_tools)
 
     if persona == "readonly":
         return False
@@ -247,13 +262,14 @@ def _requires_job_creation(persona: str | None) -> bool:
         # None indicates unrestricted access (*)
         return True
 
-    creation_tools = {"fine_tune", "run_custom_training", "run_container_training"}
-    return bool(allowed.intersection(creation_tools))
+    return not _JOB_CREATION_TOOLS.isdisjoint(allowed)
 
 
 def get_trainer_rbac_checks(
     namespace: str,
     persona: str | None = None,
+    *,
+    available_tools: Collection[str] | None = None,
 ) -> list[tuple[str, str, str, str]]:
     """Return required (resource, verb, group, namespace) tuples for Trainer operations."""
     from kubeflow_mcp.common.constants import TRAINER_CRD_GROUP
@@ -261,7 +277,7 @@ def get_trainer_rbac_checks(
     checks = [
         ("trainjobs", "list", TRAINER_CRD_GROUP, namespace),
     ]
-    if _requires_job_creation(persona):
+    if _requires_job_creation(persona, available_tools):
         checks.append(("trainjobs", "create", TRAINER_CRD_GROUP, namespace))
     checks.append(("clustertrainingruntimes", "list", TRAINER_CRD_GROUP, ""))
     return checks
@@ -271,6 +287,7 @@ def run_readiness_diagnostics(
     *,
     clients: list[str] | None = None,
     persona: str | None = None,
+    available_tools: Collection[str] | None = None,
 ) -> tuple[bool, list[ReadinessDiagnostic]]:
     """Run startup readiness diagnostics.
 
@@ -282,6 +299,9 @@ def run_readiness_diagnostics(
     Args:
         clients: Configured client modules (e.g. ["trainer"]). Defaults to ["trainer"].
         persona: Configured persona (e.g. "readonly", "data-scientist").
+        available_tools: Tool names the server registered after persona/policy filtering.
+            When given, TrainJob ``create`` permission is only required if a job-creation
+            tool is exposed.
 
     Returns:
         tuple[bool, list[ReadinessDiagnostic]]: (all_passed, diagnostics_list)
@@ -379,6 +399,32 @@ def run_readiness_diagnostics(
                         resource=TRAINER_CRD_NAME,
                     )
                 )
+        except ApiException as e:
+            if e.status == 403:
+                # Namespace-scoped ServiceAccounts typically cannot read CRDs; that does not
+                # prevent TrainJob operations, so report it without failing readiness.
+                logger.info("Readiness: Trainer CRD read forbidden: %s", e)
+                diagnostics.append(
+                    ReadinessDiagnostic(
+                        check="trainer_crd",
+                        status="warn",
+                        message=f"CRD {TRAINER_CRD_NAME} could not be verified (read forbidden)",
+                        category="permission_denied",
+                        resource=TRAINER_CRD_NAME,
+                        verb="get",
+                    )
+                )
+            else:
+                logger.warning("Readiness: Trainer CRD check failed: %s", e)
+                diagnostics.append(
+                    ReadinessDiagnostic(
+                        check="trainer_crd",
+                        status="fail",
+                        message=f"CRD {TRAINER_CRD_NAME} not found or not accessible",
+                        category="crd_missing",
+                        resource=TRAINER_CRD_NAME,
+                    )
+                )
         except Exception as e:
             logger.warning("Readiness: Trainer CRD check failed: %s", e)
             diagnostics.append(
@@ -425,7 +471,9 @@ def run_readiness_diagnostics(
             all_passed = all(d.status != "fail" for d in diagnostics)
             return all_passed, diagnostics
 
-        for resource, verb, group, ns in get_trainer_rbac_checks(namespace, persona=persona):
+        for resource, verb, group, ns in get_trainer_rbac_checks(
+            namespace, persona=persona, available_tools=available_tools
+        ):
             diagnostics.append(
                 _check_rbac_permission(auth_api, resource, verb, group, ns, K8S_TIMEOUT)
             )

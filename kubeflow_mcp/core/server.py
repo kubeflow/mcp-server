@@ -605,8 +605,13 @@ def create_server(  # noqa: C901
 
     internal_ready = clients_ready and resources_ready
 
+    # Readiness RBAC must reflect the tools actually exposed after persona/policy filtering.
+    registered_tool_names = frozenset(f.__name__ for f in allowed_funcs)
+
     def _check_readiness() -> tuple[bool, list[ReadinessDiagnostic] | None]:
-        return run_readiness_diagnostics(clients=clients, persona=persona)
+        return run_readiness_diagnostics(
+            clients=clients, persona=persona, available_tools=registered_tool_names
+        )
 
     register_probe_routes(
         mcp,

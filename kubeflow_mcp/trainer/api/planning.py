@@ -450,10 +450,17 @@ def check_compatibility() -> dict[str, Any]:
         _check_sdk_version(checks, blockers)
         platform = _detect_platform(checks, recommendations, get_core_v1_api, K8S_TIMEOUT)
 
-        effective_ns = get_trainer_effective_namespace()
-        _check_rbac_permissions(
-            checks, blockers, get_authorization_v1_api, effective_ns, K8S_TIMEOUT
-        )
+        # Resolve the namespace locally so a missing kubeconfig is reported as a blocker
+        # instead of escaping to the outer handler and discarding earlier results.
+        try:
+            effective_ns = get_trainer_effective_namespace()
+        except Exception as e:
+            checks["rbac"] = {"namespace": {"status": "fail", "error": str(e)}}
+            blockers.append(f"Could not resolve Trainer namespace for RBAC checks: {e}")
+        else:
+            _check_rbac_permissions(
+                checks, blockers, get_authorization_v1_api, effective_ns, K8S_TIMEOUT
+            )
 
         if not blockers and crd_installed:
             recommendations.append("Environment compatible — proceed with get_cluster_resources()")

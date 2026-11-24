@@ -186,7 +186,9 @@ installed, and update `KUBEFLOW_SYSTEM_NAMESPACE` to match.
 
 **The pod is not `Ready` (`/ready` returns 503)** — `/ready` dynamically checks
 Kubernetes API reachability, Trainer CRD existence/version, and essential RBAC permissions.
-If the pod fails readiness, check `kubectl logs <pod>` to see the specific diagnostic failure.
+`create trainjobs` is only checked when a job-creation tool is exposed, and a forbidden
+CRD read is logged as a warning rather than failing readiness. If the pod fails
+readiness, check `kubectl logs <pod>` to see the specific diagnostic failure.
 
 **The pod is `Ready` but calls still fail** — `/ready` re-checks Kubernetes API
 reachability, the Trainer CRD, and essential RBAC on each probe, but it does not cover

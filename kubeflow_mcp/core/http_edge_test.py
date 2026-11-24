@@ -123,6 +123,20 @@ def test_create_server_readiness_healthy_when_k8s_ok() -> None:
     assert response.json() == {"status": "ready"}
 
 
+def test_create_server_readiness_uses_registered_tools() -> None:
+    with patch(
+        "kubeflow_mcp.core.server.run_readiness_diagnostics",
+        return_value=(True, []),
+    ) as mock_diag:
+        mcp = create_server(persona="readonly")
+        with TestClient(mcp.http_app(transport="streamable-http")) as client:
+            client.get("/ready")
+
+    available = mock_diag.call_args.kwargs["available_tools"]
+    assert "list_training_jobs" in available
+    assert "fine_tune" not in available
+
+
 def test_create_server_readiness_fails_without_leaking_diagnostics(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

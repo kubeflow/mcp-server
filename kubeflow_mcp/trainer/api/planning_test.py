@@ -703,6 +703,18 @@ class TestCheckSdkVersionEdgeCases:
 
 
 class TestCheckCompatibility:
+    @pytest.fixture(autouse=True)
+    def _isolate_rbac(self):
+        """Keep these tests off the live namespace lookup and RBAC API calls."""
+        with (
+            patch(
+                "kubeflow_mcp.common.utils.get_trainer_effective_namespace",
+                return_value="default",
+            ),
+            patch("kubeflow_mcp.trainer.api.planning._check_rbac_permissions") as mock_rbac,
+        ):
+            yield mock_rbac
+
     @patch("kubeflow_mcp.trainer.api.planning._detect_platform", return_value="kubernetes")
     @patch("kubeflow_mcp.trainer.api.planning._check_sdk_version")
     @patch("kubeflow_mcp.trainer.api.planning._check_trainer_crd", return_value=True)
@@ -1307,3 +1319,33 @@ def test_pre_flight_with_rbac_blockers():
     data = result["data"]
     assert data["compatibility"]["compatible"] is False
     assert any("Blocker: Missing permission" in step for step in data["next_steps"])
+
+
+def test_check_compatibility_namespace_failure_keeps_earlier_blockers():
+    def add_crd_blocker(checks, blockers, *args, **kwargs):
+        blockers.append("Trainer CRD missing")
+        return False
+
+    with (
+        patch("kubeflow_mcp.trainer.api.planning._check_k8s_version"),
+        patch(
+            "kubeflow_mcp.trainer.api.planning._check_trainer_crd",
+            side_effect=add_crd_blocker,
+        ),
+        patch("kubeflow_mcp.trainer.api.planning._check_sdk_version"),
+        patch("kubeflow_mcp.trainer.api.planning._detect_platform", return_value="kubernetes"),
+        patch(
+            "kubeflow_mcp.common.utils.get_trainer_effective_namespace",
+            side_effect=RuntimeError("no kubeconfig"),
+        ),
+        patch("kubeflow_mcp.trainer.api.planning._check_rbac_permissions") as mock_rbac,
+    ):
+        result = check_compatibility()
+
+    assert result["success"] is True
+    data = result["data"]
+    assert data["compatible"] is False
+    assert "Trainer CRD missing" in data["blockers"]
+    assert any("Could not resolve Trainer namespace" in b for b in data["blockers"])
+    assert data["checks"]["rbac"]["namespace"]["status"] == "fail"
+    mock_rbac.assert_not_called()
