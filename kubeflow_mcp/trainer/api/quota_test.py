@@ -204,8 +204,8 @@ class TestResourceQuotaChecks:
     def test_check_resource_quota_best_effort_scope_enforced_with_gpu_only(self) -> None:
         quota = _make_resource_quota(
             name="best-effort-quota",
-            hard={"count/pods": "1"},
-            used={"count/pods": "1"},
+            hard={"pods": "1"},
+            used={"pods": "1"},
             scopes=["BestEffort"],
         )
         mock_api = MagicMock()
@@ -226,8 +226,8 @@ class TestResourceQuotaChecks:
     def test_check_resource_quota_best_effort_scope_skipped_with_limit_range_default(self) -> None:
         quota = _make_resource_quota(
             name="best-effort-quota",
-            hard={"count/pods": "1"},
-            used={"count/pods": "1"},
+            hard={"pods": "1"},
+            used={"pods": "1"},
             scopes=["BestEffort"],
         )
         limit_range = SimpleNamespace(
@@ -252,6 +252,95 @@ class TestResourceQuotaChecks:
             core_v1_api=mock_api,
         )
         assert err is None
+
+    def test_check_resource_quota_best_effort_scope_skipped_when_limit_range_forbidden(
+        self,
+    ) -> None:
+        quota = _make_resource_quota(
+            name="best-effort-quota",
+            hard={"pods": "1"},
+            used={"pods": "1"},
+            scopes=["BestEffort"],
+        )
+        mock_api = MagicMock()
+        mock_api.list_namespaced_resource_quota.return_value = SimpleNamespace(items=[quota])
+        mock_api.list_namespaced_limit_range.side_effect = ApiException(
+            status=403, reason="Forbidden"
+        )
+
+        # When LimitRange lookup is forbidden, pre-flight cannot know if admission mutates the pod,
+        # so it skips the BestEffort quota to avoid false rejections.
+        err = check_resource_quota(
+            namespace="kubeflow-user",
+            resources_per_node={"gpu": 1},
+            num_nodes=1,
+            core_v1_api=mock_api,
+        )
+        assert err is None
+
+    def test_check_resource_quota_defaulted_cpu_exceeds_quota(self) -> None:
+        quota = _make_resource_quota(
+            name="cpu-quota",
+            hard={"requests.cpu": "1"},
+            used={"requests.cpu": "800m"},
+        )
+        limit_range = SimpleNamespace(
+            spec=SimpleNamespace(
+                limits=[
+                    SimpleNamespace(
+                        default_request={"cpu": "500m"},
+                    )
+                ]
+            )
+        )
+        mock_api = MagicMock()
+        mock_api.list_namespaced_resource_quota.return_value = SimpleNamespace(items=[quota])
+        mock_api.list_namespaced_limit_range.return_value = SimpleNamespace(items=[limit_range])
+
+        # Workload specifies only GPU, but LimitRange default adds 500m CPU.
+        # Remaining CPU is 200m (1 - 800m), so 500m exceeds available quota.
+        err = check_resource_quota(
+            namespace="kubeflow-user",
+            resources_per_node={"gpu": 1},
+            num_nodes=1,
+            core_v1_api=mock_api,
+        )
+        assert err is not None
+        assert err.error_code == ErrorCode.QUOTA_EXCEEDED
+        assert "Resource quota 'cpu-quota' exceeded" in err.error
+        assert "CPU(s)" in err.error
+
+    def test_check_resource_quota_defaulted_memory_exceeds_quota(self) -> None:
+        quota = _make_resource_quota(
+            name="mem-quota",
+            hard={"requests.memory": "2Gi"},
+            used={"requests.memory": "1.5Gi"},
+        )
+        limit_range = SimpleNamespace(
+            spec=SimpleNamespace(
+                limits=[
+                    SimpleNamespace(
+                        default_request={"memory": "1Gi"},
+                    )
+                ]
+            )
+        )
+        mock_api = MagicMock()
+        mock_api.list_namespaced_resource_quota.return_value = SimpleNamespace(items=[quota])
+        mock_api.list_namespaced_limit_range.return_value = SimpleNamespace(items=[limit_range])
+
+        # Workload specifies only GPU, but LimitRange default adds 1Gi memory.
+        # Remaining memory is 0.5Gi, so 1Gi exceeds available quota.
+        err = check_resource_quota(
+            namespace="kubeflow-user",
+            resources_per_node={"gpu": 1},
+            num_nodes=1,
+            core_v1_api=mock_api,
+        )
+        assert err is not None
+        assert err.error_code == ErrorCode.QUOTA_EXCEEDED
+        assert "Resource quota 'mem-quota' exceeded" in err.error
+        assert "bytes memory" in err.error
 
 
 class TestGetNamespaceResourceQuotas:

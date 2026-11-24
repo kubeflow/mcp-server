@@ -320,12 +320,15 @@ def _check_single_quota(
 def _get_namespace_limit_range_defaults(
     effective_ns: str,
     api: Any,
-) -> tuple[Decimal | None, Decimal | None]:
+) -> tuple[Decimal | None, Decimal | None, bool]:
     """Retrieve default CPU and memory requests from namespace LimitRange resources.
 
     If a namespace has a LimitRange defining defaultRequest (or default limits) for
     CPU or memory, pods submitted without explicit compute requests are mutated at
     admission to receive those defaults, altering their effective QoS class away from BestEffort.
+
+    Returns:
+        tuple of (default_cpu, default_mem, is_forbidden)
     """
     try:
         lr_list = api.list_namespaced_limit_range(
@@ -355,9 +358,20 @@ def _get_namespace_limit_range_defaults(
                         default_cpu = _to_decimal(default_lim["cpu"])
                     if "memory" in default_lim and default_mem is None:
                         default_mem = _to_decimal(default_lim["memory"])
-        return default_cpu, default_mem
+        return default_cpu, default_mem, False
+    except ApiException as exc:
+        if getattr(exc, "status", None) in (401, 403):
+            logger.debug(
+                "Cannot list LimitRange in namespace '%s' (%s: %s). "
+                "Default request injection could not be inspected.",
+                effective_ns,
+                exc.status,
+                exc.reason,
+            )
+            return None, None, True
+        return None, None, False
     except Exception:
-        return None, None
+        return None, None, False
 
 
 def check_resource_quota(
@@ -409,8 +423,9 @@ def check_resource_quota(
 
     effective_cpu = req_cpu
     effective_mem = req_mem
+    lr_forbidden = False
     if effective_cpu is None or effective_mem is None:
-        def_cpu, def_mem = _get_namespace_limit_range_defaults(effective_ns, api)
+        def_cpu, def_mem, lr_forbidden = _get_namespace_limit_range_defaults(effective_ns, api)
         if effective_cpu is None and def_cpu is not None:
             effective_cpu = def_cpu * nodes_dec
         if effective_mem is None and def_mem is not None:
@@ -420,9 +435,12 @@ def check_resource_quota(
         q_name, hard, used, scopes = _extract_quota_data(q)
         if not hard:
             continue
-        # Skip BestEffort-only quotas if workload requests compute resources (or receives them via LimitRange defaults).
+        # Skip BestEffort-only quotas if:
+        # 1. Workload requests compute resources (or receives them via LimitRange defaults).
+        # 2. LimitRange lookup was forbidden (cannot determine if defaults will be injected at admission,
+        #    so skip BestEffort quota to avoid false rejections).
         # In Kubernetes, pods without compute requests or limits have BestEffort QoS.
-        if scopes == ["BestEffort"] and (effective_cpu or effective_mem):
+        if scopes == ["BestEffort"] and (effective_cpu or effective_mem or lr_forbidden):
             continue
 
         err = _check_single_quota(
@@ -431,8 +449,8 @@ def check_resource_quota(
             hard=hard,
             used=used,
             nodes_dec=nodes_dec,
-            req_cpu=req_cpu,
-            req_mem=req_mem,
+            req_cpu=effective_cpu,
+            req_mem=effective_mem,
             req_gpu=req_gpu,
         )
         if err:
