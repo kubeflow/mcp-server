@@ -73,12 +73,31 @@ spec:
               value: "true"
             - name: KUBEFLOW_MCP_ALLOWED_HOSTS
               value: {{ printf "%s,localhost,127.0.0.1,[::1],%s:*,localhost:*,127.0.0.1:*,[::1]:*" (include "kubeflow-mcp.fullname" .) (include "kubeflow-mcp.fullname" .) | quote }}
-            {{- if and .Values.auth.enabled (or .Values.auth.token .Values.auth.existingSecret) }}
+            {{- if .Values.auth.enabled }}
+            {{- $hasToken := or .Values.auth.token .Values.auth.existingSecret }}
+            {{- $hasOidc := and .Values.auth.oidc.enabled (or .Values.auth.oidc.issuer .Values.auth.oidc.jwksUri) }}
+            {{- if not (or $hasToken $hasOidc) }}
+            {{- fail "When auth.enabled is true, you must provide either a token source (auth.token or auth.existingSecret) or configure auth.oidc (issuer or jwksUri)." }}
+            {{- end }}
+            {{- if $hasToken }}
             - name: KUBEFLOW_MCP_AUTH_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: {{ include "kubeflow-mcp.authSecretName" . }}
                   key: {{ .Values.auth.secretKey | default "token" }}
+            {{- end }}
+            {{- if and .Values.auth.oidc.enabled .Values.auth.oidc.issuer }}
+            - name: KUBEFLOW_MCP_OIDC_ISSUER
+              value: {{ .Values.auth.oidc.issuer | quote }}
+            {{- end }}
+            {{- if and .Values.auth.oidc.enabled .Values.auth.oidc.jwksUri }}
+            - name: KUBEFLOW_MCP_JWKS_URI
+              value: {{ .Values.auth.oidc.jwksUri | quote }}
+            {{- end }}
+            {{- if and .Values.auth.oidc.enabled .Values.auth.oidc.audience }}
+            - name: KUBEFLOW_MCP_OIDC_AUDIENCE
+              value: {{ .Values.auth.oidc.audience | quote }}
+            {{- end }}
             {{- end }}
             {{- with .Values.server.extraEnv }}
             {{- toYaml . | nindent 12 }}

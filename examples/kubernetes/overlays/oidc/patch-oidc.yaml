@@ -14,6 +14,6 @@ spec:
             - name: KUBEFLOW_MCP_OIDC_AUDIENCE
               value: "kubeflow-mcp"
             - name: KUBEFLOW_MCP_JWKS_URI
-              value: "https://accounts.google.com/.well-known/jwks.json"
+              value: "https://www.googleapis.com/oauth2/v3/certs"
             - name: KUBEFLOW_MCP_JWT_ISSUER
               value: "https://accounts.google.com"

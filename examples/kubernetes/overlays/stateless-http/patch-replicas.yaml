@@ -13,4 +13,4 @@ spec:
             - name: FASTMCP_STATELESS_HTTP
               value: "true"
             - name: KUBEFLOW_MCP_ALLOWED_HOSTS
-              value: "kubeflow-mcp.example.com,kubeflow-mcp:*,localhost:*,127.0.0.1:*,[::1]:*"
+              value: "kubeflow-mcp.example.com,kubeflow-mcp:*,kubeflow-mcp.kubeflow-user-example-com.svc:*,kubeflow-mcp.kubeflow-user-example-com.svc.cluster.local:*,localhost:*,127.0.0.1:*,[::1]:*"

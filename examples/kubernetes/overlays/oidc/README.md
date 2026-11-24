@@ -8,7 +8,7 @@ This overlay customizes the base Kubeflow MCP Server deployment with OpenID Conn
 |----------|-------------|---------|
 | `KUBEFLOW_MCP_OIDC_ISSUER` | OpenID Connect Issuer URL for OIDC discovery (`.well-known/openid-configuration`) | `https://accounts.google.com` |
 | `KUBEFLOW_MCP_OIDC_AUDIENCE` | Expected audience (`aud`) in validated JWT tokens | `kubeflow-mcp` |
-| `KUBEFLOW_MCP_JWKS_URI` | Explicit JWKS endpoint URL (optional if issuer supports discovery) | `https://accounts.google.com/.well-known/jwks.json` |
+| `KUBEFLOW_MCP_JWKS_URI` | Explicit JWKS endpoint URL for token signature verification | `https://www.googleapis.com/oauth2/v3/certs` |
 | `KUBEFLOW_MCP_JWT_ISSUER` | Expected token issuer (`iss`) in validated JWT tokens | `https://accounts.google.com` |
 
 ## Deployment
