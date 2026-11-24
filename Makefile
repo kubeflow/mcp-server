@@ -62,8 +62,8 @@ format: ## Auto-format and fix lint issues
 ##@ Testing
 
 test-python: ## Run unit tests
-	@uv sync --all-extras --group dev
-	@uv run pytest --cov=kubeflow_mcp --cov-report=$(or $(report),term)
+	@uv sync --all-extras --group dev --group otel
+	@uv run --group otel pytest --cov=kubeflow_mcp --cov-report=$(or $(report),term)
 
 .PHONY: update-schema-snapshot
 update-schema-snapshot: ## Regenerate the MCP tool schema snapshot baseline (after an approved schema change)
