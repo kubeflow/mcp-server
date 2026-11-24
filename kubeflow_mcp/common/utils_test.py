@@ -36,6 +36,7 @@ from kubeflow_mcp.common.utils import (
     get_core_v1_api,
     get_custom_objects_api,
     get_default_kubeconfig_namespace,
+    get_optimizer_effective_namespace,
     get_pipelines_client,
     get_pipelines_effective_namespace,
     get_spark_session_ownership,
@@ -458,3 +459,17 @@ class TestPipelinesClient:
         assert len(_pipelines_client_cache) == _NS_CLIENT_CACHE_MAX
         assert "ns-0" not in _pipelines_client_cache
         assert f"ns-{_NS_CLIENT_CACHE_MAX}" in _pipelines_client_cache
+
+
+def test_optimizer_namespace_resolves_without_building_an_sdk_client():
+    """OptimizerClient() also builds a Trainer backend whose first read has no
+    timeout, so resolving a namespace must not construct it."""
+    with (
+        patch("kubeflow.optimizer.OptimizerClient", side_effect=AssertionError("built")),
+        patch(
+            "kubeflow_mcp.common.utils.get_default_kubeconfig_namespace",
+            return_value="kube-default",
+        ),
+    ):
+        assert get_optimizer_effective_namespace(None) == "kube-default"
+        assert get_optimizer_effective_namespace("explicit") == "explicit"

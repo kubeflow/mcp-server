@@ -31,7 +31,7 @@ Orchestrator Agent
                        │  Kubeflow SDK
                        ▼
                Trainer (23 tools) · Spark (5 tools, SparkConnect sessions)
-               Optimizer stub · Hub stub
+               Optimizer (17 tools, Katib experiments) · Hub stub
                        │
                        ▼
                Kubernetes / Kubeflow Trainer v2

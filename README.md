@@ -17,7 +17,7 @@ The Kubeflow MCP Server exposes Kubeflow operations as [Model Context Protocol (
 - **Security-First**: Persona gating (`readonly` by default), namespace allowlists, input validation, and Bearer/JWT HTTP auth
 - **Multi-Platform**: Auto-detects OpenShift, EKS, and GKE with platform-specific guidance
 - **Token-Efficient**: Progressive and semantic tool modes compress tools into 2–3 meta-tools
-- **Modular Clients**: Load only what you need (`trainer`, `spark`, `pipelines`; planned: `optimizer`, `hub`)
+- **Modular Clients**: Load only what you need (`trainer`, `spark`, `pipelines`, `optimizer`; planned: `hub`)
 
 ## Demo
 
@@ -161,6 +161,20 @@ Requires `kubeflow[spark]` extra.
 | **Sessions** | `create_spark_session`, `delete_spark_session` | Provision and delete MCP-managed SparkConnect sessions |
 | **Monitoring** | `get_spark_session_logs` | Read Spark driver logs |
 
+### Optimizer (`--clients optimizer` — 17 tools)
+
+Requires Katib v0.19 on the cluster, and the `katib.kubeflow.org/metrics-collector-injection=enabled` label on the experiment namespace.
+
+| Phase | Tools | Description |
+|-------|-------|-------------|
+| **Planning** | `katib_pre_flight` | Check the Experiment CRD, controller readiness, and admission webhooks |
+| **Discovery** | `list_hpo_experiments`, `get_hpo_experiment`, `get_hpo_experiment_status`, `get_trial`, `get_successful_trials`, `list_suggestions` | Browse Katib experiments, trials, and suggestions |
+| **Optimization** | `create_hpo_experiment`, `create_hpo_experiment_from_spec` | Create experiments from flat parameters or a full `V1beta1Experiment` manifest |
+| **Monitoring** | `get_hpo_experiment_trials`, `get_best_trial`, `get_suggestion`, `get_hpo_experiment_trial_logs`, `get_hpo_experiment_events` | Follow trials and read the best result, trial logs, and events |
+| **Lifecycle** | `wait_for_hpo_experiment`, `update_hpo_experiment`, `delete_hpo_experiment` | Wait for completion, change the trial budget or parallelism, or delete MCP-managed experiments |
+
+Katib has no pause: lowering `parallel_trial_count` makes Katib delete trials, newest first and whatever their state, so `update_hpo_experiment` is destructive and its preview lists those trials. See `optimizer://guides/hpo-patterns`.
+
 ## Personas & Configuration
 
 `--persona` controls which tools are exposed. Each level includes all tools from the level above it:
@@ -178,7 +192,7 @@ Custom personas can also be defined in `~/.kf-mcp-policy.yaml` (see [Architectur
 
 | Flag | Values / Default | Description |
 |------|------------------|-------------|
-| `--clients` | `trainer`, `spark`, `pipelines` *(default: `trainer`)* | Comma-separated client modules to enable |
+| `--clients` | `trainer`, `spark`, `pipelines`, `optimizer` *(default: `trainer`)* | Comma-separated client modules to enable |
 | `--persona` | `readonly` \| `data-scientist` \| `ml-engineer` \| `platform-admin` | Tool access persona |
 | `--mode` | `full` \| `progressive` \| `semantic` | `progressive` (3 meta-tools) and `semantic` (2 meta-tools) reduce token usage |
 | `--instruction-tier` | `full` \| `compact` \| `minimal` | Agent instruction verbosity |

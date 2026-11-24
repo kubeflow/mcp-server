@@ -16,6 +16,7 @@
 
 Mirrors kubeflow SDK's client structure:
 - TrainerClient from kubeflow.trainer
+- OptimizerClient from kubeflow.optimizer
 """
 
 import logging
@@ -33,6 +34,13 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 K8S_TIMEOUT = 5
+
+# Writes that go through admission webhooks need a longer budget than reads.
+# Katib registers a mutating and a validating webhook, each with its own 10s
+# timeout, so a create can legitimately outlive K8S_TIMEOUT while the API server
+# is still waiting on them. Timing out first turns a diagnosable admission
+# failure into an opaque "read timed out", so writes get their own bound.
+K8S_WRITE_TIMEOUT = 30
 
 
 @lru_cache(maxsize=1)
@@ -350,6 +358,27 @@ def get_trainer_ownership(name: str, namespace: str) -> str | None:
         if is_k8s_not_found(e):
             return OWNERSHIP_MISSING
         return None
+
+
+# =============================================================================
+# Optimizer (Katib) namespace resolution
+# =============================================================================
+
+
+def get_optimizer_effective_namespace(namespace: str | None = None) -> str:
+    """Namespace for Katib operations: the explicit argument, else the kubeconfig default.
+
+    The optimizer tools call the Katib API directly, so the default comes from
+    the kubeconfig (or in-cluster ServiceAccount) those calls already use,
+    resolved locally. ``OptimizerClient`` is not built for it: its constructor
+    also builds a Trainer backend that reads a ConfigMap with no request timeout,
+    so an API server that accepts the connection and never answers would hang
+    the call before any bounded Katib request is made.
+
+    Raises:
+        RuntimeError: No kubeconfig is found and the server is not in-cluster.
+    """
+    return namespace or get_default_kubeconfig_namespace()
 
 
 _SPARK_CONNECT_GROUP = "sparkoperator.k8s.io"

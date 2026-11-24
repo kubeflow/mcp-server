@@ -73,6 +73,21 @@ RUNTIME: dict[str, Any] = {
 }
 RUNTIME_PLURALS = {"trainingruntimes", "clustertrainingruntimes"}
 
+# What a GET of one Katib Experiment returns, so update_hpo_experiment can read the
+# live spec and status it previews against instead of a mock.
+KATIB_EXPERIMENT: dict[str, Any] = {
+    "apiVersion": "kubeflow.org/v1beta1",
+    "kind": "Experiment",
+    "metadata": {
+        "name": "hpo-a",
+        "namespace": "default",
+        "resourceVersion": "1",
+        "labels": {"kubeflow-mcp/managed-by": "mcp"},
+    },
+    "spec": {"parallelTrialCount": 3, "maxTrialCount": 12},
+    "status": {"trials": 0},
+}
+
 
 @dataclass
 class FakeKubernetes:
@@ -85,15 +100,19 @@ class FakeKubernetes:
     ) -> Any:
         self.calls.append((method, resource_path))
         params = path_params or {}
+        body: Any = MagicMock()
         if method == "GET" and params.get("plural") in RUNTIME_PLURALS and "name" in params:
-            runtime = copy.deepcopy(RUNTIME)
-            if not async_req:
-                return runtime
-            # The SDK calls with async_req=True and reads the body from thread.get().
-            thread = MagicMock()
-            thread.get.return_value = runtime
-            return thread
-        return MagicMock()
+            body = copy.deepcopy(RUNTIME)
+        elif method == "GET" and params.get("plural") == "experiments" and "name" in params:
+            body = copy.deepcopy(KATIB_EXPERIMENT)
+        elif method == "GET" and params.get("plural") == "trials":
+            body = {"items": []}
+        if not async_req or isinstance(body, MagicMock):
+            return body
+        # The SDK calls with async_req=True and reads the body from thread.get().
+        thread = MagicMock()
+        thread.get.return_value = body
+        return thread
 
     @property
     def writes(self) -> list[tuple[str, str]]:
