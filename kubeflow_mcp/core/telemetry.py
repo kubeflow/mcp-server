@@ -160,7 +160,9 @@ def _instrument_http_client() -> None:
 
     instrumentor = URLLib3Instrumentor()
     if instrumentor.is_instrumented_by_opentelemetry:
-        return
+        # Reconfigure existing instrumentation so a prior caller cannot leave
+        # request/response header capture enabled, without stacking wrappers.
+        instrumentor.uninstrument()
     instrumentor.instrument(captured_request_headers=[], captured_response_headers=[])
 
 

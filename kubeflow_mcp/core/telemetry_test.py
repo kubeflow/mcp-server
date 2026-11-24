@@ -203,13 +203,16 @@ def test_instrument_http_client_skips_when_package_missing(
 def test_instrument_http_client_pins_header_capture_off(
     monkeypatch: pytest.MonkeyPatch, already_instrumented: bool
 ) -> None:
-    instrument_calls: list[dict[str, object]] = []
+    events: list[tuple[str, dict[str, object] | None]] = []
 
     class _FakeInstrumentor:
         is_instrumented_by_opentelemetry = already_instrumented
 
+        def uninstrument(self) -> None:
+            events.append(("uninstrument", None))
+
         def instrument(self, **kwargs: object) -> None:
-            instrument_calls.append(kwargs)
+            events.append(("instrument", kwargs))
 
     fake_module = ModuleType("opentelemetry.instrumentation.urllib3")
     fake_module.URLLib3Instrumentor = _FakeInstrumentor  # type: ignore[attr-defined]
@@ -217,16 +220,19 @@ def test_instrument_http_client_pins_header_capture_off(
 
     _real_instrument_http_client()
 
+    expected_instrument = (
+        "instrument",
+        {"captured_request_headers": [], "captured_response_headers": []},
+    )
     if already_instrumented:
-        assert instrument_calls == []
+        assert events == [("uninstrument", None), expected_instrument]
     else:
-        assert instrument_calls == [
-            {"captured_request_headers": [], "captured_response_headers": []}
-        ]
+        assert events == [expected_instrument]
 
 
+@pytest.mark.parametrize("pre_instrumented", [False, True])
 def test_kubernetes_call_is_traced_without_recording_the_token(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, pre_instrumented: bool
 ) -> None:
     """A real Kubernetes client call yields a span that never carries the bearer token."""
     pytest.importorskip("opentelemetry.sdk.trace")
@@ -267,6 +273,9 @@ def test_kubernetes_call_is_traced_without_recording_the_token(
 
     instrumentor = urllib3_instrumentation.URLLib3Instrumentor()
     try:
+        if pre_instrumented:
+            # Simulate prior instrumentation that honored the capture-all env vars.
+            instrumentor.instrument()
         _real_instrument_http_client()
 
         config = k8s_client.Configuration(host=f"http://127.0.0.1:{server.server_port}")
