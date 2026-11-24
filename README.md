@@ -19,21 +19,6 @@ The Kubeflow MCP Server exposes Kubeflow operations as [Model Context Protocol (
 - **Token-Efficient**: Progressive and semantic tool modes compress tools into 2–3 meta-tools
 - **Modular Clients**: Load only what you need (`trainer`, `spark`, `pipelines`; planned: `optimizer`, `hub`)
 
-## Agent Skills
-
-[Agent Skills catalog](docs/skills/catalog.md): a skeleton for independently released skill
-plugins. Register the catalog, then install a plugin by replacing `<plugin-name>` with its name:
-
-```bash
-# Claude Code
-claude plugin marketplace add kubeflow/mcp-server
-claude plugin install "<plugin-name>@kubeflow-mcp"
-
-# Codex CLI
-codex plugin marketplace add kubeflow/mcp-server
-codex plugin add "<plugin-name>@kubeflow-mcp"
-```
-
 ## Demo
 
 [![Kubeflow MCP Server](https://img.youtube.com/vi/cZ2BP5hQjc8/0.jpg)](https://youtu.be/cZ2BP5hQjc8)
@@ -139,6 +124,21 @@ Agent → list_runtimes()                            # torchtune-gemma-2b found
 Agent → fine_tune(..., confirmed=False)            # Returns preview for approval
 Agent → fine_tune(..., confirmed=True)             # TrainJob "train-gemma-abc" created
 Agent → get_training_logs("train-gemma-abc")       # Streams training progress
+```
+
+## Agent Skills
+
+[Agent Skills catalog](docs/skills/catalog.md): a skeleton for independently released skill
+plugins. Register the catalog, then install a plugin by replacing `<plugin-name>` with its name:
+
+```bash
+# Claude Code
+claude plugin marketplace add kubeflow/mcp-server
+claude plugin install "<plugin-name>@kubeflow-mcp"
+
+# Codex CLI
+codex plugin marketplace add kubeflow/mcp-server
+codex plugin add "<plugin-name>@kubeflow-mcp"
 ```
 
 ## Available Tools
