@@ -138,12 +138,14 @@ These endpoints do **not** require authentication and are safe to use from load-
 
 ```bash
 curl http://localhost:8000/health   # liveness  — server process is up
-curl http://localhost:8000/ready    # readiness — clients loaded, resources ready
+curl http://localhost:8000/ready    # readiness — clients/resources loaded, K8s/CRD/RBAC checks pass
 ```
 
 `/ready` returns `200` when client modules are loaded, packaged resources are present, and
 Kubernetes/CRD/RBAC readiness diagnostics pass. A 503 means a client module failed to load,
 a packaged resource is missing, or cluster prerequisites failed — check server logs for details.
+When running in Docker without a reachable cluster, `/ready` returns `503` while `/health`
+stays `200`; this is expected.
 
 ### 3. MCP Inspector (no LLM required)
 
