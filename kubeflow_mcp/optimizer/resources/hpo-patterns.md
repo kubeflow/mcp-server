@@ -137,12 +137,14 @@ genuinely unordered options such as optimizer names or activation functions.
 ## Metrics collection
 
 `primary_container_name` names the container Katib collects metrics from, and it
-is derived from `trial_template`: the container in the template's pod spec (for a
-Kubeflow training job, the Master, Chief or Launcher replica's), or `node` when
-the template has none (a `TrainJob`). Set it explicitly only when the
-metric-producing container is not the one that gets picked, such as a pod whose
-first container is a sidecar. Katib rejects every trial pod that has no container
-of that name, so no trial starts.
+is derived from `trial_template`: a container every pod spec in it has, in the
+order of the first (for a Kubeflow training job, the Master, Chief or Launcher
+replica), or `node` when the template has none (a `TrainJob`). Set it explicitly
+only when the metric-producing container is not the one that gets picked, such as
+a pod whose first container is a sidecar. Katib looks the name up in every trial
+pod, workers included, and rejects a pod without it, so no trial starts; both
+create tools reject such a template before the preview. Name the container the
+same in every replica.
 
 ## Budget and response limits
 

@@ -305,37 +305,68 @@ def test_primary_container_prefers_node_over_a_sidecar():
     assert spec["trialTemplate"]["primaryContainerName"] == "node"
 
 
-def _replica(container, image="my/trainer:1"):
-    return {"template": {"spec": {"containers": [{"name": container, "image": image}]}}}
+LR_ONLY = {"lr": {"min": 1, "max": 2}}
 
 
-@pytest.mark.parametrize(
-    ("kind", "replicas_key", "primary"),
-    [
-        ("PyTorchJob", "pytorchReplicaSpecs", "Master"),
-        ("TFJob", "tfReplicaSpecs", "Chief"),
-        ("XGBoostJob", "xgbReplicaSpecs", "Master"),
-        ("MPIJob", "mpiReplicaSpecs", "Launcher"),
-    ],
-)
-def test_primary_container_comes_from_the_primary_replica(kind, replicas_key, primary):
-    """Katib's default primaryPodLabels pick the job-role=master pod: the
-    Master, Chief or Launcher replica, whatever order the replicas are listed in."""
-    template = {
+def _replica(*containers, image="my/trainer:1"):
+    return {"template": {"spec": {"containers": [{"name": c, "image": image} for c in containers]}}}
+
+
+def _training_job(kind, replicas_key, primary, primary_containers, worker_containers):
+    """A training-operator job listing its Worker replica before the primary one."""
+    return {
         "apiVersion": "kubeflow.org/v1",
         "kind": kind,
         "spec": {
             replicas_key: {
-                "Worker": _replica("worker-main"),
-                primary: _replica("main", image="my/trainer:${trialParameters.lr}"),
+                "Worker": _replica(*worker_containers),
+                primary: _replica(*primary_containers, image="my/trainer:${trialParameters.lr}"),
             }
         },
     }
+
+
+TRAINING_JOBS = [
+    ("PyTorchJob", "pytorchReplicaSpecs", "Master"),
+    ("TFJob", "tfReplicaSpecs", "Chief"),
+    ("XGBoostJob", "xgbReplicaSpecs", "Master"),
+    ("MPIJob", "mpiReplicaSpecs", "Launcher"),
+]
+
+
+@pytest.mark.parametrize(("kind", "replicas_key", "primary"), TRAINING_JOBS)
+def test_primary_container_comes_from_the_primary_replica(kind, replicas_key, primary):
+    """Katib's default primaryPodLabels pick the job-role=master pod: the
+    Master, Chief or Launcher replica, whatever order the replicas are listed in.
+    Its container order decides between names every replica has."""
+    template = _training_job(kind, replicas_key, primary, ("main", "sidecar"), ("sidecar", "main"))
     with cluster():
-        spec = _create(search_space={"lr": {"min": 1, "max": 2}}, trial_template=template)[
-            "config"
-        ]["spec"]
+        spec = _create(search_space=LR_ONLY, trial_template=template)["config"]["spec"]
     assert spec["trialTemplate"]["primaryContainerName"] == "main"
+
+
+@pytest.mark.parametrize(("kind", "replicas_key", "primary"), TRAINING_JOBS)
+def test_a_replica_without_the_primary_container_is_rejected(kind, replicas_key, primary):
+    """Katib sets KATIB_TRIAL_NAME on the primary container of every trial pod,
+    workers included, and rejects a pod without one, so no trial would start."""
+    template = _training_job(kind, replicas_key, primary, ("main",), ("worker-main",))
+    with cluster() as api:
+        result = _create(search_space=LR_ONLY, trial_template=template, confirmed=True)
+    assert result["error_code"] == "VALIDATION_ERROR"
+    assert result["error"].startswith(
+        f"Container 'main' is missing from trial_template.spec.{replicas_key}.Worker"
+        ".template.spec.containers (has ['worker-main'])"
+    )
+    api.create_namespaced_custom_object.assert_not_called()
+
+
+def test_the_default_skips_a_container_the_workers_lack():
+    template = _training_job(
+        "PyTorchJob", "pytorchReplicaSpecs", "Master", ("debug", "pytorch"), ("pytorch",)
+    )
+    with cluster():
+        spec = _create(search_space=LR_ONLY, trial_template=template)["config"]["spec"]
+    assert spec["trialTemplate"]["primaryContainerName"] == "pytorch"
 
 
 def test_a_pytorchjob_does_not_default_to_node():
@@ -357,11 +388,43 @@ def test_a_pytorchjob_does_not_default_to_node():
 
 
 def test_explicit_primary_container_wins():
+    template = _training_job(
+        "PyTorchJob", "pytorchReplicaSpecs", "Master", ("main", "sidecar"), ("sidecar", "main")
+    )
     with cluster():
-        spec = _create(trial_template=JOB_TEMPLATE, primary_container_name="sidecar")["config"][
-            "spec"
-        ]
+        spec = _create(
+            search_space=LR_ONLY, trial_template=template, primary_container_name="sidecar"
+        )["config"]["spec"]
     assert spec["trialTemplate"]["primaryContainerName"] == "sidecar"
+
+
+@pytest.mark.parametrize(
+    ("template", "search_space", "path"),
+    [
+        (JOB_TEMPLATE, SEARCH_SPACE, "trial_template.spec.template.spec"),
+        (
+            _training_job(
+                "PyTorchJob", "pytorchReplicaSpecs", "Master", ("main", "sidecar"), ("main",)
+            ),
+            LR_ONLY,
+            "trial_template.spec.pytorchReplicaSpecs.Worker.template.spec",
+        ),
+    ],
+)
+def test_an_explicit_primary_container_is_checked_against_every_replica(
+    template, search_space, path
+):
+    with cluster() as api:
+        result = _create(
+            search_space=search_space,
+            trial_template=template,
+            primary_container_name="sidecar",
+            confirmed=True,
+        )
+    assert result["error_code"] == "VALIDATION_ERROR"
+    assert result["error"].startswith(f"Container 'sidecar' is missing from {path}.containers")
+    assert "primary_container_name" in result["hint"]
+    api.create_namespaced_custom_object.assert_not_called()
 
 
 def test_create_failure_maps_to_sdk_error():
@@ -803,6 +866,37 @@ def test_from_spec_applies_katib_name_rules():
         result = opt.create_hpo_experiment_from_spec(spec=manifest)
     assert result["error_code"] == "VALIDATION_ERROR"
     assert result["error"].startswith("spec.metadata.name must start with a letter")
+
+
+def _manifest_running(trial_spec, primary_container):
+    manifest = _manifest()
+    manifest["spec"]["trialTemplate"] = {
+        "primaryContainerName": primary_container,
+        "trialSpec": trial_spec,
+    }
+    return manifest
+
+
+def test_from_spec_checks_the_primary_container_against_every_replica():
+    template = _training_job("PyTorchJob", "pytorchReplicaSpecs", "Master", ("main",), ("worker",))
+    with cluster() as api:
+        result = opt.create_hpo_experiment_from_spec(
+            spec=_manifest_running(template, "main"), confirmed=True
+        )
+    assert result["error_code"] == "VALIDATION_ERROR"
+    assert result["error"].startswith(
+        "Container 'main' is missing from spec.spec.trialTemplate.trialSpec.spec"
+        ".pytorchReplicaSpecs.Worker.template.spec.containers (has ['worker'])"
+    )
+    assert "primaryContainerName" in result["hint"]
+    api.create_namespaced_custom_object.assert_not_called()
+
+
+def test_from_spec_accepts_a_primary_container_every_replica_has():
+    template = _training_job("PyTorchJob", "pytorchReplicaSpecs", "Master", ("main",), ("main",))
+    with cluster():
+        result = opt.create_hpo_experiment_from_spec(spec=_manifest_running(template, "main"))
+    assert result["status"] == "preview"
 
 
 @pytest.mark.parametrize(

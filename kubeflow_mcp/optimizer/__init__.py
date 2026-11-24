@@ -365,8 +365,9 @@ OPTIMIZER TOOL SELECTION:
     cmaes, sobol (hyperband needs algorithm settings: use the spec tool)
   - trial_template is the Katib trialSpec (a TrainJob, batch/v1 Job or Kubeflow training
     job); reference every searched param as ${trialParameters.<name>}
-  - primary_container_name is derived from trial_template; set it only when the
-    container Katib should collect metrics from is not the one it picks
+  - primary_container_name is derived from trial_template and must name a container
+    every replica has; set it only when the container Katib should collect metrics
+    from is not the one it picks
   - ALWAYS preview first (confirmed=False), then show preview and wait for approval
 - Raw V1beta1Experiment spec → create_hpo_experiment_from_spec() — escape hatch for
   early stopping, custom metrics collectors, resume policies and NAS

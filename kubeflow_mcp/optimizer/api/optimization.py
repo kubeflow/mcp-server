@@ -217,28 +217,55 @@ def _pod_specs(trial_spec: Any, field: str) -> list[tuple[str, dict[str, Any]]]:
     ]
 
 
+def _pod_container_names(trial_spec: Any, field: str) -> list[tuple[str, list[str]]]:
+    """``(pod spec path, container names)`` for every pod spec with a container list."""
+    found: list[tuple[str, list[str]]] = []
+    for path, pod_spec in _pod_specs(trial_spec, field):
+        containers = pod_spec.get("containers")
+        if isinstance(containers, list):
+            names = [c["name"] for c in containers if isinstance(c, dict) and c.get("name")]
+            found.append((path, names))
+    return found
+
+
 def _resolve_primary_container(trial_template: dict[str, Any], override: str | None) -> str:
     """Name the container Katib should collect metrics from.
 
-    Katib looks ``primaryContainerName`` up in every trial pod and rejects a pod
-    that lacks it, so a wrong name means no trial ever starts. The name is read
-    off the first pod spec the template writes out, which for a training-operator
-    job is the primary replica's (its framework container, e.g. ``pytorch``).
+    Katib needs that name in every trial pod (see :func:`_missing_primary_container`),
+    so the default is a container every pod spec in the template has, in the order
+    of the first one: for a training-operator job, the primary replica's (its
+    framework container, e.g. ``pytorch``). When no name is shared, the primary
+    pod's container is returned and the check rejects it.
     """
     if override:
         return override
 
-    for _, pod_spec in _pod_specs(trial_template, "trial_template"):
-        containers = pod_spec.get("containers")
-        if not isinstance(containers, list):
-            continue
-        names = [c["name"] for c in containers if isinstance(c, dict) and c.get("name")]
-        if names:
-            # A sidecar can sort first, so prefer the conventional name when present.
-            return trainer_constants.NODE if trainer_constants.NODE in names else names[0]
-    # TrainJob and other runtime-backed templates have no inline containers;
-    # Trainer names the workload container "node".
-    return trainer_constants.NODE
+    named = [names for _, names in _pod_container_names(trial_template, "trial_template") if names]
+    if not named:
+        # TrainJob and other runtime-backed templates have no inline containers;
+        # Trainer names the workload container "node".
+        return trainer_constants.NODE
+    shared = [n for n in named[0] if all(n in names for names in named[1:])] or named[0]
+    # A sidecar can sort first, so prefer the conventional name when present.
+    return trainer_constants.NODE if trainer_constants.NODE in shared else shared[0]
+
+
+def _missing_primary_container(trial_spec: Any, container: str, field: str) -> str | None:
+    """Describe the first pod spec Katib would reject for lacking ``container``, if any.
+
+    Katib's pod webhook (``mutatePodEnv`` in v0.19.0) sets KATIB_TRIAL_NAME on the
+    primary container of every trial pod, worker replicas included, before it
+    looks at primaryPodLabels, and rejects a pod that has no container of that
+    name. One replica naming its container differently stops every trial.
+    """
+    for path, names in _pod_container_names(trial_spec, field):
+        if container not in names:
+            return (
+                f"Container '{container}' is missing from {path}.containers (has {names}). "
+                "Katib requires the primary container in every trial pod, so no trial "
+                "could start"
+            )
+    return None
 
 
 # Katib substitutes ${trialParameters.<name>} throughout the trial spec, so an
@@ -358,7 +385,7 @@ def _build_experiment(
     max_trial_count: int,
     parallel_trial_count: int,
     max_failed_trials: int | None,
-    primary_container_name: str | None = None,
+    primary_container_name: str,
 ) -> models.V1beta1Experiment:
     """Assemble the Experiment CR, stamped with the MCP ownership label."""
     return models.V1beta1Experiment(
@@ -381,9 +408,7 @@ def _build_experiment(
             algorithm=models.V1beta1AlgorithmSpec(algorithmName=algorithm),
             trialTemplate=models.V1beta1TrialTemplate(
                 retain=True,
-                primaryContainerName=_resolve_primary_container(
-                    trial_template, primary_container_name
-                ),
+                primaryContainerName=primary_container_name,
                 trialParameters=[
                     models.V1beta1TrialParameterSpec(name=p.name, reference=p.name)
                     for p in parameters
@@ -472,9 +497,10 @@ def create_hpo_experiment(
         max_trial_count: Total trials to run. Default 10.
         parallel_trial_count: Trials to run concurrently. Default 2.
         max_failed_trials: Failed trials tolerated before the experiment fails.
-        primary_container_name: Container Katib collects metrics from. Defaults
-            to the container named in ``trial_template``, or Trainer's ``node``
-            when the template carries no inline pod spec (a TrainJob).
+        primary_container_name: Container Katib collects metrics from; every pod
+            spec in ``trial_template`` must have one of that name. Defaults to a
+            container they all share, in the primary replica's order, or
+            Trainer's ``node`` when the template has no inline pod spec (a TrainJob).
         namespace: K8s namespace. Uses default from kubeconfig when omitted.
         confirmed: Set ``True`` to submit. ``False`` returns a preview.
 
@@ -492,6 +518,20 @@ def create_hpo_experiment(
     template_problem = _template_problem(trial_template)
     if template_problem is not None:
         return ToolError(error=template_problem, error_code=ErrorCode.VALIDATION_ERROR).model_dump()
+
+    primary_container = _resolve_primary_container(trial_template, primary_container_name)
+    container_problem = _missing_primary_container(
+        trial_template, primary_container, "trial_template"
+    )
+    if container_problem is not None:
+        return ToolError(
+            error=container_problem,
+            error_code=ErrorCode.VALIDATION_ERROR,
+            hint=(
+                "Give the metrics container the same name in every replica, or pass "
+                "primary_container_name naming a container they all have."
+            ),
+        ).model_dump()
 
     # (is_invalid, message) pairs, evaluated in order; the first failure wins.
     # Kept as a table so adding a rule does not add another return path.
@@ -573,7 +613,7 @@ def create_hpo_experiment(
             max_trial_count=max_trial_count,
             parallel_trial_count=parallel_trial_count,
             max_failed_trials=max_failed_trials,
-            primary_container_name=primary_container_name,
+            primary_container_name=primary_container,
         ).to_dict()
     except (TypeError, ValueError) as e:
         return ToolError(error=str(e), error_code=ErrorCode.VALIDATION_ERROR).model_dump()
@@ -705,11 +745,25 @@ def create_hpo_experiment_from_spec(
         experiment_spec.get("trialTemplate") if isinstance(experiment_spec, dict) else None
     )
     if isinstance(trial_template, dict):
-        image_err = _validate_trial_images(
-            trial_template.get("trialSpec"), "spec.spec.trialTemplate.trialSpec"
-        )
+        trial_spec = trial_template.get("trialSpec")
+        image_err = _validate_trial_images(trial_spec, "spec.spec.trialTemplate.trialSpec")
         if image_err is not None:
             return image_err.model_dump()
+        container = trial_template.get("primaryContainerName")
+        container_problem = (
+            _missing_primary_container(trial_spec, container, "spec.spec.trialTemplate.trialSpec")
+            if isinstance(container, str) and container
+            else None
+        )
+        if container_problem is not None:
+            return ToolError(
+                error=container_problem,
+                error_code=ErrorCode.VALIDATION_ERROR,
+                hint=(
+                    "Set spec.spec.trialTemplate.primaryContainerName to a container "
+                    "every replica has."
+                ),
+            ).model_dump()
 
     # Check the namespace the experiment will actually be created in. The spec
     # can name its own, so checking only the argument would let
