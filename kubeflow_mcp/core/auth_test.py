@@ -75,23 +75,23 @@ class TestBuildAuthProvider:
         config = AuthConfig()
         assert build_auth_provider(config) is None
 
-    def test_returns_none_when_empty_strings(self):
+    def test_returns_none_when_empty_strings(self) -> None:
         config = AuthConfig(auth_token="", jwks_uri="")
         assert build_auth_provider(config) is None
 
-    def test_returns_api_key_verifier(self):
+    def test_returns_api_key_verifier(self) -> None:
         config = AuthConfig(auth_token="my-token")
         provider = build_auth_provider(config)
         assert isinstance(provider, APIKeyVerifier)
 
-    def test_returns_jwt_verifier(self):
+    def test_returns_jwt_verifier(self) -> None:
         config = AuthConfig(jwks_uri="https://example.com/jwks.json")
         provider = build_auth_provider(config)
 
         assert isinstance(provider, JWTVerifier)
         assert provider.jwks_uri == "https://example.com/jwks.json"
 
-    def test_returns_jwt_verifier_with_issuer_and_audience(self):
+    def test_returns_jwt_verifier_with_issuer_and_audience(self) -> None:
         config = AuthConfig(
             jwks_uri="https://example.com/jwks.json",
             issuer="https://issuer.example.com",
@@ -104,7 +104,7 @@ class TestBuildAuthProvider:
         assert provider.issuer == "https://issuer.example.com"
         assert provider.audience == "kubeflow-mcp"
 
-    def test_jwks_uri_takes_precedence(self):
+    def test_jwks_uri_takes_precedence(self) -> None:
         config = AuthConfig(auth_token="my-token", jwks_uri="https://example.com/jwks.json")
         provider = build_auth_provider(config)
 
@@ -112,13 +112,13 @@ class TestBuildAuthProvider:
 
 
 class TestAuthContext:
-    def test_defaults(self):
+    def test_defaults(self) -> None:
         ctx = AuthContext()
         assert ctx.user is None
         assert ctx.groups is None
         assert ctx.impersonate is None
 
-    def test_custom_values(self):
+    def test_custom_values(self) -> None:
         ctx = AuthContext(
             user="test-user",
             groups=["kubeflow-admins", "data-engineers"],
@@ -130,7 +130,7 @@ class TestAuthContext:
 
 
 class TestJWTVerifierIntegration:
-    async def test_verify_token_invalid_jwt_format(self):
+    async def test_verify_token_invalid_jwt_format(self) -> None:
         config = AuthConfig(jwks_uri="https://example.com/jwks.json")
         provider = build_auth_provider(config)
         assert isinstance(provider, JWTVerifier)
@@ -138,7 +138,7 @@ class TestJWTVerifierIntegration:
         assert result is None
 
     @patch.object(JWTVerifier, "load_access_token", new_callable=AsyncMock)
-    async def test_verify_token_delegates_to_load_access_token(self, mock_load):
+    async def test_verify_token_delegates_to_load_access_token(self, mock_load: AsyncMock) -> None:
         token_obj = AccessToken(
             token="valid.jwt.token",
             client_id="test-client",
@@ -155,7 +155,7 @@ class TestJWTVerifierIntegration:
         mock_load.assert_awaited_once_with("valid.jwt.token")
 
     @patch.object(JWTVerifier, "load_access_token", new_callable=AsyncMock)
-    async def test_verify_token_expired_or_invalid_claims(self, mock_load):
+    async def test_verify_token_expired_or_invalid_claims(self, mock_load: AsyncMock) -> None:
         mock_load.return_value = None
 
         config = AuthConfig(jwks_uri="https://example.com/jwks.json")

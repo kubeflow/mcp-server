@@ -568,7 +568,7 @@ async def test_full_mode_instructions_have_no_tool_access_block():
     assert "TOOL ACCESS" not in instructions
 
 
-def test_configure_resilience():
+def test_configure_resilience() -> None:
     import kubeflow_mcp.core.server as server_mod
 
     previous = server_mod._rate_limiter
@@ -581,7 +581,9 @@ def test_configure_resilience():
         server_mod._rate_limiter = previous
 
 
-def test_sections_for_persona_handles_client_import_error(monkeypatch):
+def test_sections_for_persona_handles_client_import_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from kubeflow_mcp.core.server import _sections_for_persona
 
     patched_clients = {
@@ -595,7 +597,7 @@ def test_sections_for_persona_handles_client_import_error(monkeypatch):
     assert len(sections) > 0
 
 
-def test_is_blocked_variants():
+def test_is_blocked_variants() -> None:
     from kubeflow_mcp.core.server import _is_blocked
 
     # Non-dict data returns False
@@ -617,7 +619,7 @@ def test_is_blocked_variants():
     assert _is_blocked({"success": True, "data": {"compatible": True, "blockers": []}}) is False
 
 
-def test_is_preview_variants():
+def test_is_preview_variants() -> None:
     from kubeflow_mcp.core.server import _is_preview
 
     # status="preview" returns True for any tool
