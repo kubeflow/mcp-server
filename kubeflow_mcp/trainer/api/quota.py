@@ -317,6 +317,49 @@ def _check_single_quota(
     return None
 
 
+def _get_namespace_limit_range_defaults(
+    effective_ns: str,
+    api: Any,
+) -> tuple[Decimal | None, Decimal | None]:
+    """Retrieve default CPU and memory requests from namespace LimitRange resources.
+
+    If a namespace has a LimitRange defining defaultRequest (or default limits) for
+    CPU or memory, pods submitted without explicit compute requests are mutated at
+    admission to receive those defaults, altering their effective QoS class away from BestEffort.
+    """
+    try:
+        lr_list = api.list_namespaced_limit_range(
+            namespace=effective_ns,
+            _request_timeout=K8S_TIMEOUT,
+        )
+        items = getattr(lr_list, "items", []) or []
+        default_cpu: Decimal | None = None
+        default_mem: Decimal | None = None
+        for lr in items:
+            spec = getattr(lr, "spec", None)
+            limits = getattr(spec, "limits", []) or []
+            for item in limits:
+                default_req = (
+                    getattr(item, "default_request", None)
+                    or getattr(item, "defaultRequest", None)
+                    or {}
+                )
+                if isinstance(default_req, dict):
+                    if "cpu" in default_req and default_cpu is None:
+                        default_cpu = _to_decimal(default_req["cpu"])
+                    if "memory" in default_req and default_mem is None:
+                        default_mem = _to_decimal(default_req["memory"])
+                default_lim = getattr(item, "default", None) or {}
+                if isinstance(default_lim, dict):
+                    if "cpu" in default_lim and default_cpu is None:
+                        default_cpu = _to_decimal(default_lim["cpu"])
+                    if "memory" in default_lim and default_mem is None:
+                        default_mem = _to_decimal(default_lim["memory"])
+        return default_cpu, default_mem
+    except Exception:
+        return None, None
+
+
 def check_resource_quota(
     namespace: str | None = None,
     resources_per_node: dict[str, Any] | None = None,
@@ -364,13 +407,22 @@ def check_resource_quota(
     nodes_dec = Decimal(max(1, num_nodes))
     req_cpu, req_mem, req_gpu = _extract_requested_resources(resources_per_node or {}, nodes_dec)
 
+    effective_cpu = req_cpu
+    effective_mem = req_mem
+    if effective_cpu is None or effective_mem is None:
+        def_cpu, def_mem = _get_namespace_limit_range_defaults(effective_ns, api)
+        if effective_cpu is None and def_cpu is not None:
+            effective_cpu = def_cpu * nodes_dec
+        if effective_mem is None and def_mem is not None:
+            effective_mem = def_mem * nodes_dec
+
     for q in items:
         q_name, hard, used, scopes = _extract_quota_data(q)
         if not hard:
             continue
-        # Skip BestEffort-only quotas if workload requests compute resources (CPU or memory).
-        # In Kubernetes, pods without CPU/memory requests or limits have BestEffort QoS.
-        if scopes == ["BestEffort"] and (req_cpu or req_mem):
+        # Skip BestEffort-only quotas if workload requests compute resources (or receives them via LimitRange defaults).
+        # In Kubernetes, pods without compute requests or limits have BestEffort QoS.
+        if scopes == ["BestEffort"] and (effective_cpu or effective_mem):
             continue
 
         err = _check_single_quota(

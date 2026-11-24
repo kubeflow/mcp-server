@@ -223,6 +223,36 @@ class TestResourceQuotaChecks:
         assert err.error_code == ErrorCode.QUOTA_EXCEEDED
         assert "Resource quota 'best-effort-quota' exceeded" in err.error
 
+    def test_check_resource_quota_best_effort_scope_skipped_with_limit_range_default(self) -> None:
+        quota = _make_resource_quota(
+            name="best-effort-quota",
+            hard={"count/pods": "1"},
+            used={"count/pods": "1"},
+            scopes=["BestEffort"],
+        )
+        limit_range = SimpleNamespace(
+            spec=SimpleNamespace(
+                limits=[
+                    SimpleNamespace(
+                        default_request={"cpu": "500m", "memory": "512Mi"},
+                    )
+                ]
+            )
+        )
+        mock_api = MagicMock()
+        mock_api.list_namespaced_resource_quota.return_value = SimpleNamespace(items=[quota])
+        mock_api.list_namespaced_limit_range.return_value = SimpleNamespace(items=[limit_range])
+
+        # Even though workload only requested GPU, the namespace LimitRange injects default CPU/memory requests,
+        # changing effective QoS to Burstable and skipping the BestEffort quota.
+        err = check_resource_quota(
+            namespace="kubeflow-user",
+            resources_per_node={"gpu": 1},
+            num_nodes=1,
+            core_v1_api=mock_api,
+        )
+        assert err is None
+
 
 class TestGetNamespaceResourceQuotas:
     def test_get_namespace_resource_quotas_success(self) -> None:
