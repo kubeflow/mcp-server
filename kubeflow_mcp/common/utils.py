@@ -357,7 +357,7 @@ _SPARK_CONNECT_VERSION = "v1alpha1"
 _SPARK_CONNECT_PLURAL = "sparkconnects"
 
 
-SparkOwnership = Literal["managed", "unmanaged", "not_found", "unknown"]
+SparkOwnership = Literal["managed", "unmanaged", "not_found", "forbidden", "unknown"]
 SPARK_CREATION_LABEL = "kubeflow-mcp/creation-id"
 
 
@@ -402,7 +402,8 @@ def get_spark_session_ownership(name: str, namespace: str) -> SparkOwnership:
         ``"managed"``: session carries the MCP ownership label.
         ``"unmanaged"``: session exists but lacks the label.
         ``"not_found"``: no such session in *namespace*.
-        ``"unknown"``: the check could not be performed (API error, permissions).
+        ``"forbidden"``: the caller may not read the session (401/403).
+        ``"unknown"``: the check could not be performed (any other API error).
     """
     try:
         api = get_custom_objects_api()
@@ -415,10 +416,12 @@ def get_spark_session_ownership(name: str, namespace: str) -> SparkOwnership:
             _request_timeout=K8S_TIMEOUT,
         )
     except Exception as e:
-        from kubeflow_mcp.common.types import is_k8s_not_found
+        from kubeflow_mcp.common.types import is_k8s_forbidden, is_k8s_not_found
 
         if is_k8s_not_found(e):
             return "not_found"
+        if is_k8s_forbidden(e):
+            return "forbidden"
         return "unknown"
 
     labels = (obj or {}).get("metadata", {}).get("labels", {}) or {}

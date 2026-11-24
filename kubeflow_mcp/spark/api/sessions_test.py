@@ -537,6 +537,27 @@ class TestDeleteOwnershipGuard:
         assert out["success"] is False
         assert out["error_code"] == "SDK_ERROR"
 
+    @pytest.mark.parametrize("confirmed", [False, True])
+    def test_forbidden_ownership_read_is_permission_denied(self, spark_persona, confirmed):
+        """A 403 on the ownership read is the caller's RBAC, not an outage — even a
+        preview must not report it as SDK_ERROR, which would count against the breaker."""
+        spark_persona("data-scientist")
+        with patch.object(sessions, "get_spark_session_ownership", return_value="forbidden"):
+            out = sessions.delete_spark_session("x", namespace="team-b", confirmed=confirmed)
+        assert out["error_code"] == "PERMISSION_DENIED"
+        assert out.get("status") != "preview"
+
+    def test_forbidden_delete_call_is_permission_denied(self, spark_persona, mock_spark_client):
+        from kubernetes.client.exceptions import ApiException
+
+        spark_persona("data-scientist")
+        error = RuntimeError("delete failed")
+        error.__cause__ = ApiException(status=403, reason="Forbidden")
+        mock_spark_client.delete_session.side_effect = error
+        with patch.object(sessions, "get_spark_session_ownership", return_value="managed"):
+            out = sessions.delete_spark_session("x", namespace="default", confirmed=True)
+        assert out["error_code"] == "PERMISSION_DENIED"
+
     def test_guard_runs_before_preview(self, spark_persona):
         """An unowned session must be refused at preview time, not after the
         user has already confirmed."""
