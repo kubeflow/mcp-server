@@ -126,6 +126,21 @@ Agent → fine_tune(..., confirmed=True)             # TrainJob "train-gemma-abc
 Agent → get_training_logs("train-gemma-abc")       # Streams training progress
 ```
 
+## Agent Skills
+
+[Agent Skills catalog](docs/skills/catalog.md): a skeleton for independently released skill
+plugins. Register the catalog, then install a plugin by replacing `<plugin-name>` with its name:
+
+```bash
+# Claude Code
+claude plugin marketplace add kubeflow/mcp-server
+claude plugin install "<plugin-name>@kubeflow-mcp"
+
+# Codex CLI
+codex plugin marketplace add kubeflow/mcp-server
+codex plugin add "<plugin-name>@kubeflow-mcp"
+```
+
 ## Available Tools
 
 ### Trainer (`--clients trainer`, default — 23 tools)

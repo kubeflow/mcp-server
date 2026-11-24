@@ -1,0 +1,6 @@
+{
+  "name": "kubeflow-mcp",
+  "description": "Catalog for Kubeflow Agent Skills.",
+  "owner": {"name": "Kubeflow contributors"},
+  "plugins": []
+}
