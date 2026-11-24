@@ -491,9 +491,15 @@ def test_serve_http_refuses_to_start_with_bad_auth_config():
         pytest.param({"KUBEFLOW_MCP_JWT_ISSUER": "https://idp.example.com"}, id="no-audience"),
         pytest.param({"KUBEFLOW_MCP_JWT_AUDIENCE": "kubeflow-mcp"}, id="no-issuer"),
         pytest.param({"KUBEFLOW_MCP_AUTH_TOKEN": "secret"}, id="api-key-does-not-cover-it"),
+        pytest.param(
+            {"KUBEFLOW_MCP_JWT_ISSUER": " ", "KUBEFLOW_MCP_JWT_AUDIENCE": " "},
+            id="whitespace-only",
+        ),
     ],
 )
-def test_serve_http_with_incomplete_jwt_env_exits_before_serving(monkeypatch, env):
+def test_serve_http_with_incomplete_jwt_env_exits_before_serving(
+    monkeypatch: pytest.MonkeyPatch, env: dict[str, str]
+) -> None:
     """Real config loading and auth: a JWKS URI without issuer and audience stops serve."""
     monkeypatch.setenv("KUBEFLOW_MCP_JWKS_URI", "https://idp.example.com/.well-known/jwks.json")
     for name, value in env.items():

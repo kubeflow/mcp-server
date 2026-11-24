@@ -242,8 +242,9 @@ All three are required: with a JWKS URI but no issuer or audience the server ref
 because it would otherwise accept any token the identity provider signs, including tokens issued
 to other applications. Set the audience to the value your identity provider puts in the `aud`
 claim of tokens meant for this server (for example the client ID or API identifier you registered
-for it), not one shared with other applications. Tokens must also carry an `exp` claim, and tokens
-whose `nbf` or `iat` is in the future are rejected (60 seconds of clock skew is allowed).
+for it), not one shared with other applications. Tokens must also carry an `exp` claim. A token is
+rejected as soon as its `exp` has passed (there is no leeway), or when its `nbf` or `iat` is more
+than 60 seconds in the future (the allowance for clock skew).
 
 For a defence-in-depth setup, place the server behind an authenticating reverse proxy with TLS in
 addition to the built-in token/JWT check. See
