@@ -759,10 +759,6 @@ class TestGetTrainingEvents:
         mock_client_fn.return_value = _make_mock_client(get_job_events=[event])
         result = get_training_events("my-job")
         assert result["data"]["events"][0]["event_time"] == "2026-01-01T00:00:00Z"
-
-    @pytest.mark.parametrize("field", ["last_timestamp", "first_timestamp"])
-    @patch(PATCH_NS_CHECK, return_value=None)
-    @patch(PATCH_CLIENT)
     def test_legacy_event_timestamp_fallbacks(self, mock_client_fn, _ns, field):
         from datetime import datetime, timezone
 
