@@ -14,3 +14,5 @@ spec:
               value: "true"
             - name: KUBEFLOW_MCP_ALLOWED_HOSTS
               value: "kubeflow-mcp.example.com,kubeflow-mcp:*,kubeflow-mcp.kubeflow-user-example-com.svc:*,kubeflow-mcp.kubeflow-user-example-com.svc.cluster.local:*,localhost:*,127.0.0.1:*,[::1]:*"
+            - name: KUBEFLOW_MCP_ALLOWED_ORIGINS
+              value: "http://kubeflow-mcp.example.com,https://kubeflow-mcp.example.com,http://kubeflow-mcp:*,http://kubeflow-mcp.kubeflow-user-example-com.svc:*,http://kubeflow-mcp.kubeflow-user-example-com.svc.cluster.local:*,http://localhost:*,http://127.0.0.1:*,http://[::1]:*"

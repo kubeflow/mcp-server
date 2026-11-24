@@ -52,8 +52,6 @@ class TestHelmChartValues:
         assert server["port"] == 8000
         assert server["host"] == "0.0.0.0"
         assert "trainer" in server["clients"]
-        assert "spark" in server["clients"]
-        assert "pipelines" in server["clients"]
 
         # Health & readiness probes match core server endpoints
         probes = values["probes"]

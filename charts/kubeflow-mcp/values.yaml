@@ -15,11 +15,10 @@ nameOverride: ""
 fullnameOverride: ""
 
 server:
-  # List of MCP clients to enable: trainer, spark, pipelines, optimizer, hub
+  # List of MCP clients to enable: trainer (additional clients such as spark, pipelines
+  # can be enabled when their respective modules or extras are installed)
   clients:
     - trainer
-    - spark
-    - pipelines
   # Persona for RBAC tool filtering: readonly, data-scientist, ml-engineer, platform-admin
   persona: ml-engineer
   # Tool loading mode: full, progressive, semantic
