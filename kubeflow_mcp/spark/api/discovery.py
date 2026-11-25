@@ -18,7 +18,13 @@ import logging
 from typing import Any
 
 from kubeflow_mcp.common.constants import ErrorCode
-from kubeflow_mcp.common.types import ToolError, ToolResponse, exception_details, is_k8s_not_found
+from kubeflow_mcp.common.types import (
+    ToolError,
+    ToolResponse,
+    exception_details,
+    is_k8s_forbidden,
+    is_k8s_not_found,
+)
 from kubeflow_mcp.common.utils import get_spark_client_for_namespace
 from kubeflow_mcp.core.security import check_namespace_allowed, validate_k8s_name
 from kubeflow_mcp.spark.types import session_info_to_dict
@@ -26,6 +32,11 @@ from kubeflow_mcp.spark.types import session_info_to_dict
 logger = logging.getLogger(__name__)
 
 MAX_LIST_LIMIT = 500
+
+# SparkConnectState values in kubeflow[spark] 0.5.0. A filter outside them can
+# never match, so it is refused instead of silently returning nothing. Pinned by
+# ``sdk_contracts_test.py``.
+SESSION_STATES = ("Provisioning", "Ready", "Running", "NotReady", "Failed")
 
 
 def list_spark_sessions(
@@ -37,7 +48,8 @@ def list_spark_sessions(
 
     Args:
         state: Filter by session state: ``Provisioning``, ``Ready``, ``Running``,
-            ``NotReady``, ``Failed``. Case-insensitive.
+            ``NotReady``, ``Failed``. Case-insensitive. Any other value is
+            rejected with ``VALIDATION_ERROR``.
         namespace: K8s namespace. Uses default from kubeconfig when omitted.
         limit: Maximum sessions to return. Defaults to 50.
 
@@ -58,6 +70,16 @@ def list_spark_sessions(
     if ns_err is not None:
         return ns_err.model_dump()
 
+    want = None
+    if state is not None:
+        want = state.strip().lower()
+        if want not in {s.lower() for s in SESSION_STATES}:
+            return ToolError(
+                error=f"Unsupported state '{state}'",
+                error_code=ErrorCode.VALIDATION_ERROR,
+                details={"supported_states": sorted(SESSION_STATES)},
+            ).model_dump()
+
     if limit < 1:
         return ToolError(
             error=f"limit must be >= 1, got {limit}",
@@ -69,8 +91,7 @@ def list_spark_sessions(
         client = get_spark_client_for_namespace(namespace)
         sessions = [session_info_to_dict(s) for s in client.list_sessions()]
 
-        if state:
-            want = state.strip().lower()
+        if want is not None:
             sessions = [s for s in sessions if (s.get("state") or "").lower() == want]
 
         shown = sessions[:limit]
@@ -88,6 +109,14 @@ def list_spark_sessions(
         return ToolError(error=str(e), error_code=ErrorCode.SDK_ERROR).model_dump()
     except Exception as e:
         logger.warning("list_spark_sessions() failed: %s", e, exc_info=True)
+        if is_k8s_forbidden(e):
+            return ToolError(
+                error="Permission denied listing SparkConnect sessions"
+                + (f" in namespace '{namespace}'" if namespace else ""),
+                error_code=ErrorCode.PERMISSION_DENIED,
+                details=exception_details(e),
+                hint="Check RBAC: listing sessions needs 'list' on sparkconnects in the namespace.",
+            ).model_dump()
         return ToolError(
             error=str(e),
             error_code=ErrorCode.SDK_ERROR,
@@ -148,6 +177,13 @@ def get_spark_session(name: str, namespace: str | None = None) -> dict[str, Any]
             return ToolError(
                 error=f"SparkConnect session '{name}' not found",
                 error_code=ErrorCode.RESOURCE_NOT_FOUND,
+            ).model_dump()
+        if is_k8s_forbidden(e):
+            return ToolError(
+                error=f"Permission denied reading SparkConnect session '{name}'",
+                error_code=ErrorCode.PERMISSION_DENIED,
+                details=exception_details(e),
+                hint="Check RBAC: reading a session needs 'get' on sparkconnects in the namespace.",
             ).model_dump()
         return ToolError(
             error=str(e),

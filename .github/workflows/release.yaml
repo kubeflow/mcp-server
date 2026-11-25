@@ -123,6 +123,27 @@ jobs:
         run: |
           make test-python
 
+      # Report-only: lists known vulnerabilities in uv.lock in the job summary
+      # without blocking the release. Same pinned binary as osv-scanner.yaml.
+      - name: Scan dependencies for known vulnerabilities (OSV-Scanner)
+        run: |
+          OSV_VERSION="2.4.0"
+          EXPECTED_SHA="15314940c10d26af9c6649f150b8a47c1262e8fc7e17b1d1029b0e479e8ed8a0"
+          curl -fsSL "https://github.com/google/osv-scanner/releases/download/v${OSV_VERSION}/osv-scanner_linux_amd64" -o osv-scanner
+          echo "${EXPECTED_SHA}  osv-scanner" | sha256sum -c -
+          chmod +x osv-scanner
+          rc=0
+          ./osv-scanner scan --format markdown --output osv-report.md -L uv.lock || rc=$?
+          # Exit code 1 = vulnerabilities found, 0 = clean. Anything else is a real failure.
+          if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ]; then
+            echo "::error::OSV-Scanner failed with unexpected exit code $rc"
+            exit 1
+          fi
+          if [ "$rc" -eq 1 ]; then
+            echo "::warning::OSV-Scanner found known vulnerabilities in uv.lock (see job summary)"
+          fi
+          { echo "## OSV-Scanner (uv.lock)"; cat osv-report.md; } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Verify version
         run: |
           TAG_VERSION="${{ needs.prepare.outputs.version }}"
