@@ -36,17 +36,88 @@ from kubeflow_mcp.common.utils import (
     get_core_v1_api,
     get_custom_objects_api,
     get_default_kubeconfig_namespace,
+    get_optimizer_effective_namespace,
     get_pipelines_client,
     get_pipelines_effective_namespace,
+    get_spark_session_ownership,
     get_trainer_client_for_namespace,
     get_trainer_effective_namespace,
     get_trainer_ownership,
+    get_training_job_status,
     reset_clients,
 )
 
 PATCH_CUSTOM_API = "kubeflow_mcp.common.utils.get_custom_objects_api"
 PATCH_GET_API_CLIENT = "kubeflow_mcp.common.utils._get_api_client"
 PATCH_TRAINER_CLIENT = "kubeflow_mcp.common.utils.get_trainer_client"
+
+
+@pytest.mark.parametrize(
+    "suspended,conditions,expected",
+    [
+        (False, [{"type": "Suspended", "status": "False"}], "Running"),
+        (True, [{"type": "Suspended", "status": "True"}], "Created"),
+        (False, [{"type": "Suspended", "status": "True"}], "Created"),
+        (False, [{"type": "Complete", "status": "True"}], "Complete"),
+        (False, [{"type": "Failed", "status": "True"}], "Failed"),
+    ],
+)
+@patch(PATCH_CUSTOM_API)
+def test_reconcile_created_job_with_active_workers(mock_api_fn, suspended, conditions, expected):
+    job = SimpleNamespace(
+        name="resumed-job",
+        status="Created",
+        num_nodes=2,
+        steps=[
+            SimpleNamespace(name=f"node-{i}", status=status)
+            for i, status in enumerate(["Running", "Succeeded"])
+        ],
+    )
+    mock_api_fn.return_value.get_namespaced_custom_object.return_value = {
+        "spec": {"suspend": suspended},
+        "status": {"conditions": conditions},
+    }
+    assert get_training_job_status(job, "workloads") == expected
+    assert (
+        mock_api_fn.return_value.get_namespaced_custom_object.call_args.kwargs["namespace"]
+        == "workloads"
+    )
+
+
+@pytest.mark.parametrize(
+    "status,workers",
+    [
+        ("Complete", ["Running"]),
+        ("Failed", ["Running"]),
+        ("Created", []),
+        ("Created", ["Pending"]),
+        ("Created", ["Running"]),
+    ],
+)
+@patch(PATCH_CUSTOM_API)
+def test_status_reconciliation_leaves_terminal_or_incomplete_workers_alone(
+    mock_api_fn, status, workers
+):
+    job = SimpleNamespace(
+        name="job",
+        status=status,
+        num_nodes=2,
+        steps=[SimpleNamespace(name=f"node-{i}", status=s) for i, s in enumerate(workers)],
+    )
+    assert get_training_job_status(job, "workloads") == status
+    mock_api_fn.assert_not_called()
+
+
+@patch(PATCH_CUSTOM_API)
+def test_status_reconciliation_preserves_sdk_status_if_api_fails(mock_api_fn):
+    mock_api_fn.return_value.get_namespaced_custom_object.side_effect = RuntimeError("Forbidden")
+    job = SimpleNamespace(
+        name="job",
+        status="Created",
+        num_nodes=1,
+        steps=[SimpleNamespace(name="node-0", status="Running")],
+    )
+    assert get_training_job_status(job, "workloads") == "Created"
 
 
 class TestGetTrainerOwnership:
@@ -94,6 +165,43 @@ class TestGetTrainerOwnership:
         mock_api.get_namespaced_custom_object.side_effect = Exception("connection refused")
         mock_api_fn.return_value = mock_api
         assert get_trainer_ownership("my-job", "default") is None
+
+
+class TestGetSparkSessionOwnership:
+    @patch(PATCH_CUSTOM_API)
+    def test_managed_when_label_present(self, mock_api_fn):
+        mock_api_fn.return_value.get_namespaced_custom_object.return_value = {
+            "metadata": {"labels": {MCP_MANAGED_LABEL: MCP_MANAGED_VALUE}}
+        }
+        assert get_spark_session_ownership("etl", "default") == "managed"
+
+    @patch(PATCH_CUSTOM_API)
+    def test_not_found_on_404(self, mock_api_fn):
+        from kubernetes.client.exceptions import ApiException
+
+        mock_api_fn.return_value.get_namespaced_custom_object.side_effect = ApiException(
+            status=404, reason="Not Found"
+        )
+        assert get_spark_session_ownership("gone", "default") == "not_found"
+
+    @pytest.mark.parametrize("status", [401, 403])
+    @patch(PATCH_CUSTOM_API)
+    def test_forbidden_is_distinct_from_unknown(self, mock_api_fn, status):
+        """A denied read is the caller's RBAC, not an API failure: delete needs
+        to report it as PERMISSION_DENIED rather than SDK_ERROR."""
+        from kubernetes.client.exceptions import ApiException
+
+        mock_api_fn.return_value.get_namespaced_custom_object.side_effect = ApiException(
+            status=status, reason="Forbidden"
+        )
+        assert get_spark_session_ownership("etl", "team-b") == "forbidden"
+
+    @patch(PATCH_CUSTOM_API)
+    def test_unknown_on_other_api_error(self, mock_api_fn):
+        mock_api_fn.return_value.get_namespaced_custom_object.side_effect = Exception(
+            "connection refused"
+        )
+        assert get_spark_session_ownership("etl", "default") == "unknown"
 
 
 class TestResetClients:
@@ -351,3 +459,17 @@ class TestPipelinesClient:
         assert len(_pipelines_client_cache) == _NS_CLIENT_CACHE_MAX
         assert "ns-0" not in _pipelines_client_cache
         assert f"ns-{_NS_CLIENT_CACHE_MAX}" in _pipelines_client_cache
+
+
+def test_optimizer_namespace_resolves_without_building_an_sdk_client():
+    """OptimizerClient() also builds a Trainer backend whose first read has no
+    timeout, so resolving a namespace must not construct it."""
+    with (
+        patch("kubeflow.optimizer.OptimizerClient", side_effect=AssertionError("built")),
+        patch(
+            "kubeflow_mcp.common.utils.get_default_kubeconfig_namespace",
+            return_value="kube-default",
+        ),
+    ):
+        assert get_optimizer_effective_namespace(None) == "kube-default"
+        assert get_optimizer_effective_namespace("explicit") == "explicit"

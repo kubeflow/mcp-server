@@ -223,7 +223,8 @@ class TestRedactText:
         # The cli.py auth warning names flags and env vars, not credential values.
         warning = (
             "Set --auth-token or KUBEFLOW_MCP_AUTH_TOKEN for bearer auth, "
-            "or KUBEFLOW_MCP_JWKS_URI for JWT verification."
+            "or KUBEFLOW_MCP_JWKS_URI with KUBEFLOW_MCP_JWT_ISSUER and "
+            "KUBEFLOW_MCP_JWT_AUDIENCE for JWT verification."
         )
         assert _redact_text(warning) == warning
 

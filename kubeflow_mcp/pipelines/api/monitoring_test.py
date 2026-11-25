@@ -463,3 +463,111 @@ class TestGetPipelineLogs:
 
         assert [(p["task"], p["pod"]) for p in data["pods"]] == [("parent", "shared-executor-pod")]
         assert core_api.read_namespaced_pod_log.call_count == 1
+
+
+@pytest.mark.parametrize(
+    ("node_name", "expected"),
+    [
+        ("wf(0).root(0).evaluate-model(0).executor(0)", "evaluate-model"),
+        ("wf(0).root(0).train-model-driver(0)", "train-model-driver"),
+        ("wf(0).root-driver(0)", "root-driver"),
+        ("executor(0)", "executor"),
+        ("", None),
+        (None, None),
+    ],
+)
+def test_task_from_node_name(node_name, expected):
+    assert monitoring._task_from_node_name(node_name) == expected
+
+
+class TestKfpV2LogsLiveShape:
+    """The shape a KFP 2.17 run has on a real cluster (seen on EKS, Nov 2026).
+
+    KFP records each launcher pod under a task called ``executor`` and the user's task
+    (``evaluate-model``) as a DAG node that has no pod of its own.
+    """
+
+    @staticmethod
+    def _live_pod(name, node, role, node_name):
+        pod = make_pod(name, node=node, role=role)
+        pod.metadata.annotations[monitoring._NODE_NAME_ANNOTATION] = node_name
+        return pod
+
+    def _setup(self, kfp_client, core_api, log="user output"):
+        run = make_run(
+            "SUCCEEDED",
+            tasks=[
+                make_task("evaluate-model", pod="wf-dag-eval"),
+                make_task("evaluate-model-driver", pod="wf-drv-eval"),
+                make_task("executor", pod="wf-launch-eval"),
+                make_task("train-model", pod="wf-dag-train"),
+                make_task("executor", pod="wf-launch-train"),
+            ],
+        )
+        kfp_client.get_run.return_value = run
+        core_api.list_namespaced_pod.return_value = SimpleNamespace(
+            items=[
+                self._live_pod(
+                    "wf-system-container-impl-1",
+                    "wf-launch-eval",
+                    "launcher",
+                    "wf(0).root(0).evaluate-model(0).executor(0)",
+                ),
+                self._live_pod(
+                    "wf-system-container-impl-2",
+                    "wf-launch-train",
+                    "launcher",
+                    "wf(0).root(0).train-model(0).executor(0)",
+                ),
+                self._live_pod(
+                    "wf-system-container-driver-1",
+                    "wf-drv-eval",
+                    "driver",
+                    "wf(0).root(0).evaluate-model-driver(0)",
+                ),
+            ]
+        )
+        core_api.read_namespaced_pod_log.side_effect = lambda name, **kw: f"{name}: {log}"
+
+    @pytest.mark.parametrize("task", ["evaluate-model", "evaluate-model(0)"])
+    def test_task_filter_finds_the_launcher_pod(self, kfp_client, core_api, task):
+        self._setup(kfp_client, core_api)
+
+        data = get_pipeline_logs(RUN_ID, task=task)["data"]
+
+        assert data["pods"][0] == {
+            "task": "evaluate-model",
+            "pod": "wf-system-container-impl-1",
+            "logs": "wf-system-container-impl-1: user output",
+        }
+        # The DAG node has no pod; it is reported without an API read.
+        assert data["pods"][1] == {
+            "task": "evaluate-model",
+            "pod": "wf-dag-eval",
+            "error": "pod no longer exists",
+        }
+        read = [c.kwargs["name"] for c in core_api.read_namespaced_pod_log.call_args_list]
+        assert read == ["wf-system-container-impl-1"]
+
+    def test_launcher_pods_are_named_after_their_task(self, kfp_client, core_api):
+        self._setup(kfp_client, core_api)
+
+        data = get_pipeline_logs(RUN_ID)["data"]
+
+        named = {p["pod"]: p["task"] for p in data["pods"] if "logs" in p}
+        assert named == {
+            "wf-system-container-impl-1": "evaluate-model",
+            "wf-system-container-impl-2": "train-model",
+            "wf-system-container-driver-1": "evaluate-model-driver",
+        }
+
+    def test_budget_is_shared_only_by_pods_that_are_read(self, kfp_client, core_api):
+        self._setup(kfp_client, core_api, log="x" * 50_000)
+
+        data = get_pipeline_logs(RUN_ID)["data"]
+
+        read = [p for p in data["pods"] if "logs" in p]
+        assert len(read) == 3
+        # Two pod-less DAG nodes take no share: each read pod gets a third, not a fifth.
+        for pod in read:
+            assert len(pod["logs"]) >= monitoring.MAX_LOG_CHARS // 3
