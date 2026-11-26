@@ -34,9 +34,24 @@ _log_buffer: deque[dict[str, Any]] = deque(maxlen=1000)
 
 # A key needs a real ``=`` or ``:`` after it, otherwise prose such as
 # ``bearer auth`` reads as a key and ordinary log lines get mangled.
-_REDACT_KEY = re.compile(r"(?<!\w)(\w+)\s*[=:]\s*")
+# Supports bare keys (token=) and quoted JSON/dict keys ("token":, 'token':).
+_REDACT_KEY = re.compile(r"(?<![\w-])\\?([\"']?)([\w-]+)\\?\1\s*[=:]\s*")
 # Taking the scheme word too covers ``Authorization: Bearer <jwt>``.
-_REDACT_VALUE = re.compile(r"(?:(?:bearer|basic|digest|token)\s+)?\S+", re.IGNORECASE)
+# Supports quoted JSON/dict values, single-quoted values, and bare values.
+# Quoted options are escape-aware; bare values redact leading and embedded
+# delimiters (commas, semicolons, brackets) without consuming separators before whitespace.
+_REDACT_VALUE = re.compile(
+    r"""(?ix)
+    (?:(?:bearer|basic|digest|token)\s+)?
+    (?:
+        \\?"((?:[^"\\\r\n]|\\.)*)\\?"
+        |
+        \\?'((?:[^'\\\r\n]|\\.)*)\\?'
+        |
+        (?:[^\s,;}{\]]|[,;}{\]](?![\s}{\]]|\Z))+
+    )
+    """
+)
 
 
 def _redact_text(text: str) -> str:
@@ -49,13 +64,18 @@ def _redact_text(text: str) -> str:
     pieces: list[str] = []
     pos = 0
     for key in _REDACT_KEY.finditer(text):
-        if key.start() < pos or not is_sensitive_key(key.group(1)):
+        if key.start() < pos or not is_sensitive_key(key.group(2)):
             continue
         value = _REDACT_VALUE.match(text, key.end())
         if value is None:
             continue
         pieces.append(text[pos : key.end()])
-        pieces.append("***")
+        if value.group(1) is not None:
+            pieces.append('"***"')
+        elif value.group(2) is not None:
+            pieces.append("'***'")
+        else:
+            pieces.append("***")
         pos = value.end()
     pieces.append(text[pos:])
     return "".join(pieces)
@@ -129,10 +149,17 @@ class ConsoleFormatter(logging.Formatter):
         color = self.COLORS.get(record.levelname, self.RESET)
         cid = correlation_id.get()
         cid_str = f" [{cid[:8]}]" if cid else ""
-        return (
+        message = (
             f"{color}{record.levelname:8}{self.RESET}{cid_str} "
             f"{record.name}: {_redact_text(record.getMessage())}"
         )
+        if record.exc_info:
+            exc_text = _redact_text(self.formatException(record.exc_info))
+            message = f"{message}\n{exc_text}"
+        if record.stack_info:
+            stack_text = _redact_text(self.formatStack(record.stack_info))
+            message = f"{message}\n{stack_text}"
+        return message
 
 
 class BufferingHandler(logging.Handler):
