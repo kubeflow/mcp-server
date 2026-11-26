@@ -145,7 +145,7 @@ release: install-dev ## Create a release commit. Usage: export GITHUB_TOKEN=<tok
 		$(SED) -E -i 's/"version": "[0-9]+\.[0-9]+\.[0-9]+(rc[0-9]+)?"/"version": "$(VERSION)"/g' server.json; \
 		echo "Version bumped to $(VERSION) in server.json"; \
 	else \
-		$(MAKE) changelog VERSION=$(VERSION); \
+		$(MAKE) changelog VERSION=$(VERSION) || exit $$?; \
 		$(SED) -i 's/^__version__ = ".*"/__version__ = "$(VERSION)"/' kubeflow_mcp/__init__.py && \
 		echo "Version bumped to $(VERSION) in kubeflow_mcp/__init__.py" && \
 		$(SED) -E -i 's/"version": "[0-9]+\.[0-9]+\.[0-9]+(rc[0-9]+)?"/"version": "$(VERSION)"/g' server.json && \
@@ -164,47 +164,53 @@ changelog: ## Generate changelog. Usage: make changelog VERSION=X.Y.Z [DRY_RUN=1
 	@git fetch upstream --tags --prune
 	@MAJOR_MINOR=$$(echo "$(VERSION)" | cut -d. -f1,2); \
 	CHANGELOG_PATH="CHANGELOG/CHANGELOG-$$MAJOR_MINOR.md"; \
-	TARGET_MAJOR=$$(echo "$(VERSION)" | cut -d. -f1); \
-	TARGET_MINOR=$$(echo "$(VERSION)" | cut -d. -f2); \
-	TARGET_PATCH=$$(echo "$(VERSION)" | cut -d. -f3); \
-	PREV_TAG=""; \
-	for candidate in $$(git tag --list --sort=-version:refname | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$$'); do \
-		CANDIDATE_MAJOR=$${candidate%%.*}; \
-		CANDIDATE_MINOR=$${candidate#*.}; CANDIDATE_MINOR=$${CANDIDATE_MINOR%%.*}; \
-		CANDIDATE_PATCH=$${candidate##*.}; \
-		IS_OLDER=0; \
-		if [ "$$CANDIDATE_MAJOR" -lt "$$TARGET_MAJOR" ] || \
-			[ "$$CANDIDATE_MAJOR" -eq "$$TARGET_MAJOR" ] && [ "$$CANDIDATE_MINOR" -lt "$$TARGET_MINOR" ]; then \
-			IS_OLDER=1; \
-		elif [ "$$CANDIDATE_MAJOR" -eq "$$TARGET_MAJOR" ] && \
-			[ "$$CANDIDATE_MINOR" -eq "$$TARGET_MINOR" ] && [ "$$CANDIDATE_PATCH" -lt "$$TARGET_PATCH" ]; then \
-			IS_OLDER=1; \
-		fi; \
-		if [ "$$IS_OLDER" -eq 1 ]; then \
-			PREV_TAG="$$candidate"; \
-			break; \
-		fi; \
-	done; \
-	if [ -z "$$PREV_TAG" ]; then \
-		PREV_REF=""; \
-		CLIFF_SCOPE="--unreleased"; \
-		echo "No older stable release tag found; using unreleased commits"; \
-	else \
-		if ! git rev-parse --verify --quiet "refs/tags/$$PREV_TAG" >/dev/null; then \
-			echo "Error: selected stable release tag is unavailable: $$PREV_TAG"; \
+	if [ "$(DRY_RUN)" != "1" ] && [ -f "$$CHANGELOG_PATH" ] && \
+		grep -Fq '# [$(VERSION)](' "$$CHANGELOG_PATH"; then \
+		echo "Error: $(VERSION) is already in $$CHANGELOG_PATH; remove its section before regenerating, or use DRY_RUN=1"; \
+		exit 1; \
+	fi; \
+	RELEASE_BRANCH="release-$$MAJOR_MINOR"; \
+	RELEASE_SHA=$$(git rev-parse --verify --quiet "refs/remotes/upstream/$$RELEASE_BRANCH" || true); \
+	if [ -z "$$RELEASE_SHA" ]; then \
+		if [ -f "$$CHANGELOG_PATH" ]; then \
+			echo "Error: branch $$RELEASE_BRANCH not found on upstream, but $$CHANGELOG_PATH exists. Run: git fetch upstream $$RELEASE_BRANCH"; \
 			exit 1; \
 		fi; \
-		PREV_REF="refs/tags/$$PREV_TAG"; \
-		if ! git merge-base --is-ancestor "$$PREV_REF" HEAD; then \
-			PREV_REF="$$(git log -n 1 --format=%H -S "__version__ = \"$$PREV_TAG\"" -- kubeflow_mcp/__init__.py)"; \
-			if [ -z "$$PREV_REF" ]; then \
-				echo "Error: previous release tag $$PREV_TAG is not an ancestor and its version bump was not found"; \
-				exit 1; \
-			fi; \
-			echo "Previous release tag is not an ancestor; using version bump $$PREV_REF as the changelog base"; \
-		fi; \
-		CLIFF_SCOPE="$$PREV_REF..$$(git rev-parse HEAD)"; \
+		RELEASE_SHA=$$(git rev-parse HEAD); \
+		echo "Branch $$RELEASE_BRANCH does not exist yet; using HEAD for the new release line"; \
 	fi; \
+	PATCH=$$(echo "$(VERSION)" | cut -d. -f3); \
+	if [ "$$PATCH" -gt 0 ]; then \
+		PREV_TAG="$$MAJOR_MINOR.$$((PATCH - 1))"; \
+	else \
+		MAJOR=$$(echo "$(VERSION)" | cut -d. -f1); \
+		PREV_MINOR=$$(( $$(echo "$(VERSION)" | cut -d. -f2) - 1 )); \
+		PREV_TAG=$$(git tag --list "$$MAJOR.$$PREV_MINOR.*" --sort=-version:refname | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$$' | sed -n '1p' || true); \
+	fi; \
+	if [ -z "$$PREV_TAG" ]; then \
+		echo "Error: cannot determine the previous release tag for $(VERSION)"; \
+		exit 1; \
+	fi; \
+	if ! git rev-parse --verify --quiet "refs/tags/$$PREV_TAG" >/dev/null; then \
+		echo "Error: selected stable release tag is unavailable: $$PREV_TAG"; \
+		exit 1; \
+	fi; \
+	PREV_REF="refs/tags/$$PREV_TAG"; \
+	if ! git merge-base --is-ancestor "$$PREV_REF" "$$RELEASE_SHA"; then \
+		PREV_REF=""; \
+		for candidate in $$(git log "$$RELEASE_SHA" --format=%H -S "__version__ = \"$$PREV_TAG\"" -- kubeflow_mcp/__init__.py); do \
+			if git show "$$candidate:kubeflow_mcp/__init__.py" | grep -Fxq "__version__ = \"$$PREV_TAG\""; then \
+				PREV_REF="$$candidate"; \
+				break; \
+			fi; \
+		done; \
+		if [ -z "$$PREV_REF" ]; then \
+			echo "Error: previous release tag $$PREV_TAG is not an ancestor and its version bump was not found"; \
+			exit 1; \
+		fi; \
+		echo "Previous release tag is not an ancestor; using version bump $$PREV_REF as the changelog base"; \
+	fi; \
+	CLIFF_SCOPE="$$PREV_REF..$$RELEASE_SHA"; \
 	echo "Generating changelog for $(VERSION) (range: $$CLIFF_SCOPE)"; \
 	CONTAINER_USER_ARGS="-u $$(id -u):$$(id -g)"; \
 	if [ "$(CONTAINER_RUNTIME)" = "podman" ]; then CONTAINER_USER_ARGS=""; fi; \
@@ -219,11 +225,11 @@ changelog: ## Generate changelog. Usage: make changelog VERSION=X.Y.Z [DRY_RUN=1
 		echo "DRY_RUN=1: printing changelog to stdout (not writing $$CHANGELOG_PATH)"; \
 		$$CLIFF_CMD; \
 	elif [ -f "$$CHANGELOG_PATH" ] && grep -qE '^# \[[0-9]+\.[0-9]+\.[0-9]+\]' "$$CHANGELOG_PATH"; then \
-		$$CLIFF_CMD --prepend "$$CHANGELOG_PATH"; \
+		$$CLIFF_CMD --prepend "$$CHANGELOG_PATH" || exit $$?; \
 		echo "Changelog written to $$CHANGELOG_PATH"; \
 	else \
 		mkdir -p CHANGELOG; \
-		$$CLIFF_CMD -o "$$CHANGELOG_PATH"; \
+		$$CLIFF_CMD -o "$$CHANGELOG_PATH" || exit $$?; \
 		echo "Changelog written to $$CHANGELOG_PATH"; \
 	fi
 
