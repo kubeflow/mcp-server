@@ -181,7 +181,7 @@ changelog: ## Generate changelog. Usage: make changelog VERSION=X.Y.Z [DRY_RUN=1
 	fi; \
 	PATCH=$$(echo "$(VERSION)" | cut -d. -f3); \
 	if [ "$$PATCH" -gt 0 ]; then \
-		PREV_TAG="$$MAJOR_MINOR.$$((PATCH - 1))"; \
+		PREV_TAGS="$$MAJOR_MINOR.$$((PATCH - 1))"; \
 	else \
 		MAJOR=$$(echo "$(VERSION)" | cut -d. -f1); \
 		MINOR=$$(echo "$(VERSION)" | cut -d. -f2); \
@@ -190,31 +190,39 @@ changelog: ## Generate changelog. Usage: make changelog VERSION=X.Y.Z [DRY_RUN=1
 		else \
 			PREV_PATTERN="$$MAJOR.$$((MINOR - 1)).*"; \
 		fi; \
-		PREV_TAG=$$(git tag --list "$$PREV_PATTERN" --sort=-version:refname | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$$' | sed -n '1p' || true); \
+		PREV_TAGS=$$(git tag --list "$$PREV_PATTERN" --sort=-version:refname | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$$' || true); \
 	fi; \
-	if [ -z "$$PREV_TAG" ]; then \
+	if [ -z "$$PREV_TAGS" ]; then \
 		echo "Error: cannot determine the previous release tag for $(VERSION)"; \
 		exit 1; \
 	fi; \
-	if ! git rev-parse --verify --quiet "refs/tags/$$PREV_TAG" >/dev/null; then \
-		echo "Error: selected stable release tag is unavailable: $$PREV_TAG"; \
-		exit 1; \
-	fi; \
-	PREV_REF="refs/tags/$$PREV_TAG"; \
-	if ! git merge-base --is-ancestor "$$PREV_REF" "$$RELEASE_SHA"; then \
-		PREV_REF=""; \
+	PREV_REF=""; \
+	for PREV_TAG in $$PREV_TAGS; do \
+		if ! git rev-parse --verify --quiet "refs/tags/$$PREV_TAG" >/dev/null; then \
+			echo "Error: selected stable release tag is unavailable: $$PREV_TAG"; \
+			exit 1; \
+		fi; \
+		if git merge-base --is-ancestor "refs/tags/$$PREV_TAG" "$$RELEASE_SHA"; then \
+			PREV_REF="refs/tags/$$PREV_TAG"; \
+			break; \
+		fi; \
 		for candidate in $$(git log "$$RELEASE_SHA" --format=%H -S "__version__ = \"$$PREV_TAG\"" -- kubeflow_mcp/__init__.py); do \
 			if git show "$$candidate:kubeflow_mcp/__init__.py" | grep -Fxq "__version__ = \"$$PREV_TAG\""; then \
 				PREV_REF="$$candidate"; \
 				break; \
 			fi; \
 		done; \
-		if [ -z "$$PREV_REF" ]; then \
-			echo "Error: previous release tag $$PREV_TAG is not an ancestor and its version bump was not found"; \
-			exit 1; \
+		if [ -n "$$PREV_REF" ]; then \
+			echo "Previous release tag is not an ancestor; using version bump $$PREV_REF as the changelog base"; \
+			break; \
 		fi; \
-		echo "Previous release tag is not an ancestor; using version bump $$PREV_REF as the changelog base"; \
+		echo "No reachable boundary for $$PREV_TAG in the selected release history"; \
+	done; \
+	if [ -z "$$PREV_REF" ]; then \
+		echo "Error: no previous stable release tag or version bump was found in the selected history"; \
+		exit 1; \
 	fi; \
+	echo "Using previous stable release $$PREV_TAG"; \
 	CLIFF_SCOPE="$$PREV_REF..$$RELEASE_SHA"; \
 	echo "Generating changelog for $(VERSION) (range: $$CLIFF_SCOPE)"; \
 	CONTAINER_USER_ARGS="-u $$(id -u):$$(id -g)"; \
