@@ -28,7 +28,7 @@ from kubeflow_mcp.common.constants import (
     ErrorCode,
 )
 from kubeflow_mcp.common.huggingface import is_confirmed_missing as _is_confirmed_missing
-from kubeflow_mcp.common.types import ToolError, ToolResponse, exception_details
+from kubeflow_mcp.common.types import ToolError, ToolResponse, exception_details, is_k8s_forbidden
 
 logger = logging.getLogger(__name__)
 
@@ -419,7 +419,9 @@ def check_compatibility() -> dict[str, Any]:
     except Exception as e:
         return ToolError(
             error=str(e),
-            error_code=ErrorCode.KUBERNETES_ERROR,
+            error_code=ErrorCode.PERMISSION_DENIED
+            if is_k8s_forbidden(e)
+            else ErrorCode.KUBERNETES_ERROR,
             details=exception_details(e),
         ).model_dump()
 
@@ -557,7 +559,9 @@ def get_cluster_resources() -> dict[str, Any]:
     except Exception as e:
         return ToolError(
             error=str(e),
-            error_code=ErrorCode.KUBERNETES_ERROR,
+            error_code=ErrorCode.PERMISSION_DENIED
+            if is_k8s_forbidden(e)
+            else ErrorCode.KUBERNETES_ERROR,
             details=exception_details(e),
         ).model_dump()
 

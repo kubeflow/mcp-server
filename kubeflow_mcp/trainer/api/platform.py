@@ -25,7 +25,13 @@ from kubeflow.trainer.constants import constants as trainer_constants
 
 from kubeflow_mcp.common import utils as mcp_utils
 from kubeflow_mcp.common.constants import ErrorCode
-from kubeflow_mcp.common.types import ToolError, ToolResponse, exception_details, is_k8s_not_found
+from kubeflow_mcp.common.types import (
+    ToolError,
+    ToolResponse,
+    exception_details,
+    is_k8s_forbidden,
+    is_k8s_not_found,
+)
 from kubeflow_mcp.core.security import (
     check_namespace_allowed,
     validate_namespace,
@@ -174,7 +180,9 @@ def inspect_crd(name: str | None = None) -> dict[str, Any]:
             ).model_dump()
         return ToolError(
             error=str(e),
-            error_code=ErrorCode.KUBERNETES_ERROR,
+            error_code=ErrorCode.PERMISSION_DENIED
+            if is_k8s_forbidden(e)
+            else ErrorCode.KUBERNETES_ERROR,
             details=exception_details(e),
         ).model_dump()
 
@@ -286,7 +294,7 @@ def inspect_controller(
 
     except Exception as e:
         logger.warning("inspect_controller(%s, %s) failed: %s", view, namespace, e, exc_info=True)
-        if getattr(e, "status", None) == 403:
+        if is_k8s_forbidden(e):
             return ToolError(
                 error=f"Permission denied while looking up the controller pod: {e}",
                 error_code=ErrorCode.PERMISSION_DENIED,
@@ -477,7 +485,9 @@ def patch_runtime(
             ).model_dump()
         return ToolError(
             error=str(e),
-            error_code=ErrorCode.KUBERNETES_ERROR,
+            error_code=ErrorCode.PERMISSION_DENIED
+            if is_k8s_forbidden(e)
+            else ErrorCode.KUBERNETES_ERROR,
             details=exception_details(e),
         ).model_dump()
 
@@ -559,7 +569,9 @@ def create_runtime(
         logger.warning("create_runtime(%s) failed: %s", name, e, exc_info=True)
         return ToolError(
             error=str(e),
-            error_code=ErrorCode.KUBERNETES_ERROR,
+            error_code=ErrorCode.PERMISSION_DENIED
+            if is_k8s_forbidden(e)
+            else ErrorCode.KUBERNETES_ERROR,
             details=exception_details(e),
         ).model_dump()
 
@@ -665,7 +677,7 @@ def delete_runtime(
                 f"Did not delete ClusterTrainingRuntime '{name}': "
                 "could not check which TrainJobs use it"
             )
-            if getattr(check_exc, "status", None) == 403:
+            if is_k8s_forbidden(check_exc):
                 return ToolError(
                     error=error,
                     error_code=ErrorCode.PERMISSION_DENIED,
@@ -706,6 +718,8 @@ def delete_runtime(
             ).model_dump()
         return ToolError(
             error=str(e),
-            error_code=ErrorCode.KUBERNETES_ERROR,
+            error_code=ErrorCode.PERMISSION_DENIED
+            if is_k8s_forbidden(e)
+            else ErrorCode.KUBERNETES_ERROR,
             details=exception_details(e),
         ).model_dump()
