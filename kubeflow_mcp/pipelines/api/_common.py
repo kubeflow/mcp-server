@@ -19,7 +19,7 @@ import re
 from typing import Any
 
 from kubeflow_mcp.common.constants import ErrorCode
-from kubeflow_mcp.common.types import ToolError, exception_details
+from kubeflow_mcp.common.types import ToolError, exception_details, is_k8s_forbidden
 from kubeflow_mcp.common.utils import get_pipelines_effective_namespace
 from kubeflow_mcp.core.policy import get_allowed_namespaces
 from kubeflow_mcp.core.security import check_namespace_allowed, validate_namespace
@@ -289,7 +289,7 @@ def pipelines_error(exc: Exception, action: str) -> ToolError:
         return ToolError(
             error=f"Not found while trying to {action}", error_code=ErrorCode.RESOURCE_NOT_FOUND
         )
-    if status in (401, 403):
+    if is_k8s_forbidden(exc):
         return ToolError(
             error=f"Permission denied while trying to {action}",
             error_code=ErrorCode.PERMISSION_DENIED,

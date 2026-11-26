@@ -25,7 +25,12 @@ from typing import Any
 
 from kubeflow_mcp.common import utils as mcp_utils
 from kubeflow_mcp.common.constants import ErrorCode
-from kubeflow_mcp.common.types import ToolError, exception_details, is_k8s_not_found
+from kubeflow_mcp.common.types import (
+    ToolError,
+    exception_details,
+    is_k8s_forbidden,
+    is_k8s_not_found,
+)
 from kubeflow_mcp.core.policy import get_effective_persona
 from kubeflow_mcp.core.security import check_namespace_allowed
 from kubeflow_mcp.optimizer.constants import KATIB_API_GROUP
@@ -196,7 +201,7 @@ def resource_error(exc: Exception, name: str, kind: str = "Experiment") -> ToolE
                 f"delete_hpo_experiment('{name}'): preview it, then confirm."
             ),
         )
-    if _api_status(exc) == 403:
+    if is_k8s_forbidden(exc):
         # A namespace the server may not touch is a configuration problem, not an
         # outage, so it must not trip the circuit breaker for every namespace.
         return ToolError(
@@ -236,10 +241,10 @@ def collection_error(exc: Exception) -> ToolError:
     """Map an exception from a list operation onto a ``ToolError``.
 
     List tools have no single resource name to report, so they cannot use
-    :func:`resource_error`. A 403 is still surfaced distinctly because a
-    namespace the caller cannot read is caller-fixable, not an outage.
+    :func:`resource_error`. A 401/403 is surfaced distinctly because an access
+    failure is caller-fixable, not an outage.
     """
-    if _api_status(exc) == 403:
+    if is_k8s_forbidden(exc):
         return ToolError(
             error=f"Not authorized to list this resource: {exc}",
             error_code=ErrorCode.PERMISSION_DENIED,
