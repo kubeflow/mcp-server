@@ -261,8 +261,8 @@ def get_pipeline_run(run_id: str, namespace: str | None = None) -> dict[str, Any
         return pipelines_error(e, f"get pipeline run '{run_id}'").model_dump()
 
 
-def _decode_pod_log_response(response: Any) -> tuple[str, int]:
-    """Decode a K8s pod log response (string mock or raw HTTPResponse)."""
+def _decode_pod_log_response(response: Any, limit_bytes: int) -> tuple[str, int]:
+    """Decode a K8s pod log response (string mock, stream, or raw HTTPResponse)."""
     if response is None:
         return "", 0
     if isinstance(response, str):
@@ -270,7 +270,19 @@ def _decode_pod_log_response(response: Any) -> tuple[str, int]:
     if isinstance(response, bytes):
         return response.decode("utf-8", errors="replace"), len(response)
     try:
-        body = response.data or b""
+        read_fn = getattr(response, "read", None)
+        if callable(read_fn):
+            chunks: list[bytes] = []
+            total = 0
+            while total < limit_bytes:
+                chunk = read_fn(min(8192, limit_bytes - total))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+            body = b"".join(chunks)
+        else:
+            body = response.data or b""
     finally:
         close = getattr(response, "close", None)
         if callable(close):
@@ -303,9 +315,14 @@ def _read_container_log(
         if container is not None:
             kwargs["container"] = container
         response = api.read_namespaced_pod_log(**kwargs)
-        text, byte_len = _decode_pod_log_response(response)
-        if lines == 1 or byte_len < limit_bytes:
+        text, byte_len = _decode_pod_log_response(response, limit_bytes)
+        if byte_len < limit_bytes:
             return text
+        if lines == 1:
+            return (
+                f"{text}\n... (incomplete tail: single log line reached "
+                f"{limit_bytes} byte read limit; suffix omitted)"
+            )
         lines = max(1, lines // 4)
 
 
