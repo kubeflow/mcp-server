@@ -88,6 +88,27 @@ def test_get_experiment_trials_status_filter_and_alias(katib, wanted):
     assert data["summary"]["total_trials"] == 2
 
 
+@pytest.mark.parametrize("bad_status", ["", "failed", "Error", "Suspended"])
+def test_get_experiment_trials_rejects_unknown_status_before_api_call(katib, bad_status):
+    katib.add_experiment(experiment_cr())
+    katib.add_trials(trial_cr("t1", "Failed"))
+    result = monitoring.get_hpo_experiment_trials("exp-1", status=bad_status)
+    assert result["error_code"] == "VALIDATION_ERROR"
+    assert result["details"] == {
+        "supported_statuses": [
+            "Complete",
+            "Created",
+            "EarlyStopped",
+            "Failed",
+            "Killed",
+            "MetricsUnavailable",
+            "Running",
+        ],
+        "aliases": {"Succeeded": "Complete"},
+    }
+    assert katib.custom.calls == []
+
+
 def test_get_experiment_trials_not_found(katib):
     result = monitoring.get_hpo_experiment_trials("missing")
     assert result["error_code"] == "RESOURCE_NOT_FOUND"

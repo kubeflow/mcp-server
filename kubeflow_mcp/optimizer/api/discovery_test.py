@@ -77,6 +77,18 @@ def test_list_experiments_status_filter_and_alias(katib, wanted):
     assert [e["name"] for e in result["data"]["experiments"]] == ["b"]
 
 
+@pytest.mark.parametrize("bad_status", ["", "running", "Runing", "Suspended", "Killed"])
+def test_list_experiments_rejects_unknown_status_before_api_call(katib, bad_status):
+    katib.add_experiment(experiment_cr("a", status={"trialsRunning": 1}))
+    result = discovery.list_hpo_experiments(status=bad_status)
+    assert result["error_code"] == "VALIDATION_ERROR"
+    assert result["details"] == {
+        "supported_statuses": ["Complete", "Created", "Failed", "Running"],
+        "aliases": {"Succeeded": "Complete"},
+    }
+    assert katib.custom.calls == []
+
+
 def test_list_experiments_api_error(katib, monkeypatch):
     def boom(**_):
         raise RuntimeError("boom")

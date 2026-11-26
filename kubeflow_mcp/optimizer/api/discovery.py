@@ -34,11 +34,12 @@ from kubeflow_mcp.core.security import validate_k8s_name
 from kubeflow_mcp.optimizer.api import _katib
 from kubeflow_mcp.optimizer.api._common import (
     DEFAULT_LIST_LIMIT,
+    VALID_EXPERIMENT_STATUSES,
     check_optimizer_namespace,
     clamp_limit,
     collection_error,
     experiment_error,
-    resolve_status_filter,
+    validate_status_filter,
 )
 from kubeflow_mcp.optimizer.constants import (
     EXPERIMENT_PLURAL,
@@ -85,6 +86,10 @@ def list_hpo_experiments(
     if limit_err is not None:
         return limit_err.model_dump()
 
+    want, status_err = validate_status_filter(status, VALID_EXPERIMENT_STATUSES)
+    if status_err is not None:
+        return status_err.model_dump()
+
     try:
         ns = get_optimizer_effective_namespace(namespace)
         resp = get_custom_objects_api().list_namespaced_custom_object(
@@ -96,8 +101,7 @@ def list_hpo_experiments(
         )
 
         experiments = [experiment_summary_from_cr(item) for item in resp.get("items", [])]
-        if status:
-            want = resolve_status_filter(status)
+        if want is not None:
             experiments = [e for e in experiments if e.get("status") == want]
 
         return ToolResponse(
