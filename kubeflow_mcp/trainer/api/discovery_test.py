@@ -24,6 +24,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from kubernetes.client.exceptions import ApiException
 from tests.common import RESOURCE_NOT_FOUND
 
 from kubeflow_mcp.common.constants import ErrorCode
@@ -33,6 +34,7 @@ from kubeflow_mcp.conftest import (
     verify_tool_error,
     verify_tool_success,
 )
+from kubeflow_mcp.trainer.api import discovery
 from kubeflow_mcp.trainer.api.discovery import (
     _JOB_STATUS_FILTER_ALIASES,
     _get_runtime_image,
@@ -80,6 +82,126 @@ def test_list_training_jobs_accepts_supported_statuses(status):
         result = list_training_jobs(status=status)
 
     verify_tool_success(result)
+
+
+@pytest.mark.parametrize("status", [401, 403, 500])
+@pytest.mark.parametrize("wrapped", [False, True])
+@pytest.mark.parametrize("operation", ["client", "runtime", "list"])
+def test_list_training_jobs_classifies_api_errors(
+    status: int, wrapped: bool, operation: str
+) -> None:
+    error = ApiException(status=status)
+    if wrapped:
+        cause = error
+        error = RuntimeError("Trainer SDK request failed")
+        error.__cause__ = cause
+    client = MagicMock()
+    with patch(
+        "kubeflow_mcp.trainer.api.discovery.get_trainer_client_for_namespace",
+        return_value=client,
+    ) as factory:
+        if operation == "client":
+            factory.side_effect = error
+        elif operation == "runtime":
+            client.get_runtime.side_effect = error
+        else:
+            client.list_jobs.side_effect = error
+        result = list_training_jobs(runtime="torch-distributed", namespace="team-b")
+
+    expected = ErrorCode.PERMISSION_DENIED if status in (401, 403) else ErrorCode.SDK_ERROR
+    details = verify_tool_error(result, error_code=expected)["details"]
+    assert details["exception"] == type(error).__name__
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "method", "factory"),
+    [
+        ("get_training_job", "get_job", "get_trainer_client_for_namespace"),
+        ("list_runtimes", "list_runtimes", "get_trainer_client"),
+        ("get_runtime", "get_runtime", "get_trainer_client"),
+    ],
+)
+@pytest.mark.parametrize("status", [401, 403, 500])
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_discovery_classifies_api_errors(
+    tool_name: str, method: str, factory: str, status: int, wrapped: bool
+) -> None:
+    error: Exception = ApiException(status=status)
+    if wrapped:
+        cause = error
+        error = RuntimeError("Trainer SDK request failed")
+        error.__cause__ = cause
+    client = MagicMock()
+    getattr(client, method).side_effect = error
+    kwargs = {} if tool_name == "list_runtimes" else {"name": "job-a"}
+    with patch.object(discovery, factory, return_value=client):
+        result = getattr(discovery, tool_name)(**kwargs)
+    expected = ErrorCode.PERMISSION_DENIED if status in (401, 403) else ErrorCode.SDK_ERROR
+    assert (
+        verify_tool_error(result, error_code=expected)["details"]["exception"]
+        == type(error).__name__
+    )
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "method", "factory"),
+    [
+        ("list_training_jobs", "list_jobs", "get_trainer_client_for_namespace"),
+        ("get_training_job", "get_job", "get_trainer_client_for_namespace"),
+        ("list_runtimes", "list_runtimes", "get_trainer_client"),
+        ("get_runtime", "get_runtime", "get_trainer_client"),
+    ],
+)
+@pytest.mark.parametrize("mode", ["full", "progressive"])
+@pytest.mark.parametrize("status", [403, 500])
+async def test_discovery_breaker_distinguishes_denials_from_outages(
+    tool_name: str, method: str, factory: str, mode: str, status: int
+) -> None:
+    from fastmcp import Client
+
+    from kubeflow_mcp.core.resilience import CircuitState, get_breaker
+    from kubeflow_mcp.core.server import create_server
+
+    breaker = get_breaker(tool_name)
+    error = RuntimeError("Failed to list TrainJobs")
+    error.__cause__ = ApiException(status=status)
+    sdk_client = MagicMock()
+    success = (
+        SimpleNamespace(name="job-a", runtime=None, status="Running", steps=[])
+        if tool_name in ("get_training_job", "get_runtime")
+        else []
+    )
+    getattr(sdk_client, method).side_effect = [error] * breaker.failure_threshold + [success]
+    with (
+        patch.object(discovery, factory, return_value=sdk_client),
+        patch.object(discovery, "get_training_job_status", return_value="Running"),
+    ):
+        async with Client(create_server(clients=["trainer"], mode=mode)) as client:
+            for attempt in range(breaker.failure_threshold + 1):
+                arguments = {}
+                if tool_name in ("get_training_job", "get_runtime"):
+                    arguments["name"] = "job-a"
+                if factory == "get_trainer_client_for_namespace":
+                    arguments["namespace"] = (
+                        "team-b" if attempt < breaker.failure_threshold else "team-a"
+                    )
+                tool = tool_name
+                if mode != "full":
+                    arguments = {"tool_name": tool, "arguments": arguments}
+                    tool = "execute_tool"
+                response = await client.call_tool(tool, arguments, raise_on_error=False)
+                result = response.structured_content
+                if attempt < breaker.failure_threshold:
+                    expected = ErrorCode.PERMISSION_DENIED if status == 403 else ErrorCode.SDK_ERROR
+                    assert response.is_error
+                    assert result["error_code"] == expected
+                elif status == 403:
+                    assert not response.is_error
+                    assert result["success"] is True
+                else:
+                    assert result["error_code"] == ErrorCode.CIRCUIT_OPEN
+
+    assert breaker.state == (CircuitState.CLOSED if status == 403 else CircuitState.OPEN)
 
 
 class TestTrainjobRuntimeToMcp:
