@@ -337,7 +337,9 @@ def get_trainer_ownership(name: str, namespace: str) -> str | None:
         ``OWNERSHIP_MANAGED`` if the job carries the MCP ownership label,
         ``OWNERSHIP_UNMANAGED`` if it exists without the label,
         ``OWNERSHIP_MISSING`` if no such job exists, or
-        ``None`` if the check could not be performed (API error, permissions).
+        ``None`` if the check could not be performed (other API errors).
+
+    Permission errors propagate so the caller can report ``PERMISSION_DENIED``.
     """
     try:
         api = get_custom_objects_api()
@@ -353,8 +355,10 @@ def get_trainer_ownership(name: str, namespace: str) -> str | None:
         managed = labels.get(MCP_MANAGED_LABEL) == MCP_MANAGED_VALUE
         return OWNERSHIP_MANAGED if managed else OWNERSHIP_UNMANAGED
     except Exception as e:
-        from kubeflow_mcp.common.types import is_k8s_not_found
+        from kubeflow_mcp.common.types import is_k8s_forbidden, is_k8s_not_found
 
+        if is_k8s_forbidden(e):
+            raise
         if is_k8s_not_found(e):
             return OWNERSHIP_MISSING
         return None

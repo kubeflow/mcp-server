@@ -1867,3 +1867,24 @@ def test_preview_warns_when_overrides_omit_inherited_gpus(
     assert resources == original
     inspect.assert_called_once_with()
     sdk.assert_not_called()
+
+
+@pytest.mark.parametrize("status", [401, 403, 500])
+@pytest.mark.parametrize("wrapping", ["direct", "cause", "context", "nested"])
+def test_sdk_error_classifies_kubernetes_errors(status: int, wrapping: str) -> None:
+    from kubeflow_mcp.trainer.api.training import _sdk_error
+
+    error: Exception = ApiException(status=status)
+    if wrapping != "direct":
+        cause = error
+        error = RuntimeError("Trainer request failed")
+        if wrapping == "context":
+            error.__context__ = cause
+        else:
+            error.__cause__ = cause
+        if wrapping == "nested":
+            cause = error
+            error = RuntimeError("Training submission failed")
+            error.__cause__ = cause
+    result = _sdk_error(error)
+    assert result["error_code"] == ("PERMISSION_DENIED" if status in (401, 403) else "SDK_ERROR")

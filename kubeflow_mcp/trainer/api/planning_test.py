@@ -16,6 +16,7 @@
 
 import importlib.metadata
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -1131,3 +1132,26 @@ class TestPreFlight:
         res = pre_flight(model="meta-llama/Llama-3.1-70B")
         data = res["data"]
         assert not any("consider QLoRA" in rec for rec in data["recommendations"])
+
+
+@pytest.mark.parametrize("tool", [get_cluster_resources, check_compatibility])
+@pytest.mark.parametrize("status", [401, 403, 500])
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_planning_classifies_kubernetes_errors(tool: Any, status: int, wrapped: bool) -> None:
+    from kubernetes.client.exceptions import ApiException
+
+    error: Exception = ApiException(status=status)
+    if wrapped:
+        cause = error
+        error = RuntimeError("Kubernetes request failed")
+        error.__cause__ = cause
+    target = (
+        "kubeflow_mcp.common.utils.get_core_v1_api"
+        if tool is get_cluster_resources
+        else "kubeflow_mcp.trainer.api.planning._check_k8s_version"
+    )
+    with patch(target, side_effect=error):
+        result = tool()
+    assert result["error_code"] == (
+        "PERMISSION_DENIED" if status in (401, 403) else "KUBERNETES_ERROR"
+    )
