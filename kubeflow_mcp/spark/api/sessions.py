@@ -141,7 +141,7 @@ def _provisioned_session_or_none(
     Reporting only the error would leave a running, MCP-labelled session that the
     caller does not know about.
     """
-    if has_k8s_status(exc, 409, 403):
+    if has_k8s_status(exc, 409, 401, 403):
         return None
     try:
         effective_ns = get_spark_effective_namespace(namespace)
@@ -426,7 +426,7 @@ def create_spark_session(
         provisioned = _provisioned_session_or_none(e, session_name, namespace, creation_id)
         if provisioned is not None:
             return provisioned
-        denied = has_k8s_status(e, 403)
+        denied = is_k8s_forbidden(e)
         return ToolError(
             error=str(e),
             error_code=ErrorCode.PERMISSION_DENIED if denied else ErrorCode.SDK_ERROR,
