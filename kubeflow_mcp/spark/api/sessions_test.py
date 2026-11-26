@@ -650,3 +650,30 @@ class TestClientFactory:
             out = utils.get_spark_client_for_namespace(None)
         assert out == "UNSCOPED"
         gsc.assert_called_once()
+
+
+@pytest.mark.parametrize("status", [401, 403, 500])
+@pytest.mark.parametrize("wrapping", ["direct", "cause", "context", "nested"])
+def test_create_session_classifies_api_errors(
+    mock_spark_client, status: int, wrapping: str
+) -> None:
+    from kubernetes.client.exceptions import ApiException
+
+    error: Exception = ApiException(status=status)
+    if wrapping != "direct":
+        cause = error
+        error = RuntimeError("Spark request failed")
+        if wrapping == "context":
+            error.__context__ = cause
+        else:
+            error.__cause__ = cause
+        if wrapping == "nested":
+            cause = error
+            error = RuntimeError("Session creation failed")
+            error.__cause__ = cause
+    mock_spark_client.connect.side_effect = error
+    with patch.object(sessions, "get_spark_session_created_by", return_value=None) as recovery:
+        result = sessions.create_spark_session("audit-session", namespace="default", confirmed=True)
+    assert result["error_code"] == ("PERMISSION_DENIED" if status in (401, 403) else "SDK_ERROR")
+    if status in (401, 403):
+        recovery.assert_not_called()

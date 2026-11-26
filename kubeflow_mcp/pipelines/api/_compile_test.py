@@ -565,14 +565,40 @@ class TestRealCompile:
         )
 
     @pytest.mark.skipif(not hasattr(os, "fork"), reason="OS limits need POSIX (resource module)")
-    def test_memory_limit_stops_the_worker(self, tmp_path, monkeypatch):
+    def test_memory_limit_matches_platform_support(self, tmp_path, monkeypatch):
         monkeypatch.setattr(_compile, "MAX_COMPILE_MEMORY_BYTES", 64 * 1024 * 1024)
+        # Probe in a child so the hard limit cannot constrain the pytest process.
+        probe = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-c",
+                textwrap.dedent("""\
+                    import resource
+                    try:
+                        resource.setrlimit(resource.RLIMIT_AS, (64 * 1024 * 1024,) * 2)
+                    except (ValueError, OSError):
+                        print("unsupported")
+                    else:
+                        print("supported")
+                """),
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=_compile.COMPILE_TIMEOUT_SECONDS,
+        )
 
         started = time.monotonic()
         compiled, err = compile_pipeline_code(PIPELINE_CODE, str(tmp_path))
 
-        assert compiled is None
-        assert err is not None
+        if probe.stdout.strip() == "supported":
+            assert compiled is None
+            assert err is not None
+        else:
+            assert probe.stdout.strip() == "unsupported"
+            assert err is None, err
+            assert compiled is not None
         assert time.monotonic() - started < _compile.COMPILE_TIMEOUT_SECONDS
 
     def test_kfp_errors_come_back_with_the_line(self, tmp_path):
