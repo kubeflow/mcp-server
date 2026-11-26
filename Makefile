@@ -184,8 +184,13 @@ changelog: ## Generate changelog. Usage: make changelog VERSION=X.Y.Z [DRY_RUN=1
 		PREV_TAG="$$MAJOR_MINOR.$$((PATCH - 1))"; \
 	else \
 		MAJOR=$$(echo "$(VERSION)" | cut -d. -f1); \
-		PREV_MINOR=$$(( $$(echo "$(VERSION)" | cut -d. -f2) - 1 )); \
-		PREV_TAG=$$(git tag --list "$$MAJOR.$$PREV_MINOR.*" --sort=-version:refname | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$$' | sed -n '1p' || true); \
+		MINOR=$$(echo "$(VERSION)" | cut -d. -f2); \
+		if [ "$$MINOR" -eq 0 ] && [ "$$MAJOR" -gt 0 ]; then \
+			PREV_PATTERN="$$((MAJOR - 1)).*"; \
+		else \
+			PREV_PATTERN="$$MAJOR.$$((MINOR - 1)).*"; \
+		fi; \
+		PREV_TAG=$$(git tag --list "$$PREV_PATTERN" --sort=-version:refname | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$$' | sed -n '1p' || true); \
 	fi; \
 	if [ -z "$$PREV_TAG" ]; then \
 		echo "Error: cannot determine the previous release tag for $(VERSION)"; \
