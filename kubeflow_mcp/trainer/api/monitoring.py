@@ -25,7 +25,13 @@ from kubeflow.trainer.constants import constants as trainer_constants
 
 from kubeflow_mcp.common.constants import ErrorCode
 from kubeflow_mcp.common.failures import extract_failure_hint
-from kubeflow_mcp.common.types import ToolError, ToolResponse, exception_details, is_k8s_not_found
+from kubeflow_mcp.common.types import (
+    ToolError,
+    ToolResponse,
+    exception_details,
+    is_k8s_forbidden,
+    is_k8s_not_found,
+)
 from kubeflow_mcp.common.utils import (
     K8S_TIMEOUT,
     get_core_v1_api,
@@ -448,7 +454,7 @@ def get_training_logs(
             ).model_dump()
         return ToolError(
             error=str(e),
-            error_code=ErrorCode.SDK_ERROR,
+            error_code=ErrorCode.PERMISSION_DENIED if is_k8s_forbidden(e) else ErrorCode.SDK_ERROR,
             hint="Read trainer://guides/troubleshooting",
             details=exception_details(e),
         ).model_dump()
@@ -535,7 +541,7 @@ def get_training_events(
             ).model_dump()
         return ToolError(
             error=str(e),
-            error_code=ErrorCode.SDK_ERROR,
+            error_code=ErrorCode.PERMISSION_DENIED if is_k8s_forbidden(e) else ErrorCode.SDK_ERROR,
             hint="Read trainer://guides/troubleshooting",
             details=exception_details(e),
         ).model_dump()
@@ -741,7 +747,7 @@ def wait_for_training(
             ).model_dump()
         return ToolError(
             error=str(e),
-            error_code=ErrorCode.SDK_ERROR,
+            error_code=ErrorCode.PERMISSION_DENIED if is_k8s_forbidden(e) else ErrorCode.SDK_ERROR,
             hint="Read trainer://guides/troubleshooting",
             details=exception_details(e),
         ).model_dump()
