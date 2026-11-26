@@ -130,7 +130,8 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: false
           outputs: type=oci,dest=${{ runner.temp }}/mcp-image.tar
-          tags: ${{ steps.meta.outputs.tags }}
+          # Skopeo requires one archive reference; publish the aliases after scanning.
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.ver.outputs.version }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: VERSION=${{ steps.ver.outputs.version }}
           cache-from: type=gha
