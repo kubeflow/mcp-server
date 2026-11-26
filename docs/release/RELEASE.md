@@ -35,6 +35,8 @@ make release VERSION=X.Y.Z OFFLINE=1
 
 This updates the package version, `server.json`, and the changelog. Review the changes, then open a signed PR against `main` or the appropriate release branch.
 
+Changelogs cover changes through `upstream/release-X.Y`, or `HEAD` when creating a new release line. Backport required fixes before generating the final notes. Patch releases start at the previous patch tag; minor releases start at the latest stable tag in the previous minor series. If that tag has diverged, generation uses its version-bump commit on the selected release history.
+
 Use the same command with an `rcN` version for a release candidate; release candidates skip stable changelog generation.
 
 To generate or preview only the changelog:
