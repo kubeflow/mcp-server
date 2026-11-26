@@ -26,6 +26,7 @@ from kubeflow_mcp.common.types import (
     ToolError,
     ToolResponse,
     exception_details,
+    is_k8s_forbidden,
     is_k8s_not_found,
 )
 from kubeflow_mcp.core.policy import get_effective_persona
@@ -136,7 +137,7 @@ def delete_training_job(
             ).model_dump()
         return ToolError(
             error=str(e),
-            error_code=ErrorCode.SDK_ERROR,
+            error_code=ErrorCode.PERMISSION_DENIED if is_k8s_forbidden(e) else ErrorCode.SDK_ERROR,
             details=exception_details(e),
         ).model_dump()
 
@@ -227,6 +228,6 @@ def update_training_job(
             ).model_dump()
         return ToolError(
             error=str(e),
-            error_code=ErrorCode.SDK_ERROR,
+            error_code=ErrorCode.PERMISSION_DENIED if is_k8s_forbidden(e) else ErrorCode.SDK_ERROR,
             details=exception_details(e),
         ).model_dump()

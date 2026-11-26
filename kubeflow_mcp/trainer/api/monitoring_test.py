@@ -23,12 +23,15 @@ from unittest.mock import MagicMock, patch
 import pytest
 from kubeflow.trainer.backends.kubernetes.backend import KubernetesBackend
 from kubeflow.trainer.constants import constants as trainer_constants
+from kubernetes.client.exceptions import ApiException
 from tests.common import TestCase
 from urllib3.response import HTTPResponse
 
+from kubeflow_mcp.common.constants import ErrorCode
 from kubeflow_mcp.common.failures import FAILURE_PATTERNS, extract_failure_hint
 from kubeflow_mcp.core.resilience import CircuitState, get_breaker
 from kubeflow_mcp.core.server import _audit_wrap
+from kubeflow_mcp.trainer.api import monitoring
 from kubeflow_mcp.trainer.api.monitoring import (
     MAX_CURSOR_CHARS,
     MAX_LINE_CHARS,
@@ -39,6 +42,72 @@ from kubeflow_mcp.trainer.api.monitoring import (
     get_training_logs,
     wait_for_training,
 )
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "method"),
+    [
+        ("get_training_logs", "get_job_logs"),
+        ("get_training_events", "get_job_events"),
+        ("wait_for_training", "wait_for_job_status"),
+    ],
+)
+@pytest.mark.parametrize("status", [401, 403, 404, 500])
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_monitoring_classifies_api_errors(
+    tool_name: str, method: str, status: int, wrapped: bool
+) -> None:
+    error: Exception = ApiException(status=status)
+    if wrapped:
+        cause = error
+        error = RuntimeError("Trainer SDK request failed")
+        error.__cause__ = cause
+    client = MagicMock()
+    getattr(client, method).side_effect = error
+    with patch.object(monitoring, "get_trainer_client_for_namespace", return_value=client):
+        result = getattr(monitoring, tool_name)(name="job-a", namespace="team-b")
+    expected = (
+        ErrorCode.PERMISSION_DENIED
+        if status in (401, 403)
+        else ErrorCode.RESOURCE_NOT_FOUND
+        if status == 404
+        else ErrorCode.SDK_ERROR
+    )
+    assert result["success"] is False
+    assert result["error_code"] == expected
+    assert result["details"]["exception"] == type(error).__name__
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "method", "success"),
+    [
+        ("get_training_logs", "get_job_logs", ["Training output"]),
+        ("get_training_events", "get_job_events", []),
+        ("wait_for_training", "wait_for_job_status", SimpleNamespace(status="Complete")),
+    ],
+)
+@pytest.mark.parametrize("status", [403, 500])
+def test_monitoring_breaker_distinguishes_denials_from_outages(
+    tool_name: str, method: str, success: object, status: int
+) -> None:
+    breaker = get_breaker(tool_name)
+    error = RuntimeError("Trainer SDK request failed")
+    error.__cause__ = ApiException(status=status)
+    client = MagicMock()
+    getattr(client, method).side_effect = [error] * breaker.failure_threshold + [success]
+    wrapped = _audit_wrap(getattr(monitoring, tool_name))
+    with patch.object(monitoring, "get_trainer_client_for_namespace", return_value=client):
+        for _ in range(breaker.failure_threshold):
+            result = wrapped(name="job-a", namespace="team-b")
+            expected = ErrorCode.PERMISSION_DENIED if status == 403 else ErrorCode.SDK_ERROR
+            assert result["error_code"] == expected
+        result = wrapped(name="job-a", namespace="team-a")
+    if status == 403:
+        assert result["success"] is True
+        assert breaker.state == CircuitState.CLOSED
+    else:
+        assert result["error_code"] == ErrorCode.CIRCUIT_OPEN
+        assert breaker.state == CircuitState.OPEN
 
 
 def test_extract_failure_hint_openshift_pip_error():
