@@ -205,12 +205,96 @@ class TestRedactText:
             ("retry s3_secret_access_key: s3-abc999", "s3-abc999"),
             ("refresh with accessToken=at-abc999", "at-abc999"),
             ("login failed user: password=hunter2", "hunter2"),
+            ('{"token": "my-json-token-123"}', "my-json-token-123"),
+            ("{'token': 'my-dict-token-456'}", "my-dict-token-456"),
+            ('{"password": "secret_pass_789"}', "secret_pass_789"),
+            ("{'password': 'dict_pass_abc'}", "dict_pass_abc"),
+            ('{"api_key": "sk-live-999"}', "sk-live-999"),
+            ('{"client_secret": "cs-test-000"}', "cs-test-000"),
+            ('{"authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.SECRETPAYLOAD.sig"}', _JWT),
+            ('{"token": 12345}', "12345"),
+            (r'{"password": "secret\"with\"quotes"}', "secret"),
+            (r'{"password": "secret\"with\"quotes"}', "quotes"),
+            (r"{'password': 'secret\'with\'quotes'}", "quotes"),
+            ("password=,dummy-value", "dummy-value"),
+            ("password=abc,def", "def"),
+            ("password=;dummy-value", "dummy-value"),
+            ("password=abc;def", "def"),
+            ("password=abc}def", "def"),
+            ("password=abc]def", "def"),
         ],
     )
     def test_credential_is_removed(self, text, leaked):
         result = _redact_text(text)
         assert leaked not in result
         assert "***" in result
+
+    def test_bare_credential_with_leading_comma_redacted(self):
+        text = "password=,dummy-value"
+        assert _redact_text(text) == "password=***"
+        assert "dummy-value" not in _redact_text(text)
+
+    def test_bare_credential_with_embedded_comma_redacted(self):
+        text = "password=abc,def"
+        assert _redact_text(text) == "password=***"
+        assert "abc" not in _redact_text(text)
+        assert "def" not in _redact_text(text)
+
+    def test_bare_credential_with_leading_and_embedded_semicolon_redacted(self):
+        assert _redact_text("password=;dummy-value") == "password=***"
+        assert "dummy-value" not in _redact_text("password=;dummy-value")
+        assert _redact_text("password=abc;def") == "password=***"
+        assert "abc" not in _redact_text("password=abc;def")
+        assert "def" not in _redact_text("password=abc;def")
+
+    def test_bare_credential_with_embedded_brackets_redacted(self):
+        assert _redact_text("password=abc}def") == "password=***"
+        assert "abc" not in _redact_text("password=abc}def")
+        assert "def" not in _redact_text("password=abc}def")
+        assert _redact_text("password=abc]def") == "password=***"
+        assert "abc" not in _redact_text("password=abc]def")
+        assert "def" not in _redact_text("password=abc]def")
+
+    def test_bare_credential_preserves_trailing_comma_separator(self):
+        text = "token: abc, next=1"
+        assert _redact_text(text) == "token: ***, next=1"
+
+    def test_bare_credential_preserves_trailing_separators_and_delimiters(self):
+        assert _redact_text("token: abc; next=1") == "token: ***; next=1"
+        assert _redact_text("token: abc;") == "token: ***;"
+        assert _redact_text('{"token": abc}') == '{"token": ***}'
+        assert _redact_text("[token: abc]") == "[token: ***]"
+        assert _redact_text('{"data": {"token": abc}}') == '{"data": {"token": ***}}'
+
+    def test_escaped_quotes_inside_json_value_redacted(self):
+        text = r'{"password": "secret\"with\"quotes", "user": "alice"}'
+        expected = '{"password": "***", "user": "alice"}'
+        assert _redact_text(text) == expected
+        assert "secret" not in _redact_text(text)
+        assert "quotes" not in _redact_text(text)
+
+    def test_escaped_quotes_inside_single_quoted_dict_redacted(self):
+        text = r"{'password': 'secret\'with\'quotes', 'user': 'alice'}"
+        expected = "{'password': '***', 'user': 'alice'}"
+        assert _redact_text(text) == expected
+        assert "secret" not in _redact_text(text)
+        assert "quotes" not in _redact_text(text)
+
+        escaped_dict = r"{\'password\': \'alpha beta\'}"
+        result = _redact_text(escaped_dict)
+        assert result == r"{\'password\': '***'}"
+        assert "alpha" not in result
+        assert "beta" not in result
+
+    def test_quoted_json_structure_preserved(self):
+        text = '{"user": "alice", "token": "secret123", "role": "admin"}'
+        expected = '{"user": "alice", "token": "***", "role": "admin"}'
+        assert _redact_text(text) == expected
+
+    def test_single_quoted_dict_structure_preserved(self):
+        text = "{'user': 'alice', 'password': 'hunter2', 'role': 'admin'}"
+        expected = "{'user': 'alice', 'password': '***', 'role': 'admin'}"
+        assert _redact_text(text) == expected
 
     def test_plain_message_untouched(self):
         assert _redact_text("tool_call completed in 12ms") == "tool_call completed in 12ms"
@@ -277,6 +361,18 @@ class TestLogPathsRedactConsistently:
 
         output = json.loads(StructuredFormatter().format(record))
         assert _JWT not in output["exception"]
+
+    def test_console_formatter_redacts_exception_text(self):
+        try:
+            raise RuntimeError(f"boom: token={_JWT}")
+        except RuntimeError:
+            record = self._record("tool_call_failed", exc_info=sys.exc_info())
+
+        output = ConsoleFormatter().format(record)
+        assert _JWT not in output
+        assert "token=***" in output
+        assert "RuntimeError: boom" in output
+        assert "Traceback (most recent call last)" in output
 
     def test_all_paths_produce_the_same_message(self):
         record = self._record(self._LINE)
@@ -363,6 +459,153 @@ class TestConsoleFormatterColors:
         record.levelname = "CUSTOM"
         formatted = ConsoleFormatter().format(record)
         assert formatted.startswith(ConsoleFormatter.RESET)
+
+
+class TestConsoleFormatterTraceback:
+    """Tests for ConsoleFormatter exception and stack info handling."""
+
+    def test_renders_and_redacts_traceback(self):
+        formatter = ConsoleFormatter()
+        try:
+            raise ValueError(f"db crash password=hunter2 token={_JWT}")
+        except ValueError:
+            record = logging.LogRecord(
+                name="test",
+                level=logging.ERROR,
+                pathname=__file__,
+                lineno=1,
+                msg="operation failed",
+                args=(),
+                exc_info=sys.exc_info(),
+            )
+
+        formatted = formatter.format(record)
+        assert "operation failed" in formatted
+        assert "Traceback (most recent call last)" in formatted
+        assert "ValueError: db crash" in formatted
+        assert "password=***" in formatted
+        assert "hunter2" not in formatted
+        assert _JWT not in formatted
+        assert "token=***" in formatted
+
+    def test_renders_and_redacts_stack_info(self):
+        formatter = ConsoleFormatter()
+        record = logging.LogRecord(
+            name="test",
+            level=logging.WARNING,
+            pathname=__file__,
+            lineno=1,
+            msg="warning check",
+            args=(),
+            exc_info=None,
+        )
+        record.stack_info = (
+            f"Stack (most recent call last):\n  File 'test.py', line 1\n    secret_key={_JWT}"
+        )
+
+        formatted = formatter.format(record)
+        assert "warning check" in formatted
+        assert "Stack (most recent call last)" in formatted
+        assert _JWT not in formatted
+        assert "secret_key=***" in formatted
+
+    def test_single_line_when_no_exception_or_stack(self):
+        formatter = ConsoleFormatter()
+        record = logging.LogRecord(
+            name="test",
+            level=logging.INFO,
+            pathname=__file__,
+            lineno=1,
+            msg="simple message",
+            args=(),
+            exc_info=None,
+        )
+        formatted = formatter.format(record)
+        assert "\n" not in formatted
+
+    def test_renders_and_redacts_json_exception_payload(self):
+        formatter = ConsoleFormatter()
+        try:
+            raise RuntimeError('{"token": "super_secret_token", "error": "unauthorized"}')
+        except RuntimeError:
+            record = logging.LogRecord(
+                name="test",
+                level=logging.ERROR,
+                pathname=__file__,
+                lineno=1,
+                msg="api error",
+                args=(),
+                exc_info=sys.exc_info(),
+            )
+
+        formatted = formatter.format(record)
+        assert "super_secret_token" not in formatted
+        assert '{"token": "***", "error": "unauthorized"}' in formatted
+        assert "Traceback (most recent call last)" in formatted
+
+    def test_renders_and_redacts_quoted_dict_in_stack_info(self):
+        formatter = ConsoleFormatter()
+        record = logging.LogRecord(
+            name="test",
+            level=logging.ERROR,
+            pathname=__file__,
+            lineno=1,
+            msg="stack error",
+            args=(),
+            exc_info=None,
+        )
+        record.stack_info = (
+            "Stack (most recent call last):\n"
+            "  File 'handler.py', line 12\n"
+            "    headers = {'api_key': 'secret-key-123'}"
+        )
+
+        formatted = formatter.format(record)
+        assert "secret-key-123" not in formatted
+        assert "{'api_key': '***'}" in formatted
+        assert "Stack (most recent call last)" in formatted
+
+    def test_renders_and_redacts_exception_with_escaped_quotes(self):
+        formatter = ConsoleFormatter()
+        try:
+            raise RuntimeError(r'{"password": "leak_xyz\"nested_abc\"val", "status": "failed"}')
+        except RuntimeError:
+            record = logging.LogRecord(
+                name="test",
+                level=logging.ERROR,
+                pathname=__file__,
+                lineno=1,
+                msg="auth error",
+                args=(),
+                exc_info=sys.exc_info(),
+            )
+
+        formatted = formatter.format(record)
+        assert "leak_xyz" not in formatted
+        assert "nested_abc" not in formatted
+        assert '{"password": "***", "status": "failed"}' in formatted
+        assert "Traceback (most recent call last)" in formatted
+
+    def test_renders_and_redacts_bare_credential_with_comma_in_traceback(self):
+        formatter = ConsoleFormatter()
+        try:
+            raise RuntimeError("failed with password=lead,trail_secret in job")
+        except RuntimeError:
+            record = logging.LogRecord(
+                name="test",
+                level=logging.ERROR,
+                pathname=__file__,
+                lineno=1,
+                msg="auth error",
+                args=(),
+                exc_info=sys.exc_info(),
+            )
+
+        formatted = formatter.format(record)
+        assert "lead" not in formatted
+        assert "trail_secret" not in formatted
+        assert "password=***" in formatted
+        assert "Traceback (most recent call last)" in formatted
 
 
 class TestSetupLogging:
