@@ -377,7 +377,7 @@ make inspector
 | `FailedScheduling` | No node matches resource request | Check `get_cluster_resources()`; reduce `gpu_per_node`; add `tolerations` |
 | `ErrImagePull / ImagePullBackOff` | Image not found or auth failed | Verify image name; add `image_pull_secrets` parameter |
 | `NCCL timeout` | Multi-node communication failure | Pass `env={"NCCL_TIMEOUT": "1800"}`; try gloo backend; check cluster network |
-| `403 Forbidden` (HuggingFace) | Gated model, no token | Accept the model licence on HuggingFace; pass `hf_token` parameter |
+| `403 Forbidden` (HuggingFace) | Gated model, no token | Accept the model licence on HuggingFace; put the token in a Secret and pass `hf_token_secret` (`fine_tune`) or `secret_env` (`run_*`) |
 | `Read-only filesystem` | Platform enforces read-only root FS (e.g. OpenShift) | Add emptyDir volumes for `/.local`, `/.cache`, `/tmp` |
 | `ProcessGroupNCCL … no GPUs` | torchtune on CPU-only cluster | Use `run_custom_training()` with gloo backend |
 | Script syntax error | Invalid Python in `run_custom_training` | Script body is wrapped into a function — no top-level indentation, no `if __name__` guards |

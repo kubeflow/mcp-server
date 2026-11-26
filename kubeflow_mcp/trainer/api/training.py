@@ -15,6 +15,7 @@
 """Training submission tools: fine_tune, run_custom_training, run_container_training."""
 
 import ast
+import functools
 import json
 import logging
 import os
@@ -24,7 +25,7 @@ import tempfile
 import textwrap
 import threading
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -36,6 +37,7 @@ from kubeflow.trainer.constants.constants import (
     DEFAULT_TRAINING_RUNTIME,
 )
 from kubernetes import client as k8s_client
+from typing_extensions import TypedDict
 
 from kubeflow_mcp.common.constants import ErrorCode
 from kubeflow_mcp.common.huggingface import (
@@ -54,6 +56,7 @@ from kubeflow_mcp.common.utils import (
 from kubeflow_mcp.core.security import (
     check_namespace_allowed,
     is_safe_python_code,
+    is_sensitive_key,
     mask_sensitive_data,
     validate_image_reference,
     validate_k8s_name,
@@ -191,6 +194,189 @@ def _inject_trainer_hf_home(hf_home_path: str):
             if _hf_home_refcount == 0:
                 k8s_utils.get_trainer_cr_from_builtin_trainer = _original_get_trainer_cr
                 _original_get_trainer_cr = None
+
+
+class SecretKeyRef(TypedDict):
+    """A key in a Kubernetes Secret in the TrainJob namespace."""
+
+    name: str
+    key: str
+
+
+# Kubernetes Secret data keys and (pre-1.30, conservative) env var names.
+_SECRET_KEY_RE = re.compile(r"[-._a-zA-Z0-9]+")
+_ENV_NAME_RE = re.compile(r"[-._a-zA-Z][-._a-zA-Z0-9]*")
+
+
+@dataclass(frozen=True)
+class _SecretRefs:
+    """Secret references to set on the TrainJob instead of plain env values."""
+
+    hf_token: SecretKeyRef | None = None
+    s3_secret: str | None = None
+    trainer_env: tuple[tuple[str, str, str], ...] = ()  # (env name, secret, key)
+
+
+_secret_refs_ctx: ContextVar[_SecretRefs | None] = ContextVar("secret_refs", default=None)
+_secret_refs_lock = threading.Lock()
+_secret_refs_refcount = 0
+_secret_refs_originals: dict[str, Callable] = {}
+
+
+def _secret_env_var(env_name: str, secret: str, key: str) -> Any:
+    from kubeflow_trainer_api import models
+
+    return models.IoK8sApiCoreV1EnvVar(
+        name=env_name,
+        value_from=models.IoK8sApiCoreV1EnvVarSource(
+            secret_key_ref=models.IoK8sApiCoreV1SecretKeySelector(name=secret, key=key)
+        ),
+    )
+
+
+def _upsert_env(cr: Any, envs: list[Any]) -> None:
+    """Replace same-named entries (env lists are keyed by name) and put ``envs`` first,
+    so other values can reference them as ``$(NAME)``."""
+    names = {e.name for e in envs}
+    cr.env = envs + [e for e in (cr.env or []) if e.name not in names]
+
+
+def _wrap_initializer_builder(original: Callable) -> Callable:
+    @functools.wraps(original)
+    def _patched(source: Any) -> Any:
+        cr = original(source)
+        refs = _secret_refs_ctx.get()
+        if refs is None:
+            return cr
+        if refs.hf_token and isinstance(
+            source, (HuggingFaceModelInitializer, HuggingFaceDatasetInitializer)
+        ):
+            _upsert_env(
+                cr, [_secret_env_var("ACCESS_TOKEN", refs.hf_token["name"], refs.hf_token["key"])]
+            )
+        elif refs.s3_secret and isinstance(source, (S3ModelInitializer, S3DatasetInitializer)):
+            from kubeflow_trainer_api import models
+
+            cr.secret_ref = models.IoK8sApiCoreV1LocalObjectReference(name=refs.s3_secret)
+        return cr
+
+    return _patched
+
+
+def _wrap_custom_trainer_builder(original: Callable) -> Callable:
+    @functools.wraps(original)
+    def _patched(runtime: Any, trainer: Any) -> Any:
+        cr = original(runtime, trainer)
+        refs = _secret_refs_ctx.get()
+        if refs is not None and refs.trainer_env:
+            _upsert_env(cr, [_secret_env_var(*entry) for entry in refs.trainer_env])
+        return cr
+
+    return _patched
+
+
+_SECRET_REF_WRAPPERS: dict[str, Callable[[Callable], Callable]] = {
+    "get_model_initializer": _wrap_initializer_builder,
+    "get_dataset_initializer": _wrap_initializer_builder,
+    "get_trainer_cr_from_custom_trainer": _wrap_custom_trainer_builder,
+}
+
+
+@contextmanager
+def _inject_secret_refs(refs: _SecretRefs | None) -> Iterator[None]:
+    """Patch SDK builders so credentials come from Secrets instead of plain env values.
+
+    The SDK (v0.5.x) has no ``secretRef`` on initializers and only plain-string env.
+    Trainer rejects env in ``runtimePatches`` for the initializer and node containers,
+    so the references are set on the CRs the builders return. Wrappers keep their own
+    original, so a call that grabbed a wrapper just before restore still works.
+    """
+    if refs is None:
+        yield
+        return
+
+    import kubeflow.trainer.backends.kubernetes.utils as k8s_utils
+
+    global _secret_refs_refcount
+
+    token = _secret_refs_ctx.set(refs)
+    with _secret_refs_lock:
+        if _secret_refs_refcount == 0:
+            for name, wrap in _SECRET_REF_WRAPPERS.items():
+                _secret_refs_originals[name] = getattr(k8s_utils, name)
+                setattr(k8s_utils, name, wrap(_secret_refs_originals[name]))
+        _secret_refs_refcount += 1
+
+    try:
+        yield
+    finally:
+        _secret_refs_ctx.reset(token)
+        with _secret_refs_lock:
+            _secret_refs_refcount -= 1
+            if _secret_refs_refcount == 0:
+                for name, original in _secret_refs_originals.items():
+                    setattr(k8s_utils, name, original)
+                _secret_refs_originals.clear()
+
+
+def _validation_error(error: str) -> ToolError:
+    return ToolError(error=error, error_code=ErrorCode.VALIDATION_ERROR)
+
+
+def _validate_secret_key_ref(ref: Any, field: str) -> ToolError | None:
+    if (
+        not isinstance(ref, dict)
+        or set(ref) != {"name", "key"}
+        or not all(isinstance(v, str) for v in ref.values())
+    ):
+        return _validation_error(f"{field} must be {{'name': '<secret>', 'key': '<key>'}}")
+    name_err = validate_k8s_subdomain_name(ref["name"], f"{field}.name")
+    if name_err:
+        return name_err
+    key = ref["key"]
+    if (
+        len(key) > 253
+        or not _SECRET_KEY_RE.fullmatch(key)
+        or key in (".", "..")
+        or key.startswith("..")
+    ):
+        return _validation_error(f"{field}.key '{key}' is not a valid Secret key")
+    return None
+
+
+def _validate_secret_env(secret_env: Any, env: dict[str, str] | None) -> ToolError | None:
+    if secret_env is None:
+        return None
+    if not isinstance(secret_env, dict):
+        return _validation_error("secret_env must map env var names to Secret keys")
+    for env_name, ref in secret_env.items():
+        if not isinstance(env_name, str) or not _ENV_NAME_RE.fullmatch(env_name):
+            return _validation_error(f"secret_env name '{env_name}' is not a valid env var name")
+        err = _validate_secret_key_ref(ref, f"secret_env.{env_name}")
+        if err:
+            return err
+    overlap = sorted(set(secret_env) & set(env or {}))
+    if overlap:
+        return _validation_error(f"Set {', '.join(overlap)} in env or secret_env, not both")
+    return None
+
+
+def _env_credential_warning(env: dict[str, str] | None) -> str | None:
+    sensitive = sorted(k for k in env or {} if is_sensitive_key(k))
+    if not sensitive:
+        return None
+    return (
+        f"Stored as plain text on the TrainJob: env {', '.join(sensitive)}. "
+        "Use secret_env to read credentials from a Secret"
+    )
+
+
+def _secret_env_refs(secret_env: dict[str, SecretKeyRef] | None) -> _SecretRefs | None:
+    if not secret_env:
+        return None
+    return _SecretRefs(
+        trainer_env=tuple((k, ref["name"], ref["key"]) for k, ref in secret_env.items())
+    )
 
 
 _TRAINING_SCRIPT_DIR: str | None = None
@@ -1084,6 +1270,43 @@ def _build_dataset_preprocess_cfg(
     return TorchTuneInstructDataset(**ds_kwargs)
 
 
+def _validate_fine_tune_credentials(
+    *,
+    model: str,
+    dataset: str,
+    hf_token: str | None,
+    hf_token_secret: Any,
+    s3_access_key_id: str | None,
+    s3_secret_access_key: str | None,
+    s3_credentials_secret: Any,
+) -> ToolError | None:
+    """Check Secret references; inline and Secret forms of one credential conflict."""
+    # Same routing as _build_initializer: anything not s3:// uses a HuggingFace initializer.
+    uses_s3 = model.startswith("s3://") or dataset.startswith("s3://")
+    uses_hf = not (model.startswith("s3://") and dataset.startswith("s3://"))
+    if hf_token_secret is not None:
+        if hf_token:
+            return _validation_error("Pass hf_token or hf_token_secret, not both")
+        if not uses_hf:
+            return _validation_error(
+                "hf_token_secret needs a HuggingFace (non-s3://) model or dataset"
+            )
+        err = _validate_secret_key_ref(hf_token_secret, "hf_token_secret")
+        if err:
+            return err
+    if s3_credentials_secret is not None:
+        if s3_access_key_id or s3_secret_access_key:
+            return _validation_error(
+                "Pass s3_access_key_id/s3_secret_access_key or s3_credentials_secret, not both"
+            )
+        if not uses_s3:
+            return _validation_error("s3_credentials_secret needs an s3:// model or dataset")
+        if not isinstance(s3_credentials_secret, str):
+            return _validation_error("s3_credentials_secret must be a Secret name")
+        return validate_k8s_subdomain_name(s3_credentials_secret, "s3_credentials_secret")
+    return None
+
+
 def fine_tune(
     model: str,
     dataset: str,
@@ -1091,6 +1314,7 @@ def fine_tune(
     name: str | None = None,
     namespace: str | None = None,
     hf_token: str | None = None,
+    hf_token_secret: SecretKeyRef | None = None,
     batch_size: int = 4,
     epochs: int = 1,
     num_nodes: int = 1,
@@ -1117,6 +1341,7 @@ def fine_tune(
     s3_secret_access_key: str | None = None,
     s3_region: str | None = None,
     s3_role_arn: str | None = None,
+    s3_credentials_secret: str | None = None,
     node_selector: dict[str, str] | None = None,
     tolerations: list[dict[str, Any]] | None = None,
     volumes: list[dict[str, Any]] | None = None,
@@ -1156,7 +1381,10 @@ def fine_tune(
         name: Custom TrainJob name. Auto-generated if omitted.
         namespace: K8s namespace for the TrainJob. Uses default from kubeconfig
             when omitted. Must be allowed by policy.
-        hf_token: HuggingFace access token for gated models (Llama, Mistral).
+        hf_token: HuggingFace access token for gated models (Llama, Mistral). Stored as
+            plain text on the TrainJob; prefer ``hf_token_secret``.
+        hf_token_secret: Read the HuggingFace token from a Secret in the job namespace
+            instead, e.g. ``{"name": "hf-creds", "key": "token"}``.
         batch_size: Per-GPU batch size. Defaults to 4.
         epochs: Number of training epochs. Defaults to 1.
         num_nodes: Distributed training nodes. Defaults to 1.
@@ -1191,6 +1419,12 @@ def fine_tune(
         s3_secret_access_key: S3 secret access key.
         s3_region: S3 region.
         s3_role_arn: IAM role ARN for S3 access.
+        s3_credentials_secret: Name of a Secret in the job namespace holding the S3
+            credentials, used instead of ``s3_access_key_id``/``s3_secret_access_key``
+            (which are stored as plain text on the TrainJob). The S3 initializer reads it
+            as env, so its keys must be ``ACCESS_KEY_ID`` and ``SECRET_ACCESS_KEY``
+            (optionally ``ENDPOINT``, ``REGION``, ``ROLE_ARN``; ``s3_endpoint``,
+            ``s3_region`` and ``s3_role_arn`` take precedence over those).
         node_selector: K8s node selector (e.g., ``{"gpu-type": "a100"}``).
         tolerations: K8s tolerations for tainted nodes.
         volumes: Kubernetes camelCase dictionaries, each with ``name`` and one source
@@ -1223,6 +1457,15 @@ def fine_tune(
             _validate_resources_per_node(resources_per_node)
             or _validate_service_account_name(service_account_name)
             or _validate_storage(volumes, volume_mounts)
+            or _validate_fine_tune_credentials(
+                model=model,
+                dataset=dataset,
+                hf_token=hf_token,
+                hf_token_secret=hf_token_secret,
+                s3_access_key_id=s3_access_key_id,
+                s3_secret_access_key=s3_secret_access_key,
+                s3_credentials_secret=s3_credentials_secret,
+            )
         )
         if input_err:
             return input_err.model_dump()
@@ -1262,6 +1505,8 @@ def fine_tune(
             ("s3_endpoint", s3_endpoint),
             ("s3_region", s3_region),
             ("s3_role_arn", s3_role_arn),
+            ("hf_token_secret", hf_token_secret),
+            ("s3_credentials_secret", s3_credentials_secret),
             ("node_selector", node_selector),
             ("tolerations", tolerations),
             ("volumes", volumes),
@@ -1305,6 +1550,20 @@ def fine_tune(
             ).model_dump()
 
         config["mode"] = "builtin_trainer"
+        inline = [
+            p
+            for p, v in (
+                ("hf_token", hf_token),
+                ("s3_access_key_id", s3_access_key_id),
+                ("s3_secret_access_key", s3_secret_access_key),
+            )
+            if v
+        ]
+        if inline:
+            config["credential_warning"] = (
+                f"Stored as plain text on the TrainJob: {', '.join(inline)}. Use "
+                "hf_token_secret or s3_credentials_secret to read credentials from a Secret"
+            )
 
         if not confirmed:
             from kubeflow_mcp.trainer.api.planning import get_cluster_resources
@@ -1391,7 +1650,10 @@ def fine_tune(
 
         trainer = BuiltinTrainer(config=torch_cfg)
         _inject_ownership_label(options)
-        with _inject_trainer_hf_home(HF_HOME_PATH):
+        refs = None
+        if hf_token_secret or s3_credentials_secret:
+            refs = _SecretRefs(hf_token=hf_token_secret, s3_secret=s3_credentials_secret)
+        with _inject_trainer_hf_home(HF_HOME_PATH), _inject_secret_refs(refs):
             job_name = client.train(
                 runtime=runtime, initializer=initializer, trainer=trainer, options=options
             )
@@ -1428,6 +1690,7 @@ def run_custom_training(
     pip_index_urls: list[str] | None = None,
     resources_per_node: dict[str, Any] | None = None,
     env: dict[str, str] | None = None,
+    secret_env: dict[str, SecretKeyRef] | None = None,
     node_selector: dict[str, str] | None = None,
     tolerations: list[dict[str, Any]] | None = None,
     volumes: list[dict[str, Any]] | None = None,
@@ -1467,7 +1730,10 @@ def run_custom_training(
             ``{"gpu": gpu_per_node}`` (or no resource constraints if
             ``gpu_per_node=0``).
         env: Environment variables set on the trainer container in the TrainJob
-            spec. Dict format: ``{"KEY": "VALUE"}``.
+            spec. Dict format: ``{"KEY": "VALUE"}``. Values are stored as plain text;
+            use ``secret_env`` for credentials.
+        secret_env: Environment variables read from Secrets in the job namespace, e.g.
+            ``{"HF_TOKEN": {"name": "hf-creds", "key": "token"}}``.
         node_selector: K8s node selector applied to the pod.
         tolerations: K8s tolerations for tainted nodes.
         volumes: Kubernetes camelCase dictionaries, each with ``name`` and one source
@@ -1499,6 +1765,7 @@ def run_custom_training(
             _validate_resources_per_node(resources_per_node)
             or _validate_service_account_name(service_account_name)
             or _validate_storage(volumes, volume_mounts)
+            or _validate_secret_env(secret_env, env)
         )
         if input_err:
             return input_err.model_dump()
@@ -1546,6 +1813,8 @@ def run_custom_training(
         }
         for k, v in [
             ("env", mask_sensitive_data(env) if env else None),
+            ("secret_env", secret_env),
+            ("credential_warning", _env_credential_warning(env)),
             ("node_selector", node_selector),
             ("tolerations", tolerations),
             ("volumes", volumes),
@@ -1616,11 +1885,12 @@ def run_custom_training(
 
         _inject_ownership_label(options)
         client = _get_client(namespace)
-        job_name = client.train(
-            runtime=runtime,
-            trainer=trainer,
-            options=options,
-        )
+        with _inject_secret_refs(_secret_env_refs(secret_env)):
+            job_name = client.train(
+                runtime=runtime,
+                trainer=trainer,
+                options=options,
+            )
 
         return ToolResponse(
             data={
@@ -1658,6 +1928,7 @@ def run_container_training(
     gpu_per_node: int = 1,
     resources_per_node: dict[str, Any] | None = None,
     env: dict[str, str] | None = None,
+    secret_env: dict[str, SecretKeyRef] | None = None,
     node_selector: dict[str, str] | None = None,
     tolerations: list[dict[str, Any]] | None = None,
     volumes: list[dict[str, Any]] | None = None,
@@ -1692,7 +1963,10 @@ def run_container_training(
         resources_per_node: Full resource dict (e.g.,
             ``{"cpu": "8", "memory": "32Gi", "gpu": 2}``). Overrides
             ``gpu_per_node`` when provided.
-        env: Environment variables as dict (e.g., ``{"HF_TOKEN": "xxx"}``).
+        env: Environment variables as dict (e.g., ``{"LOG_LEVEL": "info"}``). Values are
+            stored as plain text; use ``secret_env`` for credentials.
+        secret_env: Environment variables read from Secrets in the job namespace, e.g.
+            ``{"HF_TOKEN": {"name": "hf-creds", "key": "token"}}``.
         node_selector: K8s node selector.
         tolerations: K8s tolerations.
         volumes: Kubernetes camelCase dictionaries, each with ``name`` and one source
@@ -1721,6 +1995,7 @@ def run_container_training(
             _validate_resources_per_node(resources_per_node)
             or _validate_service_account_name(service_account_name)
             or _validate_storage(volumes, volume_mounts)
+            or _validate_secret_env(secret_env, env)
         )
         if input_err:
             return input_err.model_dump()
@@ -1759,6 +2034,8 @@ def run_container_training(
             "env": mask_sensitive_data(env) if env else None,
         }
         for k, v in [
+            ("secret_env", secret_env),
+            ("credential_warning", _env_credential_warning(env)),
             ("node_selector", node_selector),
             ("tolerations", tolerations),
             ("volumes", volumes),
@@ -1806,11 +2083,12 @@ def run_container_training(
 
         _inject_ownership_label(options)
         client = _get_client(namespace)
-        job_name = client.train(
-            runtime=runtime,
-            trainer=trainer,
-            options=options,
-        )
+        with _inject_secret_refs(_secret_env_refs(secret_env)):
+            job_name = client.train(
+                runtime=runtime,
+                trainer=trainer,
+                options=options,
+            )
 
         return ToolResponse(
             data={
