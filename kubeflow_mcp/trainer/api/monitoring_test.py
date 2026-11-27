@@ -956,6 +956,22 @@ class TestGetTrainingEvents:
         assert result["data"]["events"][0]["event_time"] == "2026-01-01T00:00:00Z"
 
     @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_event_time_preferred_over_legacy_timestamps(self, mock_client_fn, _ns):
+        event = SimpleNamespace(
+            event_time="preferred",
+            last_timestamp="legacy-last",
+            first_timestamp="legacy-first",
+            reason="Scheduled",
+            message="Scheduled",
+        )
+        mock_client_fn.return_value = _make_mock_client(get_job_events=[event])
+
+        result = get_training_events("my-job")
+
+        assert result["data"]["events"][0]["event_time"] == "preferred"
+
+    @patch(PATCH_NS_CHECK, return_value=None)
     def test_limit_less_than_one(self, _ns):
         result = get_training_events("my-job", limit=0)
         assert result["success"] is False
