@@ -31,7 +31,13 @@ if TYPE_CHECKING:
 
 
 class ErrorCode:
-    """Standard error codes for tool responses."""
+    """Standard error codes for tool responses.
+
+    This is the agent-facing error contract. Every failing tool response
+    carries ``success: False`` and one of these codes, so a client can decide
+    what to do without parsing human-readable text. See
+    ``docs/design/error-contract.md``.
+    """
 
     RESOURCE_NOT_FOUND = "RESOURCE_NOT_FOUND"
     PERMISSION_DENIED = "PERMISSION_DENIED"
@@ -42,6 +48,39 @@ class ErrorCode:
     TIMEOUT = "TIMEOUT"
     CIRCUIT_OPEN = "CIRCUIT_OPEN"
     RATE_LIMITED = "RATE_LIMITED"
+    TOOL_NOT_FOUND = "TOOL_NOT_FOUND"
+
+
+#: Codes where the same call may succeed later without any change by the caller.
+#: Agents should back off and retry rather than rewrite their request.
+RETRIABLE_ERROR_CODES = frozenset(
+    {
+        ErrorCode.RATE_LIMITED,
+        ErrorCode.CIRCUIT_OPEN,
+        ErrorCode.TIMEOUT,
+        ErrorCode.KUBERNETES_ERROR,
+        ErrorCode.SDK_ERROR,
+    }
+)
+
+#: Codes caused by the request itself. Retrying unchanged will fail the same way;
+#: the agent must correct its input, pick another resource, or ask for permission.
+CALLER_ERROR_CODES = frozenset(
+    {
+        ErrorCode.VALIDATION_ERROR,
+        ErrorCode.RESOURCE_NOT_FOUND,
+        ErrorCode.TOOL_NOT_FOUND,
+        ErrorCode.PERMISSION_DENIED,
+        ErrorCode.QUOTA_EXCEEDED,
+    }
+)
+
+
+def is_retriable_error(result: Any) -> bool:
+    """Return True if a failed tool result is worth retrying unchanged."""
+    if not isinstance(result, dict):
+        return False
+    return result.get("error_code") in RETRIABLE_ERROR_CODES
 
 
 def is_infrastructure_error(result: Any) -> bool:

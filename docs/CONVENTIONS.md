@@ -86,7 +86,8 @@ Copy trainer's persona matrix tests (`trainer/api/architecture_test.py`).
 - Missing resource: `RESOURCE_NOT_FOUND`. Exists but not MCP-owned: `VALIDATION_ERROR`.
 - 404s: `is_k8s_not_found()` — never substring-match `"not found"`.
 - Errors: return `ToolError` at tool boundary; log WARNING + `exc_info`; no stack traces in
-  responses (use `exception_details()`).
+  responses (use `exception_details()`). Every failure carries `success: False` and a stable
+  `error_code`: [design/error-contract.md](design/error-contract.md).
 
 ---
 
