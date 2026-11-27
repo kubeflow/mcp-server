@@ -218,7 +218,7 @@ The tool accepts a Python script string, wraps it inside `def train():`, and cal
 
 `core/auth.py` implements HTTP-layer authentication (API key via `--auth-token`, JWT/OIDC via `KUBEFLOW_MCP_JWKS_URI` with a required issuer and audience). However, authenticated identities are not yet mapped to distinct Kubernetes identities. All tool calls run under whatever Kubeconfig the process was started with.
 
-**Impact:** In multi-user deployments, all users share the same Kubernetes identity. There is no per-user RBAC enforcement at the MCP layer (the auth layer verifies *who* is calling, but cannot scope *what* they can do beyond persona-level filtering).
+**Impact:** In multi-user deployments, all users share the same Kubernetes identity. Unless per-caller authorization is on ([`--authz sar`](#per-caller-authorization---authz-sar)), there is no per-user RBAC enforcement at the MCP layer (the auth layer verifies *who* is calling, but cannot scope *what* they can do beyond persona-level filtering).
 
 **Recommendation:** For single-user local development (stdio), this is acceptable — the user's own Kubeconfig is used. For multi-user HTTP deployments, configure JWT auth and turn on [per-caller authorization](#per-caller-authorization---authz-sar), so each call is checked against the caller's own Kubernetes RBAC. Calls still run as the server's account, so that account bounds what anyone can do.
 

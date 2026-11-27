@@ -219,7 +219,11 @@ class SubjectAccessReviewer:
             with self._lock:
                 if len(self._cache) >= MAX_CACHE_ENTRIES:
                     self._evict(now)
-                self._cache[key] = (now, allowed)
+                # Reviews run outside the lock: one that started earlier (say, before a
+                # permission was revoked) must not replace the answer of a later one.
+                stored = self._cache.get(key)
+                if stored is None or stored[0] <= now:
+                    self._cache[key] = (now, allowed)
         return allowed
 
     def _evict(self, now: float) -> None:
@@ -253,11 +257,22 @@ class SubjectAccessReviewer:
                 review, _request_timeout=K8S_TIMEOUT
             )
         except Exception as e:
-            raise AuthzError(f"SubjectAccessReview failed: {e}") from e
+            # The API server's response can be in the error; keep it out of the refusal.
+            logger.warning("authz_review_failed", exc_info=True)
+            raise AuthzError("SubjectAccessReview failed, see the server log") from e
         status = getattr(result, "status", None)
         if status is None:
             raise AuthzError("SubjectAccessReview returned no status")
-        return bool(status.allowed) and not bool(status.denied)
+        if status.denied:
+            return False
+        if status.allowed:
+            return True
+        # No decision because evaluation failed is not a denial: refuse without caching
+        # it, so the next call asks again.
+        if getattr(status, "evaluation_error", None):
+            logger.warning("authz_review_undecided: %s", status.evaluation_error)
+            raise AuthzError("SubjectAccessReview could not decide, see the server log")
+        return False
 
 
 def _refuse(
@@ -308,6 +323,10 @@ class SarAuthorizationMiddleware(Middleware):
                     "execute_tool needs tool_name as a string and arguments as an object",
                     error_code=ErrorCode.VALIDATION_ERROR,
                 )
+            # The tool registry behind execute_tool is shared by the whole process, so
+            # refuse a target this server did not register rather than let it run unchecked.
+            if tool not in self._permissions:
+                return _refuse(f"Tool '{tool}' not found", error_code=ErrorCode.RESOURCE_NOT_FOUND)
         # Nothing declared (unknown, hidden, or no Kubernetes request): nothing to ask.
         if not self._permissions.get(tool):
             return await call_next(context)
@@ -361,7 +380,8 @@ class SarAuthorizationMiddleware(Middleware):
         except InvalidArguments:
             raise
         except Exception as e:
-            raise AuthzError(f"cannot work out what this call needs ({e})") from e
+            logger.warning("authz_checks_unavailable", exc_info=True)
+            raise AuthzError("cannot work out what this call needs, see the server log") from e
         return self._reviewer.missing(identity, checks)
 
 

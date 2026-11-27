@@ -276,6 +276,53 @@ class TestReviewer:
         with pytest.raises(AuthzError):
             SubjectAccessReviewer(lambda: api, cache_ttl=0).missing(ALICE, [Check(GET_JOB, "ns")])
 
+    def test_no_decision_from_a_failed_evaluation_is_not_cached_as_a_denial(self):
+        class UndecidedApi(FakeAuthorizationApi):
+            def create_subject_access_review(self, review, **kwargs):
+                self.reviews.append(review)
+                status = SimpleNamespace(allowed=False, denied=False, evaluation_error="down")
+                return SimpleNamespace(status=status)
+
+        api = UndecidedApi()
+        reviewer = SubjectAccessReviewer(lambda: api, cache_ttl=30, clock=lambda: 0.0)
+        for _ in range(2):
+            with pytest.raises(AuthzError):
+                reviewer.missing(ALICE, [Check(GET_JOB, "ns")])
+        assert len(api.reviews) == 2
+
+    def test_a_decision_stands_despite_an_evaluation_error(self):
+        class PartlyFailedApi(FakeAuthorizationApi):
+            def create_subject_access_review(self, review, **kwargs):
+                status = SimpleNamespace(allowed=True, denied=False, evaluation_error="one rule")
+                return SimpleNamespace(status=status)
+
+        reviewer = SubjectAccessReviewer(lambda: PartlyFailedApi(), cache_ttl=0)
+        assert reviewer.missing(ALICE, [Check(GET_JOB, "ns")]) == []
+
+    def test_an_older_review_does_not_replace_a_newer_answer(self):
+        """A slow allow that started before a revocation must not overwrite the later deny."""
+        now = [0.0]
+        reviewer = None
+
+        class RevokedMidwayApi(FakeAuthorizationApi):
+            def create_subject_access_review(self, review, **kwargs):
+                if not self.reviews:
+                    self.reviews.append(review)
+                    # While this (allowing) review is in flight, the permission is
+                    # revoked and a later call stores the new answer.
+                    now[0] = 5.0
+                    self.allowed = set()
+                    assert reviewer.missing(ALICE, [Check(GET_JOB, "ns")]) != []
+                    return SimpleNamespace(status=SimpleNamespace(allowed=True, denied=False))
+                return super().create_subject_access_review(review, **kwargs)
+
+        api = RevokedMidwayApi(allowed={("alice", "get", "trainjobs", "ns")})
+        reviewer = SubjectAccessReviewer(lambda: api, cache_ttl=30, clock=lambda: now[0])
+        reviewer.missing(ALICE, [Check(GET_JOB, "ns")])
+        now[0] = 6.0
+        assert reviewer.missing(ALICE, [Check(GET_JOB, "ns")]) != []
+        assert len(api.reviews) == 2
+
     def test_cache_reuses_a_decision_until_it_expires(self):
         api = FakeAuthorizationApi(allowed={("alice", "get", "trainjobs", "ns")})
         now = [0.0]
@@ -446,13 +493,31 @@ class TestMiddleware:
 
     async def test_review_failure_refuses_the_call(self):
         calls = []
-        mcp = _server(FakeAuthorizationApi(error=RuntimeError("boom")), {"sub": "alice"}, calls)
+        error = RuntimeError("HTTP response body: internal detail")
+        mcp = _server(FakeAuthorizationApi(error=error), {"sub": "alice"}, calls)
         async with Client(mcp) as client:
             result = await client.call_tool(
                 "delete_training_job", {"name": "j", "namespace": "team-a"}, raise_on_error=False
             )
         assert result.is_error and calls == []
         assert result.structured_content["error_code"] == "PERMISSION_DENIED"
+        # The API server's response stays in the server log, not in the refusal.
+        assert "internal detail" not in str(result.structured_content)
+        assert "internal detail" not in result.content[0].text
+
+    async def test_execute_tool_cannot_reach_a_tool_this_server_did_not_register(self):
+        """The registry behind execute_tool is process-wide; another server's tool is refused."""
+        calls = []
+        api = FakeAuthorizationApi(ALLOW_ALICE)
+        mcp = _server(api, {"sub": "alice"}, calls)
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                "execute_tool",
+                {"tool_name": "delete_runtime", "arguments": {"name": "rt", "confirmed": True}},
+                raise_on_error=False,
+            )
+        assert result.is_error and calls == [] and api.reviews == []
+        assert result.structured_content["error_code"] == "RESOURCE_NOT_FOUND"
 
     @pytest.mark.parametrize(
         "arguments",
@@ -527,7 +592,7 @@ def test_builder_maps_each_registered_tool_to_its_namespace_resolver():
 
 
 def test_every_client_with_namespaced_permissions_has_a_namespace_resolver():
-    """Without one its calls are checked cluster-wide, refusing callers with namespaced Roles."""
+    """Without one, a call that omits namespace cannot be checked and is refused."""
     import importlib
 
     from kubeflow_mcp.core.authz import _namespace_resolvers
