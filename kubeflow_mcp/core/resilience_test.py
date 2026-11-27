@@ -206,14 +206,14 @@ class TestCircuitBreaker:
         assert cb.can_execute() is False
         assert cb.state == CircuitState.OPEN
 
-    def test_concurrent_record_failure_thread_safety(self):
+    def test_concurrent_record_failure_thread_safety(self) -> None:
         """Concurrent failures must atomically increment failure_count without lost updates."""
         cb = CircuitBreaker(failure_threshold=50)
         num_threads = 10
         failures_per_thread = 5
         barrier = threading.Barrier(num_threads)
 
-        def worker():
+        def worker() -> None:
             barrier.wait()
             for _ in range(failures_per_thread):
                 cb.record_failure()
@@ -226,7 +226,7 @@ class TestCircuitBreaker:
         assert cb.failure_count == num_threads * failures_per_thread
         assert cb.state == CircuitState.OPEN
 
-    def test_concurrent_record_success_in_half_open_thread_safety(self):
+    def test_concurrent_record_success_in_half_open_thread_safety(self) -> None:
         """Concurrent successes in HALF_OPEN must atomically increment counter and close circuit."""
         cb = CircuitBreaker(failure_threshold=1, recovery_timeout=0.0, half_open_max_calls=10)
         cb.record_failure()  # Transition to OPEN
@@ -237,7 +237,7 @@ class TestCircuitBreaker:
         num_threads = 10
         barrier = threading.Barrier(num_threads)
 
-        def worker():
+        def worker() -> None:
             barrier.wait()
             cb.record_success(generation)
 
@@ -250,7 +250,7 @@ class TestCircuitBreaker:
         assert cb.failure_count == 0
         assert cb._half_open_successes == 0
 
-    def test_concurrent_half_open_acquire_respects_limit(self):
+    def test_concurrent_half_open_acquire_respects_limit(self) -> None:
         """Concurrent acquire calls in HALF_OPEN state must never exceed half_open_max_calls."""
         cb = CircuitBreaker(failure_threshold=1, recovery_timeout=0.0, half_open_max_calls=5)
         cb.record_failure()  # Transition to OPEN
@@ -408,7 +408,7 @@ class TestRateLimiter:
         monkeypatch.setattr("time.time", lambda: 0.0)
         assert rl.acquire() is True
 
-    def test_concurrent_acquire_thread_safety(self, monkeypatch):
+    def test_concurrent_acquire_thread_safety(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Concurrent acquire calls must atomically consume tokens without race conditions."""
         rl = RateLimiter(rate=1.0, capacity=20.0)
         fixed_now = time.monotonic()
@@ -432,7 +432,9 @@ class TestRateLimiter:
         assert len(failed) == 30
         assert rl._tokens == pytest.approx(0.0)
 
-    def test_concurrent_acquire_fractional_tokens_thread_safety(self, monkeypatch):
+    def test_concurrent_acquire_fractional_tokens_thread_safety(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Concurrent acquire calls with fractional tokens must preserve exact token balances."""
         rl = RateLimiter(rate=1.0, capacity=10.0)
         fixed_now = time.monotonic()
@@ -490,12 +492,12 @@ class TestRetryWithBackoff:
         with pytest.raises(ValueError, match="permanent"):
             always_fail()
 
-    def test_non_retryable_exception_raises_immediately(self):
+    def test_non_retryable_exception_raises_immediately(self) -> None:
         """Non-retryable exceptions must propagate immediately on the first attempt without retry."""
         call_count = 0
 
         @retry_with_backoff(max_retries=3, base_delay=0.001, retryable_exceptions=(KeyError,))
-        def non_retryable():
+        def non_retryable() -> None:
             nonlocal call_count
             call_count += 1
             raise ValueError("fatal error")
@@ -505,7 +507,7 @@ class TestRetryWithBackoff:
 
         assert call_count == 1
 
-    def test_retryable_exceptions_tuple_retries_and_succeeds(self):
+    def test_retryable_exceptions_tuple_retries_and_succeeds(self) -> None:
         """All exception types specified in retryable_exceptions must trigger retry."""
         call_count = 0
 
@@ -514,7 +516,7 @@ class TestRetryWithBackoff:
             base_delay=0.001,
             retryable_exceptions=(KeyError, ValueError),
         )
-        def multi_flaky():
+        def multi_flaky() -> str:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -526,12 +528,12 @@ class TestRetryWithBackoff:
         assert multi_flaky() == "recovered"
         assert call_count == 3
 
-    def test_retryable_exception_raises_after_retries_exhausted(self):
+    def test_retryable_exception_raises_after_retries_exhausted(self) -> None:
         """Retryable exceptions must retry max_retries times before re-raising the last exception."""
         call_count = 0
 
         @retry_with_backoff(max_retries=2, base_delay=0.001, retryable_exceptions=(KeyError,))
-        def always_key_error():
+        def always_key_error() -> None:
             nonlocal call_count
             call_count += 1
             raise KeyError(f"attempt {call_count}")
@@ -541,12 +543,12 @@ class TestRetryWithBackoff:
 
         assert call_count == 3
 
-    def test_retryable_exception_subclass_is_retried(self):
+    def test_retryable_exception_subclass_is_retried(self) -> None:
         """Subclasses of specified retryable_exceptions must also trigger retry."""
         call_count = 0
 
         @retry_with_backoff(max_retries=2, base_delay=0.001, retryable_exceptions=(OSError,))
-        def raises_subclass():
+        def raises_subclass() -> str:
             nonlocal call_count
             call_count += 1
             if call_count < 2:
