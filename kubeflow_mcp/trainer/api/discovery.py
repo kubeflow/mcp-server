@@ -18,6 +18,7 @@ import logging
 import time
 import uuid
 from collections import Counter
+from datetime import datetime
 from typing import Any
 
 from kubeflow.trainer.constants import constants as trainer_constants
@@ -31,6 +32,7 @@ from kubeflow_mcp.common.types import (
     is_k8s_not_found,
 )
 from kubeflow_mcp.common.utils import (
+    K8S_TIMEOUT,
     get_core_v1_api,
     get_custom_objects_api,
     get_trainer_client,
@@ -137,6 +139,79 @@ def _trainjob_steps_to_mcp(job: object) -> tuple[list[dict[str, Any]], dict[str,
         "truncated": len(steps) > MAX_JOB_STEPS,
     }
     return step_list, summary
+
+
+# Upper bound on reported metrics in get_training_job. The CRD allows 256, each
+# value up to 64 characters; agents need the latest few, not a full dump.
+MAX_PROGRESS_METRICS = 32
+
+_NO_PROGRESS_REASON = (
+    "No progress reported. It needs Kubeflow Trainer 2.2+ with the TrainJobStatus "
+    "feature gate, and a training script that sends its status (KEP-2779)."
+)
+
+
+def _seconds_since(timestamp: object) -> int | None:
+    """Seconds elapsed since an RFC 3339 timestamp, or ``None`` if it cannot be parsed."""
+    if not isinstance(timestamp, str):
+        return None
+    try:
+        # Python 3.10's fromisoformat does not accept the "Z" suffix.
+        updated = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if updated.tzinfo is None:
+        return None
+    return max(0, int(time.time() - updated.timestamp()))
+
+
+def _trainjob_progress_to_mcp(name: str, namespace: str | None) -> dict[str, Any]:
+    """Return the progress a TrainJob reports in ``status.trainerStatus`` (KEP-2779).
+
+    The SDK's ``TrainJob`` does not carry this field yet, so the TrainJob object is
+    read directly. Never raises: a missing field (Trainer before 2.2, feature gate off, or a
+    script that does not report) and a failed read both return ``reported: False``
+    with a reason, so the rest of ``get_training_job`` is unaffected.
+    """
+    try:
+        obj = get_custom_objects_api().get_namespaced_custom_object(
+            group="trainer.kubeflow.org",
+            version="v1alpha1",
+            namespace=get_trainer_effective_namespace(namespace),
+            plural="trainjobs",
+            name=name,
+            _request_timeout=K8S_TIMEOUT,
+        )
+    except Exception as e:
+        logger.debug("Could not read progress for TrainJob %s: %s", name, e)
+        if getattr(e, "status", None) == 403:
+            reason = "Could not read progress: no permission to get this TrainJob"
+        else:
+            reason = f"Could not read progress: {type(e).__name__}"
+        return {"reported": False, "reason": reason}
+
+    status = obj.get("status") if isinstance(obj, dict) else None
+    trainer_status = status.get("trainerStatus") if isinstance(status, dict) else None
+    if not isinstance(trainer_status, dict) or not trainer_status:
+        return {"reported": False, "reason": _NO_PROGRESS_REASON}
+
+    raw_metrics = trainer_status.get("metrics")
+    metrics = [
+        {"name": m.get("name"), "value": m.get("value")}
+        for m in (raw_metrics if isinstance(raw_metrics, list) else [])
+        if isinstance(m, dict)
+    ]
+    progress: dict[str, Any] = {
+        "reported": True,
+        "progress_percentage": trainer_status.get("progressPercentage"),
+        "estimated_remaining_seconds": trainer_status.get("estimatedRemainingSeconds"),
+        "metrics": metrics[:MAX_PROGRESS_METRICS],
+        "last_updated_time": trainer_status.get("lastUpdatedTime"),
+        "seconds_since_update": _seconds_since(trainer_status.get("lastUpdatedTime")),
+    }
+    if len(metrics) > MAX_PROGRESS_METRICS:
+        progress["metrics_truncated"] = True
+    return progress
 
 
 MAX_LIST_LIMIT = 500
@@ -266,6 +341,11 @@ def get_training_job(name: str, namespace: str | None = None) -> dict[str, Any]:
         - ``step_summary`` (step counts by status)
         - ``pods`` (readiness, restarts, container failures and scheduling conditions)
           and ``blocking_reasons`` (best-effort, bounded diagnostics).
+        - ``progress``: what the job reports in ``status.trainerStatus`` (Trainer 2.2+,
+          KEP-2779): ``progress_percentage``, ``estimated_remaining_seconds``,
+          ``metrics`` (``name``/``value`` strings, at most ``MAX_PROGRESS_METRICS``),
+          ``last_updated_time`` and ``seconds_since_update``. ``reported`` is ``False``
+          with a ``reason`` when nothing was reported or the read failed.
 
     Raises:
         ToolError: If job not found (``RESOURCE_NOT_FOUND``).
@@ -285,33 +365,38 @@ def get_training_job(name: str, namespace: str | None = None) -> dict[str, Any]:
         jr = job.runtime if hasattr(job, "runtime") else None
         status = get_training_job_status(job, namespace)
         steps, step_summary = _trainjob_steps_to_mcp(job)
+        progress = _trainjob_progress_to_mcp(name, namespace)
 
+        # Repeat the caller's namespace, so following a hint reads this job and not
+        # one with the same name in the default namespace.
+        args = f"name='{name}'" + (f", namespace='{namespace}'" if namespace else "")
         next_steps: list[str] = []
         if status == "Failed":
             next_steps = [
-                f"get_training_events(name='{name}') — check for OOM/scheduling issues",
-                f"get_training_logs(name='{name}') — check error output",
+                f"get_training_events({args}) — check for OOM/scheduling issues",
+                f"get_training_logs({args}) — check error output",
                 "Read trainer://guides/troubleshooting",
             ]
+        elif status == "Running" and progress["reported"]:
+            next_steps = [
+                f"get_training_job({args}) — poll again to follow progress",
+                f"get_training_logs({args}) — check output",
+            ]
         elif status == "Running":
-            next_steps = [f"get_training_logs(name='{name}') — check progress"]
+            next_steps = [f"get_training_logs({args}) — check progress"]
         elif status == "Created":
             next_steps = [
-                f"get_training_events(name='{name}') — check if scheduling or suspended",
+                f"get_training_events({args}) — check if scheduling or suspended",
             ]
 
         # Point at the step that needs attention, which the job status alone hides.
         failed = [s["name"] for s in steps if s["status"] == "Failed"]
         if failed:
-            next_steps.insert(
-                0, f"get_training_logs(name='{name}', step='{failed[0]}') — failed step"
-            )
+            next_steps.insert(0, f"get_training_logs({args}, step='{failed[0]}') — failed step")
         elif "Pending" in step_summary["by_status"] and not any(
             hint.startswith("get_training_events") for hint in next_steps
         ):
-            next_steps.append(
-                f"get_training_events(name='{name}') — pods pending, check scheduling"
-            )
+            next_steps.append(f"get_training_events({args}) — pods pending, check scheduling")
 
         data: dict[str, Any] = {
             "name": job.name,
@@ -320,6 +405,7 @@ def get_training_job(name: str, namespace: str | None = None) -> dict[str, Any]:
             "created_at": _trainjob_created_at_to_mcp(job),
             "steps": steps,
             "step_summary": step_summary,
+            "progress": progress,
         }
         num_nodes = getattr(job, "num_nodes", None)
         if isinstance(num_nodes, int):
