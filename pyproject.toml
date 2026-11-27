@@ -21,6 +21,10 @@ dependencies = [
     "pyyaml>=6.0",
     "click>=8.0",
     "kubeflow>=0.5.0,<0.6.0",
+    # Imported directly by the optimizer client to build V1beta1Experiment CRs.
+    # Ships as a dependency of `kubeflow`, but declared here because we import
+    # it ourselves rather than only reaching it through the SDK.
+    "kubeflow-katib-api>=0.19.0",
     "huggingface-hub>=0.20",
     # Floors for transitive runtime dependencies, so pip installs also get the fixed releases.
     "joserfc>=1.7.6",  # CVE-2026-119283, CVE-2026-119284

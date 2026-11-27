@@ -17,7 +17,7 @@ The Kubeflow MCP Server exposes Kubeflow operations as [Model Context Protocol (
 - **Security-First**: Persona gating (`readonly` by default), namespace allowlists, input validation, and Bearer/JWT HTTP auth
 - **Multi-Platform**: Auto-detects OpenShift, EKS, and GKE with platform-specific guidance
 - **Token-Efficient**: Progressive and semantic tool modes compress tools into 2–3 meta-tools
-- **Modular Clients**: Load only what you need (`trainer`, `spark`, `pipelines`; planned: `optimizer`, `hub`)
+- **Modular Clients**: Load only what you need (`trainer`, `spark`, `pipelines`, `optimizer`; planned: `hub`)
 
 ## Demo
 
@@ -126,6 +126,21 @@ Agent → fine_tune(..., confirmed=True)             # TrainJob "train-gemma-abc
 Agent → get_training_logs("train-gemma-abc")       # Streams training progress
 ```
 
+## Agent Skills
+
+[Agent Skills catalog](docs/skills/catalog.md): a skeleton for independently released skill
+plugins. Register the catalog, then install a plugin by replacing `<plugin-name>` with its name:
+
+```bash
+# Claude Code
+claude plugin marketplace add kubeflow/mcp-server
+claude plugin install "<plugin-name>@kubeflow-mcp"
+
+# Codex CLI
+codex plugin marketplace add kubeflow/mcp-server
+codex plugin add "<plugin-name>@kubeflow-mcp"
+```
+
 ## Available Tools
 
 ### Trainer (`--clients trainer`, default — 23 tools)
@@ -161,6 +176,20 @@ Requires `kubeflow[spark]` extra.
 | **Sessions** | `create_spark_session`, `delete_spark_session` | Provision and delete MCP-managed SparkConnect sessions |
 | **Monitoring** | `get_spark_session_logs` | Read Spark driver logs |
 
+### Optimizer (`--clients optimizer` — 17 tools)
+
+Requires Katib v0.19 on the cluster, and the `katib.kubeflow.org/metrics-collector-injection=enabled` label on the experiment namespace.
+
+| Phase | Tools | Description |
+|-------|-------|-------------|
+| **Planning** | `katib_pre_flight` | Check the Experiment CRD, controller readiness, and admission webhooks |
+| **Discovery** | `list_hpo_experiments`, `get_hpo_experiment`, `get_hpo_experiment_status`, `get_trial`, `get_successful_trials`, `list_suggestions` | Browse Katib experiments, trials, and suggestions |
+| **Optimization** | `create_hpo_experiment`, `create_hpo_experiment_from_spec` | Create experiments from flat parameters or a full `V1beta1Experiment` manifest |
+| **Monitoring** | `get_hpo_experiment_trials`, `get_best_trial`, `get_suggestion`, `get_hpo_experiment_trial_logs`, `get_hpo_experiment_events` | Follow trials and read the best result, trial logs, and events |
+| **Lifecycle** | `wait_for_hpo_experiment`, `update_hpo_experiment`, `delete_hpo_experiment` | Wait for completion, change the trial budget or parallelism, or delete MCP-managed experiments |
+
+Katib has no pause: lowering `parallel_trial_count` makes Katib delete trials, newest first and whatever their state, so `update_hpo_experiment` is destructive and its preview lists those trials. See `optimizer://guides/hpo-patterns`.
+
 ## Personas & Configuration
 
 `--persona` controls which tools are exposed. Each level includes all tools from the level above it:
@@ -178,7 +207,7 @@ Custom personas can also be defined in `~/.kf-mcp-policy.yaml` (see [Architectur
 
 | Flag | Values / Default | Description |
 |------|------------------|-------------|
-| `--clients` | `trainer`, `spark`, `pipelines` *(default: `trainer`)* | Comma-separated client modules to enable |
+| `--clients` | `trainer`, `spark`, `pipelines`, `optimizer` *(default: `trainer`)* | Comma-separated client modules to enable |
 | `--persona` | `readonly` \| `data-scientist` \| `ml-engineer` \| `platform-admin` | Tool access persona |
 | `--mode` | `full` \| `progressive` \| `semantic` | `progressive` (3 meta-tools) and `semantic` (2 meta-tools) reduce token usage |
 | `--instruction-tier` | `full` \| `compact` \| `minimal` | Agent instruction verbosity |
@@ -200,8 +229,8 @@ Custom personas can also be defined in `~/.kf-mcp-policy.yaml` (see [Architectur
 | `KUBEFLOW_MCP_INSTRUCTION_TIER` | `full` | Instruction verbosity (`full`, `compact`, `minimal`) |
 | `KUBEFLOW_MCP_AUTH_TOKEN` | _(none)_ | Bearer token for HTTP auth (dev/staging) |
 | `KUBEFLOW_MCP_JWKS_URI` | _(none)_ | JWKS endpoint for JWT verification (production) |
-| `KUBEFLOW_MCP_JWT_ISSUER` | _(none)_ | Expected JWT issuer |
-| `KUBEFLOW_MCP_JWT_AUDIENCE` | _(none)_ | Expected JWT audience |
+| `KUBEFLOW_MCP_JWT_ISSUER` | _(none)_ | Expected JWT issuer (required with `KUBEFLOW_MCP_JWKS_URI`) |
+| `KUBEFLOW_MCP_JWT_AUDIENCE` | _(none)_ | Expected JWT audience (required with `KUBEFLOW_MCP_JWKS_URI`) |
 | `KUBEFLOW_MCP_ALLOWED_HOSTS` | _(loopback)_ | Allowed `Host` headers for DNS rebinding protection |
 | `KUBEFLOW_MCP_ALLOWED_ORIGINS` | _(loopback)_ | Allowed `Origin` headers |
 | `KUBEFLOW_MCP_DNS_REBINDING_PROTECTION` | `true` | Set `false` to disable Host/Origin checks (not recommended) |
@@ -210,6 +239,7 @@ Custom personas can also be defined in `~/.kf-mcp-policy.yaml` (see [Architectur
 | `KUBEFLOW_MCP_PIPELINES_NAMESPACE` | _(auto)_ | Override Kubeflow Pipelines namespace |
 | `LOG_FORMAT` / `LOG_LEVEL` | `auto` / `INFO` | Logging format and level |
 
+`KUBEFLOW_MCP_JWT_ISSUER` and `KUBEFLOW_MCP_JWT_AUDIENCE` are required with `KUBEFLOW_MCP_JWKS_URI`; the server refuses to start without them.
 Without `--auth-token` or JWT settings on `--transport http`, the server logs a warning that the endpoint is open.
 
 </details>
