@@ -138,9 +138,16 @@ def test_read_only_writes_are_conditional():
     for _client, tool, permissions, annotations in _all_tools():
         if not annotations.get("readOnlyHint"):
             continue
+        required = {
+            name
+            for name, p in inspect.signature(tool).parameters.items()
+            if p.default is inspect.Parameter.empty
+        }
         for permission in permissions:
             if permission.verb in _WRITE_VERBS:
                 assert permission.when, f"{tool.__name__} writes {permission} unless opted in"
+                # A required argument is set on every call, so it would not opt in.
+                assert permission.when not in required, f"{tool.__name__}: {permission}"
 
 
 @pytest.mark.parametrize("group", ["", "apps", "batch", "trainer.kubeflow.org"])

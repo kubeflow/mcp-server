@@ -116,7 +116,8 @@ class ToolPermission(NamedTuple):
     # Parameter whose absence triggers the request (it is skipped when the argument is set).
     unless: str | None = None
     # Parameter holding the name of the object requested, so RBAC rules limited by
-    # resourceNames can match. Set only when the request uses that argument unchanged.
+    # resourceNames can match. Set only when a given argument is used unchanged; when
+    # the argument is omitted (the tool generates a name), the check names no object.
     name: str | None = None
 
 

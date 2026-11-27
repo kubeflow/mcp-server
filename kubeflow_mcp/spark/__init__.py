@@ -164,8 +164,7 @@ CLIENT_TOOL_PERMISSIONS: dict[str, tuple[ToolPermission, ...]] = {
     "get_spark_session_logs": (_SESSION_GET, ToolPermission("get", "", "pods/log")),
     "create_spark_session": (
         ToolPermission("create", "sparkoperator.k8s.io", "sparkconnects"),
-        # Not named: without a name argument the tool reads back a name it generated.
-        ToolPermission("get", "sparkoperator.k8s.io", "sparkconnects"),
+        _SESSION_GET,
     ),
     "delete_spark_session": (
         _SESSION_GET,  # ownership check
