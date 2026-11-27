@@ -689,6 +689,31 @@ def estimate_resources(
         ).model_dump()
 
 
+def _check_preflight_quotas(next_steps: list[str]) -> list[dict[str, Any]] | None:
+    """Read active ResourceQuotas and record recommendations if any quota is exhausted."""
+    from kubeflow_mcp.core.security import check_namespace_allowed
+    from kubeflow_mcp.trainer.api.quota import get_namespace_resource_quotas
+
+    err = check_namespace_allowed(None)
+    if err is not None:
+        return None
+
+    quotas = get_namespace_resource_quotas()
+    if not quotas:
+        return None
+    exhausted = [
+        f"{q['name']} ({k}: 0 available)"
+        for q in quotas
+        for k, avail in q.get("available", {}).items()
+        if avail == "0"
+    ]
+    if exhausted:
+        next_steps.append(
+            f"Resource quota exhausted: {', '.join(exhausted)} — free quota before submitting jobs"
+        )
+    return quotas
+
+
 def _qlora_hint(estimate: dict[str, Any]) -> str | None:
     """Suggest QLoRA when the estimated GPU memory exceeds 24 GB."""
     memory = estimate.get("gpu_memory_required", "")
@@ -703,6 +728,46 @@ def _qlora_hint(estimate: dict[str, Any]) -> str | None:
                 "to halve memory"
             )
     return None
+
+
+def _select_tool(
+    has_torchtune: bool,
+    runtime_names: list[str],
+    gpu_total: int,
+    next_steps: list[str],
+    recommendations: list[str],
+) -> dict[str, Any]:
+    tool_selection: dict[str, Any] = {}
+    if has_torchtune and gpu_total > 0:
+        tool_selection["recommended"] = "fine_tune"
+        tool_selection["reason"] = "torchtune runtime + GPU capacity detected"
+        next_steps.append("torchtune runtime available — fine_tune() is supported")
+    elif has_torchtune and gpu_total == 0:
+        tool_selection["recommended"] = "run_custom_training"
+        tool_selection["reason"] = "torchtune needs GPUs (NCCL), cluster has none — use gloo"
+        tool_selection["fallback_from"] = "fine_tune"
+        next_steps.append(
+            "torchtune runtime found but NO GPUs — fine_tune() will fail. "
+            "Use run_custom_training() with gloo backend instead"
+        )
+        recommendations.append("Read trainer://guides/training-patterns for LoRA code patterns")
+    elif runtime_names and gpu_total > 0:
+        tool_selection["recommended"] = "run_custom_training"
+        tool_selection["reason"] = "No torchtune runtime — write LoRA script with gloo/nccl"
+        next_steps.append("No torchtune runtime — use run_custom_training() with a LoRA script")
+        recommendations.append("Read trainer://guides/training-patterns for LoRA code patterns")
+    elif runtime_names:
+        tool_selection["recommended"] = "run_custom_training"
+        tool_selection["reason"] = "CPU-only cluster, no torchtune runtime"
+        next_steps.append(
+            "CPU-only cluster, no torchtune — use run_custom_training() with gloo backend"
+        )
+        recommendations.append("Read trainer://guides/training-patterns for distributed patterns")
+    else:
+        tool_selection["recommended"] = None
+        tool_selection["reason"] = "No runtimes installed"
+        next_steps.append("No runtimes installed — install a ClusterTrainingRuntime first")
+    return tool_selection
 
 
 def pre_flight(
@@ -786,6 +851,10 @@ def pre_flight(
         estimate_data = estimate.get("data", estimate)
         result["estimate"] = estimate_data
 
+    quotas = _check_preflight_quotas(next_steps)
+    if quotas:
+        result["resource_quotas"] = quotas
+
     from kubeflow_mcp.trainer.api.discovery import list_runtimes as _list_runtimes
 
     runtimes_resp = _list_runtimes()
@@ -799,38 +868,15 @@ def pre_flight(
         n.startswith("torchtune") or n.startswith("torch-tune") for n in runtime_names
     )
 
-    tool_selection: dict[str, Any] = {}
     recommendations: list[str] = []
 
-    if has_torchtune and gpu_total > 0:
-        tool_selection["recommended"] = "fine_tune"
-        tool_selection["reason"] = "torchtune runtime + GPU capacity detected"
-        next_steps.append("torchtune runtime available — fine_tune() is supported")
-    elif has_torchtune and gpu_total == 0:
-        tool_selection["recommended"] = "run_custom_training"
-        tool_selection["reason"] = "torchtune needs GPUs (NCCL), cluster has none — use gloo"
-        tool_selection["fallback_from"] = "fine_tune"
-        next_steps.append(
-            "torchtune runtime found but NO GPUs — fine_tune() will fail. "
-            "Use run_custom_training() with gloo backend instead"
-        )
-        recommendations.append("Read trainer://guides/training-patterns for LoRA code patterns")
-    elif runtime_names and gpu_total > 0:
-        tool_selection["recommended"] = "run_custom_training"
-        tool_selection["reason"] = "No torchtune runtime — write LoRA script with gloo/nccl"
-        next_steps.append("No torchtune runtime — use run_custom_training() with a LoRA script")
-        recommendations.append("Read trainer://guides/training-patterns for LoRA code patterns")
-    elif runtime_names:
-        tool_selection["recommended"] = "run_custom_training"
-        tool_selection["reason"] = "CPU-only cluster, no torchtune runtime"
-        next_steps.append(
-            "CPU-only cluster, no torchtune — use run_custom_training() with gloo backend"
-        )
-        recommendations.append("Read trainer://guides/training-patterns for distributed patterns")
-    else:
-        tool_selection["recommended"] = None
-        tool_selection["reason"] = "No runtimes installed"
-        next_steps.append("No runtimes installed — install a ClusterTrainingRuntime first")
+    tool_selection = _select_tool(
+        has_torchtune=has_torchtune,
+        runtime_names=runtime_names,
+        gpu_total=gpu_total,
+        next_steps=next_steps,
+        recommendations=recommendations,
+    )
 
     if platform != "kubernetes":
         recommendations.append(
