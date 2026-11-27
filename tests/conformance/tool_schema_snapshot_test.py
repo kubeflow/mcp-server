@@ -40,6 +40,7 @@ from typing import Any
 import pytest
 from fastmcp import Client
 
+from kubeflow_mcp.core.policy import get_effective_persona, set_effective_persona
 from kubeflow_mcp.core.server import create_server
 
 # platform-admin exposes every tool, so its snapshot covers the full surface.
@@ -61,9 +62,9 @@ def _strip_doc_text(node: Any) -> Any:
     return node
 
 
-async def _build_snapshot() -> dict[str, Any]:
+async def _build_snapshot(clients: list[str] | None = None) -> dict[str, Any]:
     """Capture the structural tools/list surface via an in-memory MCP client."""
-    mcp = create_server(persona=SNAPSHOT_PERSONA)
+    mcp = create_server(persona=SNAPSHOT_PERSONA, clients=clients)
     async with Client(mcp) as client:
         tools = await client.list_tools()
 
@@ -90,21 +91,36 @@ def _render(snapshot: dict[str, Any]) -> str:
     return json.dumps(snapshot, indent=2, sort_keys=True) + "\n"
 
 
-async def test_tool_schema_matches_snapshot():
+@pytest.fixture
+def _restore_persona():
+    previous = get_effective_persona()
+    yield
+    set_effective_persona(previous)
+
+
+@pytest.mark.parametrize(
+    ("clients", "snapshot_path"),
+    [
+        (None, SNAPSHOT_PATH),
+        (["spark"], SNAPSHOT_PATH.with_name("tool_schema_spark_platform_admin.json")),
+    ],
+    ids=["trainer", "spark"],
+)
+async def test_tool_schema_matches_snapshot(_restore_persona, clients, snapshot_path):
     """Fail with a diff if the tools/list surface drifts from the baseline."""
-    current = _render(await _build_snapshot())
+    current = _render(await _build_snapshot(clients))
 
     if os.environ.get(_UPDATE_ENV) == "1":
-        SNAPSHOT_PATH.parent.mkdir(parents=True, exist_ok=True)
-        SNAPSHOT_PATH.write_text(current, encoding="utf-8")
+        snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+        snapshot_path.write_text(current, encoding="utf-8")
         return
 
-    assert SNAPSHOT_PATH.exists(), (
-        f"Schema snapshot baseline not found: {SNAPSHOT_PATH}\n"
+    assert snapshot_path.exists(), (
+        f"Schema snapshot baseline not found: {snapshot_path}\n"
         "Generate it with: make update-schema-snapshot"
     )
 
-    baseline = SNAPSHOT_PATH.read_text(encoding="utf-8")
+    baseline = snapshot_path.read_text(encoding="utf-8")
     if current == baseline:
         return
 

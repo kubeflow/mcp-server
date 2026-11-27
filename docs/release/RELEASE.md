@@ -35,6 +35,8 @@ make release VERSION=X.Y.Z OFFLINE=1
 
 This updates the package version, `server.json`, and the changelog. Review the changes, then open a signed PR against `main` or the appropriate release branch.
 
+Changelogs cover changes through `upstream/release-X.Y`, or `HEAD` when creating a new release line. Backport required fixes before generating the final notes. Patch releases start at the previous patch tag; minor and major releases use the newest stable boundary from the previous minor or major series that is present in the selected history. A boundary can be the release tag or, for divergent tags, its version-bump commit.
+
 Use the same command with an `rcN` version for a release candidate; release candidates skip stable changelog generation.
 
 To generate or preview only the changelog:
@@ -52,8 +54,9 @@ After the version PR merges, GitHub Actions:
 1. Creates or updates the release branch.
 2. Verifies, tests, and packages the project.
 3. Creates the version tag.
-4. Publishes the package to PyPI and the image to GHCR.
-5. Creates the GitHub Release.
+4. Builds and scans both image architectures, then publishes the image to GHCR.
+5. Publishes the package to PyPI.
+6. Creates the GitHub Release.
 
 PyPI and GitHub Release publication require approval in the release environment.
 
@@ -67,6 +70,11 @@ kubeflow-mcp --version
 Also confirm that the package, container image, and GitHub Release have the expected version.
 
 ## Re-run or recover a release
+
+Both image architectures are scanned for fixable critical CVEs before any image tags
+are published. PyPI publication waits for the image job to succeed; the GitHub Release
+is published after both registries succeed. Registry or network failures can still
+leave a partial release.
 
 If a release workflow fails or requires manual recovery:
 
@@ -89,7 +97,50 @@ If PyPI publication has already succeeded, do **not** dispatch a fresh workflow 
 2. Click **Re-run failed jobs** (instead of re-running all jobs or triggering a new workflow dispatch).
 3. This retries only the incomplete jobs (such as Docker publish or GitHub Release) without attempting to re-upload to PyPI.
 
+If recovery requires changing released code or dependencies, publish a new version
+(for example, the next RC). Re-running jobs uses the original workflow revision and
+does not apply fixes merged afterward; do not move an existing release tag.
+
 ### Requirements for manual dispatch
 
 - Manual dispatch must be started from `main` or the relevant `release-X.Y` branch. The workflow explicitly rejects runs dispatched from any other branch.
 - The selected branch must already contain a valid release version (`X.Y.Z` or `X.Y.ZrcN`) in `kubeflow_mcp/__init__.py`.
+
+## Supply-chain checks
+
+The release workflow runs these checks. None of them need extra secrets.
+
+| Check | Where | Blocks the release? |
+|---|---|---|
+| OSV-Scanner on `uv.lock` | `release.yaml`, build job | No. Findings go to the job summary as a warning. |
+| Trivy image scan of amd64 and arm64 (fixable `CRITICAL` CVEs) | `docker-publish.yaml`, before the push | Yes. Pull request builds fail on the same findings. |
+| SBOM and SLSA provenance (BuildKit) | Stored in GHCR with the image | No |
+| GitHub artifact attestation for the image | `actions/attest-build-provenance`, verified with `gh attestation verify` in the same job | Yes, if verification fails |
+| PyPI attestations | Uploaded by `pypa/gh-action-pypi-publish` with trusted publishing | No |
+
+The nightly `osv-scanner.yaml` workflow still opens fix PRs for vulnerable dependencies.
+
+Verify a published image. `gh attestation verify` needs an authenticated GitHub CLI
+and GHCR credentials to read the image:
+
+```bash
+gh auth login
+docker login ghcr.io
+gh attestation verify oci://ghcr.io/kubeflow/mcp-server:X.Y.Z --repo kubeflow/mcp-server
+docker buildx imagetools inspect ghcr.io/kubeflow/mcp-server:X.Y.Z --format '{{ json .SBOM }}'
+```
+
+If Trivy blocks a release on a CVE with no usable fix, add its ID to a `.trivyignore`
+file with a short reason and a link to the advisory. The version tag is created before
+the image scan, and a re-run scans that tag's source, so the exception does not apply
+to the blocked version. Include `.trivyignore` in the same commit as the new version
+bump (the release workflow cherry-picks only the merge commit onto an existing
+`release-X.Y` branch) or target the `release-X.Y` branch directly, mention it in the
+PR, and release that version. Do not move the existing tag.
+
+## Manual development images
+
+Manual Docker builds accept a source `ref` and a `dev-*` or `sha-*` tag
+(default: commit SHA). Publishing defaults to false. Release tags and `latest`
+are reserved for the release workflow, which passes the exact tag ref and
+explicitly enables publication.

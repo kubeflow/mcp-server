@@ -15,6 +15,8 @@
 from __future__ import annotations
 
 import contextlib
+from datetime import datetime
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -105,6 +107,79 @@ def mock_trainer_client():
         for p in patches:
             stack.enter_context(p)
         yield client
+
+
+# ─── Spark fixtures ─────────────────────────────────────────────────────────
+
+_SPARK_CLIENT_PATCHES = (
+    "kubeflow_mcp.spark.api.discovery.get_spark_client_for_namespace",
+    "kubeflow_mcp.spark.api.monitoring.get_spark_client_for_namespace",
+    "kubeflow_mcp.spark.api.sessions.get_spark_client_for_namespace",
+)
+
+
+def make_spark_session_info(
+    name: str = "spark-connect-ab12",
+    *,
+    state: str = "Ready",
+    namespace: str = "default",
+    driver_pod: str | None = "drv-0",
+) -> Any:
+    """Build a duck-typed SparkConnectInfo (str-enum state, datetime timestamp).
+
+    Uses ``pod_name`` to match the released ``kubeflow[spark]`` 0.4.x SDK (the
+    declared compatibility baseline); unreleased SDK ``main`` renamed it to
+    ``driver_pod_name`` (covered by the fallback contract test).
+    """
+    return SimpleNamespace(
+        name=name,
+        namespace=namespace,
+        state=SimpleNamespace(value=state),
+        pod_name=driver_pod,
+        pod_ip="10.0.0.5",
+        service_name=f"{name}-svc",
+        creation_timestamp=datetime(2026, 7, 9, 12, 0, 0),
+    )
+
+
+@pytest.fixture
+def spark_session_info():
+    """Factory fixture for duck-typed SparkConnectInfo objects."""
+    return make_spark_session_info
+
+
+@pytest.fixture
+def mock_spark_client():
+    """Patch every SparkClient accessor in the spark module and return the mock.
+
+    The spark module imports the SDK lazily, so these tests run without the
+    ``kubeflow[spark]`` extra installed.
+    """
+    client = MagicMock()
+    client.get_session.return_value = make_spark_session_info()
+    client.list_sessions.return_value = [make_spark_session_info()]
+    with contextlib.ExitStack() as stack:
+        for target in _SPARK_CLIENT_PATCHES:
+            stack.enter_context(patch(target, return_value=client))
+        yield client
+
+
+@pytest.fixture
+def spark_persona():
+    """Set the effective persona for ownership-guard tests, restoring it after.
+
+    Yields a setter; the guard in ``delete_spark_session`` reads the persona
+    resolved at server startup, which is process-global.
+    """
+    from kubeflow_mcp.core import policy
+
+    original = policy.get_effective_persona()
+
+    def _set(persona: str) -> None:
+        policy.set_effective_persona(persona)
+
+    yield _set
+    policy.set_effective_persona(original)
 
 
 @pytest.fixture

@@ -107,6 +107,11 @@ def test_non_category_returns_as_is():
             config={"tool": "fine_tune", "pattern": "risk:destructive"},
             expected_output=False,
         ),
+        TestCase(
+            name="unknown risk does not match",
+            config={"tool": "delete_training_job", "pattern": "risk:unknown"},
+            expected_output=False,
+        ),
     ],
 )
 def test_matches_pattern(test_case):
@@ -461,6 +466,27 @@ def test_unknown_policy_category_fails_closed(write_policy_yaml, key):
     with pytest.raises(
         PolicyFileError,
         match=r"unknown category 'trainig'.*Valid categories:.*training",
+    ) as exc_info:
+        _load_policy_file()
+    assert str(policy_path) in str(exc_info.value)
+
+
+def test_known_policy_risks_are_accepted(write_policy_yaml):
+    write_policy_yaml("policy:\n  allow: [risk:destructive]\n  deny: [risk:destructive]\n")
+
+    assert _load_policy_file() == {
+        "policy": {"allow": ["risk:destructive"], "deny": ["risk:destructive"]}
+    }
+
+
+@pytest.mark.parametrize("key", ["allow", "deny"])
+@pytest.mark.parametrize("risk", ["Destructive", "mutating", ""])
+def test_unknown_policy_risk_fails_closed(write_policy_yaml, key, risk):
+    policy_path = write_policy_yaml(f"policy:\n  {key}: ['risk:{risk}']\n")
+
+    with pytest.raises(
+        PolicyFileError,
+        match=rf"unknown risk '{risk}'.*Valid risks: destructive",
     ) as exc_info:
         _load_policy_file()
     assert str(policy_path) in str(exc_info.value)

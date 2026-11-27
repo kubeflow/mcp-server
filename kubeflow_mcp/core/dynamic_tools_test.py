@@ -17,8 +17,12 @@
 import math
 import sys
 import types
+from enum import Enum
+from typing import Annotated, Literal
 
 import pytest
+from fastmcp import Client, FastMCP
+from pydantic import Field
 
 from kubeflow_mcp.common.constants import ErrorCode
 from kubeflow_mcp.core import dynamic_tools
@@ -232,6 +236,146 @@ def test_bad_arguments_do_not_consume_half_open_slot():
     assert breaker.half_open_calls == 0
 
 
+def gated_tool(name: str, epochs: int = 1, confirmed: bool = False) -> dict:
+    """Mutating tool with a confirm gate, like delete_training_job."""
+    if not confirmed:
+        return {"success": True, "status": "preview", "epochs": epochs}
+    _calls.append(name)
+    return {"success": True, "data": {"name": name, "epochs": epochs}}
+
+
+@pytest.mark.parametrize("confirmed", [False, "false", "False", "no", "off", "0", 0])
+def test_false_like_confirmed_returns_preview(confirmed):
+    dynamic_tools.init_dynamic_tools([gated_tool], {})
+
+    result = dynamic_tools.execute_tool("gated_tool", {"name": "job", "confirmed": confirmed})
+
+    assert result["status"] == "preview"
+    assert _calls == []
+
+
+@pytest.mark.parametrize("confirmed", [True, "true", "yes", "1", 1])
+def test_true_like_confirmed_executes(confirmed):
+    dynamic_tools.init_dynamic_tools([gated_tool], {})
+
+    result = dynamic_tools.execute_tool("gated_tool", {"name": "job", "confirmed": confirmed})
+
+    assert result["data"]["name"] == "job"
+    assert _calls == ["job"]
+
+
+@pytest.mark.parametrize("confirmed", ["maybe", "please", [], {}])
+def test_unparseable_confirmed_is_rejected_without_touching_breaker(confirmed):
+    dynamic_tools.init_dynamic_tools([gated_tool], {})
+    breaker = get_breaker("gated_tool")
+    breaker.state = CircuitState.HALF_OPEN
+    breaker.half_open_calls = 0
+
+    result = dynamic_tools.execute_tool("gated_tool", {"name": "job", "confirmed": confirmed})
+
+    assert result["error_code"] == ErrorCode.VALIDATION_ERROR
+    assert "confirmed" in result["error"]
+    assert _calls == []
+    assert breaker.half_open_calls == 0
+    assert breaker.failure_count == 0
+
+
+def test_arguments_are_coerced_like_full_mode():
+    dynamic_tools.init_dynamic_tools([gated_tool], {})
+
+    result = dynamic_tools.execute_tool(
+        "gated_tool", {"name": "job", "epochs": "3", "confirmed": "true"}
+    )
+
+    assert result["data"]["epochs"] == 3
+
+
+def test_omitted_arguments_keep_tool_defaults():
+    dynamic_tools.init_dynamic_tools([gated_tool], {})
+
+    result = dynamic_tools.execute_tool("gated_tool", {"name": "job"})
+
+    assert result == {"success": True, "status": "preview", "epochs": 1}
+
+
+def test_validation_error_does_not_echo_rejected_value():
+    dynamic_tools.init_dynamic_tools([gated_tool], {})
+
+    result = dynamic_tools.execute_tool("gated_tool", {"name": "job", "epochs": "hf_secret"})
+
+    assert result["error_code"] == ErrorCode.VALIDATION_ERROR
+    assert "epochs" in result["error"]
+    assert "hf_secret" not in result["error"]
+
+
+class _Color(Enum):
+    RED = "red"
+    BLUE = "blue"
+
+
+def typed_tool(
+    count: Annotated[int, Field(ge=1)] = 1,
+    limit: int | None = None,
+    color: _Color = _Color.RED,
+    tags: list[str] | None = None,
+    speed: Literal["fast", "slow"] = "fast",
+    retries: int = Field(default=2, ge=0, le=5),
+) -> dict:
+    """Tool covering the parameter shapes FastMCP validates in full mode."""
+    values = {
+        "count": count,
+        "limit": limit,
+        "color": color,
+        "tags": tags,
+        "speed": speed,
+        "retries": retries,
+    }
+    # Type names make the comparison catch a value that matches but was not coerced,
+    # such as the string "blue" instead of _Color.BLUE.
+    return {
+        name: [type(value).__name__, value.value if isinstance(value, Enum) else value]
+        for name, value in values.items()
+    }
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        pytest.param({}, id="defaults"),
+        pytest.param({"count": "3"}, id="int-from-str"),
+        pytest.param({"count": 2.0}, id="int-from-whole-float"),
+        pytest.param({"count": 1.5}, id="int-rejects-fraction"),
+        pytest.param({"count": 0}, id="annotated-below-minimum"),
+        pytest.param({"limit": None}, id="optional-none"),
+        pytest.param({"limit": "5"}, id="optional-from-str"),
+        pytest.param({"color": "blue"}, id="enum-by-value"),
+        pytest.param({"color": "green"}, id="enum-unknown"),
+        pytest.param({"tags": ["a", "b"]}, id="list"),
+        pytest.param({"tags": "a"}, id="list-rejects-str"),
+        pytest.param({"tags": '["a", "b"]'}, id="list-rejects-json-str"),
+        pytest.param({"tags": [1, 2]}, id="list-rejects-wrong-items"),
+        pytest.param({"speed": "slow"}, id="literal"),
+        pytest.param({"speed": "medium"}, id="literal-unknown"),
+        pytest.param({"retries": "4"}, id="field-default-in-range"),
+        pytest.param({"retries": 9}, id="field-default-out-of-range"),
+    ],
+)
+async def test_execute_tool_validates_like_full_mode(arguments):
+    """execute_tool accepts, rejects and coerces exactly as FastMCP does in full mode."""
+    server = FastMCP("parity")
+    server.tool(typed_tool)
+    dynamic_tools.init_dynamic_tools([typed_tool], {})
+
+    async with Client(server) as client:
+        full = await client.call_tool("typed_tool", arguments, raise_on_error=False)
+    dynamic = dynamic_tools.execute_tool("typed_tool", arguments)
+
+    if full.is_error:
+        assert dynamic["error_code"] == ErrorCode.VALIDATION_ERROR
+    else:
+        assert dynamic == full.structured_content
+
+
 def test_tool_exception_still_counts_as_breaker_failure():
     breaker = get_breaker("failing_tool")
     for _ in range(breaker.failure_threshold):
@@ -440,3 +584,45 @@ def test_find_tools_uses_rebuilt_registry_after_reinit(monkeypatch):
 
     assert "mode" not in second  # semantic search, not the keyword fallback
     assert [t["name"] for t in second["tools"]] == ["beta_tool"]
+
+
+# Semantic mode registers only find_tools and execute_tool, so find_tools results are
+# the only place an agent can learn a tool's parameters before calling it.
+
+
+def alpha_sized_tool(size: int = 2) -> dict:
+    """Alpha tool with a size."""
+    return {"size": size}
+
+
+def test_find_tools_keyword_results_include_parameters(offline_model):
+    result = dynamic_tools.find_tools("probe tool")
+
+    assert result["mode"] == "keyword_fallback"
+    top = result["tools"][0]
+    assert top["name"] == "probe_tool"
+    assert (
+        top["parameters"] == dynamic_tools.describe_tools(["probe_tool"])["tools"][0]["parameters"]
+    )
+    assert list(top["parameters"]) == ["name"]
+
+
+def test_find_tools_semantic_results_include_parameters(monkeypatch):
+    fake_module = types.SimpleNamespace(SentenceTransformer=lambda _name: _FakeEmbeddingModel())
+    monkeypatch.setitem(sys.modules, "sentence_transformers", fake_module)
+    monkeypatch.setitem(sys.modules, "numpy", _FAKE_NUMPY)
+    dynamic_tools.init_dynamic_tools([alpha_sized_tool, probe_tool], {})
+
+    result = dynamic_tools.find_tools("alpha")
+
+    assert "mode" not in result  # semantic search, not the keyword fallback
+    top = result["tools"][0]
+    assert top["name"] == "alpha_sized_tool"
+    assert top["parameters"] == {"size": {"type": str(int), "default": 2}}
+
+
+def test_find_tools_listing_all_points_to_parameter_lookup():
+    result = dynamic_tools.find_tools("all")
+
+    assert all("parameters" not in t for t in result["tools"])
+    assert "parameters" in result["hint"]

@@ -26,6 +26,7 @@ from kubeflow_mcp.core.security import (
     _SENSITIVE_EXACT,
     _SENSITIVE_SUBSTRINGS,
     is_safe_python_code,
+    is_sensitive_key,
     mask_sensitive_data,
     truncate_log_output,
     validate_image_reference,
@@ -413,6 +414,18 @@ def test_validate_training_bounds(test_case):
             expected_status=SUCCESS,
             config={"code": "getattr(().__class__.__base__, '__subcl' + 'asses__')()"},
         ),
+        TestCase(
+            name="getattr with dangerous dunder literal string is caught",
+            expected_status=FAILED,
+            config={"code": "getattr(obj, '__subclasses__')"},
+            expected_output="getattr",
+        ),
+        TestCase(
+            name="setattr with dangerous dunder literal string is caught",
+            expected_status=FAILED,
+            config={"code": "setattr(obj, '__builtins__', None)"},
+            expected_output="setattr",
+        ),
     ],
 )
 def test_is_safe_python_code(test_case):
@@ -556,6 +569,12 @@ def test_truncate_long_output():
 
 def test_truncate_exact_boundary():
     assert truncate_log_output("x" * 100, max_length=100) == "x" * 100
+
+
+def test_is_sensitive_key_safe_keys():
+    assert is_sensitive_key("keyword") is False
+    assert is_sensitive_key("public_key") is False
+    assert is_sensitive_key("secret") is True
 
 
 class TestValidateK8sNameTrailingNewline:
@@ -774,3 +793,40 @@ class TestValidateImageReference:
         err = validate_image_reference("[::1]:5000/Team/image:tag")
         assert err is not None
         assert "repository path must be lowercase" in err.error
+
+    @pytest.mark.parametrize(
+        "image",
+        [
+            "localhost:1/img",
+            "localhost:80/img",
+            "localhost:5000/img",
+            "localhost:65535/img",
+            "registry.example.com:443/img:latest",
+            "10.0.0.1:8080/img:v1",
+            "[::1]:5000/img",
+            "[::1]:65535/img",
+        ],
+    )
+    def test_accepts_valid_registry_port(self, image):
+        assert validate_image_reference(image) is None
+
+    @pytest.mark.parametrize(
+        "image",
+        [
+            "localhost:0/img",
+            "localhost:65536/img",
+            "localhost:99999/img",
+            "registry.io:abc/img",
+            "registry.io:/img",
+            "registry.io:123:456/img",
+            "[::1]:0/img",
+            "[::1]:65536/img",
+            "[::1]:99999/img",
+            "registry.io:" + "9" * 5000 + "/img",
+        ],
+    )
+    def test_rejects_invalid_registry_port(self, image):
+        err = validate_image_reference(image)
+        assert err is not None
+        assert err.error_code == "VALIDATION_ERROR"
+        assert "has an invalid registry port (expected 1-65535)" in err.error

@@ -162,6 +162,16 @@ def setup_logging(
     if format is None:
         format = "console" if sys.stderr.isatty() else "json"
 
+    normalized_level = level.upper()
+    normalized_level = {"WARN": "WARNING", "FATAL": "CRITICAL"}.get(
+        normalized_level, normalized_level
+    )
+    valid_levels = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+    if normalized_level not in valid_levels:
+        raise ValueError(
+            f"Invalid log level '{level}'. Expected one of DEBUG, INFO, WARNING, ERROR, CRITICAL."
+        )
+
     formatter: logging.Formatter
     if format == "json":
         formatter = StructuredFormatter()
@@ -175,7 +185,7 @@ def setup_logging(
     buffer_handler.setLevel(logging.DEBUG)
 
     root = logging.getLogger("kubeflow_mcp")
-    root.setLevel(getattr(logging, level.upper()))
+    root.setLevel(getattr(logging, normalized_level))
     root.handlers.clear()
     root.addHandler(handler)
     root.addHandler(buffer_handler)

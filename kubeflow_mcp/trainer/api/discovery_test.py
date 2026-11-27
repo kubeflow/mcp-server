@@ -19,10 +19,12 @@ Covers discovery behavior, input validation, and status filter aliasing.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from kubernetes.client.exceptions import ApiException
 from tests.common import RESOURCE_NOT_FOUND
 
 from kubeflow_mcp.common.constants import ErrorCode
@@ -32,6 +34,7 @@ from kubeflow_mcp.conftest import (
     verify_tool_error,
     verify_tool_success,
 )
+from kubeflow_mcp.trainer.api import discovery
 from kubeflow_mcp.trainer.api.discovery import (
     _JOB_STATUS_FILTER_ALIASES,
     _get_runtime_image,
@@ -81,6 +84,126 @@ def test_list_training_jobs_accepts_supported_statuses(status):
     verify_tool_success(result)
 
 
+@pytest.mark.parametrize("status", [401, 403, 500])
+@pytest.mark.parametrize("wrapped", [False, True])
+@pytest.mark.parametrize("operation", ["client", "runtime", "list"])
+def test_list_training_jobs_classifies_api_errors(
+    status: int, wrapped: bool, operation: str
+) -> None:
+    error = ApiException(status=status)
+    if wrapped:
+        cause = error
+        error = RuntimeError("Trainer SDK request failed")
+        error.__cause__ = cause
+    client = MagicMock()
+    with patch(
+        "kubeflow_mcp.trainer.api.discovery.get_trainer_client_for_namespace",
+        return_value=client,
+    ) as factory:
+        if operation == "client":
+            factory.side_effect = error
+        elif operation == "runtime":
+            client.get_runtime.side_effect = error
+        else:
+            client.list_jobs.side_effect = error
+        result = list_training_jobs(runtime="torch-distributed", namespace="team-b")
+
+    expected = ErrorCode.PERMISSION_DENIED if status in (401, 403) else ErrorCode.SDK_ERROR
+    details = verify_tool_error(result, error_code=expected)["details"]
+    assert details["exception"] == type(error).__name__
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "method", "factory"),
+    [
+        ("get_training_job", "get_job", "get_trainer_client_for_namespace"),
+        ("list_runtimes", "list_runtimes", "get_trainer_client"),
+        ("get_runtime", "get_runtime", "get_trainer_client"),
+    ],
+)
+@pytest.mark.parametrize("status", [401, 403, 500])
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_discovery_classifies_api_errors(
+    tool_name: str, method: str, factory: str, status: int, wrapped: bool
+) -> None:
+    error: Exception = ApiException(status=status)
+    if wrapped:
+        cause = error
+        error = RuntimeError("Trainer SDK request failed")
+        error.__cause__ = cause
+    client = MagicMock()
+    getattr(client, method).side_effect = error
+    kwargs = {} if tool_name == "list_runtimes" else {"name": "job-a"}
+    with patch.object(discovery, factory, return_value=client):
+        result = getattr(discovery, tool_name)(**kwargs)
+    expected = ErrorCode.PERMISSION_DENIED if status in (401, 403) else ErrorCode.SDK_ERROR
+    assert (
+        verify_tool_error(result, error_code=expected)["details"]["exception"]
+        == type(error).__name__
+    )
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "method", "factory"),
+    [
+        ("list_training_jobs", "list_jobs", "get_trainer_client_for_namespace"),
+        ("get_training_job", "get_job", "get_trainer_client_for_namespace"),
+        ("list_runtimes", "list_runtimes", "get_trainer_client"),
+        ("get_runtime", "get_runtime", "get_trainer_client"),
+    ],
+)
+@pytest.mark.parametrize("mode", ["full", "progressive"])
+@pytest.mark.parametrize("status", [403, 500])
+async def test_discovery_breaker_distinguishes_denials_from_outages(
+    tool_name: str, method: str, factory: str, mode: str, status: int
+) -> None:
+    from fastmcp import Client
+
+    from kubeflow_mcp.core.resilience import CircuitState, get_breaker
+    from kubeflow_mcp.core.server import create_server
+
+    breaker = get_breaker(tool_name)
+    error = RuntimeError("Failed to list TrainJobs")
+    error.__cause__ = ApiException(status=status)
+    sdk_client = MagicMock()
+    success = (
+        SimpleNamespace(name="job-a", runtime=None, status="Running", steps=[])
+        if tool_name in ("get_training_job", "get_runtime")
+        else []
+    )
+    getattr(sdk_client, method).side_effect = [error] * breaker.failure_threshold + [success]
+    with (
+        patch.object(discovery, factory, return_value=sdk_client),
+        patch.object(discovery, "get_training_job_status", return_value="Running"),
+    ):
+        async with Client(create_server(clients=["trainer"], mode=mode)) as client:
+            for attempt in range(breaker.failure_threshold + 1):
+                arguments = {}
+                if tool_name in ("get_training_job", "get_runtime"):
+                    arguments["name"] = "job-a"
+                if factory == "get_trainer_client_for_namespace":
+                    arguments["namespace"] = (
+                        "team-b" if attempt < breaker.failure_threshold else "team-a"
+                    )
+                tool = tool_name
+                if mode != "full":
+                    arguments = {"tool_name": tool, "arguments": arguments}
+                    tool = "execute_tool"
+                response = await client.call_tool(tool, arguments, raise_on_error=False)
+                result = response.structured_content
+                if attempt < breaker.failure_threshold:
+                    expected = ErrorCode.PERMISSION_DENIED if status == 403 else ErrorCode.SDK_ERROR
+                    assert response.is_error
+                    assert result["error_code"] == expected
+                elif status == 403:
+                    assert not response.is_error
+                    assert result["success"] is True
+                else:
+                    assert result["error_code"] == ErrorCode.CIRCUIT_OPEN
+
+    assert breaker.state == (CircuitState.CLOSED if status == 403 else CircuitState.OPEN)
+
+
 class TestTrainjobRuntimeToMcp:
     def test_none_returns_none(self):
         assert _trainjob_runtime_to_mcp(None) is None
@@ -103,6 +226,30 @@ def test_get_training_job_returns_details(mock_trainer_client):
     data = verify_tool_success(result)
     assert data["name"] == VALID_JOB_NAME
     assert data["status"] == "Running"
+
+
+@patch("kubeflow_mcp.common.utils.get_custom_objects_api")
+@patch("kubeflow_mcp.trainer.api.discovery.get_trainer_client_for_namespace")
+@patch("kubeflow_mcp.trainer.api.discovery.check_namespace_allowed", return_value=None)
+def test_discovery_uses_reconciled_status_for_details_and_filters(_ns, mock_client_fn, mock_api_fn):
+    job = SimpleNamespace(
+        name="resumed-job",
+        status="Created",
+        num_nodes=1,
+        runtime=None,
+        steps=[SimpleNamespace(name="node-0", status="Running")],
+    )
+    mock_client_fn.return_value.get_job.return_value = job
+    mock_client_fn.return_value.list_jobs.return_value = [job]
+    mock_api_fn.return_value.get_namespaced_custom_object.return_value = {
+        "spec": {"suspend": False},
+        "status": {"conditions": [{"type": "Suspended", "status": "False"}]},
+    }
+    details = get_training_job("resumed-job", namespace="workloads")
+    assert details["data"]["status"] == "Running"
+    listing = list_training_jobs(status="Running", namespace="workloads")
+    assert listing["data"]["total"] == 1
+    assert listing["data"]["jobs"][0]["status"] == "Running"
 
 
 def test_get_training_job_not_found(mock_trainer_client):
@@ -375,9 +522,14 @@ class TestGetRuntimeImage:
 # ---------------------------------------------------------------------------
 
 
-def _fake_job(name, status="Running", runtime_name="torch-tune"):
+def _fake_job(name, status="Running", runtime_name="torch-tune", created_at=None):
     runtime = SimpleNamespace(name=runtime_name) if runtime_name else None
-    return SimpleNamespace(name=name, status=status, runtime=runtime)
+    return SimpleNamespace(
+        name=name,
+        status=status,
+        runtime=runtime,
+        creation_timestamp=created_at,
+    )
 
 
 def _fake_runtime(name):
@@ -396,6 +548,31 @@ def test_list_training_jobs_returns_all_when_no_filters():
     assert result["data"]["total"] == 2
     assert result["data"]["returned"] == 2
     assert result["data"]["has_more"] is False
+
+
+def test_list_training_jobs_includes_creation_timestamp():
+    created_at = datetime(2026, 10, 14, 9, 30, tzinfo=timezone.utc)
+    client = MagicMock()
+    client.list_jobs.return_value = [_fake_job("job-a", created_at=created_at)]
+    with patch(
+        "kubeflow_mcp.trainer.api.discovery.get_trainer_client_for_namespace",
+        return_value=client,
+    ):
+        result = list_training_jobs()
+
+    assert result["data"]["jobs"][0]["created_at"] == "2026-10-14T09:30:00+00:00"
+
+
+def test_list_training_jobs_returns_none_when_creation_timestamp_missing():
+    client = MagicMock()
+    client.list_jobs.return_value = [_fake_job("job-a")]
+    with patch(
+        "kubeflow_mcp.trainer.api.discovery.get_trainer_client_for_namespace",
+        return_value=client,
+    ):
+        result = list_training_jobs()
+
+    assert result["data"]["jobs"][0]["created_at"] is None
 
 
 def test_list_training_jobs_filters_by_status():
@@ -523,6 +700,19 @@ def test_get_training_job_failed_status_suggests_diagnostics():
     assert any("get_training_logs" in step for step in next_steps)
 
 
+def test_get_training_job_includes_creation_timestamp():
+    created_at = datetime(2026, 10, 14, 9, 30, tzinfo=timezone.utc)
+    client = MagicMock()
+    client.get_job.return_value = _fake_job("job-a", created_at=created_at)
+    with patch(
+        "kubeflow_mcp.trainer.api.discovery.get_trainer_client_for_namespace",
+        return_value=client,
+    ):
+        result = get_training_job("job-a")
+
+    assert result["data"]["created_at"] == "2026-10-14T09:30:00+00:00"
+
+
 def test_get_training_job_complete_status_has_no_next_steps():
     client = MagicMock()
     client.get_job.return_value = _fake_job("job-a", status="Complete")
@@ -545,6 +735,80 @@ def test_get_training_job_namespace_not_allowed_short_circuits():
 
     assert result["success"] is False
     assert result["error_code"] == ErrorCode.PERMISSION_DENIED
+
+
+def test_list_training_jobs_runtime_not_found():
+    from kubernetes.client.exceptions import ApiException
+
+    from kubeflow_mcp.core.resilience import CircuitState, get_breaker
+    from kubeflow_mcp.core.server import _audit_wrap
+
+    with (
+        patch("kubeflow_mcp.trainer.api.discovery.check_namespace_allowed", return_value=None),
+        patch("kubeflow_mcp.trainer.api.discovery.get_trainer_client_for_namespace") as mock_client,
+    ):
+        mock_client.return_value.get_runtime.side_effect = ApiException(
+            status=404, reason="Not Found"
+        )
+        result = list_training_jobs(runtime="nonexistent-runtime")
+
+    error = verify_tool_error(result, error_code=RESOURCE_NOT_FOUND)
+    assert "TrainingRuntime 'nonexistent-runtime' not found" in error["error"]
+    assert error["hint"] == "Use list_runtimes to find available runtimes"
+
+    wrapped = _audit_wrap(list_training_jobs)
+    breaker = get_breaker("list_training_jobs")
+
+    with (
+        patch("kubeflow_mcp.trainer.api.discovery.check_namespace_allowed", return_value=None),
+        patch("kubeflow_mcp.trainer.api.discovery.get_trainer_client_for_namespace") as mock_client,
+    ):
+        mock_client.return_value.get_runtime.side_effect = ApiException(
+            status=404, reason="Not Found"
+        )
+        for _ in range(5):
+            res = wrapped(runtime="nonexistent-runtime")
+            assert res["success"] is False
+            assert res["error_code"] == RESOURCE_NOT_FOUND
+
+    assert breaker.state == CircuitState.CLOSED
+    assert breaker.failure_count == 0
+
+    with (
+        patch("kubeflow_mcp.trainer.api.discovery.check_namespace_allowed", return_value=None),
+        patch("kubeflow_mcp.trainer.api.discovery.get_trainer_client_for_namespace") as mock_client,
+    ):
+        mock_client.return_value.list_jobs.return_value = []
+        valid_res = wrapped()
+        assert valid_res["success"] is True
+
+
+def test_list_training_jobs_list_jobs_404_returns_sdk_error():
+    from kubernetes.client.exceptions import ApiException
+
+    with (
+        patch("kubeflow_mcp.trainer.api.discovery.check_namespace_allowed", return_value=None),
+        patch("kubeflow_mcp.trainer.api.discovery.get_trainer_client_for_namespace") as mock_client,
+    ):
+        mock_client.return_value.get_runtime.return_value = _fake_runtime("torch-distributed")
+        mock_client.return_value.list_jobs.side_effect = ApiException(
+            status=404, reason="Not Found"
+        )
+        result = list_training_jobs(runtime="torch-distributed")
+
+    error = verify_tool_error(result, error_code=ErrorCode.SDK_ERROR)
+    assert "TrainingRuntime 'torch-distributed' not found" not in error["error"]
+
+    with (
+        patch("kubeflow_mcp.trainer.api.discovery.check_namespace_allowed", return_value=None),
+        patch("kubeflow_mcp.trainer.api.discovery.get_trainer_client_for_namespace") as mock_client,
+    ):
+        mock_client.return_value.get_runtime.side_effect = ApiException(
+            status=500, reason="Internal Server Error"
+        )
+        result = list_training_jobs(runtime="torch-distributed")
+
+    verify_tool_error(result, error_code=ErrorCode.SDK_ERROR)
 
 
 # ─── get_training_job steps ─────────────────────────────────────────────────
@@ -659,3 +923,134 @@ def test_get_training_job_keeps_failed_step_beyond_the_cap():
     assert data["next_steps"][0] == (
         f"get_training_logs(name='job-a', step='{failed_name}') — failed step"
     )
+
+
+class TestFetchPackagesPodLog:
+    """How the pip-list pod's log is read and interpreted."""
+
+    PIP_COLUMNS = (
+        "Package                                  Version              Editable project location\n"
+        "---------------------------------------- -------------------- -------------------------\n"
+        "accelerate                               1.11.0\n"
+        "torch                                    2.5.1+cu121\n"
+    )
+
+    def _fetch(self, logs, persona="data-scientist", read_only=False):
+        from kubeflow_mcp.trainer.api.discovery import _fetch_packages_via_pod
+
+        pod = MagicMock()
+        pod.status.phase = "Succeeded"
+        core = MagicMock()
+        core.read_namespaced_pod.return_value = pod
+        core.read_namespaced_pod_log.return_value = logs
+        self.core = core
+        mod = "kubeflow_mcp.trainer.api.discovery"
+        with (
+            patch(f"{mod}._get_runtime_image", return_value="img"),
+            patch(f"{mod}.get_trainer_effective_namespace", return_value="ns"),
+            patch(f"{mod}.check_namespace_allowed", return_value=None),
+            patch(f"{mod}.get_core_v1_api", return_value=core),
+            patch(f"{mod}.get_effective_persona", return_value=persona),
+            patch(f"{mod}.is_read_only", return_value=read_only),
+        ):
+            return _fetch_packages_via_pod("rt")
+
+    @pytest.mark.parametrize(
+        ("persona", "read_only"),
+        [("readonly", False), ("data-scientist", True), ("platform-admin", True)],
+    )
+    def test_no_pod_for_read_only_callers(self, persona, read_only):
+        """get_runtime is read-only: it must not create a Pod for readonly or read_only."""
+        result = self._fetch("Package Version\nnumpy 2.0.0\n", persona, read_only)
+        assert "creates a Pod" in result["packages_error"]
+        self.core.create_namespaced_pod.assert_not_called()
+
+    @pytest.mark.parametrize("persona", ["data-scientist", "ml-engineer", "platform-admin"])
+    def test_pod_created_for_training_personas(self, persona):
+        assert self._fetch("Package Version\nnumpy 2.0.0\n", persona)["total"] == 1
+        self.core.create_namespaced_pod.assert_called_once()
+
+    @pytest.mark.parametrize(
+        ("persona", "policy", "expect_pod"),
+        [
+            # a policy that strips every training tool leaves nothing that justifies a Pod
+            ("data-scientist", {"deny": ["category:training"]}, False),
+            ("platform-admin", {"deny": ["category:training"]}, False),
+            # one remaining training tool is enough
+            ("data-scientist", {"deny": ["fine_tune", "run_container_training"]}, True),
+        ],
+    )
+    def test_policy_deny_is_respected(self, persona, policy, expect_pod):
+        from kubeflow_mcp.trainer.api.discovery import _can_create_pods
+
+        mod = "kubeflow_mcp.trainer.api.discovery"
+        with (
+            patch(f"{mod}.get_effective_persona", return_value=persona),
+            patch(f"{mod}.is_read_only", return_value=False),
+            patch("kubeflow_mcp.core.policy._get_cached_policy", return_value={"policy": policy}),
+        ):
+            assert _can_create_pods() is expect_pod
+
+    def test_missing_pip_is_reported_instead_of_parsed(self):
+        """The pod command's own fallback text is not a package list."""
+        result = self._fetch("pip not found\n")
+        assert result == {"packages_error": "pip is not installed in the runtime image"}
+
+    def test_missing_pip_after_partial_output_is_reported(self):
+        """Both pip calls can fail after printing part of a list; the fallback still wins."""
+        result = self._fetch("Package Version\nnumpy 2.0.0\npip not found\n")
+        assert result == {"packages_error": "pip is not installed in the runtime image"}
+
+    def test_log_is_read_from_the_start_not_tailed(self):
+        """A tail drops the first packages of a large image, and the header with them."""
+        self._fetch("Package Version\nnumpy 2.0.0\n")
+        kwargs = self.core.read_namespaced_pod_log.call_args.kwargs
+        assert "tail_lines" not in kwargs
+        assert kwargs["limit_bytes"] >= 1024 * 1024
+
+    def test_header_and_separator_rows_are_not_packages(self):
+        result = self._fetch(self.PIP_COLUMNS)
+        assert result == {
+            "packages": [
+                {"name": "accelerate", "version": "1.11.0"},
+                {"name": "torch", "version": "2.5.1+cu121"},
+            ],
+            "total": 2,
+        }
+
+    @pytest.mark.parametrize("width", [3, 7, 40])
+    def test_separator_row_of_any_width_is_skipped(self, width):
+        dashes = "-" * width
+        result = self._fetch(f"Package Version\n{dashes} {dashes}\nnumpy 2.0.0\n")
+        assert result["packages"] == [{"name": "numpy", "version": "2.0.0"}]
+        assert result["total"] == 1
+
+
+@pytest.fixture(autouse=True)
+def _offline_pod_diagnostics():
+    """Pod detail parsing is exercised separately with Kubernetes model fixtures."""
+    with patch("kubeflow_mcp.trainer.api.discovery.get_training_pod_diagnostics", return_value={}):
+        yield
+
+
+def test_job_details_include_pod_diagnostics():
+    client = MagicMock()
+    client.get_job.return_value = _fake_job("job-a", status="Created")
+    diagnostics = {
+        "pods": [{"name": "node-0", "phase": "Pending"}],
+        "blocking_reasons": ["Unschedulable"],
+    }
+    with (
+        patch(
+            "kubeflow_mcp.trainer.api.discovery.get_trainer_client_for_namespace",
+            return_value=client,
+        ),
+        patch(
+            "kubeflow_mcp.trainer.api.discovery.get_training_pod_diagnostics",
+            return_value=diagnostics,
+        ) as read,
+    ):
+        result = get_training_job("job-a", namespace="workloads")
+    assert result["data"]["pods"] == diagnostics["pods"]
+    assert result["data"]["blocking_reasons"] == ["Unschedulable"]
+    read.assert_called_once_with("job-a", "workloads")

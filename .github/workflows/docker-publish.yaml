@@ -7,11 +7,32 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version/tag to build and push (e.g. 0.1.0). Leave blank to build without pushing.'
+        description: 'Development tag (dev-* or sha-*). Defaults to a commit SHA tag.'
         required: false
+        type: string
+      publish:
+        description: 'Publish the image to GHCR. Defaults to false.'
+        required: false
+        default: false
+        type: boolean
+      ref:
+        description: 'Branch or tag to build from.'
+        required: true
+        default: main
         type: string
   workflow_call:
     inputs:
+      ref:
+        description: 'Exact source ref to build.'
+        required: true
+        type: string
+      publish:
+        required: true
+        type: boolean
+      release:
+        description: 'Allow release tags; only set by the release workflow.'
+        default: false
+        type: boolean
       version:
         description: 'Release version/tag to build (used for image tags and checkout ref).'
         required: true
@@ -33,13 +54,34 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
         with:
-          ref: ${{ inputs.version || github.ref }}
+          ref: ${{ inputs.ref || github.ref }}
 
       - name: Parse version
         id: ver
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+          REQUESTED_PUBLISH: ${{ inputs.publish }}
+          RELEASE_BUILD: ${{ inputs.release || false }}
+          SOURCE_REF: ${{ inputs.ref }}
         run: |
           set -euo pipefail
-          V="${{ inputs.version }}"
+          V="$REQUESTED_VERSION"
+          if [[ -z "$V" ]]; then
+            V="sha-$(git rev-parse --short=12 HEAD)"
+          fi
+          if [[ ! "$V" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+            echo "Invalid image tag: $V" >&2
+            exit 1
+          fi
+          if [[ "$RELEASE_BUILD" == "true" ]]; then
+            if [[ ! "$V" =~ ^[0-9]+\.[0-9]+\.[0-9]+(rc[0-9]+)?$ || "$SOURCE_REF" != "refs/tags/$V" ]]; then
+              echo "Release builds require a release version and its matching tag ref." >&2
+              exit 1
+            fi
+          elif [[ "$V" != dev-* && "$V" != sha-* ]]; then
+            echo "Manual image tags must start with dev- or sha-." >&2
+            exit 1
+          fi
           STABLE=false
           MAJOR_MINOR=""
           MAJOR=""
@@ -53,8 +95,9 @@ jobs:
           echo "stable=$STABLE" >> "$GITHUB_OUTPUT"
           echo "major_minor=$MAJOR_MINOR" >> "$GITHUB_OUTPUT"
           echo "major=$MAJOR" >> "$GITHUB_OUTPUT"
-          # Push only when we have a concrete version to publish and it's not a PR.
-          if [[ "${{ github.event_name }}" != "pull_request" && -n "$V" ]]; then
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          # Reusable workflows inherit the caller's event; publication is an explicit input.
+          if [[ "$REQUESTED_PUBLISH" == "true" && "$GITHUB_EVENT_NAME" != "pull_request" ]]; then
             echo "push=true" >> "$GITHUB_OUTPUT"
           else
             echo "push=false" >> "$GITHUB_OUTPUT"
@@ -66,14 +109,6 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      - name: Log in to GHCR
-        if: steps.ver.outputs.push == 'true'
-        uses: docker/login-action@v4
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Extract image metadata
         id: meta
         uses: docker/metadata-action@v6
@@ -82,30 +117,92 @@ jobs:
           # Release versions are PEP 440 (e.g. 0.1.0rc1), which is not valid SemVer,
           # so tags are built with type=raw from the parsed version instead of type=semver.
           tags: |
-            type=raw,value=${{ inputs.version }},enable=${{ inputs.version != '' }}
+            type=raw,value=${{ steps.ver.outputs.version }}
             type=raw,value=${{ steps.ver.outputs.major_minor }},enable=${{ steps.ver.outputs.stable == 'true' }}
             type=raw,value=${{ steps.ver.outputs.major }},enable=${{ steps.ver.outputs.stable == 'true' }}
             type=raw,value=latest,enable=${{ steps.ver.outputs.stable == 'true' }}
 
-      - name: Build and push
+      - name: Build image archive
         id: build
         uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64,linux/arm64
-          push: ${{ steps.ver.outputs.push == 'true' }}
-          tags: ${{ steps.meta.outputs.tags }}
+          push: false
+          outputs: type=oci,dest=${{ runner.temp }}/mcp-image.tar
+          # Skopeo requires one archive reference; publish the aliases after scanning.
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.ver.outputs.version }}
           labels: ${{ steps.meta.outputs.labels }}
-          build-args: VERSION=${{ inputs.version }}
+          build-args: VERSION=${{ steps.ver.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          # SBOM and SLSA provenance are stored in GHCR next to the image.
+          sbom: ${{ steps.ver.outputs.push == 'true' }}
+          provenance: ${{ steps.ver.outputs.push == 'true' && 'mode=max' || 'false' }}
 
-      - name: Scan image for critical CVEs (Trivy)
-        if: steps.ver.outputs.push == 'true'
+      - name: Prepare images for scanning
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends skopeo
+          for arch in amd64 arm64; do
+            skopeo copy --override-os linux --override-arch "$arch" \
+              "oci-archive:$RUNNER_TEMP/mcp-image.tar" \
+              "oci:$RUNNER_TEMP/mcp-image-$arch:scan"
+          done
+
+      - name: Scan amd64 image for critical CVEs (Trivy)
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+          input: ${{ runner.temp }}/mcp-image-amd64
           format: table
           exit-code: 1
           severity: CRITICAL
           ignore-unfixed: true
+
+      - name: Scan arm64 image for critical CVEs (Trivy)
+        uses: aquasecurity/trivy-action@master
+        with:
+          input: ${{ runner.temp }}/mcp-image-arm64
+          skip-setup-trivy: true
+          format: table
+          exit-code: 1
+          severity: CRITICAL
+          ignore-unfixed: true
+
+      - name: Log in to GHCR
+        if: steps.ver.outputs.push == 'true'
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish scanned images
+        if: steps.ver.outputs.push == 'true'
+        env:
+          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          while IFS= read -r tag; do
+            skopeo copy --all --preserve-digests \
+              --authfile "${DOCKER_CONFIG:-$HOME/.docker}/config.json" \
+              "oci-archive:$RUNNER_TEMP/mcp-image.tar" "docker://$tag"
+          done <<< "$IMAGE_TAGS"
+
+      - name: Attest build provenance
+        if: steps.ver.outputs.push == 'true'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - name: Verify provenance attestation
+        if: steps.ver.outputs.push == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh attestation verify \
+            "oci://${REGISTRY}/${IMAGE_NAME}@${{ steps.build.outputs.digest }}" \
+            --repo "${{ github.repository }}"

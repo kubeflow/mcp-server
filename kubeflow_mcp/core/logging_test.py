@@ -17,7 +17,9 @@
 import io
 import json
 import logging
+import re
 import sys
+import uuid
 
 import pytest
 
@@ -27,9 +29,12 @@ from kubeflow_mcp.core.logging import (
     StructuredFormatter,
     _redact_dict,
     _redact_text,
+    correlation_id,
     get_log_buffer,
+    get_logger,
     request_context,
     setup_logging,
+    with_correlation_id,
 )
 
 _JWT = "eyJhbGciOiJIUzI1NiJ9.SECRETPAYLOAD.sig"
@@ -218,7 +223,8 @@ class TestRedactText:
         # The cli.py auth warning names flags and env vars, not credential values.
         warning = (
             "Set --auth-token or KUBEFLOW_MCP_AUTH_TOKEN for bearer auth, "
-            "or KUBEFLOW_MCP_JWKS_URI for JWT verification."
+            "or KUBEFLOW_MCP_JWKS_URI with KUBEFLOW_MCP_JWT_ISSUER and "
+            "KUBEFLOW_MCP_JWT_AUDIENCE for JWT verification."
         )
         assert _redact_text(warning) == warning
 
@@ -284,6 +290,81 @@ class TestLogPathsRedactConsistently:
         assert buffered in ConsoleFormatter().format(record)
 
 
+class TestCorrelationId:
+    @pytest.fixture(autouse=True)
+    def _reset_correlation_id(self):
+        token = correlation_id.set("")
+        try:
+            yield
+        finally:
+            correlation_id.reset(token)
+
+    def test_with_correlation_id_sets_and_returns_uuid(self):
+        cid = with_correlation_id()
+        assert isinstance(cid, str)
+        assert uuid.UUID(cid).version == 4
+        assert correlation_id.get() == cid
+
+    def test_structured_formatter_includes_correlation_id(self):
+        cid = with_correlation_id()
+        record = logging.LogRecord("test", logging.INFO, __file__, 1, "hello", (), None)
+        output = json.loads(StructuredFormatter().format(record))
+        assert output["correlation_id"] == cid
+
+    def test_structured_formatter_correlation_id_none_when_empty(self):
+        record = logging.LogRecord("test", logging.INFO, __file__, 1, "hello", (), None)
+        output = json.loads(StructuredFormatter().format(record))
+        assert output["correlation_id"] is None
+
+    def test_console_formatter_includes_correlation_id_prefix(self):
+        cid = with_correlation_id()
+        record = logging.LogRecord("test", logging.INFO, __file__, 1, "hello", (), None)
+        formatted = ConsoleFormatter().format(record)
+        assert f"[{cid[:8]}]" in formatted
+
+    def test_console_formatter_omits_correlation_id_when_empty(self):
+        record = logging.LogRecord("test", logging.INFO, __file__, 1, "hello", (), None)
+        formatted = ConsoleFormatter().format(record)
+        assert not re.search(r"\[[0-9a-f]{8}\]", formatted)
+        assert f"{ConsoleFormatter.RESET} test: hello" in formatted
+
+
+class TestRedactTextEdgeCases:
+    def test_sensitive_key_with_trailing_empty_value(self):
+        assert _redact_text("password=") == "password="
+        assert _redact_text("secret: ") == "secret: "
+
+
+class TestGetLogger:
+    def test_get_logger_prefixes_name(self):
+        logger = get_logger("my_component")
+        assert logger.name == "kubeflow_mcp.my_component"
+
+
+class TestConsoleFormatterColors:
+    @pytest.mark.parametrize(
+        ("level", "color"),
+        [
+            (logging.DEBUG, ConsoleFormatter.COLORS["DEBUG"]),
+            (logging.INFO, ConsoleFormatter.COLORS["INFO"]),
+            (logging.WARNING, ConsoleFormatter.COLORS["WARNING"]),
+            (logging.ERROR, ConsoleFormatter.COLORS["ERROR"]),
+            (logging.CRITICAL, ConsoleFormatter.COLORS["CRITICAL"]),
+        ],
+    )
+    def test_console_formatter_colors(self, level, color):
+        record = logging.LogRecord("test", level, __file__, 1, "test message", (), None)
+        formatted = ConsoleFormatter().format(record)
+        assert color in formatted
+        assert ConsoleFormatter.RESET in formatted
+
+    def test_console_formatter_unknown_level(self):
+        record = logging.LogRecord("test", 99, __file__, 1, "custom level", (), None)
+        record.levelname = "CUSTOM"
+        formatted = ConsoleFormatter().format(record)
+        assert formatted.startswith(ConsoleFormatter.RESET)
+
+
 class TestSetupLogging:
     """Tests for setup_logging handler and level configuration."""
 
@@ -325,6 +406,24 @@ class TestSetupLogging:
     def test_sets_log_level(self):
         root = setup_logging(level="debug", format="json")
         assert root.level == logging.DEBUG
+
+    @pytest.mark.parametrize(
+        ("level", "expected_level"),
+        [
+            ("WARN", logging.WARNING),
+            ("warn", logging.WARNING),
+            ("FATAL", logging.CRITICAL),
+            ("fatal", logging.CRITICAL),
+        ],
+    )
+    def test_normalizes_legacy_log_level_aliases(self, level, expected_level):
+        root = setup_logging(level=level, format="json")
+        assert root.level == expected_level
+
+    @pytest.mark.parametrize("level", ["TRACE", "NOT_A_LEVEL", ""])
+    def test_rejects_invalid_log_level(self, level):
+        with pytest.raises(ValueError, match="Invalid log level"):
+            setup_logging(level=level, format="json")
 
     def test_calling_twice_does_not_duplicate_handlers(self):
         setup_logging(format="json")

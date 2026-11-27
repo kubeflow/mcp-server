@@ -25,27 +25,31 @@ from kubeflow.trainer.constants import constants as trainer_constants
 
 from kubeflow_mcp.common import utils as mcp_utils
 from kubeflow_mcp.common.constants import ErrorCode
-from kubeflow_mcp.common.types import ToolError, ToolResponse, exception_details, is_k8s_not_found
+from kubeflow_mcp.common.types import (
+    ToolError,
+    ToolResponse,
+    exception_details,
+    is_k8s_forbidden,
+    is_k8s_not_found,
+)
 from kubeflow_mcp.core.security import (
     check_namespace_allowed,
     validate_namespace,
     validate_runtime_name,
 )
+from kubeflow_mcp.trainer.constants import TRAINER_CONTROLLER_LABEL_SELECTORS
 
 logger = logging.getLogger(__name__)
 
 _TRAINER_CRD_GROUP = "trainer.kubeflow.org"
 _MAX_TAIL_LINES = 1000
-_CONTROLLER_LABELS = [
-    "app.kubernetes.io/name=trainer,app.kubernetes.io/component=manager",
-    "app.kubernetes.io/name=trainer,app.kubernetes.io/part-of=kubeflow",
-]
 _LOG_TAIL_DEFAULT = 200
 
 
 _DEFAULT_CONTROLLER_NAMESPACES = ["kubeflow", "kubeflow-system"]
 
 _PATCH_ALLOWED_KEYS = frozenset({"spec", "metadata"})
+_CLUSTER_RUNTIME_KIND = "ClusterTrainingRuntime"
 _SPEC_ALLOWED_KEYS = frozenset({"template", "labels", "annotations"})
 
 
@@ -84,7 +88,7 @@ def _find_controller_pod(namespace: str | None = None):
 
     last_error: Exception | None = None
     for ns in namespaces:
-        for label in _CONTROLLER_LABELS:
+        for label in TRAINER_CONTROLLER_LABEL_SELECTORS:
             try:
                 pods = core.list_namespaced_pod(
                     namespace=ns,
@@ -176,7 +180,9 @@ def inspect_crd(name: str | None = None) -> dict[str, Any]:
             ).model_dump()
         return ToolError(
             error=str(e),
-            error_code=ErrorCode.KUBERNETES_ERROR,
+            error_code=ErrorCode.PERMISSION_DENIED
+            if is_k8s_forbidden(e)
+            else ErrorCode.KUBERNETES_ERROR,
             details=exception_details(e),
         ).model_dump()
 
@@ -288,7 +294,7 @@ def inspect_controller(
 
     except Exception as e:
         logger.warning("inspect_controller(%s, %s) failed: %s", view, namespace, e, exc_info=True)
-        if getattr(e, "status", None) == 403:
+        if is_k8s_forbidden(e):
             return ToolError(
                 error=f"Permission denied while looking up the controller pod: {e}",
                 error_code=ErrorCode.PERMISSION_DENIED,
@@ -305,20 +311,94 @@ def inspect_controller(
         ).model_dump()
 
 
+# Merged list key -> field that identifies an entry (a volume can be mounted at several paths).
+_MERGED_LIST_KEYS = {
+    "replicatedJobs": "name",
+    "containers": "name",
+    "initContainers": "name",
+    "env": "name",
+    "volumes": "name",
+    "volumeMounts": "mountPath",
+}
+
+
+_MERGE_SEMANTICS = (
+    "Keyed lists (replicatedJobs, containers, initContainers, env, volumes by name; "
+    "volumeMounts by mountPath) merge by key: unmentioned entries are kept and a partial list cannot "
+    "remove one. Listing every current entry applies the supplied order. An empty list [] "
+    "replaces the list and clears all entries. Other lists are replaced; null deletes a key."
+)
+
+
+def _is_keyed_list(value: Any, id_field: str) -> bool:
+    return (
+        isinstance(value, list)
+        and bool(value)
+        and all(isinstance(i, dict) and id_field in i for i in value)
+    )
+
+
+def _merge(current: Any, patch: Any, key: str | None = None) -> Any:
+    """Overlay ``patch`` on ``current``, merging name-keyed lists entry by entry."""
+    if isinstance(patch, dict) and isinstance(current, dict):
+        merged = dict(current)
+        for k, value in patch.items():
+            if value is None:
+                merged.pop(k, None)
+            else:
+                merged[k] = _merge(current.get(k), value, k)
+        return merged
+    id_field = _MERGED_LIST_KEYS.get(key)
+    if id_field and _is_keyed_list(patch, id_field) and _is_keyed_list(current, id_field):
+        patch_by_id = {item[id_field]: item for item in patch}
+        current_by_id = {c[id_field]: c for c in current}
+        if current_by_id.keys() <= patch_by_id.keys():
+            # Every current entry is listed: honour the supplied order (initContainers run in sequence).
+            return [_merge(current_by_id.get(p[id_field], {}), p) for p in patch]
+        merged_list = [_merge(c, patch_by_id.pop(c[id_field], {})) for c in current]
+        return merged_list + list(patch_by_id.values())
+    return patch
+
+
+def _expand_named_lists(current: Any, patch: Any, key: str | None = None) -> Any:
+    """Keep the shape of ``patch`` but carry the sibling entries of its name-keyed lists.
+
+    The API server applies a ClusterTrainingRuntime patch as a JSON merge patch
+    (RFC 7386), which replaces a list wholesale. Sending a patch that names one
+    replicated job or container as-is would delete every other entry.
+    """
+    if isinstance(patch, dict):
+        cur = current if isinstance(current, dict) else {}
+        return {k: _expand_named_lists(cur.get(k), v, k) for k, v in patch.items()}
+    id_field = _MERGED_LIST_KEYS.get(key)
+    if id_field and _is_keyed_list(patch, id_field) and _is_keyed_list(current, id_field):
+        return _merge(current, patch, key)
+    return patch
+
+
 def patch_runtime(
     name: str,
     patch: dict[str, Any] | None = None,
     confirmed: bool = False,
 ) -> dict[str, Any]:
-    """Strategic merge patch on a ClusterTrainingRuntime.
+    """JSON merge patch on a ClusterTrainingRuntime.
 
     Use to update images, add volumes, change defaults without full replacement.
-    Top-level keys are restricted to ``spec`` and ``metadata``; deep structure
-    is validated by the K8s API. Intended for platform-admin persona only.
+    Lists under these keys whose entries all carry their key (``name`` for
+    ``replicatedJobs``, ``containers``, ``initContainers``, ``env``, ``volumes``;
+    ``mountPath`` for ``volumeMounts``) are merged by that key: entries the patch does not mention are kept, so removing one entry
+    is not possible here. If the patch lists every current entry, its order is applied
+    (reordering); otherwise current order is kept and new entries are appended. An empty
+    list (``[]``) is not merged: it replaces the list and clears every entry. Other
+    lists are replaced. The patch is rejected with a conflict if the runtime changes
+    between the read and the write; re-run it to retry. Pass ``metadata.resourceVersion``
+    (from the preview) to also reject changes made since that version. Top-level keys are restricted to ``spec`` and ``metadata``;
+    deep structure is validated by the K8s API. Intended for platform-admin
+    persona only.
 
     Args:
         name: ClusterTrainingRuntime name.
-        patch: Strategic merge patch dict. Allowed top-level keys: spec, metadata.
+        patch: Merge patch dict. Allowed top-level keys: spec, metadata.
         confirmed: Must be True to apply. False returns a preview.
 
     Returns:
@@ -349,17 +429,31 @@ def patch_runtime(
                 "runtime": name,
                 "patch": patch,
                 "message": "Set confirmed=True to apply this patch.",
+                "merge_semantics": _MERGE_SEMANTICS,
             }
         ).model_dump()
 
     try:
         api = mcp_utils.get_custom_objects_api()
+        current = api.get_cluster_custom_object(
+            group=trainer_constants.GROUP,
+            version=trainer_constants.VERSION,
+            plural="clustertrainingruntimes",
+            name=name,
+            _request_timeout=mcp_utils.K8S_TIMEOUT,
+        )
+        body = _expand_named_lists(current, patch)
+        resource_version = current.get("metadata", {}).get("resourceVersion")
+        if resource_version:
+            # 409 if the runtime changed since the read above; a caller-supplied version is kept
+            # so a change since the caller's own read is rejected too.
+            body.setdefault("metadata", {}).setdefault("resourceVersion", resource_version)
         result = api.patch_cluster_custom_object(
             group=trainer_constants.GROUP,
             version=trainer_constants.VERSION,
             plural="clustertrainingruntimes",
             name=name,
-            body=patch,
+            body=body,
             _request_timeout=mcp_utils.K8S_TIMEOUT,
         )
 
@@ -379,9 +473,21 @@ def patch_runtime(
                 error=f"ClusterTrainingRuntime '{name}' not found",
                 error_code=ErrorCode.RESOURCE_NOT_FOUND,
             ).model_dump()
+        if getattr(e, "status", None) == 409:
+            return ToolError(
+                error=f"ClusterTrainingRuntime '{name}' changed while patching",
+                error_code=ErrorCode.KUBERNETES_ERROR,
+                details={
+                    **exception_details(e),
+                    "hint": "Another update landed after the runtime was read; "
+                    "re-run patch_runtime to merge against the latest version",
+                },
+            ).model_dump()
         return ToolError(
             error=str(e),
-            error_code=ErrorCode.KUBERNETES_ERROR,
+            error_code=ErrorCode.PERMISSION_DENIED
+            if is_k8s_forbidden(e)
+            else ErrorCode.KUBERNETES_ERROR,
             details=exception_details(e),
         ).model_dump()
 
@@ -463,9 +569,26 @@ def create_runtime(
         logger.warning("create_runtime(%s) failed: %s", name, e, exc_info=True)
         return ToolError(
             error=str(e),
-            error_code=ErrorCode.KUBERNETES_ERROR,
+            error_code=ErrorCode.PERMISSION_DENIED
+            if is_k8s_forbidden(e)
+            else ErrorCode.KUBERNETES_ERROR,
             details=exception_details(e),
         ).model_dump()
+
+
+def _uses_cluster_runtime(job: dict[str, Any], name: str) -> bool:
+    """Whether a TrainJob's runtimeRef points at the ClusterTrainingRuntime ``name``.
+
+    ``kind`` and ``apiGroup`` are optional in a runtimeRef and default to
+    ClusterTrainingRuntime and the Trainer group, so a bare ``{"name": ...}``
+    still counts. A namespaced TrainingRuntime with the same name does not.
+    """
+    ref = (job.get("spec") or {}).get("runtimeRef") or {}
+    return (
+        ref.get("name") == name
+        and (ref.get("kind") or _CLUSTER_RUNTIME_KIND) == _CLUSTER_RUNTIME_KIND
+        and (ref.get("apiGroup") or trainer_constants.GROUP) == trainer_constants.GROUP
+    )
 
 
 def delete_runtime(
@@ -481,7 +604,11 @@ def delete_runtime(
         confirmed: Must be True to delete. False returns a preview with dependents.
 
     Returns:
-        dict: Preview with dependent jobs, or deletion result.
+        dict: Preview with dependent jobs, or deletion result. The preview carries
+        ``dependents_checked``; when it is False the TrainJob listing failed, so an
+        empty ``dependent_jobs`` and a zero count do not mean nothing depends on
+        the runtime. A confirmed delete returns an error instead of deleting when
+        the listing fails.
     """
     name_err = validate_runtime_name(name)
     if name_err is not None:
@@ -491,6 +618,7 @@ def delete_runtime(
         api = mcp_utils.get_custom_objects_api()
 
         dependent_jobs = []
+        check_exc: Exception | None = None
         try:
             jobs = api.list_cluster_custom_object(
                 group=trainer_constants.GROUP,
@@ -499,32 +627,70 @@ def delete_runtime(
                 _request_timeout=mcp_utils.K8S_TIMEOUT,
             )
             for job in jobs.get("items", []):
-                runtime_ref = job.get("spec", {}).get("runtimeRef", {})
-                if runtime_ref.get("name") == name:
+                if _uses_cluster_runtime(job, name):
                     dependent_jobs.append(
                         {
                             "name": job["metadata"]["name"],
                             "namespace": job["metadata"].get("namespace", "unknown"),
                         }
                     )
-        except Exception:
-            logger.debug("Could not list dependent jobs for runtime %s", name)
+        except Exception as e:
+            check_exc = e
+            logger.warning("Could not list TrainJobs that use runtime %s: %s", name, e)
+
+        # An empty list only means "no dependents" if the listing worked, so the
+        # preview says whether it did.
+        checked = check_exc is None
 
         if not confirmed:
-            return ToolResponse(
-                data={
-                    "action": "preview",
-                    "runtime": name,
-                    "dependent_jobs": dependent_jobs,
-                    "dependent_count": len(dependent_jobs),
-                    "warning": (
-                        f"{len(dependent_jobs)} TrainJob(s) reference this runtime. "
-                        "They will fail if the runtime is deleted."
-                        if dependent_jobs
-                        else "No dependent TrainJobs found."
-                    ),
-                    "message": "Set confirmed=True to delete this runtime.",
-                }
+            message = "Set confirmed=True to delete this runtime."
+            if not checked:
+                warning = (
+                    "Could not check which TrainJobs use this runtime, so any that do "
+                    "would fail if it were deleted."
+                )
+                message = "A confirmed delete is refused until the TrainJob listing works."
+            elif dependent_jobs:
+                warning = (
+                    f"{len(dependent_jobs)} TrainJob(s) reference this runtime. "
+                    "They will fail if the runtime is deleted."
+                )
+            else:
+                warning = "No dependent TrainJobs found."
+            data: dict[str, Any] = {
+                "action": "preview",
+                "runtime": name,
+                "dependent_jobs": dependent_jobs,
+                "dependent_count": len(dependent_jobs),
+                "dependents_checked": checked,
+                "warning": warning,
+                "message": message,
+            }
+            if check_exc is not None:
+                data["dependency_check_error"] = exception_details(check_exc)
+            return ToolResponse(data=data).model_dump()
+
+        # A confirmed call may be rechecking after a clean preview, so a failed
+        # check has to stop the delete rather than be reported after it.
+        if check_exc is not None:
+            error = (
+                f"Did not delete ClusterTrainingRuntime '{name}': "
+                "could not check which TrainJobs use it"
+            )
+            if is_k8s_forbidden(check_exc):
+                return ToolError(
+                    error=error,
+                    error_code=ErrorCode.PERMISSION_DENIED,
+                    details={
+                        **exception_details(check_exc),
+                        "hint": "Grant the server's service account list access to "
+                        "TrainJobs in all namespaces, then retry",
+                    },
+                ).model_dump()
+            return ToolError(
+                error=error,
+                error_code=ErrorCode.KUBERNETES_ERROR,
+                details=exception_details(check_exc),
             ).model_dump()
 
         api.delete_cluster_custom_object(
@@ -535,14 +701,13 @@ def delete_runtime(
             _request_timeout=mcp_utils.K8S_TIMEOUT,
         )
 
-        return ToolResponse(
-            data={
-                "runtime": name,
-                "deleted": True,
-                "message": f"ClusterTrainingRuntime '{name}' deleted successfully",
-                "dependent_jobs_affected": len(dependent_jobs),
-            }
-        ).model_dump()
+        result: dict[str, Any] = {
+            "runtime": name,
+            "deleted": True,
+            "message": f"ClusterTrainingRuntime '{name}' deleted successfully",
+            "dependent_jobs_affected": len(dependent_jobs),
+        }
+        return ToolResponse(data=result).model_dump()
 
     except Exception as e:
         logger.warning("delete_runtime(%s) failed: %s", name, e, exc_info=True)
@@ -553,6 +718,8 @@ def delete_runtime(
             ).model_dump()
         return ToolError(
             error=str(e),
-            error_code=ErrorCode.KUBERNETES_ERROR,
+            error_code=ErrorCode.PERMISSION_DENIED
+            if is_k8s_forbidden(e)
+            else ErrorCode.KUBERNETES_ERROR,
             details=exception_details(e),
         ).model_dump()

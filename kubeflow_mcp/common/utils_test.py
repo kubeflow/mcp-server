@@ -17,8 +17,11 @@
 from __future__ import annotations
 
 import os
-from types import SimpleNamespace
+import sys
+from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from kubeflow_mcp.common.utils import (
     MCP_MANAGED_LABEL,
@@ -26,18 +29,95 @@ from kubeflow_mcp.common.utils import (
     OWNERSHIP_MANAGED,
     OWNERSHIP_MISSING,
     OWNERSHIP_UNMANAGED,
+    PIPELINES_NAMESPACE_ENV,
+    PIPELINES_TOKEN_ENV,
+    PIPELINES_URL_ENV,
     _get_api_client,
     get_core_v1_api,
     get_custom_objects_api,
+    get_default_kubeconfig_namespace,
+    get_optimizer_effective_namespace,
+    get_pipelines_client,
+    get_pipelines_effective_namespace,
+    get_spark_session_ownership,
     get_trainer_client_for_namespace,
     get_trainer_effective_namespace,
     get_trainer_ownership,
+    get_training_job_status,
     reset_clients,
 )
 
 PATCH_CUSTOM_API = "kubeflow_mcp.common.utils.get_custom_objects_api"
 PATCH_GET_API_CLIENT = "kubeflow_mcp.common.utils._get_api_client"
 PATCH_TRAINER_CLIENT = "kubeflow_mcp.common.utils.get_trainer_client"
+
+
+@pytest.mark.parametrize(
+    "suspended,conditions,expected",
+    [
+        (False, [{"type": "Suspended", "status": "False"}], "Running"),
+        (True, [{"type": "Suspended", "status": "True"}], "Created"),
+        (False, [{"type": "Suspended", "status": "True"}], "Created"),
+        (False, [{"type": "Complete", "status": "True"}], "Complete"),
+        (False, [{"type": "Failed", "status": "True"}], "Failed"),
+    ],
+)
+@patch(PATCH_CUSTOM_API)
+def test_reconcile_created_job_with_active_workers(mock_api_fn, suspended, conditions, expected):
+    job = SimpleNamespace(
+        name="resumed-job",
+        status="Created",
+        num_nodes=2,
+        steps=[
+            SimpleNamespace(name=f"node-{i}", status=status)
+            for i, status in enumerate(["Running", "Succeeded"])
+        ],
+    )
+    mock_api_fn.return_value.get_namespaced_custom_object.return_value = {
+        "spec": {"suspend": suspended},
+        "status": {"conditions": conditions},
+    }
+    assert get_training_job_status(job, "workloads") == expected
+    assert (
+        mock_api_fn.return_value.get_namespaced_custom_object.call_args.kwargs["namespace"]
+        == "workloads"
+    )
+
+
+@pytest.mark.parametrize(
+    "status,workers",
+    [
+        ("Complete", ["Running"]),
+        ("Failed", ["Running"]),
+        ("Created", []),
+        ("Created", ["Pending"]),
+        ("Created", ["Running"]),
+    ],
+)
+@patch(PATCH_CUSTOM_API)
+def test_status_reconciliation_leaves_terminal_or_incomplete_workers_alone(
+    mock_api_fn, status, workers
+):
+    job = SimpleNamespace(
+        name="job",
+        status=status,
+        num_nodes=2,
+        steps=[SimpleNamespace(name=f"node-{i}", status=s) for i, s in enumerate(workers)],
+    )
+    assert get_training_job_status(job, "workloads") == status
+    mock_api_fn.assert_not_called()
+
+
+@patch(PATCH_CUSTOM_API)
+def test_status_reconciliation_preserves_sdk_status_if_api_fails(mock_api_fn):
+    mock_api_fn.return_value.get_namespaced_custom_object.side_effect = RuntimeError("Forbidden")
+    job = SimpleNamespace(
+        name="job",
+        status="Created",
+        num_nodes=1,
+        steps=[SimpleNamespace(name="node-0", status="Running")],
+    )
+    assert get_training_job_status(job, "workloads") == "Created"
 
 
 class TestGetTrainerOwnership:
@@ -85,6 +165,43 @@ class TestGetTrainerOwnership:
         mock_api.get_namespaced_custom_object.side_effect = Exception("connection refused")
         mock_api_fn.return_value = mock_api
         assert get_trainer_ownership("my-job", "default") is None
+
+
+class TestGetSparkSessionOwnership:
+    @patch(PATCH_CUSTOM_API)
+    def test_managed_when_label_present(self, mock_api_fn):
+        mock_api_fn.return_value.get_namespaced_custom_object.return_value = {
+            "metadata": {"labels": {MCP_MANAGED_LABEL: MCP_MANAGED_VALUE}}
+        }
+        assert get_spark_session_ownership("etl", "default") == "managed"
+
+    @patch(PATCH_CUSTOM_API)
+    def test_not_found_on_404(self, mock_api_fn):
+        from kubernetes.client.exceptions import ApiException
+
+        mock_api_fn.return_value.get_namespaced_custom_object.side_effect = ApiException(
+            status=404, reason="Not Found"
+        )
+        assert get_spark_session_ownership("gone", "default") == "not_found"
+
+    @pytest.mark.parametrize("status", [401, 403])
+    @patch(PATCH_CUSTOM_API)
+    def test_forbidden_is_distinct_from_unknown(self, mock_api_fn, status):
+        """A denied read is the caller's RBAC, not an API failure: delete needs
+        to report it as PERMISSION_DENIED rather than SDK_ERROR."""
+        from kubernetes.client.exceptions import ApiException
+
+        mock_api_fn.return_value.get_namespaced_custom_object.side_effect = ApiException(
+            status=status, reason="Forbidden"
+        )
+        assert get_spark_session_ownership("etl", "team-b") == "forbidden"
+
+    @patch(PATCH_CUSTOM_API)
+    def test_unknown_on_other_api_error(self, mock_api_fn):
+        mock_api_fn.return_value.get_namespaced_custom_object.side_effect = Exception(
+            "connection refused"
+        )
+        assert get_spark_session_ownership("etl", "default") == "unknown"
 
 
 class TestResetClients:
@@ -178,6 +295,23 @@ class TestGetApiClientConfigLoading:
         reset_clients()
 
 
+class TestGetDefaultKubeconfigNamespace:
+    def test_corrupt_kubeconfig_fails_when_not_running_in_cluster(self, monkeypatch, tmp_path):
+        kubeconfig = tmp_path / "corrupt-config"
+        kubeconfig.touch()
+        monkeypatch.setenv("KUBECONFIG", str(kubeconfig))
+        monkeypatch.setattr(
+            "kubeflow_mcp.common.utils._SA_NAMESPACE_PATH",
+            str(tmp_path / "missing-service-account-namespace"),
+        )
+        with patch(
+            "kubernetes.config.list_kube_config_contexts",
+            side_effect=ValueError("invalid kubeconfig"),
+        ):
+            with pytest.raises(RuntimeError, match="kubeconfig is invalid"):
+                get_default_kubeconfig_namespace()
+
+
 class TestGetCoreV1Api:
     @patch(PATCH_GET_API_CLIENT)
     def test_returns_core_v1_api_instance(self, mock_api_client):
@@ -263,3 +397,79 @@ class TestGetTrainerClientForNamespace:
         assert mock_cls.call_count == 1
         with _ns_client_lock:
             _ns_client_cache.pop("cache-ns", None)
+
+
+class TestPipelinesClient:
+    @pytest.fixture
+    def fake_sdk(self, monkeypatch):
+        """A stand-in ``kubeflow.pipelines`` so the factory runs without kfp."""
+        sdk = ModuleType("kubeflow.pipelines")
+        sdk.KubernetesBackendConfig = lambda **kwargs: SimpleNamespace(**kwargs)
+        sdk.PipelinesClient = MagicMock(side_effect=lambda backend_config: backend_config)
+        monkeypatch.setitem(sys.modules, "kubeflow.pipelines", sdk)
+        for var in (PIPELINES_URL_ENV, PIPELINES_TOKEN_ENV, PIPELINES_NAMESPACE_ENV):
+            monkeypatch.delenv(var, raising=False)
+        reset_clients()
+        yield sdk
+        reset_clients()
+
+    def test_namespace_is_passed_explicitly(self, fake_sdk):
+        config = get_pipelines_client("team-a")
+
+        assert config.namespace == "team-a"
+        assert config.base_url is None and config.user_token is None
+
+    def test_url_and_token_come_from_the_environment(self, fake_sdk, monkeypatch):
+        monkeypatch.setenv(PIPELINES_URL_ENV, "https://kfp.example.com")
+        monkeypatch.setenv(PIPELINES_TOKEN_ENV, "secret")
+
+        config = get_pipelines_client("team-a")
+
+        assert config.base_url == "https://kfp.example.com"
+        assert config.user_token == "secret"
+
+    def test_cached_per_namespace_and_cleared_by_reset(self, fake_sdk):
+        assert get_pipelines_client("a") is get_pipelines_client("a")
+        assert get_pipelines_client("a") is not get_pipelines_client("b")
+        assert fake_sdk.PipelinesClient.call_count == 2
+
+        reset_clients()
+        get_pipelines_client("a")
+
+        assert fake_sdk.PipelinesClient.call_count == 3
+
+    def test_effective_namespace_order(self, monkeypatch):
+        monkeypatch.delenv(PIPELINES_NAMESPACE_ENV, raising=False)
+        with patch(
+            "kubeflow_mcp.common.utils.get_default_kubeconfig_namespace",
+            return_value="kube-default",
+        ):
+            assert get_pipelines_effective_namespace("explicit") == "explicit"
+            assert get_pipelines_effective_namespace(None) == "kube-default"
+            monkeypatch.setenv(PIPELINES_NAMESPACE_ENV, " pipelines-ns ")
+            assert get_pipelines_effective_namespace(None) == "pipelines-ns"
+
+    def test_cache_evicts_oldest_when_full(self, fake_sdk):
+        from kubeflow_mcp.common.utils import _NS_CLIENT_CACHE_MAX, _pipelines_client_cache
+
+        reset_clients()
+        for i in range(_NS_CLIENT_CACHE_MAX + 1):
+            get_pipelines_client(f"ns-{i}")
+
+        assert len(_pipelines_client_cache) == _NS_CLIENT_CACHE_MAX
+        assert "ns-0" not in _pipelines_client_cache
+        assert f"ns-{_NS_CLIENT_CACHE_MAX}" in _pipelines_client_cache
+
+
+def test_optimizer_namespace_resolves_without_building_an_sdk_client():
+    """OptimizerClient() also builds a Trainer backend whose first read has no
+    timeout, so resolving a namespace must not construct it."""
+    with (
+        patch("kubeflow.optimizer.OptimizerClient", side_effect=AssertionError("built")),
+        patch(
+            "kubeflow_mcp.common.utils.get_default_kubeconfig_namespace",
+            return_value="kube-default",
+        ),
+    ):
+        assert get_optimizer_effective_namespace(None) == "kube-default"
+        assert get_optimizer_effective_namespace("explicit") == "explicit"

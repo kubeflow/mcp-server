@@ -11,6 +11,14 @@ Diagnostic workflows, error-to-fix tables, and known tool limitations.
 3. `get_training_logs(name)` — check container output
 4. Match error in tables below
 
+Empty logs do not establish a failure cause. If pods were deleted, use retained cluster logs;
+events may also have expired. `get_training_logs` reports when no matching pods remain or
+log availability cannot be verified. An existing pod can legitimately have empty output.
+
+For SDK 0.5, discovery and wait tools reconcile `Created` with active workers after resume.
+This requires reading the TrainJob to rule out suspension and terminal conditions; if that
+read fails, the SDK status is preserved. A wait response with `reached=false` is not completion.
+
 ## Error-to-Fix Table
 
 | Error / Event | Cause | Fix |
@@ -79,9 +87,14 @@ All three training tools (`fine_tune`, `run_custom_training`, `run_container_tra
 **Add OpenShift emptyDir volumes:**
 ```json
 "volumes": [
-  {"name": "dot-local", "mount_path": "/.local", "empty_dir": {}},
-  {"name": "dot-cache", "mount_path": "/.cache", "empty_dir": {}},
-  {"name": "tmp", "mount_path": "/tmp", "empty_dir": {}}
+  {"name": "dot-local", "emptyDir": {}},
+  {"name": "dot-cache", "emptyDir": {}},
+  {"name": "tmp", "emptyDir": {}}
+],
+"volume_mounts": [
+  {"name": "dot-local", "mountPath": "/.local"},
+  {"name": "dot-cache", "mountPath": "/.cache"},
+  {"name": "tmp", "mountPath": "/tmp"}
 ]
 ```
 
@@ -98,6 +111,35 @@ All three training tools (`fine_tune`, `run_custom_training`, `run_container_tra
 
 `get_training_logs(follow=True)` returns a static message. MCP is request/response — no streaming.
 **Workaround**: Poll with `get_training_logs(follow=False)` at intervals.
+
+### Cursor Log Read Limit
+
+`get_training_logs(name, since_line=0)` reads a bounded prefix of the requested
+step's active container logs: up to 10,000 complete lines or 8 MiB of content.
+The reader uses a non-preloaded Kubernetes response and closes it on completion,
+limit, or read failure. It may read ahead by one chunk (8 KiB) to detect the line
+limit, or one byte to detect the byte limit. This bounds client consumption; it
+does not impose a server-side limit on all Kubelet/proxy buffering or work.
+
+Echo `next_offset` as `since_line` to page through that prefix. A short page can
+reflect the response character budget and does not by itself mean EOF.
+When `truncated_by_guardrail=true`, `total_lines` counts only complete lines
+collected, not the full log size. `buffer_limit` and `buffer_limit_bytes` describe
+the two read budgets. An unfinished line at the byte limit is not returned or
+counted, so the available prefix can be shorter than 10,000 lines, even empty.
+
+When `stop_reason="buffer_limit"`, **stop polling this cursor and do not reset it
+to zero**. Later logs cannot be reached through this cursor window. This applies
+even when the supplied offset is at or beyond the available prefix. A limit is
+not a container restart; `log_reset` is returned only after observing EOF below
+the supplied offset. Exact-size logs that reach EOF do not report truncation.
+
+For recent output, identify the requested step's pod and container and use
+`kubectl logs -n <namespace> <pod> -c <container> --tail=1000 --limit-bytes=8388608`.
+For continuous output use an external streaming client. Changing `step` reads a
+different worker; it does not bypass the cap for the original worker. The MCP
+tool has no `container` argument. Non-cursor tail mode retains its existing SDK
+read path and should not be used as a bounded-download workaround.
 
 ### Suspended Jobs Show "Created" Status
 
@@ -159,3 +201,42 @@ update_training_job(name, action="resume", confirmed=True)   # Resume (preview f
 - Volume scope: `fine_tune()` volumes apply to ALL replicated jobs; `run_custom_training()` applies to node only
 - `loss` in `fine_tune` only supports `CEWithChunkedOutputLoss`
 - `dataset_source`/`dataset_split`/`dataset_column_map` configure instruct-format preprocessing
+
+### GPU capacity and allocations
+
+`get_cluster_resources().data.gpu_total` is capacity, not free GPUs. `gpu_allocated` and
+`gpu_available` estimate current requests; they are unknown (`null`) when cluster-wide pod access
+is unavailable or a paginated scan cannot finish within 20 pages of 500 pods. Partial results
+are discarded. Completed pods are excluded; these estimates do not guarantee scheduler placement.
+
+Fine-tuning previews show inherited runtime requests and GPU fit warnings using the SDK's
+resource aliases. A worker requesting two GPUs needs both on one node; separate one-GPU nodes
+cannot satisfy it. Validation and preview share one cluster inspection.
+When overriding CPU or memory on a GPU runtime, also set `gpu` explicitly: Trainer v2.3
+sizes torchrun from the override, independently of the pod's inherited GPU allocation.
+
+### Training stalls or restarts
+
+Use `get_training_job(name, namespace)` to inspect associated initializer and trainer pods.
+Diagnostics use the newest pod attempt per step; earlier failed retries do not block a healthy replacement.
+Normal `ContainerCreating` and `PodInitializing` states remain visible without being reported as blockers.
+`pods` includes readiness, restarts, container waiting/termination reasons and failed scheduling
+conditions; `blocking_reasons` highlights issues such as insufficient GPUs or CrashLoopBackOff.
+Pods with blockers take priority within the 16,000-character diagnostic budget;
+additional omitted blockers are summarized and `pods_truncated` indicates omitted details.
+If pod access fails, `pod_diagnostics_error` reports that diagnostics are unavailable.
+A `wait_for_training` timeout preserves the last observed job status and includes the same diagnostics.
+
+### Persistent training storage
+
+Use Kubernetes camelCase inside storage dictionaries: `persistentVolumeClaim`, `claimName`,
+`emptyDir` and `mountPath`. Invalid fields are rejected before preview and submission.
+For persistent checkpoints, mount a PVC; `emptyDir` is temporary and cannot carry checkpoints
+between jobs.
+
+### Admission configuration rejections
+
+Webhook rejections naming `spec.runtimeRef`, `spec.trainer`, or `spec.initializer` return
+`VALIDATION_ERROR` with the webhook reason, including required, unsupported, or forbidden settings.
+RBAC and security policy denials remain `PERMISSION_DENIED`; check model/runtime compatibility
+before retrying an unsupported configuration.
