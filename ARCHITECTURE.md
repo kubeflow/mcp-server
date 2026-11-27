@@ -361,12 +361,15 @@ narrows what a caller can do.
 - **What is checked.** Every declared permission of the call, reads included, in the
   namespace the tool will use. Permissions with `when` count only when that argument is set
   (`get_runtime`'s Pod rights only with `include_packages=True`). A `namespace` argument must
-  be a valid name (`VALIDATION_ERROR` otherwise, before any check is sent).
+  be a valid name (`VALIDATION_ERROR` otherwise, before any check is sent). A request on
+  one object the call names (`delete_training_job(name="job-a")`) is checked with that name,
+  so a Role limited by `resourceNames` matches it; creates, lists, and objects the tool
+  finds itself (a job's runtime) are checked without a name and need a Role for all objects.
   `inspect_controller` without `namespace=` uses the configured controller namespace, and is
   checked cluster-wide only when it has to search for the controller.
 - **Fails closed.** No verified user, a review that errors or times out, or a namespace that
   cannot be resolved refuses the call.
-- **Cache.** A decision is reused for the same caller and permission for `authz.cache_ttl`
+- **Cache.** A decision is reused for the same caller, permission and object for `authz.cache_ttl`
   seconds (default 30, `0` turns it off), so an RBAC change can take that long to apply.
 - **Audit.** Refusals are logged as `authz_denied` / `authz_unavailable` events with
   `"audit": true`, the user and the missing permissions.

@@ -22,6 +22,7 @@ from kubeflow_mcp.common.types import ToolPermission
 from kubeflow_mcp.core.authz import (
     AuthzError,
     CallerIdentity,
+    Check,
     InvalidArguments,
     SarAuthorizationMiddleware,
     SubjectAccessReviewer,
@@ -41,7 +42,11 @@ ALICE = CallerIdentity("alice", ("team-a",))
 
 
 class FakeAuthorizationApi:
-    """Answers SubjectAccessReviews from a set of allowed (user, verb, resource, namespace)."""
+    """Answers SubjectAccessReviews from a set of allowed (user, verb, resource, namespace).
+
+    An entry with a fifth item, the object name, acts like a rule with resourceNames: it
+    allows only a request that names that object.
+    """
 
     def __init__(self, allowed=(), error: Exception | None = None):
         self.allowed = set(allowed)
@@ -55,7 +60,8 @@ class FakeAuthorizationApi:
         attrs = review.spec.resource_attributes
         resource = attrs.resource + (f"/{attrs.subresource}" if attrs.subresource else "")
         key = (review.spec.user, attrs.verb, resource, attrs.namespace)
-        return SimpleNamespace(status=SimpleNamespace(allowed=key in self.allowed, denied=False))
+        allowed = key in self.allowed or (*key, attrs.name) in self.allowed
+        return SimpleNamespace(status=SimpleNamespace(allowed=allowed, denied=False))
 
 
 def _default_namespace(namespace):
@@ -109,24 +115,37 @@ class TestIdentity:
 class TestRequiredChecks:
     def test_namespace_from_argument(self):
         checks = required_checks((DELETE_JOB,), {"namespace": "team-a"}, _default_namespace)
-        assert checks == [(DELETE_JOB, "team-a")]
+        assert checks == [Check(DELETE_JOB, "team-a")]
 
     def test_default_namespace_when_omitted(self):
-        assert required_checks((DELETE_JOB,), {}, _default_namespace) == [(DELETE_JOB, "default")]
+        assert required_checks((DELETE_JOB,), {}, _default_namespace) == [
+            Check(DELETE_JOB, "default")
+        ]
+
+    def test_named_permission_carries_the_object_name(self):
+        named = GET_JOB._replace(name="name")
+        checks = required_checks((named, POD_LOG), {"name": "job-a"}, _default_namespace)
+        assert checks == [Check(named, "default", "job-a"), Check(POD_LOG, "default")]
+
+    @pytest.mark.parametrize("value", [None, "", 7, ["job-a"]])
+    def test_name_that_is_not_a_name_is_left_out(self, value):
+        named = GET_JOB._replace(name="name")
+        checks = required_checks((named,), {"name": value}, _default_namespace)
+        assert checks == [Check(named, "default")]
 
     def test_when_skips_until_the_argument_is_set(self):
         perms = (GET_JOB, CREATE_POD)
-        assert required_checks(perms, {}, _default_namespace) == [(GET_JOB, "default")]
+        assert required_checks(perms, {}, _default_namespace) == [Check(GET_JOB, "default")]
         assert required_checks(perms, {"include_packages": True}, _default_namespace) == [
-            (GET_JOB, "default"),
-            (CREATE_POD, "default"),
+            Check(GET_JOB, "default"),
+            Check(CREATE_POD, "default"),
         ]
 
     def test_cluster_wide_has_no_namespace_and_needs_no_resolver(self):
         def unresolvable(namespace):
             raise AssertionError("not needed")
 
-        assert required_checks((LIST_NODES,), {}, unresolvable) == [(LIST_NODES, None)]
+        assert required_checks((LIST_NODES,), {}, unresolvable) == [Check(LIST_NODES, None)]
 
     @pytest.mark.parametrize(
         ("value", "needed"),
@@ -139,7 +158,7 @@ class TestRequiredChecks:
             _default_namespace,
             {"include_packages"},
         )
-        assert ((CREATE_POD, "default") in checks) is needed
+        assert (Check(CREATE_POD, "default") in checks) is needed
 
     def test_unparseable_boolean_is_refused(self):
         with pytest.raises(InvalidArguments):
@@ -158,13 +177,15 @@ class TestRequiredChecks:
             "get", "apiextensions.k8s.io", "customresourcedefinitions", True, when="name"
         )
         perms = (list_crds, get_crd)
-        assert required_checks(perms, {}, _default_namespace) == [(list_crds, None)]
+        assert required_checks(perms, {}, _default_namespace) == [Check(list_crds, None)]
         # Any name, even empty, takes the tool's single-CRD path.
         for name in ("trainjobs.trainer.kubeflow.org", ""):
-            assert required_checks(perms, {"name": name}, _default_namespace) == [(get_crd, None)]
+            assert required_checks(perms, {"name": name}, _default_namespace) == [
+                Check(get_crd, None)
+            ]
 
     def test_resolver_without_a_namespace_checks_cluster_wide(self):
-        assert required_checks((POD_LOG,), {}, lambda namespace: None) == [(POD_LOG, None)]
+        assert required_checks((POD_LOG,), {}, lambda namespace: None) == [Check(POD_LOG, None)]
 
     def test_controller_namespace_follows_the_tool(self, monkeypatch):
         monkeypatch.setattr(
@@ -191,6 +212,9 @@ def test_describe_names_resource_like_kubectl():
     assert describe(DELETE_JOB, "team-a") == (
         "delete trainjobs.trainer.kubeflow.org in namespace 'team-a'"
     )
+    assert describe(DELETE_JOB, "team-a", "job-a") == (
+        "delete trainjobs.trainer.kubeflow.org 'job-a' in namespace 'team-a'"
+    )
     assert describe(POD_LOG, "ns") == "get pods/log in namespace 'ns'"
     assert describe(LIST_NODES, None) == "list nodes cluster-wide"
 
@@ -199,7 +223,7 @@ class TestReviewer:
     def test_sends_caller_and_resource_attributes(self):
         api = FakeAuthorizationApi(allowed={("alice", "get", "pods/log", "team-a")})
         reviewer = SubjectAccessReviewer(lambda: api, cache_ttl=0)
-        assert reviewer.missing(ALICE, [(POD_LOG, "team-a")]) == []
+        assert reviewer.missing(ALICE, [Check(POD_LOG, "team-a")]) == []
         spec = api.reviews[0].spec
         assert (spec.user, spec.groups) == ("alice", ["team-a"])
         attrs = spec.resource_attributes
@@ -211,10 +235,22 @@ class TestReviewer:
             "team-a",
         )
 
+    def test_sends_the_object_name_so_resource_names_rules_match(self):
+        # alice may delete job-a only, as with a Role that lists it in resourceNames.
+        api = FakeAuthorizationApi(allowed={("alice", "delete", "trainjobs", "team-a", "job-a")})
+        reviewer = SubjectAccessReviewer(lambda: api, cache_ttl=30)
+        assert reviewer.missing(ALICE, [Check(DELETE_JOB, "team-a", "job-a")]) == []
+        assert api.reviews[0].spec.resource_attributes.name == "job-a"
+        # Cached per object: job-a's answer is not reused for job-b.
+        assert reviewer.missing(ALICE, [Check(DELETE_JOB, "team-a", "job-b")]) == [
+            "delete trainjobs.trainer.kubeflow.org 'job-b' in namespace 'team-a'"
+        ]
+        assert reviewer.missing(ALICE, [Check(DELETE_JOB, "team-a")]) != []
+
     def test_lists_every_missing_permission(self):
         api = FakeAuthorizationApi(allowed={("alice", "get", "trainjobs", "team-a")})
         reviewer = SubjectAccessReviewer(lambda: api, cache_ttl=0)
-        checks = [(GET_JOB, "team-a"), (DELETE_JOB, "team-a"), (LIST_NODES, None)]
+        checks = [Check(GET_JOB, "team-a"), Check(DELETE_JOB, "team-a"), Check(LIST_NODES, None)]
         assert reviewer.missing(ALICE, checks) == [
             "delete trainjobs.trainer.kubeflow.org in namespace 'team-a'",
             "list nodes cluster-wide",
@@ -226,7 +262,7 @@ class TestReviewer:
                 return SimpleNamespace(status=SimpleNamespace(allowed=True, denied=True))
 
         reviewer = SubjectAccessReviewer(lambda: DenyingApi(), cache_ttl=0)
-        assert reviewer.missing(ALICE, [(GET_JOB, "team-a")]) != []
+        assert reviewer.missing(ALICE, [Check(GET_JOB, "team-a")]) != []
 
     @pytest.mark.parametrize(
         "api",
@@ -238,32 +274,32 @@ class TestReviewer:
     )
     def test_undecided_raises(self, api):
         with pytest.raises(AuthzError):
-            SubjectAccessReviewer(lambda: api, cache_ttl=0).missing(ALICE, [(GET_JOB, "ns")])
+            SubjectAccessReviewer(lambda: api, cache_ttl=0).missing(ALICE, [Check(GET_JOB, "ns")])
 
     def test_cache_reuses_a_decision_until_it_expires(self):
         api = FakeAuthorizationApi(allowed={("alice", "get", "trainjobs", "ns")})
         now = [0.0]
         reviewer = SubjectAccessReviewer(lambda: api, cache_ttl=30, clock=lambda: now[0])
-        reviewer.missing(ALICE, [(GET_JOB, "ns")])
+        reviewer.missing(ALICE, [Check(GET_JOB, "ns")])
         now[0] = 29.0
-        reviewer.missing(ALICE, [(GET_JOB, "ns")])
+        reviewer.missing(ALICE, [Check(GET_JOB, "ns")])
         assert len(api.reviews) == 1
         now[0] = 30.0
-        reviewer.missing(ALICE, [(GET_JOB, "ns")])
+        reviewer.missing(ALICE, [Check(GET_JOB, "ns")])
         assert len(api.reviews) == 2
 
     def test_cache_is_per_group_set(self):
         api = FakeAuthorizationApi()
         reviewer = SubjectAccessReviewer(lambda: api, cache_ttl=30, clock=lambda: 0.0)
-        reviewer.missing(CallerIdentity("alice", ("team-a",)), [(GET_JOB, "ns")])
-        reviewer.missing(CallerIdentity("alice", ("team-b",)), [(GET_JOB, "ns")])
+        reviewer.missing(CallerIdentity("alice", ("team-a",)), [Check(GET_JOB, "ns")])
+        reviewer.missing(CallerIdentity("alice", ("team-b",)), [Check(GET_JOB, "ns")])
         assert len(api.reviews) == 2
 
     def test_cache_is_per_caller(self):
         api = FakeAuthorizationApi(allowed={("alice", "get", "trainjobs", "ns")})
         reviewer = SubjectAccessReviewer(lambda: api, cache_ttl=30, clock=lambda: 0.0)
-        assert reviewer.missing(ALICE, [(GET_JOB, "ns")]) == []
-        assert reviewer.missing(CallerIdentity("bob", ()), [(GET_JOB, "ns")]) != []
+        assert reviewer.missing(ALICE, [Check(GET_JOB, "ns")]) == []
+        assert reviewer.missing(CallerIdentity("bob", ()), [Check(GET_JOB, "ns")]) != []
 
     def test_cache_stays_bounded_whatever_namespaces_callers_send(self, monkeypatch):
         monkeypatch.setattr("kubeflow_mcp.core.authz.MAX_CACHE_ENTRIES", 10)
@@ -272,19 +308,19 @@ class TestReviewer:
             lambda: FakeAuthorizationApi(), cache_ttl=30, clock=lambda: now[0]
         )
         for i in range(10):
-            reviewer.missing(ALICE, [(GET_JOB, f"old-{i}")])
+            reviewer.missing(ALICE, [Check(GET_JOB, f"old-{i}")])
         now[0] = 100.0  # the cache is full of expired entries: only they go
-        reviewer.missing(ALICE, [(GET_JOB, "fresh")])
+        reviewer.missing(ALICE, [Check(GET_JOB, "fresh")])
         assert len(reviewer._cache) == 1
         for i in range(25):  # a burst of fresh ones never passes the cap
-            reviewer.missing(ALICE, [(GET_JOB, f"ns-{i}")])
+            reviewer.missing(ALICE, [Check(GET_JOB, f"ns-{i}")])
         assert len(reviewer._cache) <= 10
 
     def test_zero_ttl_never_caches(self):
         api = FakeAuthorizationApi()
         reviewer = SubjectAccessReviewer(lambda: api, cache_ttl=0, clock=lambda: 0.0)
-        reviewer.missing(ALICE, [(GET_JOB, "ns")])
-        reviewer.missing(ALICE, [(GET_JOB, "ns")])
+        reviewer.missing(ALICE, [Check(GET_JOB, "ns")])
+        reviewer.missing(ALICE, [Check(GET_JOB, "ns")])
         assert len(api.reviews) == 2
 
 

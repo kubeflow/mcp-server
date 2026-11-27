@@ -32,7 +32,7 @@ import threading
 import time
 from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
-from typing import Any, get_type_hints
+from typing import Any, NamedTuple, get_type_hints
 
 import anyio
 from fastmcp.server.middleware import Middleware
@@ -58,8 +58,13 @@ MAX_CACHE_ENTRIES = 10_000
 # Lax, like the tools' own argument validation: "false" and 0 are False.
 _BOOL = TypeAdapter(bool)
 
-# A permission to check, and the namespace to check it in (None: cluster-wide).
-Check = tuple[ToolPermission, str | None]
+
+class Check(NamedTuple):
+    """A permission to check for one call."""
+
+    permission: ToolPermission
+    namespace: str | None  # None: cluster-wide
+    name: str | None = None  # the object requested, when the permission names one
 
 
 class AuthzError(Exception):
@@ -146,7 +151,7 @@ def required_checks(
         and (p.unless is None or not _given(p.unless, arguments, bool_params))
     ]
     if not any(not p.cluster_wide for p in needed):
-        return [(p, None) for p in needed]
+        return [Check(p, None, _object_name(p, arguments)) for p in needed]
     namespace = arguments.get("namespace")
     if namespace is not None:
         if not isinstance(namespace, str):
@@ -155,17 +160,30 @@ def required_checks(
         if err is not None:
             raise InvalidArguments(err.error)
     effective = resolve_namespace(namespace)
-    return [(p, None if p.cluster_wide else effective) for p in needed]
+    return [
+        Check(p, None if p.cluster_wide else effective, _object_name(p, arguments)) for p in needed
+    ]
 
 
-def describe(permission: ToolPermission, namespace: str | None) -> str:
+def _object_name(permission: ToolPermission, arguments: Mapping[str, Any]) -> str | None:
+    """The name of the object the request is for, so rules with resourceNames can match.
+
+    Anything but a non-empty string is left out: the tool rejects it before it sends
+    the request, and a review without a name matches only rules for every object.
+    """
+    value = arguments.get(permission.name) if permission.name else None
+    return value if isinstance(value, str) and value else None
+
+
+def describe(permission: ToolPermission, namespace: str | None, name: str | None = None) -> str:
     """Say what is missing the way ``kubectl auth can-i`` names it."""
     resource = permission.resource
     if permission.group:
         base, _, sub = resource.partition("/")
         resource = f"{base}.{permission.group}" + (f"/{sub}" if sub else "")
+    named = f" '{name}'" if name else ""
     where = f"in namespace '{namespace}'" if namespace else "cluster-wide"
-    return f"{permission.verb} {resource} {where}"
+    return f"{permission.verb} {resource}{named} {where}"
 
 
 class SubjectAccessReviewer:
@@ -185,17 +203,18 @@ class SubjectAccessReviewer:
 
     def missing(self, identity: CallerIdentity, checks: list[Check]) -> list[str]:
         """Return the checks the caller fails, described. Raises AuthzError if unsure."""
-        return [describe(p, ns) for p, ns in checks if not self._allowed(identity, p, ns)]
+        return [describe(*check) for check in checks if not self._allowed(identity, check)]
 
-    def _allowed(self, identity: CallerIdentity, p: ToolPermission, namespace: str | None) -> bool:
-        key = (identity, p.verb, p.group, p.resource, namespace)
+    def _allowed(self, identity: CallerIdentity, check: Check) -> bool:
+        p = check.permission
+        key = (identity, p.verb, p.group, p.resource, check.namespace, check.name)
         now = self._clock()
         if self._ttl > 0:
             with self._lock:
                 hit = self._cache.get(key)
             if hit is not None and now - hit[0] < self._ttl:
                 return hit[1]
-        allowed = self._ask(identity, p, namespace)
+        allowed = self._ask(identity, check)
         if self._ttl > 0:
             with self._lock:
                 if len(self._cache) >= MAX_CACHE_ENTRIES:
@@ -208,11 +227,12 @@ class SubjectAccessReviewer:
         if len(self._cache) >= MAX_CACHE_ENTRIES:
             self._cache.clear()
 
-    def _ask(self, identity: CallerIdentity, p: ToolPermission, namespace: str | None) -> bool:
+    def _ask(self, identity: CallerIdentity, check: Check) -> bool:
         from kubernetes import client
 
         from kubeflow_mcp.common.utils import K8S_TIMEOUT
 
+        p = check.permission
         resource, _, subresource = p.resource.partition("/")
         review = client.V1SubjectAccessReview(
             spec=client.V1SubjectAccessReviewSpec(
@@ -223,7 +243,8 @@ class SubjectAccessReviewer:
                     group=p.group,
                     resource=resource,
                     subresource=subresource or None,
-                    namespace=namespace,
+                    namespace=check.namespace,
+                    name=check.name,
                 ),
             )
         )

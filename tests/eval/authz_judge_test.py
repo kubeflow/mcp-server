@@ -38,7 +38,11 @@ DELETE = {"name": "job-a", "namespace": "team-a", "confirmed": True}
 
 
 class Rbac:
-    """Answers SubjectAccessReviews: alice may do anything in team-a, nobody else anything."""
+    """Answers SubjectAccessReviews like RBAC would.
+
+    alice may do anything in team-a. carol has a Role limited by resourceNames: she may
+    read and delete the TrainJob job-a in team-a, and nothing else.
+    """
 
     def __init__(self) -> None:
         self.reviews: list[Any] = []
@@ -46,7 +50,15 @@ class Rbac:
     def create_subject_access_review(self, review: Any, **kwargs: Any) -> Any:
         self.reviews.append(review)
         attrs = review.spec.resource_attributes
-        allowed = review.spec.user == "alice" and attrs.namespace == "team-a"
+        allowed = attrs.namespace == "team-a" and (
+            review.spec.user == "alice"
+            or (
+                review.spec.user == "carol"
+                and attrs.resource == "trainjobs"
+                and attrs.verb in ("get", "delete")
+                and attrs.name == "job-a"
+            )
+        )
         return SimpleNamespace(status=SimpleNamespace(allowed=allowed, denied=False))
 
 
@@ -85,7 +97,7 @@ async def test_denied_caller_sends_nothing_to_the_cluster(mode, k8s, rbac):
     body = payload(result)
     assert body.get("error_code") == "PERMISSION_DENIED", body
     assert (
-        "delete trainjobs.trainer.kubeflow.org in namespace 'team-a'"
+        "delete trainjobs.trainer.kubeflow.org 'job-a' in namespace 'team-a'"
         in (body["details"]["missing_permissions"])
     )
     assert k8s.calls == [], f"{mode}: a refused call still reached the cluster"
@@ -96,6 +108,19 @@ async def test_allowed_caller_goes_through(k8s, rbac):
     result = await _call(_server("alice"), "delete_training_job", DELETE, "full")
     assert payload(result).get("error_code") != "PERMISSION_DENIED"
     assert any(method == "DELETE" for method, _ in k8s.writes)
+
+
+async def test_role_limited_to_one_job_by_resource_names(k8s, rbac):
+    """The check names the job, so a Role scoped by resourceNames matches it and only it."""
+    result = await _call(_server("carol"), "delete_training_job", DELETE, "full")
+    assert payload(result).get("error_code") != "PERMISSION_DENIED", payload(result)
+    assert any(method == "DELETE" for method, _ in k8s.writes)
+
+    other = await _call(
+        _server("carol"), "delete_training_job", {**DELETE, "name": "job-b"}, "full"
+    )
+    assert payload(other).get("error_code") == "PERMISSION_DENIED"
+    assert {r.spec.resource_attributes.name for r in rbac.reviews} == {"job-a", "job-b"}
 
 
 async def test_allowed_caller_is_refused_in_another_namespace(k8s, rbac):
