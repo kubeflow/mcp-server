@@ -24,6 +24,7 @@ from pydantic import ValidationError
 from tests.common import TestCase
 
 from kubeflow_mcp.core.config import (
+    LoggingConfig,
     ResilienceConfig,
     ServerConfig,
     _find_config_file,
@@ -78,6 +79,18 @@ def test_resilience_config_rejects_invalid_circuit_breaker_values(field, value):
 def test_resilience_config_allows_zero_recovery_timeout():
     cfg = ResilienceConfig(cb_recovery_timeout=0.0)
     assert cfg.cb_recovery_timeout == 0.0
+
+
+@pytest.mark.parametrize("format_value", ["json", "console", None])
+def test_logging_config_accepts_supported_formats(format_value):
+    cfg = LoggingConfig(format=format_value)
+
+    assert cfg.format == format_value
+
+
+def test_logging_config_rejects_unsupported_format():
+    with pytest.raises(ValidationError, match="json.*console"):
+        LoggingConfig(format="invalid")
 
 
 @pytest.mark.parametrize(
@@ -155,6 +168,23 @@ def test_load_config_env_overrides_file(tmp_path):
     assert cfg.server.persona == "platform-admin"
 
 
+def test_load_config_rejects_invalid_logging_format_from_yaml(tmp_path, monkeypatch):
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("logging:\n  format: invalid\n")
+    monkeypatch.delenv("LOG_FORMAT", raising=False)
+
+    with pytest.raises(ValidationError, match="json.*console"):
+        load_config(config_path=config_file)
+
+
+def test_load_config_rejects_invalid_logging_format_from_environment(monkeypatch):
+    monkeypatch.setenv("LOG_FORMAT", "invalid")
+
+    with patch("kubeflow_mcp.core.config._find_config_file", return_value=None):
+        with pytest.raises(ValidationError, match="json.*console"):
+            load_config()
+
+
 @pytest.mark.parametrize(
     ("contents", "message"),
     [
@@ -172,7 +202,18 @@ def test_load_config_rejects_invalid_yaml_and_non_mapping_roots(tmp_path, conten
         load_config(config_path=config_file)
 
 
-# TODO(test): test config_path that doesn't exist falls back to default search
+def test_load_config_accepts_empty_yaml_file(tmp_path, monkeypatch):
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("")
+    monkeypatch.delenv("KUBEFLOW_MCP_CLIENTS", raising=False)
+    monkeypatch.delenv("KUBEFLOW_MCP_PERSONA", raising=False)
+
+    cfg = load_config(config_path=config_file)
+
+    assert cfg.server.clients == ["trainer"]
+    assert cfg.server.persona == "readonly"
+
+
 # TODO(test): test auth config env overrides (KUBEFLOW_MCP_AUTH_TOKEN, KUBEFLOW_MCP_JWKS_URI)
 # TODO(test): test OTEL env, controller namespace, and multiple clients
 

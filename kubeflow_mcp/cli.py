@@ -17,6 +17,7 @@
 import warnings
 
 import click
+from pydantic import ValidationError
 
 from kubeflow_mcp import __version__
 
@@ -129,6 +130,8 @@ def serve(
 
     try:
         cfg = load_config()
+    except ValidationError as exc:
+        raise click.ClickException(f"Invalid configuration: {exc}") from None
     except ValueError as e:
         raise click.ClickException(str(e)) from e
 
