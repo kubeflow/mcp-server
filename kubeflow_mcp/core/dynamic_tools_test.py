@@ -531,6 +531,85 @@ def test_find_tools_semantic_results_include_parameters(monkeypatch):
     assert top["parameters"] == {"size": {"type": str(int), "default": 2}}
 
 
+def field_default_tool(
+    retries: int = Field(default=2, ge=0, le=5),
+    level: int = Field(ge=1),
+    tags: list[str] = Field(default_factory=list),  # noqa: B008
+    color: _Color = _Color.RED,
+) -> dict:
+    """Field default tool with retries."""
+    return {"retries": retries, "level": level, "tags": tags, "color": color}
+
+
+def test_parameters_report_field_defaults_by_value():
+    dynamic_tools.init_dynamic_tools([field_default_tool], {})
+
+    params = dynamic_tools.describe_tools(["field_default_tool"])["tools"][0]["parameters"]
+
+    assert params["retries"]["default"] == 2
+    assert "default" not in params["level"]  # Field() without a default is required
+    assert params["tags"]["default"] == []  # default_factory is called, not left unset
+
+
+def underscore_param_tool(name: str, _trace: bool = False) -> dict:
+    """Tool with a parameter pydantic keeps out of model_fields."""
+    return {"name": name}
+
+
+def data_factory_tool(
+    name: str,
+    slug: Annotated[str, Field(default_factory=lambda data: data["name"])],
+) -> dict:
+    """Tool whose default is built from the other validated arguments."""
+    return {"slug": slug}
+
+
+def test_parameters_skip_defaults_built_from_other_arguments():
+    dynamic_tools.init_dynamic_tools([data_factory_tool], {})
+
+    params = dynamic_tools.describe_tools(["data_factory_tool"])["tools"][0]["parameters"]
+
+    assert "default" not in params["slug"]  # no value until name is known
+    assert dynamic_tools.execute_tool("data_factory_tool", {"name": "llama"}) == {"slug": "llama"}
+
+
+def test_parameters_include_underscore_parameters():
+    dynamic_tools.init_dynamic_tools([underscore_param_tool], {})
+
+    params = dynamic_tools.describe_tools(["underscore_param_tool"])["tools"][0]["parameters"]
+
+    assert list(params) == ["name", "_trace"]
+    assert params["_trace"]["default"] is False
+
+
+@pytest.mark.parametrize(
+    ("meta_tool", "arguments"),
+    [
+        ("describe_tools", {"tool_names": ["field_default_tool"]}),
+        ("find_tools", {"query": "field default tool"}),
+    ],
+)
+async def test_meta_tools_return_structured_content_for_field_defaults(
+    offline_model, meta_tool, arguments
+):
+    """A FieldInfo default can't be serialized, so MCP clients rejected the whole response.
+
+    The Enum default checks that FastMCP serializes plain non-literal defaults by value.
+    """
+    server = FastMCP("field-defaults")
+    server.tool(dynamic_tools.describe_tools)
+    server.tool(dynamic_tools.find_tools)
+    dynamic_tools.init_dynamic_tools([field_default_tool], {})
+
+    async with Client(server) as client:
+        result = await client.call_tool(meta_tool, arguments)
+
+    params = result.structured_content["tools"][0]["parameters"]
+    assert params["retries"]["default"] == 2
+    assert params["tags"]["default"] == []
+    assert params["color"]["default"] == "red"
+
+
 def test_find_tools_listing_all_points_to_parameter_lookup():
     result = dynamic_tools.find_tools("all")
 
