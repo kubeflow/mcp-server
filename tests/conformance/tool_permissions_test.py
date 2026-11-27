@@ -175,6 +175,8 @@ def test_inspect_crd_declares_each_branch():
         ("trainer", "patch_runtime"),
         ("trainer", "delete_runtime"),
         ("spark", "delete_spark_session"),
+        ("optimizer", "delete_hpo_experiment"),
+        ("optimizer", "update_hpo_experiment"),
     ],
 )
 def test_writes_on_one_object_name_it(client, tool_name):
