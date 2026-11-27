@@ -524,3 +524,18 @@ def test_builder_maps_each_registered_tool_to_its_namespace_resolver():
     assert middleware._resolvers["inspect_controller"] is _controller_namespace
     assert middleware._resolvers["list_training_jobs"] is utils.get_trainer_effective_namespace
     assert "include_packages" not in middleware._bool_params.get("list_training_jobs", ())
+
+
+def test_every_client_with_namespaced_permissions_has_a_namespace_resolver():
+    """Without one its calls are checked cluster-wide, refusing callers with namespaced Roles."""
+    import importlib
+
+    from kubeflow_mcp.core.authz import _namespace_resolvers
+    from kubeflow_mcp.core.server import CLIENT_MODULES
+
+    resolvers = _namespace_resolvers()
+    for client in CLIENT_MODULES:
+        module = importlib.import_module(f"kubeflow_mcp.{client}")
+        permissions = getattr(module, "CLIENT_TOOL_PERMISSIONS", {})  # stubs have no tools
+        if any(not p.cluster_wide for perms in permissions.values() for p in perms):
+            assert client in resolvers, client

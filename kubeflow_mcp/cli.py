@@ -15,6 +15,7 @@
 """Kubeflow MCP Server CLI."""
 
 import warnings
+from typing import Any
 
 import click
 
@@ -133,7 +134,7 @@ def serve(
     from kubeflow_mcp.core.logging import setup_logging
     from kubeflow_mcp.core.policy import PolicyFileError, get_allowed_tools
     from kubeflow_mcp.core.resilience import configure_circuit_breaker
-    from kubeflow_mcp.core.server import configure_resilience, create_server
+    from kubeflow_mcp.core.server import configure_resilience
     from kubeflow_mcp.core.telemetry import setup_tracing
 
     try:
@@ -230,18 +231,15 @@ def serve(
     client_list = [c.strip() for c in clients.split(",") if c.strip()]
     if not client_list:
         raise click.ClickException("at least one client must be specified")
-    try:
-        server = create_server(
-            clients=client_list,
-            persona=persona,
-            mode=mode,
-            instruction_tier=instruction_tier,
-            auth_provider=auth_provider,
-            # Only when on, so the default call is unchanged.
-            **({"authz": cfg.authz} if cfg.authz.mode == "sar" else {}),
-        )
-    except ValueError as e:
-        raise click.ClickException(str(e)) from e
+    server = _create_server(
+        clients=client_list,
+        persona=persona,
+        mode=mode,
+        instruction_tier=instruction_tier,
+        auth_provider=auth_provider,
+        # Only when on, so the default call is unchanged.
+        **({"authz": cfg.authz} if cfg.authz.mode == "sar" else {}),
+    )
 
     show_banner = not no_banner
     if transport == "stdio":
@@ -258,6 +256,17 @@ def serve(
             show_banner=show_banner,
             middleware=http_middleware,
         )
+
+
+def _create_server(**kwargs: Any) -> Any:
+    """Build the server, reporting a setup error (such as ``--authz sar`` without JWT
+    auth) as a CLI error instead of a traceback."""
+    from kubeflow_mcp.core.server import create_server
+
+    try:
+        return create_server(**kwargs)
+    except ValueError as e:
+        raise click.ClickException(str(e)) from e
 
 
 @cli.command()

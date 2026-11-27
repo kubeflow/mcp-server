@@ -378,6 +378,7 @@ def _namespace_resolvers() -> dict[str, Callable[[str | None], str]]:
         "trainer": utils.get_trainer_effective_namespace,
         "spark": utils.get_spark_effective_namespace,
         "pipelines": utils.get_pipelines_effective_namespace,
+        "optimizer": utils.get_optimizer_effective_namespace,
         # Health tools use the Trainer client's namespace.
         "health": utils.get_trainer_effective_namespace,
     }
