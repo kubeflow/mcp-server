@@ -20,7 +20,13 @@ from collections import deque
 from typing import Any
 
 from kubeflow_mcp.common.constants import ErrorCode
-from kubeflow_mcp.common.types import ToolError, ToolResponse, exception_details, is_k8s_not_found
+from kubeflow_mcp.common.types import (
+    ToolError,
+    ToolResponse,
+    exception_details,
+    is_k8s_forbidden,
+    is_k8s_not_found,
+)
 from kubeflow_mcp.common.utils import get_spark_client_for_namespace
 from kubeflow_mcp.core.security import check_namespace_allowed, validate_k8s_name
 
@@ -144,6 +150,16 @@ def get_spark_session_logs(
             return ToolError(
                 error=f"SparkConnect session '{name}' not found",
                 error_code=ErrorCode.RESOURCE_NOT_FOUND,
+            ).model_dump()
+        if is_k8s_forbidden(e):
+            return ToolError(
+                error=f"Permission denied reading logs for SparkConnect session '{name}'",
+                error_code=ErrorCode.PERMISSION_DENIED,
+                details=exception_details(e),
+                hint=(
+                    "Check RBAC: reading logs needs 'get' on sparkconnects and on "
+                    "pods/log in the namespace."
+                ),
             ).model_dump()
         # Surface a not-yet-scheduled server pod as a validation error with a
         # next step, rather than an opaque SDK error.

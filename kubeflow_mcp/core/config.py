@@ -103,8 +103,8 @@ class AuthConfig(BaseModel):
 
     Supports three modes:
     - **API key**: set ``auth_token`` for simple bearer token auth (dev/staging).
-    - **JWT / JWKS**: set ``jwks_uri`` (+ optional ``issuer``, ``audience``) for
-      static JWT verification via FastMCP's ``JWTVerifier``.
+    - **JWT**: set ``jwks_uri``, ``issuer`` and ``audience`` (all three are
+      required) for production JWT verification via FastMCP's ``JWTVerifier``.
     - **Native OIDC / OAuth 2.1 Discovery**: set ``oidc_issuer`` (or ``issuer``) to
       automatically discover ``jwks_uri`` from OpenID Connect / RFC 8414 metadata.
 

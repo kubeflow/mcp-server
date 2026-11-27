@@ -101,6 +101,7 @@ class JobStatus:
 # =============================================================================
 
 TOOL_PHASES: dict[str, list[str]] = {
+    # ── Trainer phases ──
     "planning": [
         "pre_flight",
         "check_compatibility",
@@ -140,6 +141,26 @@ TOOL_PHASES: dict[str, list[str]] = {
         "delete_experiment",
         "delete_pipeline",
     ],
+    # ── Optimizer (Katib) phases ──
+    "optimizer_planning": ["katib_pre_flight"],
+    "optimizer_discovery": [
+        "list_hpo_experiments",
+        "get_hpo_experiment",
+        "get_hpo_experiment_status",
+        "get_trial",
+        "get_successful_trials",
+        "list_suggestions",
+    ],
+    "optimizer_optimization": ["create_hpo_experiment", "create_hpo_experiment_from_spec"],
+    "optimizer_monitoring": [
+        "get_hpo_experiment_trials",
+        "get_best_trial",
+        "get_suggestion",
+        "wait_for_hpo_experiment",
+        "get_hpo_experiment_trial_logs",
+        "get_hpo_experiment_events",
+    ],
+    "optimizer_lifecycle": ["delete_hpo_experiment", "update_hpo_experiment"],
 }
 
 # Reverse mapping: tool name -> phase
@@ -173,6 +194,7 @@ KUBERNETES_VERSION_LABEL = f"{MIN_K8S_VERSION[0]}.{MIN_K8S_VERSION[1]}+"
 # =============================================================================
 
 TOOL_NEXT_HINTS: dict[str, str] = {
+    # ── Trainer hints ──
     "pre_flight": "Proceed to list_runtimes() to find available runtimes",
     "check_compatibility": "Call get_cluster_resources() or use pre_flight() for full check",
     "get_cluster_resources": "Call estimate_resources(model=...) or list_runtimes()",
@@ -188,7 +210,10 @@ TOOL_NEXT_HINTS: dict[str, str] = {
     ),
     "get_training_logs": "If errors found, check get_training_events(name) for K8s-level issues",
     "get_training_events": "Fix the issue and retry, or delete_training_job(name) and resubmit",
-    "wait_for_training": "Check get_training_logs(name) for final output",
+    "wait_for_training": (
+        "Check get_training_logs(name) for final output. "
+        "Use create_hpo_experiment() to optimize hyperparameters"
+    ),
     "delete_training_job": "Resubmit with fine_tune() or run_custom_training() if needed",
     "update_training_job": "Check get_training_job(name) to verify new status",
     "inspect_crd": "Use inspect_controller(view='logs') to check controller health",
@@ -225,6 +250,24 @@ TOOL_NEXT_HINTS: dict[str, str] = {
     "delete_experiment": "Confirm removal with list_experiments()",
     "create_pipeline": "Preview a run with create_pipeline_run(pipeline=name)",
     "delete_pipeline": "Confirm the result with list_pipelines()",
+    # ── Optimizer (Katib) hints ──
+    "katib_pre_flight": "Proceed to list_hpo_experiments() or create_hpo_experiment()",
+    "list_hpo_experiments": "Call get_hpo_experiment(name) for details on a specific experiment",
+    "get_hpo_experiment": "Use get_hpo_experiment_trials(name) or get_best_trial(name) for results",
+    "get_hpo_experiment_status": "Use get_hpo_experiment(name) for full details or get_hpo_experiment_trial_logs(name)",
+    "get_trial": "Check get_hpo_experiment_trial_logs(name, trial=trial) for trial output",
+    "get_successful_trials": "Use get_best_trial(name) for the optimal result",
+    "list_suggestions": "Check get_suggestion(name) for details on a specific suggestion",
+    "get_hpo_experiment_trials": "Use get_best_trial(name) or get_hpo_experiment_trial_logs(name, trial=trial)",
+    "get_best_trial": "Use fine_tune() to retrain with these hyperparameters",
+    "get_suggestion": "Check get_hpo_experiment_events(name) if suggestion is stuck",
+    "wait_for_hpo_experiment": "Check get_best_trial(name) for optimal results",
+    "get_hpo_experiment_trial_logs": "If errors found, check get_hpo_experiment_events(name)",
+    "get_hpo_experiment_events": "Fix the issue and retry, or delete_hpo_experiment(name) and resubmit",
+    "create_hpo_experiment": "Monitor with get_hpo_experiment_status() or wait_for_hpo_experiment()",
+    "create_hpo_experiment_from_spec": "Monitor with get_hpo_experiment_status() or wait_for_hpo_experiment()",
+    "delete_hpo_experiment": "Resubmit with create_hpo_experiment() if needed",
+    "update_hpo_experiment": "Check get_hpo_experiment(name) to confirm the new trial settings",
 }
 
 
@@ -260,9 +303,52 @@ SDK_COMPATIBILITY: dict[str, object] = {
             ],
         },
         "optimizer": {
-            "status": "stub",
-            "sdk_client": "kubeflow.katib.KatibClient",
+            "status": "implemented",
+            "sdk_client": "kubeflow.optimizer.OptimizerClient",
+            # Only the client's resolved default namespace is used. Every tool
+            # reads and writes Katib's resources directly; see uncovered_methods.
             "covered_methods": [],
+            "uncovered_methods": [
+                # optimize() requires TrainJobTemplate.trainer to be a CustomTrainer
+                # holding a live Python callable (func), which cannot cross the
+                # MCP/JSON boundary. It also generates its own Experiment name and
+                # sets no labels, so a caller-supplied name and the MCP ownership
+                # label are both unreachable through it. create_hpo_experiment
+                # builds the V1beta1Experiment CR directly instead.
+                "optimize",
+                # The readers below convert the algorithm through a registry that
+                # holds only random and grid, and resolve every trial as a TrainJob
+                # named after it. Experiments using any other algorithm, or a
+                # batch/v1 Job (or other) trial template, fail, so the tools read
+                # the Experiment and Trial CRs and the trial pods instead.
+                "list_jobs",
+                "get_job",
+                "get_best_results",
+                "get_job_logs",
+                "get_job_events",
+                "wait_for_job_status",
+                # Sends no request timeout, so a confirmed delete could hang.
+                "delete_job",
+            ],
+            "k8s_api_operations": [
+                "create_hpo_experiment (CustomObjectsApi create)",
+                "create_hpo_experiment_from_spec (CustomObjectsApi create)",
+                "list_hpo_experiments (CustomObjectsApi list)",
+                "get_hpo_experiment (CustomObjectsApi get + Trial list)",
+                "get_hpo_experiment_status (CustomObjectsApi get)",
+                "get_trial (CustomObjectsApi get + Trial list)",
+                "get_successful_trials (CustomObjectsApi get + Trial list)",
+                "get_hpo_experiment_trials (CustomObjectsApi get + Trial list)",
+                "get_best_trial (CustomObjectsApi get)",
+                "wait_for_hpo_experiment (CustomObjectsApi get, polled)",
+                "get_hpo_experiment_trial_logs (CoreV1Api pod list + bounded log read)",
+                "get_hpo_experiment_events (CoreV1Api event + pod list)",
+                "list_suggestions (CustomObjectsApi list)",
+                "get_suggestion (CustomObjectsApi get)",
+                "update_hpo_experiment (CustomObjectsApi get + Trial list + patch)",
+                "delete_hpo_experiment (CustomObjectsApi delete)",
+                "katib_pre_flight (ApiextensionsV1Api + CoreV1Api)",
+            ],
         },
         "hub": {
             "status": "stub",

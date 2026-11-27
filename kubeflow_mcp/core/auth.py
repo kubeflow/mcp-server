@@ -20,7 +20,11 @@ Three modes, selected by config:
    Set via ``--auth-token``, ``KUBEFLOW_MCP_AUTH_TOKEN``, or config file.
 
 2. **JWT** (``jwks_uri``): Production-grade JWT verification via FastMCP's
-   ``JWTVerifier``. Validates signatures, expiry, issuer, and audience.
+   ``JWTVerifier``. Checks the signature against the JWKS, the issuer, the
+   audience, and that the token carries an ``exp`` that has not passed.
+   ``issuer`` and ``audience`` are required with ``jwks_uri``: without them
+   every token the identity provider signs, for any application, would be
+   accepted.
 
 3. **Native OIDC / OAuth 2.1 Discovery** (``oidc_issuer`` or ``issuer``):
    RFC 8414 and OpenID Connect Discovery auto-resolves ``jwks_uri`` from
@@ -39,11 +43,18 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 from fastmcp.server.auth import AccessToken, TokenVerifier
+from fastmcp.server.auth.providers.jwt import JWTVerifier
+from joserfc.errors import JoseError
+from joserfc.jwt import JWTClaimsRegistry
 
 if TYPE_CHECKING:
     from kubeflow_mcp.core.config import AuthConfig
 
 logger = logging.getLogger(__name__)
+
+# FastMCP checks ``exp`` only when the token has one and never looks at ``nbf``,
+# so a token without ``exp`` would never expire. Allow a minute of clock skew.
+_TIME_CLAIMS = JWTClaimsRegistry(leeway=60, exp={"essential": True})
 
 
 def _validate_metadata(
@@ -173,17 +184,51 @@ class APIKeyVerifier(TokenVerifier):
         return None
 
 
+class StrictJWTVerifier(JWTVerifier):
+    """``JWTVerifier`` that also rejects tokens with no ``exp``, or before ``nbf``/``iat``."""
+
+    async def load_access_token(self, token: str) -> AccessToken | None:
+        access = await super().load_access_token(token)
+        if access is None:
+            return None
+        try:
+            _TIME_CLAIMS.validate(access.claims)
+        except JoseError as e:
+            logger.warning(
+                "Bearer token rejected for client %s: %s",
+                access.client_id,
+                e.description or e.error,
+            )
+            return None
+        return access
+
+
 def build_auth_provider(
     auth_config: AuthConfig,
     *,
     http_client: httpx.Client | None = None,
 ) -> TokenVerifier | None:
-    """Build the appropriate auth provider from config, or None if auth is disabled."""
-    if auth_config.jwks_uri:
-        from fastmcp.server.auth.providers.jwt import JWTVerifier
+    """Build the appropriate auth provider from config, or None if auth is disabled.
 
-        logger.info("HTTP auth: JWT verification via %s", auth_config.jwks_uri)
-        return JWTVerifier(
+    Raises:
+        ValueError: ``jwks_uri`` is set without both ``issuer`` and ``audience``.
+    """
+    if auth_config.jwks_uri:
+        if not (auth_config.issuer and auth_config.audience):
+            raise ValueError(
+                "JWT auth needs an issuer and an audience: set KUBEFLOW_MCP_JWT_ISSUER and "
+                "KUBEFLOW_MCP_JWT_AUDIENCE (or auth.issuer and auth.audience in the config "
+                "file). Without them the server accepts any token the JWKS signs, including "
+                "tokens issued to other applications."
+            )
+
+        logger.info(
+            "HTTP auth: JWT verification via %s (issuer=%s, audience=%s)",
+            auth_config.jwks_uri,
+            auth_config.issuer,
+            auth_config.audience,
+        )
+        return StrictJWTVerifier(
             jwks_uri=auth_config.jwks_uri,
             issuer=auth_config.issuer,
             audience=auth_config.audience,
@@ -191,8 +236,6 @@ def build_auth_provider(
 
     effective_issuer = auth_config.oidc_issuer or auth_config.issuer
     if effective_issuer:
-        from fastmcp.server.auth.providers.jwt import JWTVerifier
-
         metadata = discover_oidc_configuration(effective_issuer, client=http_client)
         discovered_jwks_uri = metadata["jwks_uri"]
         discovered_issuer = metadata.get("issuer")
@@ -207,6 +250,12 @@ def build_auth_provider(
                 f"discovered metadata issuer '{discovered_issuer}'"
             )
 
+        if not auth_config.audience:
+            raise ValueError(
+                "OIDC discovery needs an audience: set KUBEFLOW_MCP_JWT_AUDIENCE (or auth.audience in "
+                "the config file). Without it the server accepts any token the IdP signs."
+            )
+
         expected_issuer = auth_config.issuer or discovered_issuer
 
         logger.info(
@@ -214,7 +263,7 @@ def build_auth_provider(
             effective_issuer,
             discovered_jwks_uri,
         )
-        return JWTVerifier(
+        return StrictJWTVerifier(
             jwks_uri=discovered_jwks_uri,
             issuer=expected_issuer,
             audience=auth_config.audience,

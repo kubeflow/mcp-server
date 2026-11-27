@@ -482,6 +482,57 @@ def test_serve_oidc_issuer_passed_to_build_auth_provider() -> None:
     assert called_cfg.oidc_issuer == "https://accounts.google.com"
 
 
+def test_serve_http_refuses_to_start_with_bad_auth_config():
+    """A rejected auth config stops the server with a readable error before it serves."""
+    mock_server, mock_create_server, modules_patch = _make_serve_mocks()
+    fake_auth_mod = modules_patch["kubeflow_mcp.core.auth"]
+    fake_auth_mod.build_auth_provider.side_effect = ValueError(
+        "JWT auth needs an issuer and an audience"
+    )
+
+    with patch.dict(sys.modules, modules_patch):
+        runner = CliRunner()
+        result = runner.invoke(cli, ["serve", "--transport", "http"])
+
+    assert result.exit_code == 1
+    assert "JWT auth needs an issuer and an audience" in result.output
+    mock_create_server.assert_not_called()
+    mock_server.run.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "env",
+    [
+        pytest.param({}, id="jwks-only"),
+        pytest.param({"KUBEFLOW_MCP_JWT_ISSUER": "https://idp.example.com"}, id="no-audience"),
+        pytest.param({"KUBEFLOW_MCP_JWT_AUDIENCE": "kubeflow-mcp"}, id="no-issuer"),
+        pytest.param({"KUBEFLOW_MCP_AUTH_TOKEN": "secret"}, id="api-key-does-not-cover-it"),
+    ],
+)
+def test_serve_http_with_incomplete_jwt_env_exits_before_serving(monkeypatch, env):
+    """Real config loading and auth: a JWKS URI without issuer and audience stops serve."""
+    monkeypatch.setenv("KUBEFLOW_MCP_JWKS_URI", "https://idp.example.com/.well-known/jwks.json")
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+
+    # Only config loading and auth run for real; the rest would change process-wide
+    # logging, tracing and rate-limit state for later tests.
+    with (
+        patch("kubeflow_mcp.core.config._get_config_paths", return_value=[]),
+        patch("kubeflow_mcp.core.logging.setup_logging", return_value=MagicMock()),
+        patch("kubeflow_mcp.core.telemetry.setup_tracing", return_value=False),
+        patch("kubeflow_mcp.core.resilience.configure_circuit_breaker"),
+        patch("kubeflow_mcp.core.server.configure_resilience"),
+        patch("kubeflow_mcp.core.server.create_server") as mock_create_server,
+    ):
+        result = CliRunner().invoke(cli, ["serve", "--transport", "http"])
+
+    assert result.exit_code == 1
+    assert "KUBEFLOW_MCP_JWT_ISSUER" in result.output
+    assert "KUBEFLOW_MCP_JWT_AUDIENCE" in result.output
+    mock_create_server.assert_not_called()
+
+
 def test_serve_stdio_skips_auth_provider():
     """stdio transport does not call build_auth_provider."""
     mock_server, mock_create_server, modules_patch = _make_serve_mocks()
