@@ -21,6 +21,7 @@ and mocked SDK/K8s API success and error paths.
 from __future__ import annotations
 
 from contextlib import contextmanager
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -522,3 +523,35 @@ class TestUpdateTrainingJob:
         )
         assert result["success"] is False
         assert result["error_code"] == PERMISSION_DENIED
+
+
+@pytest.mark.parametrize("tool", [delete_training_job, update_training_job])
+@pytest.mark.parametrize("source", ["ownership", "mutation"])
+@pytest.mark.parametrize("status", [401, 403, 500])
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_lifecycle_classifies_api_errors(
+    tool: Any, source: str, status: int, wrapped: bool
+) -> None:
+    error: Exception = ApiException(status=status)
+    if wrapped:
+        cause = error
+        error = RuntimeError("Trainer request failed")
+        error.__context__ = cause
+    ownership_lookup = mcp_utils.get_trainer_ownership
+    kwargs = {"name": "job-a", "confirmed": True}
+    if tool is update_training_job:
+        kwargs["action"] = "suspend"
+    with cluster() as (api, client, lookup):
+        if source == "ownership":
+            lookup.side_effect = ownership_lookup
+            with patch(f"{_UTILS}.get_custom_objects_api") as factory:
+                factory.return_value.get_namespaced_custom_object.side_effect = error
+                result = tool(**kwargs)
+            client.delete_job.assert_not_called()
+            api.patch_namespaced_custom_object.assert_not_called()
+        else:
+            client.delete_job.side_effect = error
+            api.patch_namespaced_custom_object.side_effect = error
+            result = tool(**kwargs)
+    expected = ErrorCode.PERMISSION_DENIED if status in (401, 403) else ErrorCode.SDK_ERROR
+    verify_tool_error(result, error_code=expected)

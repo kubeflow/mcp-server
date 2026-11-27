@@ -31,7 +31,7 @@ Orchestrator Agent
                        │  Kubeflow SDK
                        ▼
                Trainer (23 tools) · Spark (5 tools, SparkConnect sessions)
-               Optimizer stub · Hub stub
+               Optimizer (17 tools, Katib experiments) · Hub stub
                        │
                        ▼
                Kubernetes / Kubeflow Trainer v2
@@ -208,15 +208,15 @@ The tool accepts a Python script string, wraps it inside `def train():`, and cal
 
 **Severity: Medium** | **Status: Mitigated (API key + JWT implemented)**
 
-`kubeflow-mcp serve --transport http` exposes the MCP server over StreamableHTTP. Authentication is available via `--auth-token` (API key) or `KUBEFLOW_MCP_JWKS_URI` (JWT/OIDC). The server logs a warning if HTTP transport runs without any auth configured.
+`kubeflow-mcp serve --transport http` exposes the MCP server over StreamableHTTP. Authentication is available via `--auth-token` (API key) or `KUBEFLOW_MCP_JWKS_URI` with `KUBEFLOW_MCP_JWT_ISSUER` and `KUBEFLOW_MCP_JWT_AUDIENCE` (JWT/OIDC). The issuer and audience are required with a JWKS URI: the server refuses to start without them, because it would otherwise accept any token the identity provider signs, including tokens issued to other applications. A token must come from the configured issuer, name the configured audience in `aud`, and carry an `exp`; tokens whose `nbf` or `iat` is in the future are rejected (60 seconds of clock skew is allowed). The server logs a warning if HTTP transport runs without any auth configured.
 
-**Recommendation:** Always configure `--auth-token` or JWT for HTTP transport. Use stdio transport for local development. For production, place behind an authenticating reverse proxy with TLS for defense-in-depth.
+**Recommendation:** Always configure `--auth-token` or JWT for HTTP transport, and use JWT in production with an audience that only this server's tokens carry (for example the client ID or API identifier registered for it at the identity provider). Use stdio transport for local development. For production, place behind an authenticating reverse proxy with TLS for defense-in-depth.
 
 #### 3. Identity — Per-User Mapping
 
 **Severity: Medium** | **Status: Open, tracked in [ROADMAP.md](ROADMAP.md) Step 3**
 
-`core/auth.py` implements HTTP-layer authentication (API key via `--auth-token`, JWT/OIDC via `KUBEFLOW_MCP_JWKS_URI`). However, authenticated identities are not yet mapped to distinct Kubernetes identities. All tool calls run under whatever Kubeconfig the process was started with.
+`core/auth.py` implements HTTP-layer authentication (API key via `--auth-token`, JWT/OIDC via `KUBEFLOW_MCP_JWKS_URI` with a required issuer and audience). However, authenticated identities are not yet mapped to distinct Kubernetes identities. All tool calls run under whatever Kubeconfig the process was started with.
 
 **Impact:** In multi-user deployments, all users share the same Kubernetes identity. There is no per-user RBAC enforcement at the MCP layer (the auth layer verifies *who* is calling, but cannot scope *what* they can do beyond persona-level filtering).
 
@@ -356,7 +356,7 @@ For production deployments:
 
 - [ ] Default persona is `readonly` — explicitly set `--persona ml-engineer` or `--persona data-scientist` only for users who need write access
 - [ ] Configure `~/.kf-mcp-policy.yaml` with `policy.namespaces` and `read_only: true` if appropriate
-- [ ] For HTTP transport: set `--auth-token` (dev) or `KUBEFLOW_MCP_JWKS_URI` (production JWT) — the server warns if HTTP runs without auth
+- [ ] For HTTP transport: set `--auth-token` (dev) or `KUBEFLOW_MCP_JWKS_URI` + `KUBEFLOW_MCP_JWT_ISSUER` + `KUBEFLOW_MCP_JWT_AUDIENCE` (production JWT; all three are required, and the audience should be one that only this server's tokens carry) — the server warns if HTTP runs without auth
 - [ ] Use stdio transport for local dev; place HTTP behind an authenticated reverse proxy for additional defense-in-depth
 - [ ] Bind the MCP server ServiceAccount to the minimum ClusterRole above
 - [ ] Do not grant `run_custom_training` access to untrusted users

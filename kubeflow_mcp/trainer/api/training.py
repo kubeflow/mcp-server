@@ -44,7 +44,13 @@ from kubeflow_mcp.common.huggingface import (
     hub_confirms_missing,
     validate_hf_reference,
 )
-from kubeflow_mcp.common.types import PreviewResponse, ToolError, ToolResponse, is_k8s_not_found
+from kubeflow_mcp.common.types import (
+    PreviewResponse,
+    ToolError,
+    ToolResponse,
+    is_k8s_forbidden,
+    is_k8s_not_found,
+)
 from kubeflow_mcp.common.utils import (
     MCP_MANAGED_LABEL,
     MCP_MANAGED_VALUE,
@@ -441,7 +447,7 @@ def _sdk_error(e: Exception, hint: str | None = None) -> dict[str, Any]:
         (err for err in (e, e.__cause__ or e.__context__) if getattr(err, "status", None) == 403),
         None,
     )
-    if forbidden is not None:
+    if is_k8s_forbidden(e):
         try:
             message = json.loads(getattr(forbidden, "body", None) or "{}").get("message", "")
         except (ValueError, AttributeError):

@@ -40,13 +40,55 @@ def pipe():
     hello()
 """
 
+# A TrainJob trial template and a complete Experiment manifest for the optimizer.
+TRIAL_TEMPLATE: dict[str, Any] = {
+    "apiVersion": "trainer.kubeflow.org/v1alpha1",
+    "kind": "TrainJob",
+    "spec": {
+        "runtimeRef": {"name": "torch-distributed"},
+        "trainer": {"image": "busybox:1.36", "args": ["--lr=${trialParameters.lr}"]},
+    },
+}
+EXPERIMENT_SPEC: dict[str, Any] = {
+    "apiVersion": "kubeflow.org/v1beta1",
+    "kind": "Experiment",
+    "metadata": {"name": "hpo-b"},
+    "spec": {
+        "objective": {"type": "maximize", "objectiveMetricName": "accuracy"},
+        "algorithm": {"algorithmName": "random"},
+        "maxTrialCount": 4,
+        "parallelTrialCount": 2,
+        "parameters": [
+            {
+                "name": "lr",
+                "parameterType": "double",
+                "feasibleSpace": {"min": "0.001", "max": "0.1"},
+            }
+        ],
+        "trialTemplate": {
+            "primaryContainerName": "node",
+            "trialParameters": [{"name": "lr", "reference": "lr"}],
+            "trialSpec": TRIAL_TEMPLATE,
+        },
+    },
+}
+
 GATE_ARGS: dict[str, dict[str, Any]] = {
     "create_experiment": {"name": "exp-new", "namespace": "default"},
+    "create_hpo_experiment": {
+        "name": "hpo-a",
+        "objective_metric": "accuracy",
+        "search_space": {"lr": {"min": 0.001, "max": 0.1, "type": "loguniform"}},
+        "trial_template": TRIAL_TEMPLATE,
+        "namespace": "default",
+    },
+    "create_hpo_experiment_from_spec": {"spec": EXPERIMENT_SPEC, "namespace": "default"},
     "create_pipeline": {"name": "pipe-a", "pipeline_code": PIPELINE_CODE, "namespace": "default"},
     "create_pipeline_run": {"pipeline": "pipe-a", "namespace": "default"},
     "create_runtime": {"name": "rt-a", "spec": {"template": {}}},
     "create_spark_session": {"name": "spark-a"},
     "delete_experiment": {"name": EXPERIMENT, "namespace": "default"},
+    "delete_hpo_experiment": {"name": "hpo-a", "namespace": "default"},
     "delete_pipeline": {"name": "pipe-a", "namespace": "default"},
     "delete_runtime": {"name": "rt-a"},
     "delete_spark_session": {"name": "spark-a"},
@@ -57,6 +99,7 @@ GATE_ARGS: dict[str, dict[str, Any]] = {
     "run_container_training": {"image": "busybox:1.36"},
     "run_custom_training": {"script": "print('hi')"},
     "stop_pipeline_run": {"run_id": RUNNING_RUN_ID, "namespace": "default"},
+    "update_hpo_experiment": {"name": "hpo-a", "parallel_trial_count": 1, "namespace": "default"},
     "update_training_job": {"name": "job-a", "action": "suspend"},
 }
 
@@ -66,6 +109,12 @@ GATE_ARGS: dict[str, dict[str, Any]] = {
 READ_ARGS: dict[str, dict[str, Any]] = {
     "inspect_controller": {},
     "inspect_crd": {},
+    "wait_for_hpo_experiment": {
+        "name": "hpo-a",
+        "namespace": "default",
+        "timeout_seconds": 10,
+        "polling_interval": 5,
+    },
     "wait_for_training": {"name": "job-a", "timeout_seconds": 1, "polling_interval": 1},
 }
 
