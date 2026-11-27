@@ -148,4 +148,4 @@ This project follows the [Kubeflow Code of Conduct](https://github.com/kubeflow/
 
 ## Questions?
 
-Open an issue or reach out to maintainers on the CNCF Slack `#kubeflow-ml-experience` channel.
+Open an issue or reach out to maintainers on CNCF Slack in [#kubeflow-wg-agents](https://app.slack.com/client/T08PSQ7BQ/C0BQQRSPK6Z) or [#kubeflow-mcp-server](https://app.slack.com/client/T08PSQ7BQ/C0BSRBPNDHP).
