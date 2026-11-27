@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+from tests.benchmarks import TOOL_LIST_MODES
 from tests.benchmarks.report import generate_report
 
 DEFAULT_ITERATIONS = 100
@@ -14,10 +15,12 @@ DEFAULT_WARMUP = 5
 BENCHMARK_DIR = Path(__file__).parent
 OUTPUT_DIR = BENCHMARK_DIR.parent.parent / "benchmark-results"
 LATENCY_RESULTS: list[dict[str, object]] = []
+TOOL_LIST_RESULTS: list[dict[str, object]] = []
 
 
 def pytest_configure(config: Any) -> None:
     LATENCY_RESULTS.clear()
+    TOOL_LIST_RESULTS.clear()
 
 
 def pytest_collection_modifyitems(config: Any, items: list[Any]) -> None:
@@ -61,20 +64,39 @@ def record_latency_benchmark(
     yield run
 
 
+@pytest.fixture
+def record_tool_list_size() -> Callable[[dict[str, object]], None]:
+    return TOOL_LIST_RESULTS.append
+
+
 def pytest_terminal_summary(terminalreporter: Any, exitstatus: int, config: Any) -> None:
-    if not LATENCY_RESULTS:
+    if exitstatus != pytest.ExitCode.OK or not (LATENCY_RESULTS or TOOL_LIST_RESULTS):
+        return
+
+    if TOOL_LIST_RESULTS and (
+        len(TOOL_LIST_RESULTS) != len(TOOL_LIST_MODES)
+        or {result["mode"] for result in TOOL_LIST_RESULTS} != set(TOOL_LIST_MODES)
+    ):
+        terminalreporter.write_sep("-", "benchmark report skipped: requires all tools/list modes")
         return
 
     OUTPUT_DIR.mkdir(exist_ok=True)
-    latency_path = OUTPUT_DIR / "latency.json"
-    latency_payload = {
-        "suite": "latency",
-        "iterations": DEFAULT_ITERATIONS,
-        "warmup": DEFAULT_WARMUP,
-        "results": LATENCY_RESULTS,
-    }
-    latency_path.write_text(json.dumps(latency_payload, indent=2) + "\n")
-    report_path = generate_report(OUTPUT_DIR)
+    if LATENCY_RESULTS:
+        latency_path = OUTPUT_DIR / "latency.json"
+        latency_payload = {
+            "suite": "latency",
+            "iterations": DEFAULT_ITERATIONS,
+            "warmup": DEFAULT_WARMUP,
+            "results": LATENCY_RESULTS,
+        }
+        latency_path.write_text(json.dumps(latency_payload, indent=2) + "\n")
+        terminalreporter.write_sep("-", f"benchmark results written to {latency_path}")
 
-    terminalreporter.write_sep("-", f"benchmark results written to {latency_path}")
+    if TOOL_LIST_RESULTS:
+        token_usage_path = OUTPUT_DIR / "token_usage.json"
+        token_usage_payload = {"suite": "token_usage", "results": TOOL_LIST_RESULTS}
+        token_usage_path.write_text(json.dumps(token_usage_payload, indent=2) + "\n")
+        terminalreporter.write_sep("-", f"benchmark results written to {token_usage_path}")
+
+    report_path = generate_report(OUTPUT_DIR)
     terminalreporter.write_sep("-", f"benchmark report written to {report_path}")

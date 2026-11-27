@@ -20,14 +20,17 @@ This writes local output to:
 
 ```text
 benchmark-results/latency.json
+benchmark-results/token_usage.json
 benchmark-results/index.html
 ```
 
-`benchmark-results/` is generated output. It should be overwritten on each run and should not be committed unless otherwise noted.
+`benchmark-results/` is generated output and should not be committed unless otherwise noted.
+Failed runs and runs that measure only some of the three `tools/list` modes leave existing
+output intact.
 
 ## Current Scope
 
-The current benchmark suite measures latency only. Latency uses `pytest-benchmark` for warmup, repeated rounds, and timing collection. The project writes a small normalized JSON file so the HTML report can use the same format when future benchmark suites are added.
+Latency benchmarks use `pytest-benchmark` for warmup, repeated rounds, and timing collection.
 
 Covered latency cases:
 
@@ -53,6 +56,19 @@ Preview benchmarks use `confirmed=False`, so they do not submit jobs to Kubernet
 
 `fine_tune` GPU pre-check is patched inside the benchmark so the benchmark can run without a cluster.
 
+The `tools/list` benchmark measures the first MCP result returned to an in-memory
+client in `full`, `progressive`, and `semantic` mode. It loads only Trainer and
+uses the built-in `readonly` persona. Each mode reports the tool count and result
+size in bytes after compact UTF-8 JSON serialization, including descriptions and
+schemas. The measurement excludes the JSON-RPC envelope, server instructions,
+and later discovery calls. It requires no cluster, model, or API key.
+
+To run just this benchmark:
+
+```bash
+uv run pytest tests/benchmarks/test_token_usage.py -m benchmark
+```
+
 ## Output Format
 
 Latency results use this shape:
@@ -76,9 +92,15 @@ Latency results use this shape:
 }
 ```
 
+`token_usage.json` records `client`, `persona`, `mode`, `tool_count`, and
+`payload_bytes` for each result. The measured bytes describe the initial MCP
+payload. Model token counts depend on how each client formats tools for a
+particular model and tokenizer.
+
 ## Report
 
-The HTML report is generated from benchmark JSON files.
+The HTML report combines the available benchmark JSON files. A standalone suite run
+updates its own JSON file, so the report can include other suites' results from earlier runs.
 
 Current report includes:
 
@@ -90,6 +112,7 @@ Current report includes:
 - P99/P50 tail ratio
 - visual spread bars
 - summary cards
+- initial `tools/list` tool counts and payload sizes by loading mode
 
 Open:
 
@@ -102,7 +125,6 @@ benchmark-results/index.html
 Planned benchmark files:
 
 ```text
-tests/benchmarks/test_token_usage.py
 tests/benchmarks/test_cpu_profile.py
 tests/benchmarks/test_memory.py
 ```
@@ -110,14 +132,12 @@ tests/benchmarks/test_memory.py
 Planned output files:
 
 ```text
-benchmark-results/token_usage.json
 benchmark-results/cpu_profile.json
 benchmark-results/memory.json
 ```
 
 Recommended tools:
 
-- token usage: custom estimator
 - CPU profile: Python `cProfile`
 - memory profile: Python `tracemalloc`
 
