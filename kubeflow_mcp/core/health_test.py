@@ -31,7 +31,6 @@ from kubeflow_mcp.core.health import (
     get_server_logs,
     health_check,
 )
-from kubeflow_mcp.core.policy import get_effective_persona, set_effective_persona
 from kubeflow_mcp.core.server import create_server
 
 
@@ -204,34 +203,28 @@ class TestHealthMetadata:
     @pytest.mark.asyncio
     async def test_health_tools_registered_on_server(self) -> None:
         """Integration test: verify health tools are exposed via create_server() with metadata."""
-        previous_persona = get_effective_persona()
-        try:
-            mcp = create_server()
-            async with Client(mcp) as client:
-                tools = await client.list_tools()
-            tool_map = {tool.name: tool for tool in tools}
+        mcp = create_server()
+        async with Client(mcp) as client:
+            tools = await client.list_tools()
+        tool_map = {tool.name: tool for tool in tools}
 
-            assert "health_check" in tool_map
-            assert "get_server_logs" in tool_map
+        assert "health_check" in tool_map
+        assert "get_server_logs" in tool_map
 
-            assert tool_map["health_check"].description == HEALTH_TOOL_DESCRIPTIONS["health_check"]
-            assert (
-                tool_map["get_server_logs"].description
-                == HEALTH_TOOL_DESCRIPTIONS["get_server_logs"]
-            )
+        assert tool_map["health_check"].description == HEALTH_TOOL_DESCRIPTIONS["health_check"]
+        assert (
+            tool_map["get_server_logs"].description == HEALTH_TOOL_DESCRIPTIONS["get_server_logs"]
+        )
 
-            hc_ann = tool_map["health_check"].annotations
-            assert hc_ann is not None
-            assert hc_ann.read_only_hint is True
-            assert hc_ann.destructive_hint is False
-            assert hc_ann.idempotent_hint is True
-            assert "health" in tool_map["health_check"].meta["fastmcp"]["tags"]
+        hc_ann = tool_map["health_check"].annotations
+        assert hc_ann is not None
+        assert hc_ann.read_only_hint is True
+        assert hc_ann.destructive_hint is False
+        assert hc_ann.idempotent_hint is True
+        assert "health" in tool_map["health_check"].meta["fastmcp"]["tags"]
 
-            logs_ann = tool_map["get_server_logs"].annotations
-            assert logs_ann is not None
-            assert logs_ann.read_only_hint is True
-            assert logs_ann.destructive_hint is False
-            assert "debug" in tool_map["get_server_logs"].meta["fastmcp"]["tags"]
-
-        finally:
-            set_effective_persona(previous_persona)
+        logs_ann = tool_map["get_server_logs"].annotations
+        assert logs_ann is not None
+        assert logs_ann.read_only_hint is True
+        assert logs_ann.destructive_hint is False
+        assert "debug" in tool_map["get_server_logs"].meta["fastmcp"]["tags"]

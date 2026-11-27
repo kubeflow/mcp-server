@@ -53,14 +53,6 @@ _UPDATE_ENV = "UPDATE_SCHEMA_SNAPSHOT"
 _DOC_KEYS = {"description", "title"}
 
 
-@pytest.fixture
-def _restore_persona():
-    """create_server() mutates the process-global persona; restore it."""
-    previous = get_effective_persona()
-    yield
-    set_effective_persona(previous)
-
-
 def _strip_doc_text(node: Any) -> Any:
     """Recursively drop human-readable text keys from a JSON schema."""
     if isinstance(node, dict):
@@ -97,6 +89,13 @@ async def _build_snapshot(clients: list[str] | None = None) -> dict[str, Any]:
 
 def _render(snapshot: dict[str, Any]) -> str:
     return json.dumps(snapshot, indent=2, sort_keys=True) + "\n"
+
+
+@pytest.fixture
+def _restore_persona():
+    previous = get_effective_persona()
+    yield
+    set_effective_persona(previous)
 
 
 @pytest.mark.parametrize(
