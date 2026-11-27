@@ -442,6 +442,58 @@ def _create(experiment: dict[str, Any], namespace: str, name: str) -> dict[str, 
     ).model_dump()
 
 
+def _is_strict_int(value: Any) -> bool:
+    """Return True when ``value`` is an ``int`` and not a ``bool``."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _trial_bound_error(value: Any, label: str, low: int, high: int) -> str | None:
+    """Check that ``value`` is a strict integer within ``[low, high]``."""
+    if not _is_strict_int(value) or value < low:
+        return f"{label} must be an integer between {low} and {high}, got {value!r}"
+    if value > high:
+        return f"{label} must be at most {high}, got {value}"
+    return None
+
+
+def _trials_bound_func(
+    *,
+    max_trial_count: Any,
+    parallel_trial_count: Any,
+    max_failed_trials: Any,
+    max_trials_label: str,
+    parallel_label: str,
+    max_failed_label: str,
+    parallel_required: bool = True,
+) -> str | None:
+    """Validate Katib trial counts and cross-field constraints before preview/create."""
+    err = _trial_bound_error(max_trial_count, max_trials_label, 1, MAX_TRIAL_COUNT_LIMIT)
+    if err is not None:
+        return err
+    if parallel_trial_count is None:
+        if parallel_required:
+            return (
+                f"{parallel_label} must be an integer between 1 and "
+                f"{MAX_PARALLEL_TRIAL_LIMIT}, got {parallel_trial_count!r}"
+            )
+    else:
+        err = _trial_bound_error(parallel_trial_count, parallel_label, 1, MAX_PARALLEL_TRIAL_LIMIT)
+        if err is not None:
+            return err
+        if parallel_trial_count > max_trial_count:
+            return (
+                f"{parallel_label} ({parallel_trial_count}) must not exceed "
+                f"{max_trials_label} ({max_trial_count})"
+            )
+    if max_failed_trials is not None:
+        if not _is_strict_int(max_failed_trials) or not 0 <= max_failed_trials <= max_trial_count:
+            return (
+                f"{max_failed_label} must be between 0 and {max_trials_label} "
+                f"({max_trial_count}), got {max_failed_trials!r}"
+            )
+    return None
+
+
 def create_hpo_experiment(
     name: str,
     objective_metric: str,
@@ -548,31 +600,25 @@ def create_hpo_experiment(
             not isinstance(search_space, dict) or not search_space,
             "search_space must define at least one parameter",
         ),
-        (
-            not 1 <= max_trial_count <= MAX_TRIAL_COUNT_LIMIT,
-            f"max_trial_count must be between 1 and {MAX_TRIAL_COUNT_LIMIT}, got {max_trial_count}",
-        ),
-        (
-            not 1 <= parallel_trial_count <= MAX_PARALLEL_TRIAL_LIMIT,
-            f"parallel_trial_count must be between 1 and {MAX_PARALLEL_TRIAL_LIMIT}, "
-            f"got {parallel_trial_count}",
-        ),
-        # Katib's webhook rejects both of these; catching them here keeps the
-        # preview honest about what will be admitted.
-        (
-            parallel_trial_count > max_trial_count,
-            f"parallel_trial_count ({parallel_trial_count}) must not exceed "
-            f"max_trial_count ({max_trial_count})",
-        ),
-        (
-            max_failed_trials is not None and not 0 <= max_failed_trials <= max_trial_count,
-            f"max_failed_trials must be between 0 and max_trial_count ({max_trial_count}), "
-            f"got {max_failed_trials}",
-        ),
     ]
     for is_invalid, message in problems:
         if is_invalid:
             return ToolError(error=message, error_code=ErrorCode.VALIDATION_ERROR).model_dump()
+
+    # Katib's webhook enforces trial count ranges and cross-field rules; catching
+    # them here (including rejecting bools) keeps previews honest and avoids
+    # leaking Pydantic internals.
+    bounds_problem = _trials_bound_func(
+        max_trial_count=max_trial_count,
+        parallel_trial_count=parallel_trial_count,
+        max_failed_trials=max_failed_trials,
+        max_trials_label="max_trial_count",
+        parallel_label="parallel_trial_count",
+        max_failed_label="max_failed_trials",
+        parallel_required=True,
+    )
+    if bounds_problem is not None:
+        return ToolError(error=bounds_problem, error_code=ErrorCode.VALIDATION_ERROR).model_dump()
 
     try:
         parameters = [_build_parameter(key, spec) for key, spec in search_space.items()]
@@ -672,13 +718,17 @@ def _manifest_problem(manifest: dict[str, Any]) -> str | None:
             "spec.spec.maxTrialCount is required: without it Katib keeps starting trials "
             "with no limit"
         )
-    for field, limit in (
-        ("maxTrialCount", MAX_TRIAL_COUNT_LIMIT),
-        ("parallelTrialCount", MAX_PARALLEL_TRIAL_LIMIT),
-    ):
-        value = body.get(field)
-        if isinstance(value, int) and not isinstance(value, bool) and value > limit:
-            return f"spec.spec.{field} must be at most {limit}, got {value}"
+    bounds_problem = _trials_bound_func(
+        max_trial_count=body.get("maxTrialCount"),
+        parallel_trial_count=body.get("parallelTrialCount"),
+        max_failed_trials=body.get("maxFailedTrialCount"),
+        max_trials_label="spec.spec.maxTrialCount",
+        parallel_label="spec.spec.parallelTrialCount",
+        max_failed_label="spec.spec.maxFailedTrialCount",
+        parallel_required=False,
+    )
+    if bounds_problem is not None:
+        return bounds_problem
     template = body["trialTemplate"]
     trial_spec = template.get("trialSpec") if isinstance(template, dict) else None
     kind = trial_spec.get("kind") if isinstance(trial_spec, dict) else None

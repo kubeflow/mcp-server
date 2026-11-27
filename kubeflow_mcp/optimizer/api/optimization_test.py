@@ -724,6 +724,34 @@ def test_trial_budget_katib_would_reject_is_refused(overrides, message):
     api.create_namespaced_custom_object.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"max_trial_count": True, "parallel_trial_count": 1},
+        {"max_trial_count": False, "parallel_trial_count": 1},
+        {"parallel_trial_count": True},
+        {"parallel_trial_count": False},
+        {"max_failed_trials": True},
+        {"max_failed_trials": False},
+        {"max_trial_count": "10"},
+        {"max_trial_count": 1.5},
+        {"max_trial_count": None},
+        {"parallel_trial_count": "2"},
+        {"parallel_trial_count": None},
+        {"max_failed_trials": "1"},
+        {"max_failed_trials": 1.5},
+    ],
+)
+def test_create_rejects_booleans_and_non_integers_for_trial_bounds(overrides):
+    """bool subclasses int in Python, so it must be rejected before Pydantic sees it."""
+    with cluster() as api:
+        result = _create(**overrides)
+    assert result["success"] is False
+    assert result["error_code"] == "VALIDATION_ERROR"
+    assert "V1beta1ExperimentSpec" not in result["error"]
+    api.create_namespaced_custom_object.assert_not_called()
+
+
 def test_parallelism_equal_to_the_budget_is_valid():
     with cluster():
         result = _create(max_trial_count=4, parallel_trial_count=4, max_failed_trials=4)
@@ -948,6 +976,60 @@ def test_from_spec_applies_the_same_trial_caps(field, value, limit):
     assert result["error_code"] == "VALIDATION_ERROR"
     assert f"spec.spec.{field} must be at most {limit}" in result["error"]
     api.create_namespaced_custom_object.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "spec_overrides",
+    [
+        {"maxTrialCount": 0},
+        {"maxTrialCount": -1},
+        {"maxTrialCount": True},
+        {"maxTrialCount": False},
+        {"maxTrialCount": "5"},
+        {"maxTrialCount": 1.5},
+        {"parallelTrialCount": 0},
+        {"parallelTrialCount": -1},
+        {"parallelTrialCount": True},
+        {"parallelTrialCount": False},
+        {"parallelTrialCount": "2"},
+        {"maxTrialCount": 2, "parallelTrialCount": 5},
+        {"maxTrialCount": 4, "maxFailedTrialCount": 99},
+        {"maxTrialCount": 4, "maxFailedTrialCount": -1},
+        {"maxTrialCount": 4, "maxFailedTrialCount": True},
+        {"maxTrialCount": 4, "maxFailedTrialCount": False},
+        {"maxTrialCount": 4, "maxFailedTrialCount": "1"},
+    ],
+)
+@pytest.mark.parametrize("confirmed", [False, True])
+def test_from_spec_rejects_invalid_trial_bounds_and_types(spec_overrides, confirmed):
+    """Invalid trial bounds must fail in preview too, before namespace or Pydantic checks."""
+    manifest = _manifest()
+    manifest["spec"].update(spec_overrides)
+    with (
+        cluster() as api,
+        patch("kubeflow_mcp.optimizer.api.optimization.check_optimizer_namespace") as ns_check,
+    ):
+        result = opt.create_hpo_experiment_from_spec(spec=manifest, confirmed=confirmed)
+    assert result["success"] is False
+    assert result["error_code"] == "VALIDATION_ERROR"
+    assert result.get("status") != "preview"
+    ns_check.assert_not_called()
+    api.create_namespaced_custom_object.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "spec_overrides",
+    [
+        {"maxTrialCount": 4, "parallelTrialCount": 4, "maxFailedTrialCount": 4},
+        {"maxTrialCount": 4, "maxFailedTrialCount": 0},
+    ],
+)
+def test_from_spec_accepts_valid_trial_bound_edges(spec_overrides):
+    manifest = _manifest()
+    manifest["spec"].update(spec_overrides)
+    with cluster():
+        result = opt.create_hpo_experiment_from_spec(spec=manifest)
+    assert result["status"] == "preview"
 
 
 @pytest.mark.parametrize("budget", ["omitted", None])
