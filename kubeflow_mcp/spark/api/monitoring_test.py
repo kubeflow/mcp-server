@@ -104,6 +104,13 @@ class TestLogs:
         assert out["error_code"] == "PERMISSION_DENIED"
         assert "pods/log" in out["hint"]
 
+    @pytest.mark.parametrize("tail_lines", [0, -1, True, False, 1.5, "10", None])
+    def test_invalid_tail_lines_is_rejected_before_sdk_call(self, mock_spark_client, tail_lines):
+        out = monitoring.get_spark_session_logs("x", tail_lines=tail_lines)
+        assert out["success"] is False
+        assert out["error_code"] == "VALIDATION_ERROR"
+        mock_spark_client.get_session_logs.assert_not_called()
+
     def test_unrelated_sdk_failure_stays_sdk_error(self):
         client = MagicMock()
         client.get_session_logs.side_effect = RuntimeError("connection refused")

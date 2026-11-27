@@ -27,6 +27,7 @@ from kubeflow_mcp.common.types import (
 )
 from kubeflow_mcp.common.utils import get_spark_client_for_namespace
 from kubeflow_mcp.core.security import check_namespace_allowed, validate_k8s_name
+from kubeflow_mcp.spark.api._common import validate_int_range
 from kubeflow_mcp.spark.types import session_info_to_dict
 
 logger = logging.getLogger(__name__)
@@ -72,7 +73,7 @@ def list_spark_sessions(
 
     want = None
     if state is not None:
-        want = state.strip().lower()
+        want = state.strip().lower() if isinstance(state, str) else None
         if want not in {s.lower() for s in SESSION_STATES}:
             return ToolError(
                 error=f"Unsupported state '{state}'",
@@ -80,11 +81,9 @@ def list_spark_sessions(
                 details={"supported_states": sorted(SESSION_STATES)},
             ).model_dump()
 
-    if limit < 1:
-        return ToolError(
-            error=f"limit must be >= 1, got {limit}",
-            error_code=ErrorCode.VALIDATION_ERROR,
-        ).model_dump()
+    limit_err = validate_int_range(limit, "limit", 1)
+    if limit_err is not None:
+        return limit_err.model_dump()
     limit = min(limit, MAX_LIST_LIMIT)
 
     try:

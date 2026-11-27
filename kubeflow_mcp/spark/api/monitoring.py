@@ -29,6 +29,7 @@ from kubeflow_mcp.common.types import (
 )
 from kubeflow_mcp.common.utils import get_spark_client_for_namespace
 from kubeflow_mcp.core.security import check_namespace_allowed, validate_k8s_name
+from kubeflow_mcp.spark.api._common import validate_int_range
 
 logger = logging.getLogger(__name__)
 
@@ -90,11 +91,9 @@ def get_spark_session_logs(
     if name_err is not None:
         return name_err.model_dump()
 
-    if tail_lines < 1:
-        return ToolError(
-            error=f"tail_lines must be >= 1, got {tail_lines}",
-            error_code=ErrorCode.VALIDATION_ERROR,
-        ).model_dump()
+    tail_err = validate_int_range(tail_lines, "tail_lines", 1)
+    if tail_err is not None:
+        return tail_err.model_dump()
     tail_lines = min(tail_lines, MAX_TAIL_LINES)
 
     try:
