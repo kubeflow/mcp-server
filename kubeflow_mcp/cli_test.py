@@ -140,6 +140,7 @@ def test_serve_passes_clients_and_persona():
         mode="full",
         instruction_tier="full",
         auth_provider=None,
+        transport="stdio",
     )
     mock_server.run.assert_called_once()
 
@@ -320,6 +321,7 @@ def test_serve_progressive_mode():
         mode="progressive",
         instruction_tier="full",
         auth_provider=None,
+        transport="stdio",
     )
     mock_server.run.assert_called_once()
 
@@ -337,6 +339,7 @@ def test_serve_semantic_mode():
         mode="semantic",
         instruction_tier="full",
         auth_provider=None,
+        transport="stdio",
     )
 
 
@@ -530,6 +533,20 @@ def test_serve_stdio_skips_auth_provider():
     mock_create_server.assert_called_once()
     _, kwargs = mock_create_server.call_args
     assert kwargs["auth_provider"] is None
+
+
+def test_serve_sse_transport_passed_to_create_server():
+    """--transport sse passes transport='sse' to create_server."""
+    mock_server, mock_create_server, modules_patch = _make_serve_mocks()
+
+    with patch.dict(sys.modules, modules_patch):
+        runner = CliRunner()
+        runner.invoke(cli, ["serve", "--transport", "sse"])
+
+    mock_create_server.assert_called_once()
+    _, kwargs = mock_create_server.call_args
+    assert kwargs["transport"] == "sse"
+    mock_server.run.assert_called_once()
 
 
 # --- serve: resilience wiring ---

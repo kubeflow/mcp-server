@@ -40,6 +40,7 @@ def _make_client(config: SecurityConfig) -> TestClient:
             Route("/mcp", ok, methods=["GET", "POST"]),
             Route("/health", ok, methods=["GET"]),
             Route("/ready", ok, methods=["GET"]),
+            Route("/.well-known/mcp.json", ok, methods=["GET"]),
         ],
         middleware=[Middleware(DNSRebindingProtectionMiddleware, settings=settings)],
     )
@@ -47,7 +48,7 @@ def _make_client(config: SecurityConfig) -> TestClient:
     return TestClient(app, raise_server_exceptions=False)
 
 
-@pytest.mark.parametrize("path", ["/health", "/ready"])
+@pytest.mark.parametrize("path", ["/health", "/ready", "/.well-known/mcp.json"])
 def test_probe_paths_bypass_host_validation(path: str):
     # kubelet sends liveness/readiness probes with Host: <pod-ip>:<port>,
     # which is never in the loopback allowlist. These paths are
