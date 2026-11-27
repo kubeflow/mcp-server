@@ -430,29 +430,83 @@ def check_compatibility() -> dict[str, Any]:
         ).model_dump()
 
 
+def _gpu_resources(allocatable: dict[str, Any]) -> dict[str, int]:
+    """Allocatable GPU extended resources on a node, by resource name.
+
+    Any ``<vendor>/gpu`` extended resource counts (``nvidia.com/gpu``, ``amd.com/gpu``,
+    ``intel.com/gpu``), as do Intel's ``gpu.intel.com/*`` device-plugin names.
+    Quantities that are not whole numbers or <= 0 are ignored.
+    """
+    found: dict[str, int] = {}
+    for name, quantity in (allocatable or {}).items():
+        if not (name.endswith("/gpu") or name.startswith("gpu.intel.com/")):
+            continue
+        try:
+            count = int(parse_quantity(quantity))
+        except (TypeError, ValueError):
+            continue
+        if count > 0:
+            found[name] = count
+    return found
+
+
+def _node_is_ready(node: Any) -> bool:
+    """Whether the node reports a ``Ready=True`` condition.
+
+    If conditions are missing entirely (e.g. minimal unit test mocks),
+    the node is treated as Ready unless marked otherwise.
+    """
+    status = getattr(node, "status", None)
+    conditions = getattr(status, "conditions", None)
+    if conditions is None:
+        return True
+    return any(
+        getattr(c, "type", None) == "Ready" and getattr(c, "status", None) == "True"
+        for c in conditions
+    )
+
+
 def _pod_gpu_request(pod: Any) -> int:
-    """Compute effective NVIDIA GPU requests, including init and restartable init containers."""
+    """Compute effective GPU requests across vendors, including init and restartable init containers."""
 
     def requested(container: Any) -> int:
-        resources = container.resources
+        resources = getattr(container, "resources", None)
         if resources is None:
             return 0
-        return int(
-            parse_quantity(
-                (resources.requests or {}).get(
-                    "nvidia.com/gpu", (resources.limits or {}).get("nvidia.com/gpu", 0)
-                )
-            )
-        )
+        requests = getattr(resources, "requests", None) or {}
+        limits = getattr(resources, "limits", None) or {}
+        all_res = {**limits, **requests}
+        total = 0
+        for name, qty in all_res.items():
+            if name.endswith("/gpu") or name.startswith("gpu.intel.com/"):
+                try:
+                    total += int(parse_quantity(qty))
+                except (TypeError, ValueError):
+                    continue
+        return total
 
     sidecars = peak = 0
-    for container in pod.spec.init_containers or []:
+    spec = getattr(pod, "spec", None)
+    if spec is None:
+        return 0
+    for container in getattr(spec, "init_containers", None) or []:
         count = requested(container)
         peak = max(peak, sidecars + count)
-        if container.restart_policy == "Always":
+        if getattr(container, "restart_policy", None) == "Always":
             sidecars += count
-    return max(peak, sidecars + sum(requested(c) for c in pod.spec.containers)) + int(
-        (pod.spec.overhead or {}).get("nvidia.com/gpu", 0)
+
+    overhead = getattr(spec, "overhead", None) or {}
+    overhead_gpu = 0
+    for name, qty in overhead.items():
+        if name.endswith("/gpu") or name.startswith("gpu.intel.com/"):
+            try:
+                overhead_gpu += int(parse_quantity(qty))
+            except (TypeError, ValueError):
+                continue
+
+    return (
+        max(peak, sidecars + sum(requested(c) for c in (getattr(spec, "containers", None) or [])))
+        + overhead_gpu
     )
 
 
@@ -485,20 +539,29 @@ def get_cluster_resources() -> dict[str, Any]:
 
     Call this before submitting training jobs to verify resources exist.
 
+    Only GPUs a pod could be scheduled onto are counted in ``gpu_total``:
+    nodes that are not Ready or are cordoned are listed, but their GPUs
+    go to ``gpu_unavailable``. Any ``<vendor>/gpu`` extended resource counts
+    (``nvidia.com/gpu``, ``amd.com/gpu``, ``intel.com/gpu``), as do Intel's
+    ``gpu.intel.com/*`` device plugin names.
+
     Returns:
         dict: Response containing:
 
-        - ``gpu_total`` (int): Allocatable GPU capacity across all nodes
+        - ``gpu_total`` (int): Schedulable GPU capacity across Ready, uncordoned nodes
+        - ``gpu_unavailable`` (int): GPUs on NotReady or cordoned nodes
+        - ``gpu_by_resource`` (dict): Schedulable GPUs per resource name
         - ``gpu_allocated`` / ``gpu_available``: GPU requests / remaining capacity,
           or None when the cluster-wide pod scan is unavailable or incomplete
         - ``availability_note``: Limits of the availability estimate
-        - ``nodes_with_gpu`` (int): Number of nodes with GPUs
+        - ``nodes_with_gpu`` (int): Number of nodes with schedulable GPUs
         - ``node_count`` (int): Total node count
-        - ``nodes`` (list): Per-node details (name, memory, cpu, gpus)
+        - ``nodes`` (list): Per-node details (name, memory, cpu, ready, cordoned, gpus, gpu_resources)
+        - ``hint`` (str, optional): Diagnostic guidance when all GPUs in cluster are unschedulable
 
     Example:
         >>> get_cluster_resources()
-        {"data": {"gpu_total": 4, "nodes_with_gpu": 2, ...}}
+        {"data": {"gpu_total": 4, "gpu_by_resource": {"nvidia.com/gpu": 4}, ...}}
 
     Note:
         Free GPUs do not guarantee scheduling; affinity, taints and other requests also apply.
@@ -509,56 +572,88 @@ def get_cluster_resources() -> dict[str, Any]:
         v1 = get_core_v1_api()
         nodes = v1.list_node(_request_timeout=K8S_TIMEOUT)
         gpu_total = 0
+        gpu_unavailable = 0
+        gpu_by_resource: dict[str, int] = {}
         node_info = []
 
         for node in nodes.items:
-            alloc = node.status.allocatable or {}
-            gpu = int(alloc.get("nvidia.com/gpu", 0))
-            gpu_total += gpu
+            alloc = getattr(getattr(node, "status", None), "allocatable", None) or {}
+            gpus = _gpu_resources(alloc)
+            gpu = sum(gpus.values())
+            ready = _node_is_ready(node)
+            cordoned = bool(getattr(getattr(node, "spec", None), "unschedulable", False))
 
-            node_data = {
-                "name": node.metadata.name,
+            node_data: dict[str, Any] = {
+                "name": getattr(getattr(node, "metadata", None), "name", "unknown"),
                 "memory": alloc.get("memory"),
                 "cpu": alloc.get("cpu"),
+                "ready": ready,
+                "cordoned": cordoned,
             }
 
             if gpu > 0:
                 node_data["gpus"] = gpu
+                node_data["gpu_resources"] = gpus
+                if ready and not cordoned:
+                    gpu_total += gpu
+                    for resource, count in gpus.items():
+                        gpu_by_resource[resource] = gpu_by_resource.get(resource, 0) + count
+                else:
+                    gpu_unavailable += gpu
 
             node_info.append(node_data)
 
         allocated: dict[str, int] | None = {}
-        note = "Availability estimates unallocated NVIDIA GPU requests, not scheduler placement."
+        note = "Availability estimates unallocated GPU requests across schedulable nodes, not scheduler placement."
         try:
             allocated = _get_gpu_allocations(v1)
         except Exception:
             allocated = None
             note = "GPU availability unknown: cluster-wide pod requests could not be fully read. gpu_total is capacity."
         for info in node_info:
+            is_schedulable = info.get("ready", False) and not info.get("cordoned", False)
             info["gpu_allocated"] = (
                 allocated.get(info["name"], 0) if allocated is not None else None
             )
             info["gpu_available"] = (
                 max(0, info.get("gpus", 0) - info["gpu_allocated"])
-                if allocated is not None
-                else None
+                if allocated is not None and is_schedulable
+                else (
+                    0 if allocated is not None and not is_schedulable and "gpus" in info else None
+                )
             )
 
-        return ToolResponse(
-            data={
-                "gpu_total": gpu_total,
-                "gpu_allocated": sum(n["gpu_allocated"] for n in node_info)
-                if allocated is not None
-                else None,
-                "gpu_available": sum(n["gpu_available"] for n in node_info)
-                if allocated is not None
-                else None,
-                "availability_note": note,
-                "nodes_with_gpu": sum(1 for n in node_info if n.get("gpus", 0) > 0),
-                "node_count": len(node_info),
-                "nodes": node_info,
-            }
-        ).model_dump()
+        data: dict[str, Any] = {
+            "gpu_total": gpu_total,
+            "gpu_unavailable": gpu_unavailable,
+            "gpu_by_resource": gpu_by_resource,
+            "gpu_allocated": sum(
+                n["gpu_allocated"] for n in node_info if n.get("gpu_allocated") is not None
+            )
+            if allocated is not None
+            else None,
+            "gpu_available": sum(
+                n["gpu_available"] for n in node_info if n.get("gpu_available") is not None
+            )
+            if allocated is not None
+            else None,
+            "availability_note": note,
+            "nodes_with_gpu": sum(
+                1
+                for n in node_info
+                if n.get("gpus", 0) > 0 and n.get("ready") and not n.get("cordoned")
+            ),
+            "node_count": len(node_info),
+            "nodes": node_info,
+        }
+
+        if gpu_total == 0 and gpu_unavailable > 0:
+            data["hint"] = (
+                f"{gpu_unavailable} GPU(s) exist but are on NotReady or cordoned nodes. "
+                "Free GPUs will become available once nodes recover or are uncordoned."
+            )
+
+        return ToolResponse(data=data).model_dump()
 
     except Exception as e:
         return ToolError(

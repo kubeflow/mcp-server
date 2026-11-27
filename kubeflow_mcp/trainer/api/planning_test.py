@@ -800,6 +800,214 @@ class TestGetClusterResources:
         assert res["error_code"] == "KUBERNETES_ERROR"
         assert "K8s API down" in res["error"]
 
+    def test_get_cluster_resources_counts_gpus_from_any_vendor(self):
+        node_nv = SimpleNamespace(
+            metadata=SimpleNamespace(name="nv-node"),
+            spec=SimpleNamespace(unschedulable=False),
+            status=SimpleNamespace(
+                allocatable={"nvidia.com/gpu": "4", "cpu": "32", "memory": "256Gi"},
+                conditions=[SimpleNamespace(type="Ready", status="True")],
+            ),
+        )
+        node_amd = SimpleNamespace(
+            metadata=SimpleNamespace(name="amd-node"),
+            spec=SimpleNamespace(unschedulable=False),
+            status=SimpleNamespace(
+                allocatable={"amd.com/gpu": "8", "cpu": "64"},
+                conditions=[SimpleNamespace(type="Ready", status="True")],
+            ),
+        )
+        node_intel = SimpleNamespace(
+            metadata=SimpleNamespace(name="intel-node"),
+            spec=SimpleNamespace(unschedulable=False),
+            status=SimpleNamespace(
+                allocatable={"gpu.intel.com/i915": "2"},
+                conditions=[SimpleNamespace(type="Ready", status="True")],
+            ),
+        )
+        node_cpu = SimpleNamespace(
+            metadata=SimpleNamespace(name="cpu-only"),
+            spec=SimpleNamespace(unschedulable=False),
+            status=SimpleNamespace(
+                allocatable={"cpu": "4", "memory": "16Gi"},
+                conditions=[SimpleNamespace(type="Ready", status="True")],
+            ),
+        )
+        v1_mock = MagicMock()
+        v1_mock.list_node.return_value = SimpleNamespace(
+            items=[node_nv, node_amd, node_intel, node_cpu]
+        )
+
+        with patch("kubeflow_mcp.common.utils.get_core_v1_api", return_value=v1_mock):
+            res = get_cluster_resources()
+
+        assert res["success"] is True
+        data = res["data"]
+        assert data["gpu_total"] == 14
+        assert data["gpu_unavailable"] == 0
+        assert data["gpu_by_resource"] == {
+            "nvidia.com/gpu": 4,
+            "amd.com/gpu": 8,
+            "gpu.intel.com/i915": 2,
+        }
+        assert data["nodes_with_gpu"] == 3
+        assert data["node_count"] == 4
+        assert "hint" not in data
+
+        nv_node = next(n for n in data["nodes"] if n["name"] == "nv-node")
+        assert nv_node["ready"] is True
+        assert nv_node["cordoned"] is False
+        assert nv_node["gpus"] == 4
+        assert nv_node["gpu_resources"] == {"nvidia.com/gpu": 4}
+
+    def test_get_cluster_resources_excludes_not_ready_and_cordoned_nodes(self):
+        healthy = SimpleNamespace(
+            metadata=SimpleNamespace(name="healthy"),
+            spec=SimpleNamespace(unschedulable=False),
+            status=SimpleNamespace(
+                allocatable={"nvidia.com/gpu": "4"},
+                conditions=[SimpleNamespace(type="Ready", status="True")],
+            ),
+        )
+        down = SimpleNamespace(
+            metadata=SimpleNamespace(name="down"),
+            spec=SimpleNamespace(unschedulable=False),
+            status=SimpleNamespace(
+                allocatable={"nvidia.com/gpu": "2"},
+                conditions=[SimpleNamespace(type="Ready", status="False")],
+            ),
+        )
+        drained = SimpleNamespace(
+            metadata=SimpleNamespace(name="drained"),
+            spec=SimpleNamespace(unschedulable=True),
+            status=SimpleNamespace(
+                allocatable={"nvidia.com/gpu": "1"},
+                conditions=[SimpleNamespace(type="Ready", status="True")],
+            ),
+        )
+        v1_mock = MagicMock()
+        v1_mock.list_node.return_value = SimpleNamespace(items=[healthy, down, drained])
+
+        with patch("kubeflow_mcp.common.utils.get_core_v1_api", return_value=v1_mock):
+            res = get_cluster_resources()
+
+        assert res["success"] is True
+        data = res["data"]
+        assert data["gpu_total"] == 4
+        assert data["gpu_unavailable"] == 3
+        assert data["gpu_by_resource"] == {"nvidia.com/gpu": 4}
+        assert data["nodes_with_gpu"] == 1
+        assert data["node_count"] == 3
+        assert "hint" not in data
+
+        drained_node = next(n for n in data["nodes"] if n["name"] == "drained")
+        assert drained_node["ready"] is True
+        assert drained_node["cordoned"] is True
+        assert drained_node["gpus"] == 1
+
+        down_node = next(n for n in data["nodes"] if n["name"] == "down")
+        assert down_node["ready"] is False
+        assert down_node["cordoned"] is False
+        assert down_node["gpus"] == 2
+
+    def test_get_cluster_resources_hints_when_every_gpu_is_unschedulable(self):
+        down = SimpleNamespace(
+            metadata=SimpleNamespace(name="down"),
+            spec=SimpleNamespace(unschedulable=False),
+            status=SimpleNamespace(
+                allocatable={"nvidia.com/gpu": "8"},
+                conditions=[SimpleNamespace(type="Ready", status="False")],
+            ),
+        )
+        cpu = SimpleNamespace(
+            metadata=SimpleNamespace(name="cpu"),
+            spec=SimpleNamespace(unschedulable=False),
+            status=SimpleNamespace(
+                allocatable={"cpu": "4"},
+                conditions=[SimpleNamespace(type="Ready", status="True")],
+            ),
+        )
+        v1_mock = MagicMock()
+        v1_mock.list_node.return_value = SimpleNamespace(items=[down, cpu])
+
+        with patch("kubeflow_mcp.common.utils.get_core_v1_api", return_value=v1_mock):
+            res = get_cluster_resources()
+
+        assert res["success"] is True
+        data = res["data"]
+        assert data["gpu_total"] == 0
+        assert data["gpu_unavailable"] == 8
+        assert data["nodes_with_gpu"] == 0
+        assert "8 GPU(s) exist but are on NotReady or cordoned nodes" in data["hint"]
+
+    def test_get_cluster_resources_tolerates_nodes_without_status_details(self):
+        bare = SimpleNamespace(
+            metadata=SimpleNamespace(name="bare-node"),
+            spec=SimpleNamespace(unschedulable=None),
+            status=SimpleNamespace(allocatable=None, conditions=None),
+        )
+        normal = SimpleNamespace(
+            metadata=SimpleNamespace(name="normal-node"),
+            spec=SimpleNamespace(unschedulable=False),
+            status=SimpleNamespace(
+                allocatable={"nvidia.com/gpu": "1"},
+                conditions=[SimpleNamespace(type="Ready", status="True")],
+            ),
+        )
+        v1_mock = MagicMock()
+        v1_mock.list_node.return_value = SimpleNamespace(items=[bare, normal])
+
+        with patch("kubeflow_mcp.common.utils.get_core_v1_api", return_value=v1_mock):
+            res = get_cluster_resources()
+
+        assert res["success"] is True
+        data = res["data"]
+        assert data["gpu_total"] == 1
+        assert data["node_count"] == 2
+
+    def test_get_cluster_resources_ignores_non_integer_gpu_quantities(self):
+        odd_node = SimpleNamespace(
+            metadata=SimpleNamespace(name="odd"),
+            spec=SimpleNamespace(unschedulable=False),
+            status=SimpleNamespace(
+                allocatable={"nvidia.com/gpu": "0", "amd.com/gpu": "invalid", "intel.com/gpu": "2"},
+                conditions=[SimpleNamespace(type="Ready", status="True")],
+            ),
+        )
+        v1_mock = MagicMock()
+        v1_mock.list_node.return_value = SimpleNamespace(items=[odd_node])
+
+        with patch("kubeflow_mcp.common.utils.get_core_v1_api", return_value=v1_mock):
+            res = get_cluster_resources()
+
+        assert res["success"] is True
+        data = res["data"]
+        assert data["gpu_total"] == 2
+        assert data["gpu_by_resource"] == {"intel.com/gpu": 2}
+
+    def test_pod_gpu_request_supports_multi_vendor(self):
+        from kubeflow_mcp.trainer.api.planning import _pod_gpu_request
+
+        pod = SimpleNamespace(
+            spec=SimpleNamespace(
+                init_containers=[
+                    SimpleNamespace(
+                        resources=SimpleNamespace(requests={"amd.com/gpu": "2"}),
+                        restart_policy="Never",
+                    )
+                ],
+                containers=[
+                    SimpleNamespace(
+                        resources=SimpleNamespace(limits={"gpu.intel.com/i915": "1"}),
+                    )
+                ],
+                overhead={"nvidia.com/gpu": "1"},
+            )
+        )
+        # peak from init (2) vs app container (1) = 2, + overhead (1) = 3
+        count = _pod_gpu_request(pod)
+        assert count == 3
+
 
 # ─── estimate_resources & model parameter parsing ───────────────────────────
 
