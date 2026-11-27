@@ -25,27 +25,31 @@ from kubeflow.trainer.constants import constants as trainer_constants
 
 from kubeflow_mcp.common import utils as mcp_utils
 from kubeflow_mcp.common.constants import ErrorCode
-from kubeflow_mcp.common.types import ToolError, ToolResponse, exception_details, is_k8s_not_found
+from kubeflow_mcp.common.types import (
+    ToolError,
+    ToolResponse,
+    exception_details,
+    is_k8s_forbidden,
+    is_k8s_not_found,
+)
 from kubeflow_mcp.core.security import (
     check_namespace_allowed,
     validate_namespace,
     validate_runtime_name,
 )
+from kubeflow_mcp.trainer.constants import TRAINER_CONTROLLER_LABEL_SELECTORS
 
 logger = logging.getLogger(__name__)
 
 _TRAINER_CRD_GROUP = "trainer.kubeflow.org"
 _MAX_TAIL_LINES = 1000
-_CONTROLLER_LABELS = [
-    "app.kubernetes.io/name=trainer,app.kubernetes.io/component=manager",
-    "app.kubernetes.io/name=trainer,app.kubernetes.io/part-of=kubeflow",
-]
 _LOG_TAIL_DEFAULT = 200
 
 
 _DEFAULT_CONTROLLER_NAMESPACES = ["kubeflow", "kubeflow-system"]
 
 _PATCH_ALLOWED_KEYS = frozenset({"spec", "metadata"})
+_CLUSTER_RUNTIME_KIND = "ClusterTrainingRuntime"
 _SPEC_ALLOWED_KEYS = frozenset({"template", "labels", "annotations"})
 
 
@@ -84,7 +88,7 @@ def _find_controller_pod(namespace: str | None = None):
 
     last_error: Exception | None = None
     for ns in namespaces:
-        for label in _CONTROLLER_LABELS:
+        for label in TRAINER_CONTROLLER_LABEL_SELECTORS:
             try:
                 pods = core.list_namespaced_pod(
                     namespace=ns,
@@ -176,7 +180,9 @@ def inspect_crd(name: str | None = None) -> dict[str, Any]:
             ).model_dump()
         return ToolError(
             error=str(e),
-            error_code=ErrorCode.KUBERNETES_ERROR,
+            error_code=ErrorCode.PERMISSION_DENIED
+            if is_k8s_forbidden(e)
+            else ErrorCode.KUBERNETES_ERROR,
             details=exception_details(e),
         ).model_dump()
 
@@ -288,7 +294,7 @@ def inspect_controller(
 
     except Exception as e:
         logger.warning("inspect_controller(%s, %s) failed: %s", view, namespace, e, exc_info=True)
-        if getattr(e, "status", None) == 403:
+        if is_k8s_forbidden(e):
             return ToolError(
                 error=f"Permission denied while looking up the controller pod: {e}",
                 error_code=ErrorCode.PERMISSION_DENIED,
@@ -479,7 +485,9 @@ def patch_runtime(
             ).model_dump()
         return ToolError(
             error=str(e),
-            error_code=ErrorCode.KUBERNETES_ERROR,
+            error_code=ErrorCode.PERMISSION_DENIED
+            if is_k8s_forbidden(e)
+            else ErrorCode.KUBERNETES_ERROR,
             details=exception_details(e),
         ).model_dump()
 
@@ -561,9 +569,26 @@ def create_runtime(
         logger.warning("create_runtime(%s) failed: %s", name, e, exc_info=True)
         return ToolError(
             error=str(e),
-            error_code=ErrorCode.KUBERNETES_ERROR,
+            error_code=ErrorCode.PERMISSION_DENIED
+            if is_k8s_forbidden(e)
+            else ErrorCode.KUBERNETES_ERROR,
             details=exception_details(e),
         ).model_dump()
+
+
+def _uses_cluster_runtime(job: dict[str, Any], name: str) -> bool:
+    """Whether a TrainJob's runtimeRef points at the ClusterTrainingRuntime ``name``.
+
+    ``kind`` and ``apiGroup`` are optional in a runtimeRef and default to
+    ClusterTrainingRuntime and the Trainer group, so a bare ``{"name": ...}``
+    still counts. A namespaced TrainingRuntime with the same name does not.
+    """
+    ref = (job.get("spec") or {}).get("runtimeRef") or {}
+    return (
+        ref.get("name") == name
+        and (ref.get("kind") or _CLUSTER_RUNTIME_KIND) == _CLUSTER_RUNTIME_KIND
+        and (ref.get("apiGroup") or trainer_constants.GROUP) == trainer_constants.GROUP
+    )
 
 
 def delete_runtime(
@@ -579,7 +604,11 @@ def delete_runtime(
         confirmed: Must be True to delete. False returns a preview with dependents.
 
     Returns:
-        dict: Preview with dependent jobs, or deletion result.
+        dict: Preview with dependent jobs, or deletion result. The preview carries
+        ``dependents_checked``; when it is False the TrainJob listing failed, so an
+        empty ``dependent_jobs`` and a zero count do not mean nothing depends on
+        the runtime. A confirmed delete returns an error instead of deleting when
+        the listing fails.
     """
     name_err = validate_runtime_name(name)
     if name_err is not None:
@@ -589,6 +618,7 @@ def delete_runtime(
         api = mcp_utils.get_custom_objects_api()
 
         dependent_jobs = []
+        check_exc: Exception | None = None
         try:
             jobs = api.list_cluster_custom_object(
                 group=trainer_constants.GROUP,
@@ -597,32 +627,70 @@ def delete_runtime(
                 _request_timeout=mcp_utils.K8S_TIMEOUT,
             )
             for job in jobs.get("items", []):
-                runtime_ref = job.get("spec", {}).get("runtimeRef", {})
-                if runtime_ref.get("name") == name:
+                if _uses_cluster_runtime(job, name):
                     dependent_jobs.append(
                         {
                             "name": job["metadata"]["name"],
                             "namespace": job["metadata"].get("namespace", "unknown"),
                         }
                     )
-        except Exception:
-            logger.debug("Could not list dependent jobs for runtime %s", name)
+        except Exception as e:
+            check_exc = e
+            logger.warning("Could not list TrainJobs that use runtime %s: %s", name, e)
+
+        # An empty list only means "no dependents" if the listing worked, so the
+        # preview says whether it did.
+        checked = check_exc is None
 
         if not confirmed:
-            return ToolResponse(
-                data={
-                    "action": "preview",
-                    "runtime": name,
-                    "dependent_jobs": dependent_jobs,
-                    "dependent_count": len(dependent_jobs),
-                    "warning": (
-                        f"{len(dependent_jobs)} TrainJob(s) reference this runtime. "
-                        "They will fail if the runtime is deleted."
-                        if dependent_jobs
-                        else "No dependent TrainJobs found."
-                    ),
-                    "message": "Set confirmed=True to delete this runtime.",
-                }
+            message = "Set confirmed=True to delete this runtime."
+            if not checked:
+                warning = (
+                    "Could not check which TrainJobs use this runtime, so any that do "
+                    "would fail if it were deleted."
+                )
+                message = "A confirmed delete is refused until the TrainJob listing works."
+            elif dependent_jobs:
+                warning = (
+                    f"{len(dependent_jobs)} TrainJob(s) reference this runtime. "
+                    "They will fail if the runtime is deleted."
+                )
+            else:
+                warning = "No dependent TrainJobs found."
+            data: dict[str, Any] = {
+                "action": "preview",
+                "runtime": name,
+                "dependent_jobs": dependent_jobs,
+                "dependent_count": len(dependent_jobs),
+                "dependents_checked": checked,
+                "warning": warning,
+                "message": message,
+            }
+            if check_exc is not None:
+                data["dependency_check_error"] = exception_details(check_exc)
+            return ToolResponse(data=data).model_dump()
+
+        # A confirmed call may be rechecking after a clean preview, so a failed
+        # check has to stop the delete rather than be reported after it.
+        if check_exc is not None:
+            error = (
+                f"Did not delete ClusterTrainingRuntime '{name}': "
+                "could not check which TrainJobs use it"
+            )
+            if is_k8s_forbidden(check_exc):
+                return ToolError(
+                    error=error,
+                    error_code=ErrorCode.PERMISSION_DENIED,
+                    details={
+                        **exception_details(check_exc),
+                        "hint": "Grant the server's service account list access to "
+                        "TrainJobs in all namespaces, then retry",
+                    },
+                ).model_dump()
+            return ToolError(
+                error=error,
+                error_code=ErrorCode.KUBERNETES_ERROR,
+                details=exception_details(check_exc),
             ).model_dump()
 
         api.delete_cluster_custom_object(
@@ -633,14 +701,13 @@ def delete_runtime(
             _request_timeout=mcp_utils.K8S_TIMEOUT,
         )
 
-        return ToolResponse(
-            data={
-                "runtime": name,
-                "deleted": True,
-                "message": f"ClusterTrainingRuntime '{name}' deleted successfully",
-                "dependent_jobs_affected": len(dependent_jobs),
-            }
-        ).model_dump()
+        result: dict[str, Any] = {
+            "runtime": name,
+            "deleted": True,
+            "message": f"ClusterTrainingRuntime '{name}' deleted successfully",
+            "dependent_jobs_affected": len(dependent_jobs),
+        }
+        return ToolResponse(data=result).model_dump()
 
     except Exception as e:
         logger.warning("delete_runtime(%s) failed: %s", name, e, exc_info=True)
@@ -651,6 +718,8 @@ def delete_runtime(
             ).model_dump()
         return ToolError(
             error=str(e),
-            error_code=ErrorCode.KUBERNETES_ERROR,
+            error_code=ErrorCode.PERMISSION_DENIED
+            if is_k8s_forbidden(e)
+            else ErrorCode.KUBERNETES_ERROR,
             details=exception_details(e),
         ).model_dump()

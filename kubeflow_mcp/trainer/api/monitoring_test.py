@@ -21,13 +21,17 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from kubeflow.trainer.backends.kubernetes.backend import KubernetesBackend
 from kubeflow.trainer.constants import constants as trainer_constants
+from kubernetes.client.exceptions import ApiException
 from tests.common import TestCase
 from urllib3.response import HTTPResponse
 
+from kubeflow_mcp.common.constants import ErrorCode
 from kubeflow_mcp.common.failures import FAILURE_PATTERNS, extract_failure_hint
 from kubeflow_mcp.core.resilience import CircuitState, get_breaker
 from kubeflow_mcp.core.server import _audit_wrap
+from kubeflow_mcp.trainer.api import monitoring
 from kubeflow_mcp.trainer.api.monitoring import (
     MAX_CURSOR_CHARS,
     MAX_LINE_CHARS,
@@ -38,6 +42,72 @@ from kubeflow_mcp.trainer.api.monitoring import (
     get_training_logs,
     wait_for_training,
 )
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "method"),
+    [
+        ("get_training_logs", "get_job_logs"),
+        ("get_training_events", "get_job_events"),
+        ("wait_for_training", "wait_for_job_status"),
+    ],
+)
+@pytest.mark.parametrize("status", [401, 403, 404, 500])
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_monitoring_classifies_api_errors(
+    tool_name: str, method: str, status: int, wrapped: bool
+) -> None:
+    error: Exception = ApiException(status=status)
+    if wrapped:
+        cause = error
+        error = RuntimeError("Trainer SDK request failed")
+        error.__cause__ = cause
+    client = MagicMock()
+    getattr(client, method).side_effect = error
+    with patch.object(monitoring, "get_trainer_client_for_namespace", return_value=client):
+        result = getattr(monitoring, tool_name)(name="job-a", namespace="team-b")
+    expected = (
+        ErrorCode.PERMISSION_DENIED
+        if status in (401, 403)
+        else ErrorCode.RESOURCE_NOT_FOUND
+        if status == 404
+        else ErrorCode.SDK_ERROR
+    )
+    assert result["success"] is False
+    assert result["error_code"] == expected
+    assert result["details"]["exception"] == type(error).__name__
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "method", "success"),
+    [
+        ("get_training_logs", "get_job_logs", ["Training output"]),
+        ("get_training_events", "get_job_events", []),
+        ("wait_for_training", "wait_for_job_status", SimpleNamespace(status="Complete")),
+    ],
+)
+@pytest.mark.parametrize("status", [403, 500])
+def test_monitoring_breaker_distinguishes_denials_from_outages(
+    tool_name: str, method: str, success: object, status: int
+) -> None:
+    breaker = get_breaker(tool_name)
+    error = RuntimeError("Trainer SDK request failed")
+    error.__cause__ = ApiException(status=status)
+    client = MagicMock()
+    getattr(client, method).side_effect = [error] * breaker.failure_threshold + [success]
+    wrapped = _audit_wrap(getattr(monitoring, tool_name))
+    with patch.object(monitoring, "get_trainer_client_for_namespace", return_value=client):
+        for _ in range(breaker.failure_threshold):
+            result = wrapped(name="job-a", namespace="team-b")
+            expected = ErrorCode.PERMISSION_DENIED if status == 403 else ErrorCode.SDK_ERROR
+            assert result["error_code"] == expected
+        result = wrapped(name="job-a", namespace="team-a")
+    if status == 403:
+        assert result["success"] is True
+        assert breaker.state == CircuitState.CLOSED
+    else:
+        assert result["error_code"] == ErrorCode.CIRCUIT_OPEN
+        assert breaker.state == CircuitState.OPEN
 
 
 def test_extract_failure_hint_openshift_pip_error():
@@ -242,6 +312,33 @@ def _make_mock_client(**method_returns):
 
 
 class TestGetTrainingLogs:
+    @pytest.mark.parametrize("since_line", [None, 0])
+    @pytest.mark.parametrize("pods_present", [False, True])
+    @patch(PATCH_CORE_V1)
+    @patch(PATCH_EFF_NS, return_value="workloads")
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_missing_pods_are_distinguished_from_empty_output(
+        self, mock_client_fn, _ns, _eff_ns, mock_v1_fn, pods_present, since_line
+    ):
+        mock_client_fn.return_value = _make_mock_client(get_job_logs=[])
+        mock_v1_fn.return_value.list_namespaced_pod.return_value = SimpleNamespace(
+            items=[_trainjob_pod("job", "node", index=0)] if pods_present else []
+        )
+        mock_v1_fn.return_value.read_namespaced_pod_log.return_value = ""
+        result = get_training_logs("job", since_line=since_line)
+        assert result["success"] is True
+        data = result["data"]
+        assert data["logs"] == ""
+        assert data["lines"] == 0
+        if pods_present:
+            assert "next_steps" not in data
+        else:
+            assert "Empty logs do not prove" in data["next_steps"][0]
+        if since_line is not None:
+            assert data["next_offset"] == 0
+            assert data["total_lines"] == 0
+
     @patch(PATCH_NS_CHECK, return_value=None)
     @patch(PATCH_CLIENT)
     def test_success(self, mock_client_fn, _ns):
@@ -978,6 +1075,30 @@ class TestGetTrainingEvents:
 class TestWaitForTraining:
     @patch(PATCH_NS_CHECK, return_value=None)
     @patch(PATCH_CLIENT)
+    @patch("kubeflow_mcp.common.utils.get_custom_objects_api")
+    def test_wait_recognizes_resumed_running_workers(self, mock_api_fn, mock_client_fn, _ns):
+        job = SimpleNamespace(
+            name="resumed-job",
+            status="Created",
+            num_nodes=2,
+            steps=[SimpleNamespace(name=f"node-{i}", status="Running") for i in range(2)],
+        )
+        mock_api_fn.return_value.get_namespaced_custom_object.return_value = {
+            "spec": {"suspend": False},
+            "status": {"conditions": [{"type": "Suspended", "status": "False"}]},
+        }
+
+        backend = MagicMock()
+        backend.get_job.return_value = job
+        mock_client_fn.return_value.wait_for_job_status.side_effect = lambda **kwargs: (
+            KubernetesBackend.wait_for_job_status(backend, **kwargs)
+        )
+        result = wait_for_training("resumed-job", target_statuses="Running", namespace="workloads")
+        assert result["data"]["status"] == "Running"
+        assert result["data"]["reached"] is True
+
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
     def test_success(self, mock_client_fn, _ns):
         job = SimpleNamespace(status="Complete")
         mock_client_fn.return_value = _make_mock_client(wait_for_job_status=job)
@@ -1167,6 +1288,36 @@ class TestWaitForTraining:
         assert result["data"]["reached"] is False
         sleep.assert_not_called()
 
+    @pytest.mark.parametrize("observed_status", ["Running", "Complete"])
+    @patch(PATCH_NS_CHECK, return_value=None)
+    @patch(PATCH_CLIENT)
+    def test_reconciles_status_before_sdk_target_and_completion_checks(
+        self, mock_client_fn, _ns, observed_status: str
+    ) -> None:
+        """A resumed job can reach a target or complete before the SDK recognizes it."""
+        from kubeflow.trainer.backends.kubernetes.backend import KubernetesBackend
+
+        backend = SimpleNamespace(get_job=lambda name: SimpleNamespace(status="Created"))
+        mock_client_fn.return_value.wait_for_job_status.side_effect = lambda **kwargs: (
+            KubernetesBackend.wait_for_job_status(backend, **kwargs)
+        )
+        with (
+            patch(
+                "kubeflow_mcp.trainer.api.monitoring.get_training_job_status",
+                return_value=observed_status,
+            ),
+            patch(
+                "kubeflow.trainer.backends.kubernetes.backend.time.sleep",
+                side_effect=AssertionError("A reconciled status must finish on the first poll"),
+            ) as sleep,
+        ):
+            result = wait_for_training(
+                "resumed-job", target_statuses="Running", timeout_seconds=2, polling_interval=1
+            )
+        assert result["data"]["status"] == observed_status
+        assert result["data"]["reached"] is (observed_status == "Running")
+        sleep.assert_not_called()
+
     @patch(PATCH_NS_CHECK, return_value=None)
     @patch(PATCH_CLIENT)
     def test_passes_a_status_callback_to_the_sdk(self, mock_client_fn, _ns):
@@ -1276,3 +1427,91 @@ class TestWaitForTraining:
         assert res_clamped["error_code"] == "VALIDATION_ERROR"
         assert "polling_interval must be strictly less than timeout_seconds" in res_clamped["error"]
         mock_client_fn.assert_not_called()
+
+
+@pytest.mark.parametrize("status", ["Created", "Running"])
+@pytest.mark.parametrize("blocked", [False, True])
+def test_wait_timeout_keeps_last_status_and_pod_blockers(status: str, blocked: bool) -> None:
+    client = MagicMock()
+
+    def timeout(**kwargs):
+        kwargs["callbacks"][0](SimpleNamespace(status=status))
+        raise TimeoutError("not complete")
+
+    client.wait_for_job_status.side_effect = timeout
+    diagnostics = {
+        "pods": [{"name": "node-0", "phase": "Pending"}],
+        "blocking_reasons": ["Insufficient nvidia.com/gpu"] if blocked else [],
+    }
+    with (
+        patch(PATCH_NS_CHECK, return_value=None),
+        patch(PATCH_CLIENT, return_value=client),
+        patch("kubeflow_mcp.trainer.api.monitoring.get_training_job_status", return_value=status),
+        patch(
+            "kubeflow_mcp.trainer.api.monitoring.get_training_pod_diagnostics",
+            return_value=diagnostics,
+        ),
+    ):
+        result = wait_for_training("my-job", timeout_seconds=10)
+    assert result["data"]["status"] == status
+    assert result["data"]["reached"] is False
+    assert result["data"]["blocking_reasons"] == diagnostics["blocking_reasons"]
+    hint = result["data"]["hint"]
+    if blocked:
+        assert "blocking_reasons" in hint
+    elif status == "Running":
+        assert "wait_for_training again" in hint
+        assert "scheduling issues" not in hint
+    else:
+        assert "get_training_events" in hint
+
+
+@pytest.mark.parametrize("cursor", [False, True])
+@pytest.mark.parametrize("pods_exist", [False, True])
+def test_empty_logs_distinguish_unknown_steps_from_absent_pods(
+    cursor: bool, pods_exist: bool
+) -> None:
+    client = MagicMock()
+    client.get_job_logs.return_value = iter(())
+    client.get_job.return_value = SimpleNamespace(steps=[])
+    api = MagicMock()
+    api.list_namespaced_pod.return_value.items = (
+        [
+            SimpleNamespace(
+                metadata=SimpleNamespace(
+                    labels={
+                        trainer_constants.JOBSET_RJOB_NAME_LABEL: "node",
+                        trainer_constants.JOB_INDEX_LABEL: str(i),
+                    }
+                )
+            )
+            for i in range(2)
+        ]
+        if pods_exist
+        else []
+    )
+    with (
+        patch(PATCH_NS_CHECK, return_value=None),
+        patch(PATCH_CLIENT, return_value=client),
+        patch("kubeflow_mcp.trainer.api.monitoring.get_core_v1_api", return_value=api),
+        patch(
+            "kubeflow_mcp.trainer.api.monitoring.get_trainer_effective_namespace",
+            return_value="workloads",
+        ),
+    ):
+        result = get_training_logs("my-job", step="node-5", since_line=0 if cursor else None)
+    assert result["success"] is True
+    hint = result["data"]["next_steps"][0]
+    if pods_exist:
+        assert "Available steps: node-0, node-1" in hint
+        assert "deleted" not in hint
+    else:
+        assert "No pods remain" in hint
+    api.read_namespaced_pod_log.assert_not_called()
+
+
+@pytest.fixture(autouse=True)
+def _offline_pod_diagnostics():
+    """Pod detail parsing is exercised separately with Kubernetes model fixtures."""
+    with patch("kubeflow_mcp.trainer.api.monitoring.get_training_pod_diagnostics", return_value={}):
+        yield

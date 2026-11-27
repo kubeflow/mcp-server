@@ -67,6 +67,19 @@ def pipeline_version_to_dict(version: Any) -> dict[str, Any]:
     }
 
 
+def experiment_to_dict(experiment: Any) -> dict[str, Any]:
+    """Convert a ``V2beta1Experiment`` into a JSON-safe dict."""
+    return {
+        "experiment_id": getattr(experiment, "experiment_id", None),
+        "name": getattr(experiment, "display_name", None),
+        "description": getattr(experiment, "description", None),
+        "namespace": getattr(experiment, "namespace", None),
+        "storage_state": _state(getattr(experiment, "storage_state", None)),
+        "created_at": _iso(getattr(experiment, "created_at", None)),
+        "last_run_created_at": _iso(getattr(experiment, "last_run_created_at", None)),
+    }
+
+
 def _task_to_dict(task: Any) -> dict[str, Any]:
     child_pods = []
     child_pods_truncated = False

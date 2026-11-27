@@ -4,183 +4,62 @@
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE) [![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue)](https://www.python.org) [![Join Slack](https://img.shields.io/badge/Join_Slack-blue?logo=slack)](https://www.kubeflow.org/docs/about/community/#kubeflow-slack-channels) [![Coverage Status](https://coveralls.io/repos/github/kubeflow/mcp-server/badge.svg?branch=main)](https://coveralls.io/github/kubeflow/mcp-server?branch=main) [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/kubeflow/mcp-server)
 
-Proposal: [KEP-936](https://github.com/kubeflow/community/tree/master/proposals/936-kubeflow-mcp-server) · [ROADMAP](ROADMAP.md) · [SECURITY](SECURITY.md) · [CONTRIBUTING](CONTRIBUTING.md)
+[Quickstart](docs/quickstart.md) · [Architecture](ARCHITECTURE.md) · [Blog](https://blog.kubeflow.org/introducing-kubeflow-mcp/) · [KEP-936](https://github.com/kubeflow/community/tree/master/proposals/936-kubeflow-mcp-server) · [Roadmap](ROADMAP.md) · [Security](SECURITY.md) · [Contributing](CONTRIBUTING.md)
 
 ## Overview
 
-The Kubeflow MCP Server exposes Kubeflow Training operations as [Model Context Protocol](https://modelcontextprotocol.io/) tools, enabling AI agents (Claude, Cursor, Claude Code, or any custom agents etc.) to plan, submit, monitor, and manage training jobs through natural language — without users needing to learn Kubernetes or the Kubeflow SDK directly.
+The Kubeflow MCP Server exposes Kubeflow operations as [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) tools. AI agents (Claude, Cursor, Claude Code, or custom agents) can plan, submit, monitor, and manage ML workloads in natural language — without requiring users to write Kubernetes YAML or Kubeflow SDK boilerplate.
 
-### Benefits
+### Why Kubeflow MCP Server?
 
-- **Agent-Native**: Tools auto-discovered via MCP — no manual API wiring
-- **Guided Workflow**: Phase ordering with next-step hints (Plan → Discover → Train → Monitor)
-- **Preview-Before-Submit**: Every mutating operation requires explicit confirmation
-- **Security-First**: Persona gating, namespace enforcement, input validation, bearer/JWT auth
-- **Multi-Platform**: Auto-detects OpenShift, EKS, GKE with platform-specific guidance
-- **Token-Efficient**: Progressive/semantic modes compress 23 tools into 2-3 meta-tools
-- **Extensible**: Plugin architecture for additional Kubeflow clients (trainer, spark, pipelines; TODO: optimizer, hub)
+- **Agent-Native**: Tools are auto-discovered via MCP with guided workflow phases (`Plan → Discover → Run → Monitor`)
+- **Preview-Before-Submit**: Every mutating operation previews its action first and requires explicit `confirmed=True`
+- **Security-First**: Persona gating (`readonly` by default), namespace allowlists, input validation, and Bearer/JWT HTTP auth
+- **Multi-Platform**: Auto-detects OpenShift, EKS, and GKE with platform-specific guidance
+- **Token-Efficient**: Progressive and semantic tool modes compress tools into 2–3 meta-tools
+- **Modular Clients**: Load only what you need (`trainer`, `spark`, `pipelines`, `optimizer`; planned: `hub`)
 
 ## Demo
 
 [![Kubeflow MCP Server](https://img.youtube.com/vi/cZ2BP5hQjc8/0.jpg)](https://youtu.be/cZ2BP5hQjc8)
 
-## Get Started
+## Quick Start
 
-> New here? See the **[Quickstart & Troubleshooting guide](docs/quickstart.md)** for a step-by-step path from installation to a working MCP client.
-
-### Install from PyPI
-
-```bash
-pip install kubeflow-mcp
-```
-
-### Install from source (development)
-
-```bash
-git clone https://github.com/kubeflow/mcp-server.git
-cd mcp-server
-make install-dev
-```
+> New to Kubeflow MCP? Follow the **[Quickstart & Troubleshooting Guide](docs/quickstart.md)** for step-by-step cluster verification, RBAC checks, and common fixes.
 
 ### Prerequisites
 
-Before starting the Kubeflow MCP Server, make sure the following requirements
-are available:
+- **Python** 3.10, 3.11, or 3.12
+- **Kubernetes cluster** with `kubectl` and a configured `kubeconfig` (see [RBAC Configuration](ARCHITECTURE.md#rbac-configuration))
+- **Kubeflow component(s)** installed for the clients you enable: Kubeflow Trainer, Spark Operator, and/or Kubeflow Pipelines
 
-- Python 3.10, 3.11, or 3.12
-- A running Kubernetes cluster
-- `kubectl` installed and available in `PATH`
-- A kubeconfig configured for the target cluster
-- Kubeflow Trainer installed in the cluster
-- Kubeflow Trainer CRDs and at least one `ClusterTrainingRuntime`
-- Kubernetes permissions for the namespace you train in, plus cluster-scoped
-  read access for planning and runtime discovery (see
-  [RBAC Configuration](ARCHITECTURE.md#rbac-configuration))
-
-Verify the connection and your permissions in the target namespace. Each
-`can-i` command should print `yes`:
+### Install & Run
 
 ```bash
-kubectl config current-context
-kubectl auth can-i create trainjobs.trainer.kubeflow.org -n <namespace>
-kubectl auth can-i list pods -n <namespace>
-kubectl auth can-i get pods --subresource=log -n <namespace>
-```
+# Default (Trainer client)
+pip install kubeflow-mcp
 
-The checks below need cluster-scoped read access, so they can return
-`Forbidden` for a namespace-scoped user even when Kubeflow Trainer is installed
-correctly. Without that access, the tools that read these resources
-(`get_cluster_resources`, `check_compatibility`, `list_runtimes`) fail; tools
-that work on jobs in your namespace are unaffected.
+# Optional client extras
+pip install "kubeflow-mcp[pipelines]"   # Kubeflow Pipelines (kfp)
+pip install "kubeflow-mcp[spark]"       # Kubeflow Spark
 
-```bash
-kubectl get nodes
-kubectl get crd trainjobs.trainer.kubeflow.org
-kubectl get clustertrainingruntimes
-```
-
-### Run the server
-
-```bash
+# Start the MCP server (stdio transport by default)
 kubeflow-mcp serve
 ```
 
-### Run with Docker
-
-Pre-built multi-arch images are published to GHCR on every release:
-
-```bash
-docker run --rm -p 8000:8000 \
-  -e KUBEFLOW_MCP_AUTH_TOKEN=my-secret-token \
-  ghcr.io/kubeflow/mcp-server:latest
-```
-
-The server listens on `http://localhost:8000/mcp`.
-
-Container and Kubernetes probes are available without MCP authentication:
-
-```text
-GET /health  # liveness: the server process is accepting HTTP requests
-GET /ready   # readiness: configured clients imported and packaged resources loaded
-```
-
-`/ready` returns 200 only when both `clients_ready` and `resources_ready` are true. It does
-not contact Kubernetes or other APIs, so it is not a live dependency check. A missing
-packaged resource Markdown file keeps `/ready` at 503 even though `/health` and registered
-tools remain available; check the server logs and package contents rather than cluster
-dependencies.
-
-**Environment variables**
-
-| Variable | Default | Description |
-|---|---|---|
-| `MCP_TRANSPORT` | `stdio` | Transport protocol (`http`, `stdio`; `sse` is deprecated) |
-| `KUBEFLOW_MCP_AUTH_TOKEN` | _(none)_ | Bearer token for HTTP auth |
-| `KUBEFLOW_MCP_JWKS_URI` | _(none)_ | JWKS endpoint for JWT verification (production) |
-| `KUBEFLOW_MCP_JWT_ISSUER` | _(none)_ | Expected JWT issuer |
-| `KUBEFLOW_MCP_JWT_AUDIENCE` | _(none)_ | Expected JWT audience |
-| `KUBEFLOW_MCP_CLIENTS` | `trainer` | Comma-separated client modules to load |
-| `KUBEFLOW_MCP_PERSONA` | `readonly` | Tool persona (`readonly`, `data-scientist`, `ml-engineer`, `platform-admin`, or a custom persona from the policy file) |
-| `KUBEFLOW_MCP_INSTRUCTION_TIER` | `full` | Instruction verbosity (`full`, `compact`, `minimal`) |
-| `KUBEFLOW_MCP_ALLOWED_HOSTS` | _(loopback)_ | Comma-separated `Host` header allowlist for DNS rebinding protection; `:*` port wildcard supported (e.g. `mcp.example.com,mcp.example.com:*`) |
-| `KUBEFLOW_MCP_ALLOWED_ORIGINS` | _(loopback)_ | Comma-separated `Origin` header allowlist; `:*` port wildcard supported (e.g. `https://mcp.example.com`) |
-| `KUBEFLOW_MCP_DNS_REBINDING_PROTECTION` | `true` | Set `false` to disable Host/Origin validation (not recommended) |
-| `LOG_FORMAT` | _(auto)_ | Log format (`json`, `console`); defaults to `console` in an interactive terminal and `json` otherwise |
-| `LOG_LEVEL` | `INFO` | Log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
-
-**MCP client config (HTTP transport)**
-
-```json
-{
-  "mcpServers": {
-    "kubeflow": {
-      "url": "http://localhost:8000/mcp",
-      "headers": { "Authorization": "Bearer my-secret-token" }
-    }
-  }
-}
-```
-
-For in-cluster deployments, replace `localhost:8000` with the Kubernetes Service address and mount `KUBEFLOW_MCP_AUTH_TOKEN` from a Secret.
-
-> **Note:** DNS rebinding protection allows only loopback `Host`/`Origin` headers by default. When exposing the server through a Service or Ingress, set `KUBEFLOW_MCP_ALLOWED_HOSTS` (e.g. `KUBEFLOW_MCP_ALLOWED_HOSTS=kubeflow-mcp.kubeflow.svc:*,mcp.example.com`) or requests will be rejected with HTTP 421.
-
-### Example: Fine-tune a model via AI agent
-
-Once connected, your AI agent can run a complete training workflow through natural language:
-
-```
-User: "Fine-tune gemma-2b on the alpaca dataset"
-
-Agent calls: check_compatibility()        → ✅ K8s 1.29, Trainer CRD installed
-Agent calls: get_cluster_resources()      → 4x A100 GPUs available
-Agent calls: estimate_resources("google/gemma-2b") → needs ~16GB GPU, 1x A100
-Agent calls: list_runtimes()              → torchtune-llama, torchtune-gemma, ...
-Agent calls: fine_tune(                   → preview config (confirmed=False)
-    model="hf://google/gemma-2b",
-    dataset="hf://tatsu-lab/alpaca",
-    runtime="torchtune-gemma-2b"
-)
-Agent calls: fine_tune(..., confirmed=True) → TrainJob "train-gemma-abc" created
-Agent calls: get_training_logs("train-gemma-abc") → training progress...
-```
-
-All mutating tools require `confirmed=True` and return a preview before making changes.
-
-### MCP Client Config
-
+### Connect an MCP Client
 
 <details>
-<summary>Cursor</summary>
+<summary><b>Cursor</b> (stdio)</summary>
 
-Add to `.cursor/mcp.json` (or use the `.mcp.json` at the repo root for local dev):
+Add to `.cursor/mcp.json`:
 
 ```json
 {
   "mcpServers": {
     "kubeflow": {
-      "command": "uv",
-      "args": ["run", "kubeflow-mcp", "serve"]
+      "command": "kubeflow-mcp",
+      "args": ["serve"]
     }
   }
 }
@@ -189,7 +68,7 @@ Add to `.cursor/mcp.json` (or use the `.mcp.json` at the repo root for local dev
 </details>
 
 <details>
-<summary>Claude Code</summary>
+<summary><b>Claude Code</b> (stdio)</summary>
 
 ```bash
 claude mcp add kubeflow -- kubeflow-mcp serve
@@ -197,227 +76,208 @@ claude mcp add kubeflow -- kubeflow-mcp serve
 
 </details>
 
-## Tools
+<details>
+<summary><b>Docker & HTTP Transport</b> (remote / in-cluster)</summary>
 
-23 tools organized by workflow phase:
+Pre-built multi-arch images are published to GHCR on every release. Replace `<your-secret-token>` with a unique secret before running:
+
+```bash
+docker run --rm -p 127.0.0.1:8000:8000 \
+  -v ~/.kube/config:/kubeconfig:ro \
+  -e KUBECONFIG=/kubeconfig \
+  -e KUBEFLOW_MCP_AUTH_TOKEN="<your-secret-token>" \
+  ghcr.io/kubeflow/mcp-server:latest
+```
+
+Connect your MCP client to `http://localhost:8000/mcp`:
+
+```json
+{
+  "mcpServers": {
+    "kubeflow": {
+      "url": "http://localhost:8000/mcp",
+      "headers": { "Authorization": "Bearer <your-secret-token>" }
+    }
+  }
+}
+```
+
+For local clusters (e.g., Kind/Minikube) whose kubeconfig points to `127.0.0.1`, use `--network host` (Linux) or a kubeconfig targeting `host.docker.internal` so the container can reach the host API server. For in-cluster Kubernetes deployments, omit the kubeconfig mount (the pod uses its ServiceAccount credentials) and set `KUBEFLOW_MCP_ALLOWED_HOSTS` when exposing behind a Service or Ingress. Unauthenticated container probes are exposed at `GET /health` (liveness) and `GET /ready` (readiness).
+
+</details>
+
+### Example Workflow
+
+Start the server with `data-scientist` (the default `readonly` persona blocks job submission):
+
+```bash
+kubeflow-mcp serve --persona data-scientist
+```
+
+```text
+User: "Fine-tune gemma-2b on the alpaca dataset"
+
+Agent → check_compatibility()                      # K8s + Trainer CRD verified
+Agent → get_cluster_resources()                    # 4x A100 GPUs available
+Agent → estimate_resources("google/gemma-2b")      # Needs ~16GB GPU, 1x A100
+Agent → list_runtimes()                            # torchtune-gemma-2b found
+Agent → fine_tune(..., confirmed=False)            # Returns preview for approval
+Agent → fine_tune(..., confirmed=True)             # TrainJob "train-gemma-abc" created
+Agent → get_training_logs("train-gemma-abc")       # Streams training progress
+```
+
+## Agent Skills
+
+[Agent Skills catalog](docs/skills/catalog.md): a skeleton for independently released skill
+plugins. Register the catalog, then install a plugin by replacing `<plugin-name>` with its name:
+
+```bash
+# Claude Code
+claude plugin marketplace add kubeflow/mcp-server
+claude plugin install "<plugin-name>@kubeflow-mcp"
+
+# Codex CLI
+codex plugin marketplace add kubeflow/mcp-server
+codex plugin add "<plugin-name>@kubeflow-mcp"
+```
+
+## Available Tools
+
+### Trainer (`--clients trainer`, default — 23 tools)
 
 | Phase | Tools | Description |
 |-------|-------|-------------|
-| Planning | `pre_flight`, `check_compatibility`, `get_cluster_resources`, `estimate_resources` | Environment validation and resource estimation |
-| Discovery | `list_training_jobs`, `get_training_job`, `list_runtimes`, `get_runtime` | Browse jobs and available runtimes |
-| Training | `fine_tune`, `run_custom_training`, `run_container_training` | Submit LoRA/QLoRA fine-tuning, custom scripts, or container jobs |
-| Monitoring | `get_training_logs`, `get_training_events`, `wait_for_training` | Track progress, debug failures |
-| Lifecycle | `delete_training_job`, `update_training_job` | Manage existing jobs (ownership-guarded) |
-| Platform | `inspect_crd`, `inspect_controller`, `patch_runtime`, `create_runtime`, `delete_runtime` | Cluster inspection and runtime management |
-| Health | `health_check`, `get_server_logs` | Server diagnostics |
+| **Planning** | `pre_flight`, `check_compatibility`, `get_cluster_resources`, `estimate_resources` | Environment checks and GPU/memory estimation |
+| **Discovery** | `list_training_jobs`, `get_training_job`, `list_runtimes`, `get_runtime` | Browse TrainJobs and ClusterTrainingRuntimes |
+| **Training** | `fine_tune`, `run_custom_training`, `run_container_training` | Submit LoRA/QLoRA fine-tuning, Python scripts, or container jobs |
+| **Monitoring** | `get_training_logs`, `get_training_events`, `wait_for_training` | Track job status, logs, and Kubernetes events |
+| **Lifecycle** | `update_training_job`, `delete_training_job` | Suspend, resume, or delete MCP-managed jobs |
+| **Platform** | `inspect_crd`, `inspect_controller`, `create_runtime`, `patch_runtime`, `delete_runtime` | Cluster inspection and runtime administration |
+| **Health** | `health_check`, `get_server_logs` | Server diagnostics |
 
-### Spark tools
+### Pipelines (`--clients pipelines` — 14 tools)
 
-Enabled with `--clients trainer,spark` (requires the `kubeflow[spark]` extra):
-
-| Phase | Tools | Description |
-|-------|-------|-------------|
-| Discovery | `list_spark_sessions`, `get_spark_session` | Browse SparkConnect sessions |
-| Sessions | `create_spark_session`, `delete_spark_session` | Provision and tear down SparkConnect sessions (ownership-guarded) |
-| Monitoring | `get_spark_session_logs` | Read driver logs |
-
-Sessions created through MCP are labelled `kubeflow-mcp/managed-by=mcp`. Non-admin
-personas may only delete sessions carrying that label; use the `platform-admin`
-persona to manage sessions created outside MCP.
-
-Creation supports CPU/memory resources and an optional `service_account_name` for
-the driver. The selected account must already exist and have namespace-scoped
-Spark workload RBAC; see `spark://guides/session-patterns`. GPU resource keys are
-rejected because SDK 0.5.0's SparkConnect builder does not preserve them.
-SDK 0.5.0 batch jobs (`FileJob`/`FuncJob`) are separate MCP follow-up scope in
-[#331](https://github.com/kubeflow/mcp-server/issues/331); this session module is
-only part of [#5](https://github.com/kubeflow/mcp-server/issues/5).
-
-### Pipelines client
-
-Enable with `--clients trainer,pipelines`. Wraps `kubeflow.pipelines.PipelinesClient`.
+Requires `pip install "kubeflow-mcp[pipelines]"` and Kubeflow Pipelines on the cluster.
 
 | Phase | Tools | Description |
 |-------|-------|-------------|
-| Discovery | `list_pipelines`, `get_pipeline` | Browse registered pipelines and their versions |
-| Monitoring | `list_pipeline_runs`, `get_pipeline_run`, `get_pipeline_logs` | Follow runs, read task pod logs |
-| Runs | `create_pipeline_run`, `stop_pipeline_run`, `retry_pipeline_run` | Start, stop or retry runs (preview first) |
+| **Discovery** | `list_pipelines`, `get_pipeline`, `list_experiments`, `get_experiment` | Browse pipelines, versions, and experiments |
+| **Authoring** | `create_pipeline`, `delete_pipeline` | Compile and register KFP v2 pipelines from Python, or delete them |
+| **Monitoring** | `list_pipeline_runs`, `get_pipeline_run`, `get_pipeline_logs` | Follow runs and read task pod logs |
+| **Runs** | `create_pipeline_run`, `stop_pipeline_run`, `retry_pipeline_run`, `create_experiment`, `delete_experiment` | Launch, stop, or retry runs and manage experiments |
 
-Requires `kfp` on the server host. Upstream `kfp` 2.x pins `kubernetes<31`
-([kubeflow/pipelines#13390](https://github.com/kubeflow/pipelines/issues/13390)), which
-cannot coexist with the `kubernetes>=35` client this repository's own development and
-test environments resolve, so `kfp` is not installed by default and not part of the
-`all` extra. Use a pip environment for the server host and install the Kubeflow SDK's
-`pipelines` extra in the same resolution as the MCP server:
+### Spark (`--clients spark` — 5 tools)
 
-```bash
-pip install kubeflow-mcp 'kubeflow[pipelines]'
-# or from a checkout of this repository:
-pip install . 'kubeflow[pipelines]'
-```
+Requires `kubeflow[spark]` extra.
 
-pip then resolves the `kubernetes` python client to a `kfp`-compatible release (`<31`);
-the Kubeflow SDK itself accepts any `>=27.2,<36`. If pip prints a warning that a
-`kubeflow` release "does not provide the extra 'pipelines'", the resolution picked an
-older `kubeflow-mcp` (the `0.1.x` releases pin `kubeflow==0.4.0`, which has no
-`pipelines` extra) and `kfp` was skipped: upgrade `kubeflow-mcp` to `>=0.2.x` and
-re-install.
+| Phase | Tools | Description |
+|-------|-------|-------------|
+| **Discovery** | `list_spark_sessions`, `get_spark_session` | Browse SparkConnect sessions |
+| **Sessions** | `create_spark_session`, `delete_spark_session` | Provision and delete MCP-managed SparkConnect sessions |
+| **Monitoring** | `get_spark_session_logs` | Read Spark driver logs |
 
-Validate the real SDK contracts in the environment where `kfp` is installed,
-from a checkout of this repository:
+### Optimizer (`--clients optimizer` — 17 tools)
 
-```bash
-pip install pytest
-python -m pytest kubeflow_mcp/pipelines/api/sdk_contracts_test.py
-```
+Requires Katib v0.19 on the cluster, and the `katib.kubeflow.org/metrics-collector-injection=enabled` label on the experiment namespace.
 
-Set `KUBEFLOW_MCP_PIPELINES_URL`, `KUBEFLOW_MCP_PIPELINES_TOKEN` or
-`KUBEFLOW_MCP_PIPELINES_NAMESPACE` when the defaults do not fit. Only registered pipelines
-can be run, by name. Stop and retry need the `ml-engineer` persona because KFP runs carry
-no MCP ownership label.
+| Phase | Tools | Description |
+|-------|-------|-------------|
+| **Planning** | `katib_pre_flight` | Check the Experiment CRD, controller readiness, and admission webhooks |
+| **Discovery** | `list_hpo_experiments`, `get_hpo_experiment`, `get_hpo_experiment_status`, `get_trial`, `get_successful_trials`, `list_suggestions` | Browse Katib experiments, trials, and suggestions |
+| **Optimization** | `create_hpo_experiment`, `create_hpo_experiment_from_spec` | Create experiments from flat parameters or a full `V1beta1Experiment` manifest |
+| **Monitoring** | `get_hpo_experiment_trials`, `get_best_trial`, `get_suggestion`, `get_hpo_experiment_trial_logs`, `get_hpo_experiment_events` | Follow trials and read the best result, trial logs, and events |
+| **Lifecycle** | `wait_for_hpo_experiment`, `update_hpo_experiment`, `delete_hpo_experiment` | Wait for completion, change the trial budget or parallelism, or delete MCP-managed experiments |
 
+Katib has no pause: lowering `parallel_trial_count` makes Katib delete trials, newest first and whatever their state, so `update_hpo_experiment` is destructive and its preview lists those trials. See `optimizer://guides/hpo-patterns`.
 
-### Requirements
+## Personas & Configuration
 
-| MCP Server | Kubeflow Trainer | Kubeflow SDK | Python      | Kubernetes |
-|------------|------------------|--------------|-------------|------------|
-| 0.2.x (upcoming) | >= 2.3.0, < 2.4.0 | >= 0.5.0, < 0.6.0 | 3.10 - 3.12 | >= 1.27    |
-| 0.1.x  | == 2.2.1         | == 0.4.1     | 3.10 - 3.12 | >= 1.27    |
+`--persona` controls which tools are exposed. Each level includes all tools from the level above it:
 
-## CLI Reference
+| Persona | Scope |
+|---------|-------|
+| `readonly` *(default)* | Planning, browsing resources/jobs, reading logs and events |
+| `data-scientist` | Submitting training/pipeline runs, deleting MCP-created jobs/sessions |
+| `ml-engineer` | Container training, job lifecycle controls, pipeline authoring, CRD/controller inspection |
+| `platform-admin` | Full access, including runtime and pipeline/experiment administration |
 
-### `kubeflow-mcp serve`
+Custom personas can also be defined in `~/.kf-mcp-policy.yaml` (see [Architecture](ARCHITECTURE.md#security-model)).
 
-```bash
-# Modules: trainer, spark, pipelines, optimizer (stub), hub (stub)
-# Persona: readonly | data-scientist | ml-engineer | platform-admin
-# Mode: full | progressive | semantic
-# Instruction tier: full | compact | minimal
-# Transport: stdio | http | sse (deprecated)
-# Auth token: bearer token for HTTP auth (dev/staging)
-# OTel endpoint: optional OTLP HTTP endpoint for tracing
-# Log level: DEBUG | INFO | WARNING | ERROR
-# Log format: console | json (auto-detected if omitted)
-# No banner: suppress the FastMCP startup banner
-kubeflow-mcp serve \
-  --clients trainer,spark \
-  --persona ml-engineer \
-  --mode full \
-  --instruction-tier full \
-  --transport stdio \
-  --auth-token SECRET \
-  --otel-endpoint URL \
-  --log-level INFO \
-  --log-format console \
-  --no-banner
-```
+### CLI Reference (`kubeflow-mcp serve`)
 
-| Flag | Values |
-| ---- | ------ |
-| `--clients` | `trainer`, `spark`, `optimizer` (stub), `hub` (stub) |
-| `--persona` | `readonly` \| `data-scientist` \| `ml-engineer` \| `platform-admin` |
-| `--mode` | `full` \| `progressive` \| `semantic` |
-| `--instruction-tier` | `full` \| `compact` \| `minimal` |
-| `--transport` | `stdio` \| `http` \| `sse` |
-| `--auth-token` | bearer token for HTTP auth (dev/staging) |
-| `--otel-endpoint` | OTLP HTTP endpoint (optional tracing) |
-| `--log-level` | `DEBUG` \| `INFO` \| `WARNING` \| `ERROR` |
-| `--log-format` | `console` \| `json` (auto-detected if omitted) |
-| `--no-banner` | suppress startup banner |
-
-`--mode progressive` exposes 3 meta-tools (~85 tokens) for hierarchical discovery. `--mode semantic` exposes 2 meta-tools (~69 tokens) using embedding search. Both reduce token consumption significantly for agent workflows.
-
-`--persona` controls which tools are exposed. Each persona includes the tools of the one above it:
-
-| Persona | Use it for |
-|---|---|
-| `readonly` (default) | Planning, browsing jobs and runtimes, reading logs and events |
-| `data-scientist` | Submitting fine-tuning and custom training, waiting for jobs, deleting MCP-created jobs |
-| `ml-engineer` | Container training, suspending/resuming jobs, inspecting CRDs and the controller |
-| `platform-admin` | All tools, including creating, patching and deleting runtimes |
-
-A custom persona defined under `personas:` in `~/.kf-mcp-policy.yaml` can be used the same way, from `--persona`, `KUBEFLOW_MCP_PERSONA` or the config file. An unknown persona from any of them stops `serve` with an error.
+| Flag | Values / Default | Description |
+|------|------------------|-------------|
+| `--clients` | `trainer`, `spark`, `pipelines`, `optimizer` *(default: `trainer`)* | Comma-separated client modules to enable |
+| `--persona` | `readonly` \| `data-scientist` \| `ml-engineer` \| `platform-admin` | Tool access persona |
+| `--mode` | `full` \| `progressive` \| `semantic` | `progressive` (3 meta-tools) and `semantic` (2 meta-tools) reduce token usage |
+| `--instruction-tier` | `full` \| `compact` \| `minimal` | Agent instruction verbosity |
+| `--transport` | `stdio` \| `http` *(default: `stdio`)* | Transport protocol (`sse` is deprecated) |
+| `--auth-token` | `<token>` | Bearer token for HTTP authentication |
+| `--otel-endpoint` | `<url>` | Optional OTLP HTTP endpoint for OpenTelemetry tracing |
+| `--log-level` | `DEBUG` \| `INFO` \| `WARNING` \| `ERROR` | Server log verbosity |
+| `--log-format` | `console` \| `json` | Auto-detected if omitted |
+| `--no-banner` | flag | Suppress the startup banner |
 
 <details>
-<summary> HTTP Authentication</summary>
+<summary><b>Environment Variables & HTTP Authentication</b></summary>
 
-When using `--transport http`, configure auth to secure the endpoint:
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MCP_TRANSPORT` | `stdio` | Transport protocol (`http`, `stdio`) |
+| `KUBEFLOW_MCP_CLIENTS` | `trainer` | Comma-separated client modules |
+| `KUBEFLOW_MCP_PERSONA` | `readonly` | Active persona name |
+| `KUBEFLOW_MCP_INSTRUCTION_TIER` | `full` | Instruction verbosity (`full`, `compact`, `minimal`) |
+| `KUBEFLOW_MCP_AUTH_TOKEN` | _(none)_ | Bearer token for HTTP auth (dev/staging) |
+| `KUBEFLOW_MCP_JWKS_URI` | _(none)_ | JWKS endpoint for JWT verification (production) |
+| `KUBEFLOW_MCP_JWT_ISSUER` | _(none)_ | Expected JWT issuer (required with `KUBEFLOW_MCP_JWKS_URI`) |
+| `KUBEFLOW_MCP_JWT_AUDIENCE` | _(none)_ | Expected JWT audience (required with `KUBEFLOW_MCP_JWKS_URI`) |
+| `KUBEFLOW_MCP_ALLOWED_HOSTS` | _(loopback)_ | Allowed `Host` headers for DNS rebinding protection |
+| `KUBEFLOW_MCP_ALLOWED_ORIGINS` | _(loopback)_ | Allowed `Origin` headers |
+| `KUBEFLOW_MCP_DNS_REBINDING_PROTECTION` | `true` | Set `false` to disable Host/Origin checks (not recommended) |
+| `KUBEFLOW_MCP_PIPELINES_URL` | _(auto)_ | Override Kubeflow Pipelines endpoint URL |
+| `KUBEFLOW_MCP_PIPELINES_TOKEN` | _(auto)_ | Override Kubeflow Pipelines auth token |
+| `KUBEFLOW_MCP_PIPELINES_NAMESPACE` | _(auto)_ | Override Kubeflow Pipelines namespace |
+| `LOG_FORMAT` / `LOG_LEVEL` | `auto` / `INFO` | Logging format and level |
 
-```bash
-# Simple API key (dev/staging)
-kubeflow-mcp serve --transport http --auth-token my-secret-token
-
-# Or via env var
-export KUBEFLOW_MCP_AUTH_TOKEN=my-secret-token
-kubeflow-mcp serve --transport http
-
-# JWT verification (production)
-export KUBEFLOW_MCP_JWKS_URI=https://auth.example.com/.well-known/jwks.json
-export KUBEFLOW_MCP_JWT_ISSUER=https://auth.example.com
-export KUBEFLOW_MCP_JWT_AUDIENCE=kubeflow-mcp
-kubeflow-mcp serve --transport http
-```
-
-Without auth configured, the server logs a warning that the HTTP endpoint is open.
+`KUBEFLOW_MCP_JWT_ISSUER` and `KUBEFLOW_MCP_JWT_AUDIENCE` are required with `KUBEFLOW_MCP_JWKS_URI`; the server refuses to start without them.
+Without `--auth-token` or JWT settings on `--transport http`, the server logs a warning that the endpoint is open.
 
 </details>
 
 ## Observability
 
-OpenTelemetry tracing is optional and can be enabled without changing tool code.
+Optional OpenTelemetry tracing can be enabled with `--otel-endpoint http://localhost:4318` (or `OTEL_EXPORTER_OTLP_ENDPOINT`) after installing `uv sync --group otel`. See [examples/observability/README.md](examples/observability/README.md) for collector setup, span attributes, and log correlation.
 
-- Install optional dependencies from source: `uv sync --group otel`
-- Enable tracing with CLI flag or env var:
+## Compatibility
 
-```bash
-kubeflow-mcp serve --otel-endpoint http://localhost:4318
-# or
-export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
-kubeflow-mcp serve
-```
-
-Each tool invocation emits an `execute_tool <tool>` span with attributes:
-`tool.name`, `tool.args_preview`, `tool.success`, `tool.duration_ms`, `kubeflow.persona`, and `correlation_id`.
-It is a child of the `tools/call <tool>` span that FastMCP creates, which continues the
-caller's trace when the request `_meta` carries a W3C `traceparent`.
-
-JSON logs and `get_server_logs` entries include `trace_id` and `span_id` while a span is
-active, so logs can be joined to traces. A missing or malformed `traceparent` just starts
-a new trace.
+| MCP Server | Kubeflow Trainer | Kubeflow SDK | Python | Kubernetes |
+|------------|------------------|--------------|--------|------------|
+| `0.2.x` *(upcoming)* | `>= 2.3.0, < 2.4.0` | `>= 0.5.0, < 0.6.0` | `3.10 – 3.12` | `>= 1.27` |
+| `0.1.x` | `== 2.2.1` | `== 0.4.1` | `3.10 – 3.12` | `>= 1.27` |
 
 ## Development
 
 ```bash
+git clone https://github.com/kubeflow/mcp-server.git
+cd mcp-server
 make install-dev                  # setup environment
 make verify                       # lint + format check
-make test-python                  # run tests
-make inspector                    # launch MCP Inspector (stdio)
-make inspector TRANSPORT=http     # Inspector + Streamable HTTP (start server separately)
-make inspector TRANSPORT=sse      # Inspector + SSE (deprecated; start server separately)
+make test-python                  # run unit tests
+make inspector                    # launch MCP Inspector (stdio; or TRANSPORT=http)
 ```
 
-## Community
+## Community & Documentation
 
-- **Slack**: Join [#kubeflow-ml-experience](https://www.kubeflow.org/docs/about/community/#kubeflow-slack-channels) on CNCF Slack
-- **Meetings**: Attend the [Kubeflow SDK and ML Experience](https://bit.ly/kf-ml-experience) bi-weekly call
-- **GitHub**: Issues and contributions at [kubeflow/mcp-server](https://github.com/kubeflow/mcp-server)
-
-## Documentation
-
-- **[Quickstart & Troubleshooting](docs/quickstart.md)**: Install, connect a client, verify connectivity, and diagnose common failures
-- **[CONTRIBUTING](CONTRIBUTING.md)**: Development workflow and PR guidelines
-- **[ROADMAP](ROADMAP.md)**: Project roadmap
-- **[SECURITY](SECURITY.md)**: Vulnerability reporting; see [ARCHITECTURE.md#security-model](ARCHITECTURE.md#security-model) for threat model, RBAC, and hardening
-- **[Client conventions](docs/CONVENTIONS.md)**: Checklist for adding client modules
-- **[KEP-936](https://github.com/kubeflow/community/tree/master/proposals/936-kubeflow-mcp-server)**: Design proposal
+- **Slack**: [#kubeflow-wg-agents](https://app.slack.com/client/T08PSQ7BQ/C0BQQRSPK6Z) and [#kubeflow-mcp-server](https://app.slack.com/client/T08PSQ7BQ/C0BSRBPNDHP) on [CNCF Slack](https://www.kubeflow.org/docs/about/community/#kubeflow-slack-channels)
+- **Meetings**: [Kubeflow WG Agents Meeting Notes](https://bit.ly/kubeflow-mcp-wg-notes)
+- **Blog**: [Introducing Kubeflow MCP: An Agent Interface for Cloud Native AI at Scale](https://blog.kubeflow.org/introducing-kubeflow-mcp/)
+- **Docs**: [Quickstart](docs/quickstart.md) · [Architecture](ARCHITECTURE.md) · [Client Conventions](docs/CONVENTIONS.md) · [Contributing](CONTRIBUTING.md) · [Roadmap](ROADMAP.md) · [Security](SECURITY.md)
 
 ## License
 
 Apache License 2.0 — see [LICENSE](LICENSE).
 
-## ✨ Contributors
-
-We couldn't have done it without these incredible people:
+## Contributors
 
 <a href="https://github.com/kubeflow/mcp-server/graphs/contributors">
   <img src="https://contrib.rocks/image?repo=kubeflow/mcp-server" />

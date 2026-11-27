@@ -16,6 +16,7 @@
 
 import importlib.metadata
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -465,6 +466,130 @@ def test_estimate_resources_returns_sdk_error_for_api_failure():
 
     assert result["success"] is False
     assert result["error_code"] == "SDK_ERROR"
+
+
+@pytest.mark.parametrize("deny_pods", [False, True])
+def test_cluster_gpu_capacity_separate_from_allocations(deny_pods):
+    from kubernetes import client as k8s
+    from kubernetes.client.exceptions import ApiException
+
+    from kubeflow_mcp.trainer.api.planning import get_cluster_resources
+
+    api = MagicMock()
+    api.list_node.return_value.items = [
+        k8s.V1Node(
+            metadata=k8s.V1ObjectMeta(name=name),
+            status=k8s.V1NodeStatus(
+                allocatable={"nvidia.com/gpu": "1", "cpu": "8", "memory": "32Gi"}
+            ),
+        )
+        for name in ("gpu-a", "gpu-b")
+    ]
+
+    def pod(phase, node):
+        return k8s.V1Pod(
+            spec=k8s.V1PodSpec(
+                node_name=node,
+                containers=[
+                    k8s.V1Container(
+                        name="node",
+                        resources=k8s.V1ResourceRequirements(limits={"nvidia.com/gpu": "1"}),
+                    )
+                ],
+            ),
+            status=k8s.V1PodStatus(phase=phase),
+        )
+
+    api.list_pod_for_all_namespaces.return_value.metadata = k8s.V1ListMeta()
+    api.list_pod_for_all_namespaces.return_value.items = [
+        pod("Running", "gpu-a"),
+        pod("Pending", None),
+        pod("Succeeded", "gpu-b"),
+        pod("Failed", "gpu-b"),
+    ]
+    if deny_pods:
+        api.list_pod_for_all_namespaces.side_effect = ApiException(status=403)
+    with patch("kubeflow_mcp.common.utils.get_core_v1_api", return_value=api):
+        result = get_cluster_resources()["data"]
+    assert result["gpu_total"] == 2
+    assert result["gpu_available"] == (None if deny_pods else 1)
+    assert result["gpu_allocated"] == (None if deny_pods else 1)
+    assert result["nodes"][0]["gpu_available"] == (None if deny_pods else 0)
+    assert result["nodes"][1]["gpu_available"] == (None if deny_pods else 1)
+    assert api.list_pod_for_all_namespaces.call_args.kwargs["_request_timeout"] > 0
+
+
+def test_gpu_requests_include_init_peak_and_restartable_sidecars():
+    from kubernetes import client as k8s
+
+    from kubeflow_mcp.trainer.api.planning import _pod_gpu_request
+
+    def container(name, gpus, restart_policy=None):
+        return k8s.V1Container(
+            name=name,
+            restart_policy=restart_policy,
+            resources=k8s.V1ResourceRequirements(requests={"nvidia.com/gpu": str(gpus)}),
+        )
+
+    pod = k8s.V1Pod(
+        spec=k8s.V1PodSpec(
+            containers=[container("trainer", "1e0")],
+            init_containers=[container("sidecar", 1, "Always"), container("initializer", 3)],
+        )
+    )
+    assert _pod_gpu_request(pod) == 4
+    pod.spec.init_containers = [container("sidecar", 2, "Always")]
+    assert _pod_gpu_request(pod) == 3
+
+
+@pytest.mark.parametrize("outcome", ["complete", "page-error", "page-cap"])
+def test_gpu_allocations_require_a_complete_paginated_snapshot(outcome: str) -> None:
+    from kubernetes import client as k8s
+    from kubernetes.client.exceptions import ApiException
+
+    from kubeflow_mcp.trainer.api.planning import get_cluster_resources
+
+    api = MagicMock()
+    api.list_node.return_value.items = [
+        k8s.V1Node(
+            metadata=k8s.V1ObjectMeta(name="gpu-a"),
+            status=k8s.V1NodeStatus(allocatable={"nvidia.com/gpu": "2"}),
+        )
+    ]
+    pod = k8s.V1Pod(
+        spec=k8s.V1PodSpec(
+            node_name="gpu-a",
+            containers=[
+                k8s.V1Container(
+                    name="trainer",
+                    resources=k8s.V1ResourceRequirements(requests={"nvidia.com/gpu": "1"}),
+                )
+            ],
+        ),
+        status=k8s.V1PodStatus(phase="Running"),
+    )
+    first = k8s.V1PodList(items=[pod], metadata=k8s.V1ListMeta(_continue="next-page"))
+    last = k8s.V1PodList(items=[pod], metadata=k8s.V1ListMeta())
+    if outcome == "page-error":
+        last = ApiException(status=410, reason="Expired continuation token")
+    api.list_pod_for_all_namespaces.side_effect = [first, last]
+    if outcome == "page-cap":
+        api.list_pod_for_all_namespaces.side_effect = None
+        api.list_pod_for_all_namespaces.return_value = first
+    with (
+        patch("kubeflow_mcp.common.utils.get_core_v1_api", return_value=api),
+        patch("kubeflow_mcp.trainer.constants.MAX_GPU_POD_PAGES", 2),
+    ):
+        result = get_cluster_resources()["data"]
+    assert result["gpu_total"] == 2
+    assert result["gpu_allocated"] == (2 if outcome == "complete" else None)
+    assert result["gpu_available"] == (0 if outcome == "complete" else None)
+    calls = api.list_pod_for_all_namespaces.call_args_list
+    assert len(calls) == 2
+    assert calls[0].kwargs["limit"] > 0
+    assert calls[0].kwargs["_continue"] is None
+    assert calls[1].kwargs["_continue"] == "next-page"
+    assert calls[0].kwargs["field_selector"] == "status.phase!=Succeeded,status.phase!=Failed"
 
 
 # ─── _check_trainer_crd ─────────────────────────────────────────────────────
@@ -1007,3 +1132,104 @@ class TestPreFlight:
         res = pre_flight(model="meta-llama/Llama-3.1-70B")
         data = res["data"]
         assert not any("consider QLoRA" in rec for rec in data["recommendations"])
+
+
+@pytest.mark.parametrize("tool", [get_cluster_resources, check_compatibility])
+@pytest.mark.parametrize("status", [401, 403, 500])
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_planning_classifies_kubernetes_errors(tool: Any, status: int, wrapped: bool) -> None:
+    from kubernetes.client.exceptions import ApiException
+
+    error: Exception = ApiException(status=status)
+    if wrapped:
+        cause = error
+        error = RuntimeError("Kubernetes request failed")
+        error.__cause__ = cause
+    target = (
+        "kubeflow_mcp.common.utils.get_core_v1_api"
+        if tool is get_cluster_resources
+        else "kubeflow_mcp.trainer.api.planning._check_k8s_version"
+    )
+    with patch(target, side_effect=error):
+        result = tool()
+    assert result["error_code"] == (
+        "PERMISSION_DENIED" if status in (401, 403) else "KUBERNETES_ERROR"
+    )
+
+
+@pytest.mark.parametrize("check", ["version", "crd"])
+@pytest.mark.parametrize("status", [401, 403, 404, 500])
+@pytest.mark.parametrize("wrapping", ["direct", "cause", "context", "nested"])
+def test_compatibility_classifies_required_api_failures(
+    mock_k8s_apis: dict[str, MagicMock], check: str, status: int, wrapping: str
+) -> None:
+    from kubernetes.client.exceptions import ApiException
+
+    error: Exception = ApiException(status=status)
+    if wrapping != "direct":
+        cause = error
+        error = RuntimeError("Kubernetes request failed")
+        if wrapping == "context":
+            error.__context__ = cause
+        else:
+            error.__cause__ = cause
+        if wrapping == "nested":
+            cause = error
+            error = RuntimeError("Compatibility check failed")
+            error.__cause__ = cause
+    version_api = MagicMock()
+    version_api.get_code.return_value = SimpleNamespace(git_version="v1.34.2")
+    crd_api = MagicMock()
+    crd_api.read_custom_resource_definition.return_value = SimpleNamespace(
+        spec=SimpleNamespace(versions=[SimpleNamespace(name=MIN_TRAINER_CRD_VERSION, served=True)])
+    )
+    operation = (
+        version_api.get_code if check == "version" else crd_api.read_custom_resource_definition
+    )
+    operation.side_effect = error
+    with (
+        patch("kubeflow_mcp.common.utils.get_version_api", return_value=version_api),
+        patch("kubernetes.client.ApiextensionsV1Api", return_value=crd_api),
+    ):
+        result = check_compatibility()
+    if status in (401, 403):
+        assert result["success"] is False
+        assert result["error_code"] == "PERMISSION_DENIED"
+    else:
+        assert result["success"] is True
+        assert result["data"]["compatible"] is False
+        key = "kubernetes_version" if check == "version" else "trainer_crd"
+        assert result["data"]["checks"][key]["status"] == "fail"
+
+
+@pytest.mark.parametrize("step", range(4), ids=["compatibility", "cluster", "estimate", "runtimes"])
+@pytest.mark.parametrize("code", ["PERMISSION_DENIED", "SDK_ERROR", "VALIDATION_ERROR"])
+def test_pre_flight_propagates_failed_checks(step: int, code: str) -> None:
+    from kubeflow_mcp.core.server import _inject_meta
+
+    error = {"success": False, "error": "Check failed", "error_code": code}
+    with (
+        patch(
+            "kubeflow_mcp.trainer.api.planning.check_compatibility",
+            return_value={"success": True, "data": {"compatible": True, "blockers": []}},
+        ) as compat,
+        patch(
+            "kubeflow_mcp.trainer.api.planning.get_cluster_resources",
+            return_value={"success": True, "data": {"gpu_total": 1}},
+        ) as cluster,
+        patch(
+            "kubeflow_mcp.trainer.api.planning.estimate_resources",
+            return_value={"success": True, "data": {}},
+        ) as estimate,
+        patch(
+            "kubeflow_mcp.trainer.api.discovery.list_runtimes",
+            return_value={"success": True, "data": {"runtimes": []}},
+        ) as runtimes,
+    ):
+        checks = [compat, cluster, estimate, runtimes]
+        checks[step].return_value = error
+        result = pre_flight(model="test/model")
+        for later in checks[step + 1 :]:
+            later.assert_not_called()
+    assert result == error
+    assert "_meta" not in _inject_meta(result, "pre_flight")

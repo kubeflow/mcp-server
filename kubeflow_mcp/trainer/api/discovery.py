@@ -22,23 +22,38 @@ from typing import Any
 
 from kubeflow.trainer.constants import constants as trainer_constants
 
-from kubeflow_mcp.common.constants import ErrorCode
-from kubeflow_mcp.common.types import ToolError, ToolResponse, exception_details, is_k8s_not_found
+from kubeflow_mcp.common.constants import TOOL_PHASES, ErrorCode
+from kubeflow_mcp.common.types import (
+    ToolError,
+    ToolResponse,
+    exception_details,
+    is_k8s_forbidden,
+    is_k8s_not_found,
+)
 from kubeflow_mcp.common.utils import (
     get_core_v1_api,
     get_custom_objects_api,
     get_trainer_client,
     get_trainer_client_for_namespace,
     get_trainer_effective_namespace,
+    get_training_job_status,
+)
+from kubeflow_mcp.core.policy import (
+    apply_policy_filters,
+    get_allowed_tools,
+    get_effective_persona,
+    is_read_only,
 )
 from kubeflow_mcp.core.security import (
     check_namespace_allowed,
     validate_k8s_name,
     validate_runtime_name,
 )
+from kubeflow_mcp.trainer.api.pod_diagnostics import get_training_pod_diagnostics
 
 logger = logging.getLogger(__name__)
 
+_TRAINING_TOOLS = set(TOOL_PHASES["training"])
 _PACKAGES_POD_TIMEOUT = 60
 _PACKAGES_POLL_INTERVAL = 3
 # Upper bound on the pip-list log read. A package row is well under 100 bytes,
@@ -206,7 +221,7 @@ def list_training_jobs(
             jr = job.runtime if hasattr(job, "runtime") else None
             job_data = {
                 "name": job.name,
-                "status": job.status if hasattr(job, "status") else "Unknown",
+                "status": get_training_job_status(job, namespace),
                 "runtime": _trainjob_runtime_to_mcp(jr),
                 "created_at": _trainjob_created_at_to_mcp(job),
             }
@@ -228,7 +243,7 @@ def list_training_jobs(
     except Exception as e:
         return ToolError(
             error=str(e),
-            error_code=ErrorCode.SDK_ERROR,
+            error_code=ErrorCode.PERMISSION_DENIED if is_k8s_forbidden(e) else ErrorCode.SDK_ERROR,
             details=exception_details(e),
         ).model_dump()
 
@@ -248,7 +263,9 @@ def get_training_job(name: str, namespace: str | None = None) -> dict[str, Any]:
         - ``num_nodes`` (when available)
         - ``steps`` (each step's ``name``, pod ``status``, ``pod``, ``device``,
           and ``device_count``; failed steps first, at most ``MAX_JOB_STEPS``)
-        - ``step_summary`` (step counts by status).
+        - ``step_summary`` (step counts by status)
+        - ``pods`` (readiness, restarts, container failures and scheduling conditions)
+          and ``blocking_reasons`` (best-effort, bounded diagnostics).
 
     Raises:
         ToolError: If job not found (``RESOURCE_NOT_FOUND``).
@@ -266,7 +283,7 @@ def get_training_job(name: str, namespace: str | None = None) -> dict[str, Any]:
         job = client.get_job(name=name)
 
         jr = job.runtime if hasattr(job, "runtime") else None
-        status = job.status if hasattr(job, "status") else "Unknown"
+        status = get_training_job_status(job, namespace)
         steps, step_summary = _trainjob_steps_to_mcp(job)
 
         next_steps: list[str] = []
@@ -309,6 +326,7 @@ def get_training_job(name: str, namespace: str | None = None) -> dict[str, Any]:
             data["num_nodes"] = num_nodes
         if next_steps:
             data["next_steps"] = next_steps
+        data.update(get_training_pod_diagnostics(name, namespace))
 
         return ToolResponse(data=data).model_dump()
 
@@ -320,7 +338,7 @@ def get_training_job(name: str, namespace: str | None = None) -> dict[str, Any]:
             ).model_dump()
         return ToolError(
             error=str(e),
-            error_code=ErrorCode.SDK_ERROR,
+            error_code=ErrorCode.PERMISSION_DENIED if is_k8s_forbidden(e) else ErrorCode.SDK_ERROR,
             details=exception_details(e),
         ).model_dump()
 
@@ -360,7 +378,7 @@ def list_runtimes() -> dict[str, Any]:
     except Exception as e:
         return ToolError(
             error=str(e),
-            error_code=ErrorCode.SDK_ERROR,
+            error_code=ErrorCode.PERMISSION_DENIED if is_k8s_forbidden(e) else ErrorCode.SDK_ERROR,
             details=exception_details(e),
         ).model_dump()
 
@@ -408,6 +426,19 @@ def _get_runtime_image(name: str, runtime_obj: Any = None) -> str | None:
     return None
 
 
+def _can_create_pods() -> bool:
+    """get_runtime is read-only, but include_packages creates a Pod.
+
+    Only allow it when the persona and policy still expose a training tool and read_only is off.
+    """
+    if is_read_only():
+        return False
+    tools = get_allowed_tools(get_effective_persona())
+    if tools is None:
+        tools = _TRAINING_TOOLS
+    return bool(apply_policy_filters(set(tools)) & _TRAINING_TOOLS)
+
+
 def _fetch_packages_via_pod(runtime_name: str, runtime_obj: Any = None) -> dict[str, Any]:
     """Create a lightweight Pod to run ``pip list`` using the runtime's image.
 
@@ -417,6 +448,12 @@ def _fetch_packages_via_pod(runtime_name: str, runtime_obj: Any = None) -> dict[
     The pod includes emptyDir volumes for writable directories so it works
     on platforms with read-only root filesystems.
     """
+    if not _can_create_pods():
+        return {
+            "packages_error": "Listing packages creates a Pod, which this persona/policy "
+            "does not allow (needs a training persona and no read_only policy)"
+        }
+
     image = _get_runtime_image(runtime_name, runtime_obj=runtime_obj)
     if not image:
         return {
@@ -509,7 +546,7 @@ def _fetch_packages_via_pod(runtime_name: str, runtime_obj: Any = None) -> dict[
         packages = []
         for line in logs.strip().splitlines():
             parts = line.split()
-            if len(parts) >= 2 and parts[0] not in ("Package", "---"):
+            if len(parts) >= 2 and parts[0] != "Package" and parts[0].strip("-"):
                 packages.append({"name": parts[0], "version": parts[1]})
         return {"packages": packages, "total": len(packages)}
 
@@ -613,6 +650,6 @@ def get_runtime(name: str, include_packages: bool = False) -> dict[str, Any]:
             ).model_dump()
         return ToolError(
             error=str(e),
-            error_code=ErrorCode.SDK_ERROR,
+            error_code=ErrorCode.PERMISSION_DENIED if is_k8s_forbidden(e) else ErrorCode.SDK_ERROR,
             details=exception_details(e),
         ).model_dump()

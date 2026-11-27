@@ -42,6 +42,37 @@ def is_k8s_not_found(exc: Exception) -> bool:
     return False
 
 
+def has_k8s_status(exc: BaseException, *statuses: int) -> bool:
+    """Return True if *exc* or anything in its cause/context chain has one of *statuses*.
+
+    The SDK can wrap an ``ApiException`` more than once, so the whole chain is
+    walked rather than a single level. Matching on the ``status`` attribute, not
+    the message text, avoids false hits on unrelated errors.
+    """
+    pending: list[BaseException] = [exc]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if getattr(current, "status", None) in statuses:
+            return True
+        pending.extend(e for e in (current.__cause__, current.__context__) if e is not None)
+    return False
+
+
+def is_k8s_forbidden(exc: BaseException) -> bool:
+    """Return True for Kubernetes 401/403 responses.
+
+    These mean the caller lacks access, not that the cluster is unhealthy, so
+    tools report them as ``PERMISSION_DENIED`` — a code the circuit breaker
+    treats as neutral. Reporting them as ``SDK_ERROR`` would let one user's
+    denied requests open the shared per-tool breaker for everyone.
+    """
+    return has_k8s_status(exc, 401, 403)
+
+
 def exception_details(exc: Exception) -> dict[str, Any]:
     """Extract structured details from an exception for ToolError.details.
 

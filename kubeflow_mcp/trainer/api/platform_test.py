@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -443,7 +444,77 @@ def test_delete_runtime_preview_lists_dependent_trainjobs(mock_k8s_apis):
         {"name": "job-b", "namespace": "ml"},
     ]
     assert "2 TrainJob(s)" in data["warning"]
+    assert data["dependents_checked"] is True
     api.delete_cluster_custom_object.assert_not_called()
+
+
+def test_delete_runtime_preview_reports_failed_dependency_check(mock_k8s_apis):
+    api = mock_k8s_apis["custom"]
+    api.list_cluster_custom_object.side_effect = ApiException(status=403, reason="Forbidden")
+
+    result = delete_runtime("torchtune-llama", confirmed=False)
+
+    data = verify_tool_success(result)
+    assert data["dependents_checked"] is False
+    assert data["dependent_count"] == 0
+    assert data["warning"].startswith("Could not check which TrainJobs use this runtime")
+    assert data["message"].startswith("A confirmed delete is refused")
+    assert data["dependency_check_error"]["exception"] == "ApiException"
+    api.delete_cluster_custom_object.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("list_error", "error_code"),
+    [
+        (ApiException(status=403, reason="Forbidden"), PERMISSION_DENIED),
+        (ApiException(status=500, reason="Internal Server Error"), KUBERNETES_ERROR),
+    ],
+)
+def test_delete_runtime_confirmed_refuses_when_check_fails(mock_k8s_apis, list_error, error_code):
+    api = mock_k8s_apis["custom"]
+    api.list_cluster_custom_object.side_effect = list_error
+
+    result = delete_runtime("torchtune-llama", confirmed=True)
+
+    verify_tool_error(result, error_code=error_code)
+    assert result["error"].startswith("Did not delete ClusterTrainingRuntime 'torchtune-llama'")
+    assert result["details"]["exception"] == "ApiException"
+    assert ("hint" in result["details"]) is (error_code == PERMISSION_DENIED)
+    api.delete_cluster_custom_object.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("runtime_ref", "counted"),
+    [
+        ({"name": "torchtune-llama"}, True),
+        ({"name": "torchtune-llama", "kind": "ClusterTrainingRuntime"}, True),
+        (
+            {
+                "name": "torchtune-llama",
+                "kind": "ClusterTrainingRuntime",
+                "apiGroup": trainer_constants.GROUP,
+            },
+            True,
+        ),
+        ({"name": "torchtune-llama", "kind": "TrainingRuntime"}, False),
+        ({"name": "torchtune-llama", "apiGroup": "example.com"}, False),
+        ({"name": "other-runtime"}, False),
+        (None, False),
+    ],
+)
+def test_delete_runtime_counts_only_jobs_on_the_cluster_runtime(
+    mock_k8s_apis, runtime_ref, counted
+):
+    job = create_mock_trainjob(name="job-a", namespace="ml")
+    job["spec"]["runtimeRef"] = runtime_ref
+    api = mock_k8s_apis["custom"]
+    api.list_cluster_custom_object.return_value = {"items": [job]}
+
+    result = delete_runtime("torchtune-llama", confirmed=False)
+
+    data = verify_tool_success(result)
+    assert data["dependents_checked"] is True
+    assert data["dependent_count"] == (1 if counted else 0)
 
 
 def test_delete_runtime_confirmed_removes_runtime(mock_k8s_apis):
@@ -523,8 +594,9 @@ def test_inspect_controller_missing_pod_is_still_not_found(mock_k8s_apis, scan_d
     verify_tool_error(result, error_code=RESOURCE_NOT_FOUND)
 
 
+@pytest.mark.parametrize("controller_name", ["trainer", "kubeflow-trainer"])
 def test_inspect_controller_finds_pod_despite_forbidden_namespace(
-    mock_k8s_apis, scan_default_namespaces
+    mock_k8s_apis, scan_default_namespaces, controller_name
 ):
     core = mock_k8s_apis["core_v1"]
     pod = MagicMock()
@@ -532,10 +604,11 @@ def test_inspect_controller_finds_pod_despite_forbidden_namespace(
     pod.metadata.namespace = "kubeflow-system"
     pod.status.phase = "Running"
 
-    def list_pods(namespace, **_kwargs):
+    def list_pods(namespace, label_selector, **_kwargs):
         if namespace == "kubeflow":
             raise ApiException(status=403, reason="Forbidden")
-        return MagicMock(items=[pod])
+        selector = f"app.kubernetes.io/name={controller_name},app.kubernetes.io/component=manager"
+        return MagicMock(items=[pod] if label_selector == selector else [])
 
     core.list_namespaced_pod.side_effect = list_pods
     core.read_namespaced_pod_log.return_value = "controller started"
@@ -847,3 +920,63 @@ def test_delete_runtime_generic_exception(mock_k8s_apis):
 
     error = verify_tool_error(result, error_code=KUBERNETES_ERROR)
     assert "Internal Error" in error["error"]
+
+
+@pytest.mark.parametrize(
+    ("tool", "api_key", "method", "kwargs"),
+    [
+        (
+            inspect_crd,
+            "apiextensions",
+            "read_custom_resource_definition",
+            {"name": "trainjobs.trainer.kubeflow.org"},
+        ),
+        (inspect_controller, "core_v1", "read_namespaced_pod_log", {}),
+        (
+            patch_runtime,
+            "custom",
+            "get_cluster_custom_object",
+            {"name": "runtime-a", "patch": {"spec": {"labels": {"team": "a"}}}, "confirmed": True},
+        ),
+        (
+            create_runtime,
+            "custom",
+            "create_cluster_custom_object",
+            {"name": "runtime-a", "spec": {"template": {}}, "confirmed": True},
+        ),
+        (
+            delete_runtime,
+            "custom",
+            "list_cluster_custom_object",
+            {"name": "runtime-a", "confirmed": True},
+        ),
+        (
+            delete_runtime,
+            "custom",
+            "delete_cluster_custom_object",
+            {"name": "runtime-a", "confirmed": True},
+        ),
+    ],
+)
+@pytest.mark.parametrize("status", [401, 403, 500])
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_platform_classifies_api_errors(
+    mock_k8s_apis: dict[str, MagicMock],
+    tool: Any,
+    api_key: str,
+    method: str,
+    kwargs: dict[str, Any],
+    status: int,
+    wrapped: bool,
+) -> None:
+    error: Exception = ApiException(status=status)
+    if wrapped:
+        cause = error
+        error = RuntimeError("Trainer request failed")
+        error.__cause__ = cause
+    getattr(mock_k8s_apis[api_key], method).side_effect = error
+    result = tool(**kwargs)
+    expected = PERMISSION_DENIED if status in (401, 403) else KUBERNETES_ERROR
+    verify_tool_error(result, error_code=expected)
+    if tool is delete_runtime and method == "list_cluster_custom_object":
+        mock_k8s_apis["custom"].delete_cluster_custom_object.assert_not_called()

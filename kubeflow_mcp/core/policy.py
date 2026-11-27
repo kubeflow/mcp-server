@@ -74,6 +74,7 @@ def _get_policy_paths() -> list[Path]:
 PERSONAS: dict[str, dict[str, Any]] = {
     "readonly": {
         "tools": [
+            # Trainer
             "pre_flight",
             "check_compatibility",
             "get_cluster_resources",
@@ -96,11 +97,27 @@ PERSONAS: dict[str, dict[str, Any]] = {
             "list_pipeline_runs",
             "get_pipeline_run",
             "get_pipeline_logs",
+            "list_experiments",
+            "get_experiment",
+            # Optimizer (12 read-only tools: planning, discovery and monitoring)
+            "katib_pre_flight",
+            "list_hpo_experiments",
+            "get_hpo_experiment",
+            "get_hpo_experiment_status",
+            "get_trial",
+            "get_successful_trials",
+            "list_suggestions",
+            "get_hpo_experiment_trials",
+            "get_best_trial",
+            "get_suggestion",
+            "get_hpo_experiment_trial_logs",
+            "get_hpo_experiment_events",
         ]
     },
     "data-scientist": {
         "inherit": "readonly",
         "tools": [
+            # Trainer
             "fine_tune",
             "run_custom_training",
             "wait_for_training",
@@ -110,11 +127,19 @@ PERSONAS: dict[str, dict[str, Any]] = {
             "delete_spark_session",
             # Pipelines
             "create_pipeline_run",
+            "create_experiment",
+            # Optimizer
+            "create_hpo_experiment",
+            # Waiting holds the MCP connection open, so like wait_for_training
+            # it is granted to the persona that submits experiments.
+            "wait_for_hpo_experiment",
+            "delete_hpo_experiment",
         ],
     },
     "ml-engineer": {
         "inherit": "data-scientist",
         "tools": [
+            # Trainer
             "run_container_training",
             "update_training_job",
             "inspect_crd",
@@ -123,6 +148,12 @@ PERSONAS: dict[str, dict[str, Any]] = {
             # run in the namespace and sit above data-scientist.
             "stop_pipeline_run",
             "retry_pipeline_run",
+            # Compiling agent-written code runs its pipeline body on the server, and an
+            # existing name gets a new version whoever registered it.
+            "create_pipeline",
+            # Optimizer
+            "create_hpo_experiment_from_spec",
+            "update_hpo_experiment",
         ],
     },
     "platform-admin": {"tools": "*"},
@@ -133,6 +164,12 @@ DESTRUCTIVE_TOOLS = {
     "delete_runtime",
     "delete_spark_session",
     "stop_pipeline_run",
+    # platform-admin only: KFP experiments and pipelines carry no MCP ownership label.
+    "delete_experiment",
+    "delete_pipeline",
+    "delete_hpo_experiment",
+    # Lowering parallel_trial_count makes Katib delete trials, including completed ones.
+    "update_hpo_experiment",
 }
 
 # Tools matched by each ``risk:<level>`` policy pattern.

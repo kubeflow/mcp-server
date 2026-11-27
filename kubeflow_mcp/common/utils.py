@@ -16,6 +16,7 @@
 
 Mirrors kubeflow SDK's client structure:
 - TrainerClient from kubeflow.trainer
+- OptimizerClient from kubeflow.optimizer
 """
 
 import logging
@@ -33,6 +34,13 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 K8S_TIMEOUT = 5
+
+# Writes that go through admission webhooks need a longer budget than reads.
+# Katib registers a mutating and a validating webhook, each with its own 10s
+# timeout, so a create can legitimately outlive K8S_TIMEOUT while the API server
+# is still waiting on them. Timing out first turns a diagnosable admission
+# failure into an opaque "read timed out", so writes get their own bound.
+K8S_WRITE_TIMEOUT = 30
 
 
 @lru_cache(maxsize=1)
@@ -264,6 +272,55 @@ _TRAINJOB_VERSION = "v1alpha1"
 _TRAINJOB_PLURAL = "trainjobs"
 
 
+def get_training_pod_step(pod: Any) -> str | None:
+    """Match the SDK's step names without grouping pods with incomplete labels."""
+    from kubeflow.trainer.constants import constants
+
+    labels = getattr(pod.metadata, "labels", None) or {}
+    role = labels.get(constants.JOBSET_RJOB_NAME_LABEL)
+    if role in (constants.LAUNCHER, constants.NODE):
+        index = labels.get(constants.JOB_INDEX_LABEL)
+        return f"{role}-{index}" if index is not None else None
+    return role
+
+
+def get_training_job_status(job: Any, namespace: str | None = None) -> str:
+    """Recover running status when SDK 0.5 skips worker inference after resume."""
+    status = getattr(job, "status", "Unknown")
+    if status != "Created":
+        return status
+    workers = [step for step in getattr(job, "steps", []) if step.name.startswith("node-")]
+    if not workers or len(workers) != getattr(job, "num_nodes", None):
+        return status
+    if any(step.status not in {"Running", "Succeeded"} for step in workers):
+        return status
+    try:
+        raw = get_custom_objects_api().get_namespaced_custom_object(
+            group=_TRAINJOB_GROUP,
+            version=_TRAINJOB_VERSION,
+            namespace=get_trainer_effective_namespace(namespace),
+            plural=_TRAINJOB_PLURAL,
+            name=job.name,
+            _request_timeout=K8S_TIMEOUT,
+        )
+        conditions = raw.get("status", {}).get("conditions", [])
+        for condition in conditions:
+            if (
+                condition.get("type") in {"Complete", "Failed"}
+                and condition.get("status") == "True"
+            ):
+                return condition["type"]
+        # A suspended job can still have terminating workers; don't call it running.
+        suspended = raw.get("spec", {}).get("suspend", False) or any(
+            c.get("type") == "Suspended" and c.get("status") == "True" for c in conditions
+        )
+        if not suspended:
+            return "Running"
+    except Exception:
+        logger.debug("Could not reconcile SDK status for job %s", job.name, exc_info=True)
+    return status
+
+
 # Outcomes of an ownership check. "missing" is kept distinct from "unmanaged"
 # because the two need opposite responses: a job that does not exist is a
 # not-found, while collapsing it into "unmanaged" tells the caller to go fix
@@ -280,7 +337,9 @@ def get_trainer_ownership(name: str, namespace: str) -> str | None:
         ``OWNERSHIP_MANAGED`` if the job carries the MCP ownership label,
         ``OWNERSHIP_UNMANAGED`` if it exists without the label,
         ``OWNERSHIP_MISSING`` if no such job exists, or
-        ``None`` if the check could not be performed (API error, permissions).
+        ``None`` if the check could not be performed (other API errors).
+
+    Permission errors propagate so the caller can report ``PERMISSION_DENIED``.
     """
     try:
         api = get_custom_objects_api()
@@ -296,11 +355,34 @@ def get_trainer_ownership(name: str, namespace: str) -> str | None:
         managed = labels.get(MCP_MANAGED_LABEL) == MCP_MANAGED_VALUE
         return OWNERSHIP_MANAGED if managed else OWNERSHIP_UNMANAGED
     except Exception as e:
-        from kubeflow_mcp.common.types import is_k8s_not_found
+        from kubeflow_mcp.common.types import is_k8s_forbidden, is_k8s_not_found
 
+        if is_k8s_forbidden(e):
+            raise
         if is_k8s_not_found(e):
             return OWNERSHIP_MISSING
         return None
+
+
+# =============================================================================
+# Optimizer (Katib) namespace resolution
+# =============================================================================
+
+
+def get_optimizer_effective_namespace(namespace: str | None = None) -> str:
+    """Namespace for Katib operations: the explicit argument, else the kubeconfig default.
+
+    The optimizer tools call the Katib API directly, so the default comes from
+    the kubeconfig (or in-cluster ServiceAccount) those calls already use,
+    resolved locally. ``OptimizerClient`` is not built for it: its constructor
+    also builds a Trainer backend that reads a ConfigMap with no request timeout,
+    so an API server that accepts the connection and never answers would hang
+    the call before any bounded Katib request is made.
+
+    Raises:
+        RuntimeError: No kubeconfig is found and the server is not in-cluster.
+    """
+    return namespace or get_default_kubeconfig_namespace()
 
 
 _SPARK_CONNECT_GROUP = "sparkoperator.k8s.io"
@@ -308,7 +390,7 @@ _SPARK_CONNECT_VERSION = "v1alpha1"
 _SPARK_CONNECT_PLURAL = "sparkconnects"
 
 
-SparkOwnership = Literal["managed", "unmanaged", "not_found", "unknown"]
+SparkOwnership = Literal["managed", "unmanaged", "not_found", "forbidden", "unknown"]
 SPARK_CREATION_LABEL = "kubeflow-mcp/creation-id"
 
 
@@ -353,7 +435,8 @@ def get_spark_session_ownership(name: str, namespace: str) -> SparkOwnership:
         ``"managed"``: session carries the MCP ownership label.
         ``"unmanaged"``: session exists but lacks the label.
         ``"not_found"``: no such session in *namespace*.
-        ``"unknown"``: the check could not be performed (API error, permissions).
+        ``"forbidden"``: the caller may not read the session (401/403).
+        ``"unknown"``: the check could not be performed (any other API error).
     """
     try:
         api = get_custom_objects_api()
@@ -366,10 +449,12 @@ def get_spark_session_ownership(name: str, namespace: str) -> SparkOwnership:
             _request_timeout=K8S_TIMEOUT,
         )
     except Exception as e:
-        from kubeflow_mcp.common.types import is_k8s_not_found
+        from kubeflow_mcp.common.types import is_k8s_forbidden, is_k8s_not_found
 
         if is_k8s_not_found(e):
             return "not_found"
+        if is_k8s_forbidden(e):
+            return "forbidden"
         return "unknown"
 
     labels = (obj or {}).get("metadata", {}).get("labels", {}) or {}

@@ -537,6 +537,27 @@ class TestDeleteOwnershipGuard:
         assert out["success"] is False
         assert out["error_code"] == "SDK_ERROR"
 
+    @pytest.mark.parametrize("confirmed", [False, True])
+    def test_forbidden_ownership_read_is_permission_denied(self, spark_persona, confirmed):
+        """A 403 on the ownership read is the caller's RBAC, not an outage — even a
+        preview must not report it as SDK_ERROR, which would count against the breaker."""
+        spark_persona("data-scientist")
+        with patch.object(sessions, "get_spark_session_ownership", return_value="forbidden"):
+            out = sessions.delete_spark_session("x", namespace="team-b", confirmed=confirmed)
+        assert out["error_code"] == "PERMISSION_DENIED"
+        assert out.get("status") != "preview"
+
+    def test_forbidden_delete_call_is_permission_denied(self, spark_persona, mock_spark_client):
+        from kubernetes.client.exceptions import ApiException
+
+        spark_persona("data-scientist")
+        error = RuntimeError("delete failed")
+        error.__cause__ = ApiException(status=403, reason="Forbidden")
+        mock_spark_client.delete_session.side_effect = error
+        with patch.object(sessions, "get_spark_session_ownership", return_value="managed"):
+            out = sessions.delete_spark_session("x", namespace="default", confirmed=True)
+        assert out["error_code"] == "PERMISSION_DENIED"
+
     def test_guard_runs_before_preview(self, spark_persona):
         """An unowned session must be refused at preview time, not after the
         user has already confirmed."""
@@ -629,3 +650,30 @@ class TestClientFactory:
             out = utils.get_spark_client_for_namespace(None)
         assert out == "UNSCOPED"
         gsc.assert_called_once()
+
+
+@pytest.mark.parametrize("status", [401, 403, 500])
+@pytest.mark.parametrize("wrapping", ["direct", "cause", "context", "nested"])
+def test_create_session_classifies_api_errors(
+    mock_spark_client, status: int, wrapping: str
+) -> None:
+    from kubernetes.client.exceptions import ApiException
+
+    error: Exception = ApiException(status=status)
+    if wrapping != "direct":
+        cause = error
+        error = RuntimeError("Spark request failed")
+        if wrapping == "context":
+            error.__context__ = cause
+        else:
+            error.__cause__ = cause
+        if wrapping == "nested":
+            cause = error
+            error = RuntimeError("Session creation failed")
+            error.__cause__ = cause
+    mock_spark_client.connect.side_effect = error
+    with patch.object(sessions, "get_spark_session_created_by", return_value=None) as recovery:
+        result = sessions.create_spark_session("audit-session", namespace="default", confirmed=True)
+    assert result["error_code"] == ("PERMISSION_DENIED" if status in (401, 403) else "SDK_ERROR")
+    if status in (401, 403):
+        recovery.assert_not_called()

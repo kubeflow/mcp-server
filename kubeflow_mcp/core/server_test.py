@@ -70,6 +70,22 @@ class TestInjectMetaBlockedResponses:
     than the envelope alone.
     """
 
+    def test_next_withheld_after_unmet_wait_or_package_error(self):
+        for tool, data in (
+            ("wait_for_training", {"status": "Unknown", "reached": False}),
+            ("get_runtime", {"packages_error": "Forbidden"}),
+        ):
+            result = _inject_meta({"success": True, "data": data}, tool)
+            assert "next" not in result["_meta"]
+            assert result["_meta"]["phase"] == TOOL_TO_PHASE[tool]
+
+    def test_next_present_after_wait_target_reached(self):
+        result = _inject_meta(
+            {"success": True, "data": {"status": "Complete", "reached": True}},
+            "wait_for_training",
+        )
+        assert result["_meta"]["next"] == TOOL_NEXT_HINTS["wait_for_training"]
+
     def test_next_withheld_when_blockers_present(self):
         result = _inject_meta(
             {"success": True, "data": {"compatible": False, "blockers": ["K8s too old"]}},
@@ -397,9 +413,32 @@ def k8s_writes():
     """
     writes: list[tuple[str, str]] = []
 
-    def fake_call_api(self, resource_path, method, *args, **kwargs):
+    def fake_call_api(self, resource_path, method, path_params=None, *args, **kwargs):
         if method in _WRITE_METHODS:
             writes.append((method, resource_path))
+        if method == "GET" and (path_params or {}).get("plural") in (
+            "trainingruntimes",
+            "clustertrainingruntimes",
+        ):
+            # Custom training reads runtime storage before reaching its confirm gate.
+            return {
+                "spec": {
+                    "template": {
+                        "spec": {
+                            "replicatedJobs": [
+                                {
+                                    "name": "node",
+                                    "template": {
+                                        "spec": {
+                                            "template": {"spec": {"containers": [{"name": "node"}]}}
+                                        }
+                                    },
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
         # An empty object, as the API returns for custom resources. A MagicMock would end
         # up in tool responses and take FastMCP ~0.3s per call to fail to serialize.
         return {}
@@ -485,3 +524,45 @@ async def test_confirm_gate_matches_full_mode_in_dynamic_modes(k8s_writes, tool)
         set_effective_persona(previous)
 
     assert mismatches == {}
+
+
+async def _instructions_and_tools(mode: str, tier: str = "full") -> tuple[str, set[str]]:
+    previous = get_effective_persona()
+    try:
+        server = create_server(persona="platform-admin", mode=mode, instruction_tier=tier)
+        async with Client(server) as client:
+            names = {tool.name for tool in await client.list_tools()}
+            return client.instructions or "", names
+    finally:
+        set_effective_persona(previous)
+
+
+@pytest.mark.parametrize("tier", ["full", "compact", "minimal"])
+@pytest.mark.parametrize(
+    ("mode", "meta_tools"),
+    [
+        ("progressive", ["list_tools", "describe_tools", "execute_tool"]),
+        ("semantic", ["find_tools", "execute_tool"]),
+    ],
+)
+async def test_dynamic_mode_instructions_explain_tool_access(mode, meta_tools, tier):
+    """Only meta-tools are registered, so the instructions must say how to reach the rest."""
+    instructions, registered = await _instructions_and_tools(mode, tier)
+
+    assert registered == set(meta_tools)
+    assert f"TOOL ACCESS ({mode} mode)" in instructions
+    for name in meta_tools:
+        assert f"{name}(" in instructions
+
+
+async def test_semantic_mode_instructions_skip_progressive_meta_tools():
+    instructions, _ = await _instructions_and_tools("semantic")
+
+    assert "list_tools(" not in instructions
+    assert "describe_tools(" not in instructions
+
+
+async def test_full_mode_instructions_have_no_tool_access_block():
+    instructions, _ = await _instructions_and_tools("full")
+
+    assert "TOOL ACCESS" not in instructions
