@@ -80,6 +80,40 @@ def test_resilience_config_allows_zero_recovery_timeout():
     assert cfg.cb_recovery_timeout == 0.0
 
 
+def test_resilience_config_per_user_defaults():
+    cfg = ResilienceConfig()
+    assert cfg.per_user_rate_limit is None
+    assert cfg.per_user_rate_capacity is None
+    assert cfg.user_bucket_ttl == 300.0
+    assert cfg.max_user_buckets == 10000
+
+
+def test_resilience_config_per_user_custom():
+    cfg = ResilienceConfig(
+        per_user_rate_limit=5.0,
+        per_user_rate_capacity=10.0,
+        user_bucket_ttl=60.0,
+        max_user_buckets=500,
+    )
+    assert cfg.per_user_rate_limit == 5.0
+    assert cfg.per_user_rate_capacity == 10.0
+    assert cfg.user_bucket_ttl == 60.0
+    assert cfg.max_user_buckets == 500
+
+
+def test_load_config_per_user_env_override(monkeypatch):
+    monkeypatch.setenv("KUBEFLOW_MCP_PER_USER_RATE_LIMIT", "7.5")
+    monkeypatch.setenv("KUBEFLOW_MCP_PER_USER_RATE_CAPACITY", "15.0")
+    monkeypatch.setenv("KUBEFLOW_MCP_USER_BUCKET_TTL", "120.0")
+    monkeypatch.setenv("KUBEFLOW_MCP_MAX_USER_BUCKETS", "2500")
+
+    cfg = load_config()
+    assert cfg.resilience.per_user_rate_limit == 7.5
+    assert cfg.resilience.per_user_rate_capacity == 15.0
+    assert cfg.resilience.user_bucket_ttl == 120.0
+    assert cfg.resilience.max_user_buckets == 2500
+
+
 @pytest.mark.parametrize(
     "test_case",
     [

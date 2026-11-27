@@ -54,7 +54,7 @@ from kubeflow_mcp.core.policy import (
     get_effective_persona,
     is_read_only,
 )
-from kubeflow_mcp.core.resilience import RateLimiter, get_breaker
+from kubeflow_mcp.core.resilience import RateLimiter, UserRateLimiter, get_breaker
 from kubeflow_mcp.core.resources import register_resources
 from kubeflow_mcp.core.security import mask_sensitive_data
 from kubeflow_mcp.core.telemetry import get_tracer
@@ -76,16 +76,46 @@ except ImportError:  # pragma: no cover
 
 logger = logging.getLogger(__name__)
 
-_rate_limiter: RateLimiter | None = None
+_rate_limiter: RateLimiter | UserRateLimiter | None = None
 
 
 def configure_resilience(
     rate_limit: float = 10.0,
     rate_capacity: float = 20.0,
+    per_user_rate_limit: float | None = None,
+    per_user_rate_capacity: float | None = None,
+    user_bucket_ttl: float = 300.0,
+    max_user_buckets: int = 10000,
 ) -> None:
-    """Initialize the global rate limiter from config. Called once at startup."""
+    """Initialize the global or per-user rate limiter from config. Called once at startup."""
     global _rate_limiter
-    _rate_limiter = RateLimiter(rate=rate_limit, capacity=rate_capacity)
+    if per_user_rate_limit is not None:
+        capacity = (
+            per_user_rate_capacity
+            if per_user_rate_capacity is not None
+            else max(1.0, per_user_rate_limit * 2)
+        )
+        _rate_limiter = UserRateLimiter(
+            user_rate=per_user_rate_limit,
+            user_capacity=capacity,
+            global_rate=rate_limit,
+            global_capacity=rate_capacity,
+            bucket_ttl=user_bucket_ttl,
+            max_buckets=max_user_buckets,
+        )
+    else:
+        _rate_limiter = RateLimiter(rate=rate_limit, capacity=rate_capacity)
+
+
+def reset_rate_limiter() -> None:
+    """Clear the rate limiter (for testing)."""
+    global _rate_limiter
+    _rate_limiter = None
+
+
+def get_rate_limiter() -> RateLimiter | UserRateLimiter | None:
+    """Return the currently configured rate limiter instance (for testing)."""
+    return _rate_limiter
 
 
 def _is_blocked(result: dict[str, Any]) -> bool:
@@ -198,11 +228,17 @@ def _audit_wrap(tool_func, *, is_dynamic_execute_tool: bool = False):
                 json.dumps(masked, default=str)[:300],
             )
 
-            if _rate_limiter is not None and not _rate_limiter.acquire():
+            user_id = get_user_id()
+            if _rate_limiter is not None and not _rate_limiter.acquire(tokens=1.0, user_id=user_id):
                 duration_ms = int((time.monotonic() - start) * 1000)
                 span.set_attribute("tool.success", False)
                 span.set_attribute("tool.duration_ms", duration_ms)
-                logger.warning("rate_limited", extra={"tool": tool_name})
+                if user_id:
+                    span.set_attribute("rate_limit.user", user_id)
+                logger.warning(
+                    "rate_limited",
+                    extra={"tool": tool_name, "user_id": user_id},
+                )
                 return {
                     "error": "Rate limit exceeded. Retry after a brief pause.",
                     "error_code": ErrorCode.RATE_LIMITED,
