@@ -107,10 +107,19 @@ def build_auth_provider(auth_config: AuthConfig) -> TokenVerifier | None:
     """Build the appropriate auth provider from config, or None if auth is disabled.
 
     Raises:
-        ValueError: ``jwks_uri`` is set without both ``issuer`` and ``audience``
-            (a value that is only whitespace counts as missing).
+        ValueError: ``jwks_uri`` is only whitespace, or is set without both
+            ``issuer`` and ``audience`` (a value that is only whitespace counts
+            as missing).
     """
     if auth_config.jwks_uri:
+        # A secret created with --from-file ends in a newline, which would make
+        # every JWKS fetch fail.
+        jwks_uri = auth_config.jwks_uri.strip()
+        if not jwks_uri:
+            raise ValueError(
+                "KUBEFLOW_MCP_JWKS_URI (auth.jwks_uri in the config file) is blank. "
+                "Set it to your identity provider's JWKS URL, or unset it."
+            )
         issuer = (auth_config.issuer or "").strip()
         audience = (auth_config.audience or "").strip()
         if not (issuer and audience):
@@ -123,12 +132,12 @@ def build_auth_provider(auth_config: AuthConfig) -> TokenVerifier | None:
 
         logger.info(
             "HTTP auth: JWT verification via %s (issuer=%s, audience=%s)",
-            auth_config.jwks_uri,
+            jwks_uri,
             issuer,
             audience,
         )
         return StrictJWTVerifier(
-            jwks_uri=auth_config.jwks_uri,
+            jwks_uri=jwks_uri,
             issuer=issuer,
             audience=audience,
         )

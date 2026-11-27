@@ -523,6 +523,29 @@ def test_serve_http_with_incomplete_jwt_env_exits_before_serving(
     mock_create_server.assert_not_called()
 
 
+def test_serve_http_with_blank_jwks_uri_exits_before_serving(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A JWKS URI that is only whitespace stops serve instead of failing every request."""
+    monkeypatch.setenv("KUBEFLOW_MCP_JWKS_URI", "\n")
+    monkeypatch.setenv("KUBEFLOW_MCP_JWT_ISSUER", "https://idp.example.com")
+    monkeypatch.setenv("KUBEFLOW_MCP_JWT_AUDIENCE", "kubeflow-mcp")
+
+    with (
+        patch("kubeflow_mcp.core.config._get_config_paths", return_value=[]),
+        patch("kubeflow_mcp.core.logging.setup_logging", return_value=MagicMock()),
+        patch("kubeflow_mcp.core.telemetry.setup_tracing", return_value=False),
+        patch("kubeflow_mcp.core.resilience.configure_circuit_breaker"),
+        patch("kubeflow_mcp.core.server.configure_resilience"),
+        patch("kubeflow_mcp.core.server.create_server") as mock_create_server,
+    ):
+        result = CliRunner().invoke(cli, ["serve", "--transport", "http"])
+
+    assert result.exit_code == 1
+    assert "KUBEFLOW_MCP_JWKS_URI" in result.output
+    mock_create_server.assert_not_called()
+
+
 def test_serve_stdio_skips_auth_provider():
     """stdio transport does not call build_auth_provider."""
     mock_server, mock_create_server, modules_patch = _make_serve_mocks()

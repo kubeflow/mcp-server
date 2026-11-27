@@ -350,6 +350,7 @@ make inspector
 | `HTTP 401 Unauthorized` | Wrong bearer token | Verify `KUBEFLOW_MCP_AUTH_TOKEN` matches the token sent by the client |
 | `HTTP 401 Unauthorized` with a JWT | The token was issued for another audience or by another issuer, has no `exp`, or is expired or not yet valid | Compare the token's `iss` and `aud` claims with `KUBEFLOW_MCP_JWT_ISSUER` and `KUBEFLOW_MCP_JWT_AUDIENCE`, and check its `exp` and `nbf` |
 | Server exits with `JWT auth needs an issuer and an audience` | `KUBEFLOW_MCP_JWKS_URI` is set without `KUBEFLOW_MCP_JWT_ISSUER` and `KUBEFLOW_MCP_JWT_AUDIENCE` | Set both to the `iss` and `aud` values your identity provider puts in tokens for this server |
+| Server exits with `KUBEFLOW_MCP_JWKS_URI (auth.jwks_uri in the config file) is blank` | The variable or `auth.jwks_uri` is set to whitespace only, for example from an empty file | Set it to your identity provider's JWKS URL, or unset it to turn JWT auth off |
 | Connection refused on port 8000 | Server started with `stdio` not `http` | Restart with `--transport http` |
 | Agent says "no tools available" | Client config points to wrong URL | Check client URL; test with `curl http://localhost:8000/health` |
 | Pod stuck in `CreateContainerConfigError` | `kubeflow-mcp-auth` Secret not created | Create the Secret before applying manifests (see [`examples/kubernetes/`](../examples/kubernetes/)) |

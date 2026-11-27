@@ -199,6 +199,23 @@ class TestBuildAuthProvider:
         assert provider.issuer == ISSUER
         assert provider.audience == AUDIENCE
 
+    @pytest.mark.parametrize("jwks_uri", ["   ", "\n", "\t \n"])
+    def test_blank_jwks_uri_is_refused(self, jwks_uri: str) -> None:
+        config = AuthConfig(jwks_uri=jwks_uri, issuer=ISSUER, audience=AUDIENCE)
+
+        with pytest.raises(ValueError, match="KUBEFLOW_MCP_JWKS_URI"):
+            build_auth_provider(config)
+
+    def test_trims_whitespace_around_jwks_uri(self) -> None:
+        # A Kubernetes Secret created with --from-file keeps the file's trailing newline.
+        config = AuthConfig(
+            jwks_uri=" https://example.com/jwks.json\n", issuer=ISSUER, audience=AUDIENCE
+        )
+        provider = build_auth_provider(config)
+
+        assert isinstance(provider, StrictJWTVerifier)
+        assert provider.jwks_uri == "https://example.com/jwks.json"
+
 
 class TestJWTVerification:
     async def test_accepts_token_issued_for_this_server(
