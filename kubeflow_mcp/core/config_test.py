@@ -25,6 +25,7 @@ from pydantic import ValidationError
 from tests.common import TestCase
 
 from kubeflow_mcp.core.config import (
+    Config,
     ResilienceConfig,
     ServerConfig,
     _find_config_file,
@@ -173,19 +174,7 @@ def test_load_config_rejects_invalid_yaml_and_non_mapping_roots(tmp_path, conten
         load_config(config_path=config_file)
 
 
-@pytest.mark.parametrize(
-    "section",
-    [
-        "server",
-        "logging",
-        "observability",
-        "trainer",
-        "optimizer",
-        "auth",
-        "security",
-        "resilience",
-    ],
-)
+@pytest.mark.parametrize("section", list(Config.model_fields))
 def test_load_config_treats_section_with_no_keys_as_empty(tmp_path: Path, section: str) -> None:
     config_file = tmp_path / "config.yaml"
     config_file.write_text(f"{section}:\n  # level: DEBUG\n")

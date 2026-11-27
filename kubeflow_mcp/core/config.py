@@ -186,18 +186,6 @@ def _find_config_file() -> Path | None:
     return None
 
 
-_CONFIG_SECTIONS = (
-    "server",
-    "logging",
-    "observability",
-    "trainer",
-    "optimizer",
-    "auth",
-    "security",
-    "resilience",
-)
-
-
 def _load_yaml_config(path: Path) -> dict[str, Any]:
     """Load config from YAML file.
 
@@ -231,7 +219,7 @@ def _load_yaml_config(path: Path) -> dict[str, Any]:
             f"Invalid configuration file '{path}': root must be a mapping, "
             f"got {type(data).__name__}"
         )
-    for section in _CONFIG_SECTIONS:
+    for section in Config.model_fields:
         value = data.get(section)
         # A section whose keys are all commented out loads as None.
         if value is None:
