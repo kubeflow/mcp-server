@@ -1,3 +1,13 @@
+# [0.2.1](https://github.com/kubeflow/mcp-server/releases/tag/0.2.1) (2026-11-27)
+
+## 🐛 Bug Fixes
+
+- [release-0.2] fix(ci): use a single OCI archive tag for release scans ([#631](https://github.com/kubeflow/mcp-server/pull/631))
+
+## ⚙️ Miscellaneous Tasks
+
+- chore: prepare release 0.2.1rc1 ([#632](https://github.com/kubeflow/mcp-server/pull/632))
+
 # [0.2.0](https://github.com/kubeflow/mcp-server/releases/tag/0.2.0) (2026-11-26)
 
 Kubeflow MCP Server 0.2.0 adds Spark, Pipelines and Katib clients, expands Trainer monitoring and resource previews, and introduces a GitHub-hosted skill catalog skeleton.
