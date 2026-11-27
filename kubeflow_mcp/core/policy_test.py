@@ -572,3 +572,9 @@ def test_inheritance_cycle_detection_raises_value_error():
     ):
         with pytest.raises(ValueError, match="Inheritance cycle detected"):
             get_allowed_tools("node-1")
+
+
+def test_get_allowed_tools_unknown_persona_raises():
+    """Unrecognized persona names must raise ValueError."""
+    with pytest.raises(ValueError, match="Unknown persona: invalid-persona"):
+        get_allowed_tools("invalid-persona")
