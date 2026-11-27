@@ -104,8 +104,9 @@ def _render(snapshot: dict[str, Any]) -> str:
     [
         (None, SNAPSHOT_PATH),
         (["spark"], SNAPSHOT_PATH.with_name("tool_schema_spark_platform_admin.json")),
+        (["optimizer"], SNAPSHOT_PATH.with_name("tool_schema_optimizer_platform_admin.json")),
     ],
-    ids=["trainer", "spark"],
+    ids=["trainer", "spark", "optimizer"],
 )
 async def test_tool_schema_matches_snapshot(_restore_persona, clients, snapshot_path):
     """Fail with a diff if the tools/list surface drifts from the baseline."""
