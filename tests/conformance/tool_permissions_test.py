@@ -34,6 +34,7 @@ from kubeflow_mcp.core.server import CLIENT_MODULES
 
 _VERBS = {"get", "list", "watch", "create", "update", "patch", "delete", "deletecollection"}
 _WRITE_VERBS = {"create", "update", "patch", "delete", "deletecollection"}
+_NAMED_VERBS = {"get", "update", "patch", "delete"}
 _RESOURCE = re.compile(r"^[a-z][a-z0-9]*(/[a-z]+)?$")
 # "" (core), single-label groups such as "apps" and "batch", and dotted ones.
 _GROUP = re.compile(r"^([a-z0-9-]+(\.[a-z0-9-]+)*)?$")
@@ -99,16 +100,19 @@ def test_permissions_are_well_formed(client, tool, permissions, annotations):
         assert permission.verb in _VERBS, f"{name}: unknown verb {permission.verb!r}"
         assert _GROUP.match(permission.group), f"{name}: bad group {permission.group!r}"
         assert _RESOURCE.match(permission.resource), f"{name}: bad resource {permission.resource!r}"
+        # RBAC matches resourceNames only for requests on one named object.
+        if permission.name is not None:
+            assert permission.verb in _NAMED_VERBS, f"{name}: {permission.verb} cannot be named"
     assert len(set(permissions)) == len(permissions), f"{name}: duplicate entries"
 
 
 @pytest.mark.parametrize("client,tool,permissions,annotations", list(_all_tools()), ids=_tool_id)
 def test_conditional_permissions_name_a_parameter(client, tool, permissions, annotations):
-    """``when`` / ``unless`` must name a real parameter, or a check would be wrong forever."""
+    """``when``, ``unless`` and ``name`` must name a real parameter, or a check is wrong forever."""
     parameters = set(inspect.signature(tool).parameters)
     for permission in permissions:
         assert not (permission.when and permission.unless), f"{tool.__name__}: {permission}"
-        for field in ("when", "unless"):
+        for field in ("when", "unless", "name"):
             value = getattr(permission, field)
             if value is not None:
                 assert value in parameters, f"{tool.__name__}: {field}={value!r} is not a parameter"
@@ -161,3 +165,20 @@ def test_inspect_crd_declares_each_branch():
     }
     assert (by_verb["list"].when, by_verb["list"].unless) == (None, "name")
     assert (by_verb["get"].when, by_verb["get"].unless) == ("name", None)
+
+
+@pytest.mark.parametrize(
+    "client,tool_name",
+    [
+        ("trainer", "delete_training_job"),
+        ("trainer", "update_training_job"),
+        ("trainer", "patch_runtime"),
+        ("trainer", "delete_runtime"),
+        ("spark", "delete_spark_session"),
+    ],
+)
+def test_writes_on_one_object_name_it(client, tool_name):
+    """A Role limited to one object by resourceNames only matches a request that names it."""
+    permissions = importlib.import_module(f"kubeflow_mcp.{client}").CLIENT_TOOL_PERMISSIONS
+    writes = [p for p in permissions[tool_name] if p.verb in _WRITE_VERBS]
+    assert writes and all(p.name == "name" for p in writes), writes

@@ -156,7 +156,7 @@ SPARK SESSION LIFECYCLE:
 
 
 # Kubernetes permissions each tool's requests need, including the SDK's (#565).
-_SESSION_GET = ToolPermission("get", "sparkoperator.k8s.io", "sparkconnects")
+_SESSION_GET = ToolPermission("get", "sparkoperator.k8s.io", "sparkconnects", name="name")
 
 CLIENT_TOOL_PERMISSIONS: dict[str, tuple[ToolPermission, ...]] = {
     "list_spark_sessions": (ToolPermission("list", "sparkoperator.k8s.io", "sparkconnects"),),
@@ -168,7 +168,7 @@ CLIENT_TOOL_PERMISSIONS: dict[str, tuple[ToolPermission, ...]] = {
     ),
     "delete_spark_session": (
         _SESSION_GET,  # ownership check
-        ToolPermission("delete", "sparkoperator.k8s.io", "sparkconnects"),
+        ToolPermission("delete", "sparkoperator.k8s.io", "sparkconnects", name="name"),
     ),
 }
 

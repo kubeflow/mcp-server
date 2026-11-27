@@ -418,7 +418,7 @@ _RUNTIME_READS = (
     ToolPermission("get", "trainer.kubeflow.org", "clustertrainingruntimes", cluster_wide=True),
 )
 _JOB_READS = (
-    ToolPermission("get", "trainer.kubeflow.org", "trainjobs"),
+    ToolPermission("get", "trainer.kubeflow.org", "trainjobs", name="name"),
     ToolPermission("list", "", "pods"),
     *_RUNTIME_READS,
 )
@@ -431,7 +431,8 @@ _CRD_GET = ToolPermission(
     "get", "apiextensions.k8s.io", "customresourcedefinitions", cluster_wide=True
 )
 _NODES_LIST = ToolPermission("list", "", "nodes", cluster_wide=True)
-_OWNED_JOB_GET = ToolPermission("get", "trainer.kubeflow.org", "trainjobs")  # ownership check
+# Read first to check the job is one this server manages.
+_OWNED_JOB_GET = ToolPermission("get", "trainer.kubeflow.org", "trainjobs", name="name")
 _CLUSTER_RUNTIME = ("trainer.kubeflow.org", "clustertrainingruntimes")
 
 CLIENT_TOOL_PERMISSIONS: dict[str, tuple[ToolPermission, ...]] = {
@@ -451,7 +452,8 @@ CLIENT_TOOL_PERMISSIONS: dict[str, tuple[ToolPermission, ...]] = {
     "list_runtimes": _RUNTIME_LISTS,
     # include_packages=True runs a short-lived Pod to list packages (#535).
     "get_runtime": (
-        *_RUNTIME_READS,
+        ToolPermission("get", "trainer.kubeflow.org", "trainingruntimes", name="name"),
+        ToolPermission("get", *_CLUSTER_RUNTIME, cluster_wide=True, name="name"),
         ToolPermission("create", "", "pods", when="include_packages"),
         ToolPermission("get", "", "pods", when="include_packages"),
         ToolPermission("get", "", "pods/log", when="include_packages"),
@@ -462,11 +464,11 @@ CLIENT_TOOL_PERMISSIONS: dict[str, tuple[ToolPermission, ...]] = {
     "wait_for_training": _JOB_READS,
     "delete_training_job": (
         _OWNED_JOB_GET,
-        ToolPermission("delete", "trainer.kubeflow.org", "trainjobs"),
+        ToolPermission("delete", "trainer.kubeflow.org", "trainjobs", name="name"),
     ),
     "update_training_job": (
         _OWNED_JOB_GET,
-        ToolPermission("patch", "trainer.kubeflow.org", "trainjobs"),
+        ToolPermission("patch", "trainer.kubeflow.org", "trainjobs", name="name"),
     ),
     # Without a name it lists every CRD; with one it reads only that CRD.
     "inspect_crd": (
@@ -483,6 +485,7 @@ CLIENT_TOOL_PERMISSIONS: dict[str, tuple[ToolPermission, ...]] = {
             "customresourcedefinitions",
             cluster_wide=True,
             when="name",
+            name="name",
         ),
     ),
     # In the controller's namespace, not the caller's.
@@ -492,8 +495,8 @@ CLIENT_TOOL_PERMISSIONS: dict[str, tuple[ToolPermission, ...]] = {
         ToolPermission("list", "", "events"),
     ),
     "patch_runtime": (
-        ToolPermission("get", *_CLUSTER_RUNTIME, cluster_wide=True),
-        ToolPermission("patch", *_CLUSTER_RUNTIME, cluster_wide=True),
+        ToolPermission("get", *_CLUSTER_RUNTIME, cluster_wide=True, name="name"),
+        ToolPermission("patch", *_CLUSTER_RUNTIME, cluster_wide=True, name="name"),
     ),
     "create_runtime": (ToolPermission("create", *_CLUSTER_RUNTIME, cluster_wide=True),),
     "delete_runtime": (
@@ -501,7 +504,7 @@ CLIENT_TOOL_PERMISSIONS: dict[str, tuple[ToolPermission, ...]] = {
         # preview says the check failed and a confirmed delete is refused, so the
         # delete needs it.
         ToolPermission("list", "trainer.kubeflow.org", "trainjobs", cluster_wide=True),
-        ToolPermission("delete", *_CLUSTER_RUNTIME, cluster_wide=True),
+        ToolPermission("delete", *_CLUSTER_RUNTIME, cluster_wide=True, name="name"),
     ),
 }
 
