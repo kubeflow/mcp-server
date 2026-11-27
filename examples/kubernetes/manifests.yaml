@@ -147,6 +147,14 @@ spec:
                 secretKeyRef:
                   name: kubeflow-mcp-auth
                   key: token
+            # Production: verify your identity provider's tokens instead. All three are
+            # required together; see "Using JWT (OIDC) instead of the shared token" in README.md.
+            # - name: KUBEFLOW_MCP_JWKS_URI
+            #   value: https://idp.example.com/.well-known/jwks.json
+            # - name: KUBEFLOW_MCP_JWT_ISSUER
+            #   value: https://idp.example.com
+            # - name: KUBEFLOW_MCP_JWT_AUDIENCE
+            #   value: kubeflow-mcp
             - name: HOME
               value: /home/kubeflow-mcp
             - name: HF_HOME

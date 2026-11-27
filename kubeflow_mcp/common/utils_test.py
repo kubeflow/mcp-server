@@ -36,8 +36,10 @@ from kubeflow_mcp.common.utils import (
     get_core_v1_api,
     get_custom_objects_api,
     get_default_kubeconfig_namespace,
+    get_optimizer_effective_namespace,
     get_pipelines_client,
     get_pipelines_effective_namespace,
+    get_spark_session_ownership,
     get_trainer_client_for_namespace,
     get_trainer_effective_namespace,
     get_trainer_ownership,
@@ -163,6 +165,43 @@ class TestGetTrainerOwnership:
         mock_api.get_namespaced_custom_object.side_effect = Exception("connection refused")
         mock_api_fn.return_value = mock_api
         assert get_trainer_ownership("my-job", "default") is None
+
+
+class TestGetSparkSessionOwnership:
+    @patch(PATCH_CUSTOM_API)
+    def test_managed_when_label_present(self, mock_api_fn):
+        mock_api_fn.return_value.get_namespaced_custom_object.return_value = {
+            "metadata": {"labels": {MCP_MANAGED_LABEL: MCP_MANAGED_VALUE}}
+        }
+        assert get_spark_session_ownership("etl", "default") == "managed"
+
+    @patch(PATCH_CUSTOM_API)
+    def test_not_found_on_404(self, mock_api_fn):
+        from kubernetes.client.exceptions import ApiException
+
+        mock_api_fn.return_value.get_namespaced_custom_object.side_effect = ApiException(
+            status=404, reason="Not Found"
+        )
+        assert get_spark_session_ownership("gone", "default") == "not_found"
+
+    @pytest.mark.parametrize("status", [401, 403])
+    @patch(PATCH_CUSTOM_API)
+    def test_forbidden_is_distinct_from_unknown(self, mock_api_fn, status):
+        """A denied read is the caller's RBAC, not an API failure: delete needs
+        to report it as PERMISSION_DENIED rather than SDK_ERROR."""
+        from kubernetes.client.exceptions import ApiException
+
+        mock_api_fn.return_value.get_namespaced_custom_object.side_effect = ApiException(
+            status=status, reason="Forbidden"
+        )
+        assert get_spark_session_ownership("etl", "team-b") == "forbidden"
+
+    @patch(PATCH_CUSTOM_API)
+    def test_unknown_on_other_api_error(self, mock_api_fn):
+        mock_api_fn.return_value.get_namespaced_custom_object.side_effect = Exception(
+            "connection refused"
+        )
+        assert get_spark_session_ownership("etl", "default") == "unknown"
 
 
 class TestResetClients:
@@ -420,3 +459,17 @@ class TestPipelinesClient:
         assert len(_pipelines_client_cache) == _NS_CLIENT_CACHE_MAX
         assert "ns-0" not in _pipelines_client_cache
         assert f"ns-{_NS_CLIENT_CACHE_MAX}" in _pipelines_client_cache
+
+
+def test_optimizer_namespace_resolves_without_building_an_sdk_client():
+    """OptimizerClient() also builds a Trainer backend whose first read has no
+    timeout, so resolving a namespace must not construct it."""
+    with (
+        patch("kubeflow.optimizer.OptimizerClient", side_effect=AssertionError("built")),
+        patch(
+            "kubeflow_mcp.common.utils.get_default_kubeconfig_namespace",
+            return_value="kube-default",
+        ),
+    ):
+        assert get_optimizer_effective_namespace(None) == "kube-default"
+        assert get_optimizer_effective_namespace("explicit") == "explicit"

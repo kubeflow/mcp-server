@@ -23,7 +23,13 @@ from typing import Any
 from kubeflow.trainer.constants import constants as trainer_constants
 
 from kubeflow_mcp.common.constants import TOOL_PHASES, ErrorCode
-from kubeflow_mcp.common.types import ToolError, ToolResponse, exception_details, is_k8s_not_found
+from kubeflow_mcp.common.types import (
+    ToolError,
+    ToolResponse,
+    exception_details,
+    is_k8s_forbidden,
+    is_k8s_not_found,
+)
 from kubeflow_mcp.common.utils import (
     get_core_v1_api,
     get_custom_objects_api,
@@ -237,7 +243,7 @@ def list_training_jobs(
     except Exception as e:
         return ToolError(
             error=str(e),
-            error_code=ErrorCode.SDK_ERROR,
+            error_code=ErrorCode.PERMISSION_DENIED if is_k8s_forbidden(e) else ErrorCode.SDK_ERROR,
             details=exception_details(e),
         ).model_dump()
 
@@ -332,7 +338,7 @@ def get_training_job(name: str, namespace: str | None = None) -> dict[str, Any]:
             ).model_dump()
         return ToolError(
             error=str(e),
-            error_code=ErrorCode.SDK_ERROR,
+            error_code=ErrorCode.PERMISSION_DENIED if is_k8s_forbidden(e) else ErrorCode.SDK_ERROR,
             details=exception_details(e),
         ).model_dump()
 
@@ -372,7 +378,7 @@ def list_runtimes() -> dict[str, Any]:
     except Exception as e:
         return ToolError(
             error=str(e),
-            error_code=ErrorCode.SDK_ERROR,
+            error_code=ErrorCode.PERMISSION_DENIED if is_k8s_forbidden(e) else ErrorCode.SDK_ERROR,
             details=exception_details(e),
         ).model_dump()
 
@@ -540,7 +546,7 @@ def _fetch_packages_via_pod(runtime_name: str, runtime_obj: Any = None) -> dict[
         packages = []
         for line in logs.strip().splitlines():
             parts = line.split()
-            if len(parts) >= 2 and parts[0] not in ("Package", "---"):
+            if len(parts) >= 2 and parts[0] != "Package" and parts[0].strip("-"):
                 packages.append({"name": parts[0], "version": parts[1]})
         return {"packages": packages, "total": len(packages)}
 
@@ -644,6 +650,6 @@ def get_runtime(name: str, include_packages: bool = False) -> dict[str, Any]:
             ).model_dump()
         return ToolError(
             error=str(e),
-            error_code=ErrorCode.SDK_ERROR,
+            error_code=ErrorCode.PERMISSION_DENIED if is_k8s_forbidden(e) else ErrorCode.SDK_ERROR,
             details=exception_details(e),
         ).model_dump()
