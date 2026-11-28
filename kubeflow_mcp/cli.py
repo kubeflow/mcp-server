@@ -96,6 +96,13 @@ def cli() -> None:
     "Ignored for stdio transport.",
 )
 @click.option(
+    "--oidc-issuer",
+    default=None,
+    help="OIDC / OAuth 2.1 Issuer URL for auto-discovery of jwks_uri. "
+    "Falls back to KUBEFLOW_MCP_OIDC_ISSUER env var, config file. "
+    "Ignored for stdio transport.",
+)
+@click.option(
     "--otel-endpoint",
     default=None,
     help="OpenTelemetry OTLP HTTP endpoint for tracing. "
@@ -111,7 +118,8 @@ def serve(
     instruction_tier: str | None,
     no_banner: bool,
     auth_token: str | None,
-    otel_endpoint: str | None,
+    oidc_issuer: str | None = None,
+    otel_endpoint: str | None = None,
 ) -> None:
     """Start the MCP server.
 
@@ -151,6 +159,8 @@ def serve(
 
     if auth_token:
         cfg.auth.auth_token = auth_token
+    if oidc_issuer:
+        cfg.auth.oidc_issuer = oidc_issuer
     if otel_endpoint:
         cfg.observability.otel_endpoint = otel_endpoint
 
@@ -191,8 +201,8 @@ def serve(
             logger.warning(
                 "HTTP transport with no auth configured — server is open. "
                 "Set --auth-token or KUBEFLOW_MCP_AUTH_TOKEN for bearer auth, "
-                "or KUBEFLOW_MCP_JWKS_URI with KUBEFLOW_MCP_JWT_ISSUER and "
-                "KUBEFLOW_MCP_JWT_AUDIENCE for JWT verification."
+                "or KUBEFLOW_MCP_JWKS_URI / KUBEFLOW_MCP_OIDC_ISSUER with "
+                "KUBEFLOW_MCP_JWT_ISSUER and KUBEFLOW_MCP_JWT_AUDIENCE for JWT verification."
             )
 
         from starlette.middleware import Middleware

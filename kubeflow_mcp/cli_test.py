@@ -466,6 +466,22 @@ def test_serve_auth_token_passed_to_create_server():
     assert kwargs["auth_provider"] is not None
 
 
+def test_serve_oidc_issuer_passed_to_build_auth_provider() -> None:
+    """--oidc-issuer passes the issuer to build_auth_provider."""
+    mock_server, mock_create_server, modules_patch = _make_serve_mocks()
+    fake_auth_mod = modules_patch["kubeflow_mcp.core.auth"]
+
+    with patch.dict(sys.modules, modules_patch):
+        runner = CliRunner()
+        runner.invoke(
+            cli, ["serve", "--transport", "http", "--oidc-issuer", "https://accounts.google.com"]
+        )
+
+    fake_auth_mod.build_auth_provider.assert_called_once()
+    called_cfg = fake_auth_mod.build_auth_provider.call_args[0][0]
+    assert called_cfg.oidc_issuer == "https://accounts.google.com"
+
+
 def test_serve_http_refuses_to_start_with_bad_auth_config():
     """A rejected auth config stops the server with a readable error before it serves."""
     mock_server, mock_create_server, modules_patch = _make_serve_mocks()
