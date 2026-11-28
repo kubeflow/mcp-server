@@ -252,7 +252,7 @@ Optional OpenTelemetry tracing can be enabled with `--otel-endpoint http://local
 
 | MCP Server | Kubeflow Trainer | Kubeflow SDK | Python | Kubernetes |
 |------------|------------------|--------------|--------|------------|
-| `0.2.x` *(upcoming)* | `>= 2.3.0, < 2.4.0` | `>= 0.5.0, < 0.6.0` | `3.10 – 3.12` | `>= 1.27` |
+| `0.2.x` *(upcoming)* | `>= 2.3.0, < 2.5.0` | `>= 0.5.0, < 0.6.0` | `3.10 – 3.12` | `>= 1.27` |
 | `0.1.x` | `== 2.2.1` | `== 0.4.1` | `3.10 – 3.12` | `>= 1.27` |
 
 ## Development
