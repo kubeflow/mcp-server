@@ -44,11 +44,12 @@ from kubeflow_mcp.core.security import (
 from kubeflow_mcp.optimizer.api import _katib
 from kubeflow_mcp.optimizer.api._common import (
     DEFAULT_LIST_LIMIT,
+    VALID_TRIAL_STATUSES,
     check_optimizer_namespace,
     clamp_limit,
     experiment_error,
-    resolve_status_filter,
     resource_error,
+    validate_status_filter,
 )
 from kubeflow_mcp.optimizer.constants import (
     KATIB_API_GROUP,
@@ -111,14 +112,17 @@ def get_hpo_experiment_trials(
     if limit_err is not None:
         return limit_err.model_dump()
 
+    want, status_err = validate_status_filter(status, VALID_TRIAL_STATUSES)
+    if status_err is not None:
+        return status_err.model_dump()
+
     try:
         ns = get_optimizer_effective_namespace(namespace)
         # Read the experiment first so a missing one is not reported as empty.
         _katib.read_experiment(name, ns)
         all_trials = [trial_to_dict(t) for t in _katib.list_trials(name, ns)]
         trials = all_trials
-        if status:
-            want = resolve_status_filter(status)
+        if want is not None:
             trials = [t for t in all_trials if t.get("status") == want]
 
         data: dict[str, Any] = {

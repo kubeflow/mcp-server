@@ -60,11 +60,42 @@ MAX_LIST_LIMIT = 500
 # "Complete". Accept both wherever a caller filters by status, so the same value
 # works against experiments and trials alike.
 STATUS_FILTER_ALIASES: dict[str, str] = {"Succeeded": "Complete"}
+VALID_EXPERIMENT_STATUSES: frozenset[str] = frozenset({"Created", "Running", "Complete", "Failed"})
+VALID_TRIAL_STATUSES: frozenset[str] = frozenset(
+    {
+        "Created",
+        "Running",
+        "Complete",
+        "Failed",
+        "Killed",
+        "EarlyStopped",
+        "MetricsUnavailable",
+    }
+)
 
 
 def resolve_status_filter(status: str) -> str:
     """Map a caller-supplied status onto the value the SDK actually reports."""
     return STATUS_FILTER_ALIASES.get(status, status)
+
+
+def validate_status_filter(
+    status: str | None, valid_statuses: frozenset[str]
+) -> tuple[str | None, ToolError | None]:
+    """Normalize and validate an optional status filter against ``valid_statuses``."""
+    if status is None:
+        return None, None
+    normalized = resolve_status_filter(status)
+    if normalized not in valid_statuses:
+        return None, ToolError(
+            error=f"Unsupported status '{status}'",
+            error_code=ErrorCode.VALIDATION_ERROR,
+            details={
+                "supported_statuses": sorted(valid_statuses),
+                "aliases": dict(STATUS_FILTER_ALIASES),
+            },
+        )
+    return normalized, None
 
 
 def clamp_limit(limit: int) -> tuple[int, ToolError | None]:
