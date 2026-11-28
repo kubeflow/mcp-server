@@ -14,6 +14,8 @@
 
 """Tests for list_pipelines and get_pipeline."""
 
+from unittest.mock import MagicMock
+
 import pytest
 
 from kubeflow_mcp.pipelines.api.discovery import get_pipeline, list_pipelines
@@ -65,12 +67,26 @@ class TestListPipelines:
         assert result["error_code"] == "VALIDATION_ERROR"
         kfp_client.list_pipelines.assert_not_called()
 
-    def test_permission_denied_maps_to_error_code(self, kfp_client):
-        kfp_client.list_pipelines.side_effect = ApiException(403, "Forbidden")
-
+    @pytest.mark.parametrize("status", [401, 403, 500])
+    @pytest.mark.parametrize("wrapping", ["direct", "cause", "context", "nested"])
+    def test_api_error_mapping(self, kfp_client: MagicMock, status: int, wrapping: str) -> None:
+        error: Exception = ApiException(status)
+        if wrapping != "direct":
+            cause = error
+            error = RuntimeError("Pipeline request failed")
+            if wrapping == "context":
+                error.__context__ = cause
+            else:
+                error.__cause__ = cause
+            if wrapping == "nested":
+                cause = error
+                error = RuntimeError("Wrapped pipeline request failed")
+                error.__cause__ = cause
+        kfp_client.list_pipelines.side_effect = error
         result = list_pipelines()
-
-        assert result["error_code"] == "PERMISSION_DENIED"
+        assert result["error_code"] == (
+            "PERMISSION_DENIED" if status in (401, 403) else "SDK_ERROR"
+        )
 
     def test_subclassed_api_exception_is_still_mapped(self, kfp_client):
         class ForbiddenException(ApiException):

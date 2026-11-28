@@ -48,12 +48,25 @@ def test_conflict_is_found_through_the_cause_chain():
     assert not is_conflict(ApiException(status=404))
 
 
-def test_a_forbidden_resource_does_not_count_as_an_outage():
-    """RBAC covering only some allowed namespaces must not open the circuit
-    breaker for the namespaces it does cover."""
-    wrapped = RuntimeError("get failed")
-    wrapped.__cause__ = ApiException(status=403, reason="Forbidden")
-    err = resource_error(wrapped, "exp")
-    assert err.error_code == "PERMISSION_DENIED"
-    assert err.hint == collection_error(ApiException(status=403)).hint
-    assert not is_infrastructure_error(err.model_dump())
+@pytest.mark.parametrize("status", [401, 403, 500])
+@pytest.mark.parametrize("wrapping", ["direct", "cause", "context", "nested"])
+def test_denials_do_not_count_as_outages(status: int, wrapping: str) -> None:
+    error: Exception = ApiException(status=status)
+    if wrapping != "direct":
+        cause = error
+        error = RuntimeError("Katib request failed")
+        if wrapping == "context":
+            error.__context__ = cause
+        else:
+            error.__cause__ = cause
+        if wrapping == "nested":
+            cause = error
+            error = RuntimeError("Experiment request failed")
+            error.__cause__ = cause
+    resource = resource_error(error, "exp")
+    collection = collection_error(error)
+    for result in (resource, collection):
+        assert result.error_code == ("PERMISSION_DENIED" if status in (401, 403) else "SDK_ERROR")
+        assert is_infrastructure_error(result.model_dump()) is (status == 500)
+    if status in (401, 403):
+        assert resource.hint == collection.hint

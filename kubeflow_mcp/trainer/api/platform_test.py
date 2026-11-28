@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -815,3 +816,63 @@ def test_inspect_controller_logs_response(mock_k8s_apis, scan_default_namespaces
         tail_lines=25,
         _request_timeout=mcp_utils.K8S_TIMEOUT,
     )
+
+
+@pytest.mark.parametrize(
+    ("tool", "api_key", "method", "kwargs"),
+    [
+        (
+            inspect_crd,
+            "apiextensions",
+            "read_custom_resource_definition",
+            {"name": "trainjobs.trainer.kubeflow.org"},
+        ),
+        (inspect_controller, "core_v1", "read_namespaced_pod_log", {}),
+        (
+            patch_runtime,
+            "custom",
+            "get_cluster_custom_object",
+            {"name": "runtime-a", "patch": {"spec": {"labels": {"team": "a"}}}, "confirmed": True},
+        ),
+        (
+            create_runtime,
+            "custom",
+            "create_cluster_custom_object",
+            {"name": "runtime-a", "spec": {"template": {}}, "confirmed": True},
+        ),
+        (
+            delete_runtime,
+            "custom",
+            "list_cluster_custom_object",
+            {"name": "runtime-a", "confirmed": True},
+        ),
+        (
+            delete_runtime,
+            "custom",
+            "delete_cluster_custom_object",
+            {"name": "runtime-a", "confirmed": True},
+        ),
+    ],
+)
+@pytest.mark.parametrize("status", [401, 403, 500])
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_platform_classifies_api_errors(
+    mock_k8s_apis: dict[str, MagicMock],
+    tool: Any,
+    api_key: str,
+    method: str,
+    kwargs: dict[str, Any],
+    status: int,
+    wrapped: bool,
+) -> None:
+    error: Exception = ApiException(status=status)
+    if wrapped:
+        cause = error
+        error = RuntimeError("Trainer request failed")
+        error.__cause__ = cause
+    getattr(mock_k8s_apis[api_key], method).side_effect = error
+    result = tool(**kwargs)
+    expected = PERMISSION_DENIED if status in (401, 403) else KUBERNETES_ERROR
+    verify_tool_error(result, error_code=expected)
+    if tool is delete_runtime and method == "list_cluster_custom_object":
+        mock_k8s_apis["custom"].delete_cluster_custom_object.assert_not_called()

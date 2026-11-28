@@ -28,7 +28,7 @@ from kubeflow_mcp.common.constants import (
     ErrorCode,
 )
 from kubeflow_mcp.common.huggingface import is_confirmed_missing as _is_confirmed_missing
-from kubeflow_mcp.common.types import ToolError, ToolResponse, exception_details
+from kubeflow_mcp.common.types import ToolError, ToolResponse, exception_details, is_k8s_forbidden
 
 logger = logging.getLogger(__name__)
 
@@ -239,6 +239,8 @@ def _check_k8s_version(
                 "detail": "Could not parse version",
             }
     except Exception as e:
+        if is_k8s_forbidden(e):
+            raise
         checks["kubernetes_version"] = {"status": "fail", "error": str(e)}
         blockers.append(f"Cannot reach Kubernetes API: {e}")
 
@@ -280,6 +282,8 @@ def _check_trainer_crd(
             )
         return True
     except Exception as e:
+        if is_k8s_forbidden(e):
+            raise
         checks["trainer_crd"] = {"status": "fail", "error": str(e)}
         checks["trainer_api_version"] = {"status": "fail", "error": "CRD not found"}
         blockers.append(
@@ -478,7 +482,9 @@ def check_compatibility() -> dict[str, Any]:
     except Exception as e:
         return ToolError(
             error=str(e),
-            error_code=ErrorCode.KUBERNETES_ERROR,
+            error_code=ErrorCode.PERMISSION_DENIED
+            if is_k8s_forbidden(e)
+            else ErrorCode.KUBERNETES_ERROR,
             details=exception_details(e),
         ).model_dump()
 
@@ -616,7 +622,9 @@ def get_cluster_resources() -> dict[str, Any]:
     except Exception as e:
         return ToolError(
             error=str(e),
-            error_code=ErrorCode.KUBERNETES_ERROR,
+            error_code=ErrorCode.PERMISSION_DENIED
+            if is_k8s_forbidden(e)
+            else ErrorCode.KUBERNETES_ERROR,
             details=exception_details(e),
         ).model_dump()
 
@@ -740,6 +748,22 @@ def estimate_resources(
         ).model_dump()
 
 
+def _qlora_hint(estimate: dict[str, Any]) -> str | None:
+    """Suggest QLoRA when the estimated GPU memory exceeds 24 GB."""
+    memory = estimate.get("gpu_memory_required", "")
+    if isinstance(memory, str) and memory.endswith("GB"):
+        try:
+            memory_gb = int(memory.rstrip("GB"))
+        except ValueError:
+            return None
+        if memory_gb > 24:
+            return (
+                f"Model needs ~{memory_gb}GB GPU — consider QLoRA (quantize_base=True) "
+                "to halve memory"
+            )
+    return None
+
+
 def pre_flight(
     model: str = "",
     num_workers: int = 1,
@@ -779,6 +803,8 @@ def pre_flight(
     next_steps: list[str] = []
 
     compat = check_compatibility()
+    if compat.get("error_code"):
+        return compat
     compat_data = compat.get("data", compat)
     result["compatibility"] = compat_data
 
@@ -798,6 +824,8 @@ def pre_flight(
         )
 
     cluster = get_cluster_resources()
+    if cluster.get("error_code"):
+        return cluster
     cluster_data = cluster.get("data", cluster)
     result["cluster"] = cluster_data
 
@@ -812,12 +840,16 @@ def pre_flight(
             batch_size=batch_size,
             quantization=quantization,
         )
+        if estimate.get("error_code"):
+            return estimate
         estimate_data = estimate.get("data", estimate)
         result["estimate"] = estimate_data
 
     from kubeflow_mcp.trainer.api.discovery import list_runtimes as _list_runtimes
 
     runtimes_resp = _list_runtimes()
+    if runtimes_resp.get("error_code"):
+        return runtimes_resp
     runtimes_data = runtimes_resp.get("data", runtimes_resp)
     result["runtimes"] = runtimes_data
 
@@ -864,19 +896,9 @@ def pre_flight(
             "Read trainer://guides/platform-fixes for platform-specific guidance"
         )
 
-    if model and "estimate" in result:
-        est = result["estimate"]
-        mem_gb = est.get("gpu_memory_required", "")
-        if isinstance(mem_gb, str) and mem_gb.endswith("GB"):
-            try:
-                mem_val = int(mem_gb.rstrip("GB"))
-            except ValueError:
-                mem_val = 0
-            if mem_val > 24:
-                recommendations.append(
-                    f"Model needs ~{mem_val}GB GPU — consider QLoRA (quantize_base=True) "
-                    "to halve memory"
-                )
+    memory_hint = _qlora_hint(result.get("estimate", {}))
+    if memory_hint:
+        recommendations.append(memory_hint)
 
     result["tool_selection"] = tool_selection
     result["recommendations"] = recommendations

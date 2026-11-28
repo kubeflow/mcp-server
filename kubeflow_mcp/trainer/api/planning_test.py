@@ -1349,3 +1349,102 @@ def test_check_compatibility_namespace_failure_keeps_earlier_blockers():
     assert any("Could not resolve Trainer namespace" in b for b in data["blockers"])
     assert data["checks"]["rbac"]["namespace"]["status"] == "fail"
     mock_rbac.assert_not_called()
+@pytest.mark.parametrize("tool", [get_cluster_resources, check_compatibility])
+@pytest.mark.parametrize("status", [401, 403, 500])
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_planning_classifies_kubernetes_errors(tool: Any, status: int, wrapped: bool) -> None:
+    from kubernetes.client.exceptions import ApiException
+
+    error: Exception = ApiException(status=status)
+    if wrapped:
+        cause = error
+        error = RuntimeError("Kubernetes request failed")
+        error.__cause__ = cause
+    target = (
+        "kubeflow_mcp.common.utils.get_core_v1_api"
+        if tool is get_cluster_resources
+        else "kubeflow_mcp.trainer.api.planning._check_k8s_version"
+    )
+    with patch(target, side_effect=error):
+        result = tool()
+    assert result["error_code"] == (
+        "PERMISSION_DENIED" if status in (401, 403) else "KUBERNETES_ERROR"
+    )
+
+
+@pytest.mark.parametrize("check", ["version", "crd"])
+@pytest.mark.parametrize("status", [401, 403, 404, 500])
+@pytest.mark.parametrize("wrapping", ["direct", "cause", "context", "nested"])
+def test_compatibility_classifies_required_api_failures(
+    mock_k8s_apis: dict[str, MagicMock], check: str, status: int, wrapping: str
+) -> None:
+    from kubernetes.client.exceptions import ApiException
+
+    error: Exception = ApiException(status=status)
+    if wrapping != "direct":
+        cause = error
+        error = RuntimeError("Kubernetes request failed")
+        if wrapping == "context":
+            error.__context__ = cause
+        else:
+            error.__cause__ = cause
+        if wrapping == "nested":
+            cause = error
+            error = RuntimeError("Compatibility check failed")
+            error.__cause__ = cause
+    version_api = MagicMock()
+    version_api.get_code.return_value = SimpleNamespace(git_version="v1.34.2")
+    crd_api = MagicMock()
+    crd_api.read_custom_resource_definition.return_value = SimpleNamespace(
+        spec=SimpleNamespace(versions=[SimpleNamespace(name=MIN_TRAINER_CRD_VERSION, served=True)])
+    )
+    operation = (
+        version_api.get_code if check == "version" else crd_api.read_custom_resource_definition
+    )
+    operation.side_effect = error
+    with (
+        patch("kubeflow_mcp.common.utils.get_version_api", return_value=version_api),
+        patch("kubernetes.client.ApiextensionsV1Api", return_value=crd_api),
+    ):
+        result = check_compatibility()
+    if status in (401, 403):
+        assert result["success"] is False
+        assert result["error_code"] == "PERMISSION_DENIED"
+    else:
+        assert result["success"] is True
+        assert result["data"]["compatible"] is False
+        key = "kubernetes_version" if check == "version" else "trainer_crd"
+        assert result["data"]["checks"][key]["status"] == "fail"
+
+
+@pytest.mark.parametrize("step", range(4), ids=["compatibility", "cluster", "estimate", "runtimes"])
+@pytest.mark.parametrize("code", ["PERMISSION_DENIED", "SDK_ERROR", "VALIDATION_ERROR"])
+def test_pre_flight_propagates_failed_checks(step: int, code: str) -> None:
+    from kubeflow_mcp.core.server import _inject_meta
+
+    error = {"success": False, "error": "Check failed", "error_code": code}
+    with (
+        patch(
+            "kubeflow_mcp.trainer.api.planning.check_compatibility",
+            return_value={"success": True, "data": {"compatible": True, "blockers": []}},
+        ) as compat,
+        patch(
+            "kubeflow_mcp.trainer.api.planning.get_cluster_resources",
+            return_value={"success": True, "data": {"gpu_total": 1}},
+        ) as cluster,
+        patch(
+            "kubeflow_mcp.trainer.api.planning.estimate_resources",
+            return_value={"success": True, "data": {}},
+        ) as estimate,
+        patch(
+            "kubeflow_mcp.trainer.api.discovery.list_runtimes",
+            return_value={"success": True, "data": {"runtimes": []}},
+        ) as runtimes,
+    ):
+        checks = [compat, cluster, estimate, runtimes]
+        checks[step].return_value = error
+        result = pre_flight(model="test/model")
+        for later in checks[step + 1 :]:
+            later.assert_not_called()
+    assert result == error
+    assert "_meta" not in _inject_meta(result, "pre_flight")
