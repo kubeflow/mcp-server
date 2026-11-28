@@ -215,6 +215,28 @@ class TestCreateGuardsInput:
         assert out.get("status") != "preview"
         assert out["error_code"] == "VALIDATION_ERROR"
 
+    @pytest.mark.parametrize("num_executors", [True, False, 1.5, "2"])
+    def test_non_int_executor_count_rejected_before_preview(self, num_executors):
+        out = sessions.create_spark_session(name="etl", num_executors=num_executors)
+        assert out["success"] is False
+        assert out["error_code"] == "VALIDATION_ERROR"
+        assert "num_executors" in out["error"]
+
+    @pytest.mark.parametrize(
+        "bad_conf",
+        [
+            "not-a-dict",
+            ["spark.sql.shuffle.partitions=8"],
+            {1: "value"},
+            {"spark.sql.shuffle.partitions": 8},
+            {"spark.sql.shuffle.partitions": True},
+        ],
+    )
+    def test_malformed_spark_conf_rejected_before_preview(self, bad_conf):
+        out = sessions.create_spark_session(name="etl", spark_conf=bad_conf)
+        assert out.get("status") != "preview"
+        assert out["error_code"] == "VALIDATION_ERROR"
+
     def test_ordinary_spark_conf_still_allowed(self):
         out = sessions.create_spark_session(
             name="etl", spark_conf={"spark.sql.shuffle.partitions": "8"}
@@ -232,9 +254,17 @@ class TestCreateBoundsTimeouts:
             ("timeout", sessions._MAX_TIMEOUT + 1),
             ("timeout", 0),
             ("timeout", -1),
+            ("timeout", True),
+            ("timeout", False),
+            ("timeout", 1.5),
+            ("timeout", "60"),
             ("connect_timeout", sessions._MAX_CONNECT_TIMEOUT + 1),
             ("connect_timeout", 0),
             ("connect_timeout", -5),
+            ("connect_timeout", True),
+            ("connect_timeout", False),
+            ("connect_timeout", 1.5),
+            ("connect_timeout", "60"),
         ],
     )
     def test_out_of_range_rejected(self, field, value):

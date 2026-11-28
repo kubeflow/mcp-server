@@ -45,6 +45,7 @@ from kubeflow_mcp.core.security import (
     validate_k8s_name,
     validate_k8s_subdomain_name,
 )
+from kubeflow_mcp.spark.api._common import validate_int_range
 from kubeflow_mcp.spark.types import session_info_to_dict
 
 logger = logging.getLogger(__name__)
@@ -86,10 +87,17 @@ _DENIED_SPARK_CONF_PREFIXES: tuple[str, ...] = (
 )
 
 
-def _validate_spark_conf(spark_conf: dict[str, str] | None) -> str | None:
-    """Return an error message if *spark_conf* sets a restricted key, else None."""
+def _validate_spark_conf(spark_conf: Any) -> str | None:
+    """Return an error message if *spark_conf* has invalid types or sets restricted keys."""
+    if spark_conf is None:
+        return None
+    if not isinstance(spark_conf, dict):
+        return "spark_conf must be a dictionary of string keys and values"
     if not spark_conf:
         return None
+    for key, value in spark_conf.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            return "All spark_conf keys and values must be strings"
     denied = sorted(
         key for key in spark_conf if key.strip().lower().startswith(_DENIED_SPARK_CONF_PREFIXES)
     )
@@ -170,21 +178,18 @@ def _validate_create_inputs(
     spark_conf: dict[str, str] | None,
 ) -> ToolError | None:
     """Bound the inputs that reach the cluster or hold a server thread."""
-    if num_executors is not None and not 0 <= num_executors <= _MAX_EXECUTORS:
-        return ToolError(
-            error=f"num_executors must be between 0 and {_MAX_EXECUTORS}, got {num_executors}",
-            error_code=ErrorCode.VALIDATION_ERROR,
-        )
+    if num_executors is not None:
+        exec_err = validate_int_range(num_executors, "num_executors", 0, _MAX_EXECUTORS)
+        if exec_err is not None:
+            return exec_err
 
     for label, value, ceiling in (
         ("timeout", timeout, _MAX_TIMEOUT),
         ("connect_timeout", connect_timeout, _MAX_CONNECT_TIMEOUT),
     ):
-        if not 1 <= value <= ceiling:
-            return ToolError(
-                error=f"{label} must be between 1 and {ceiling} seconds, got {value}",
-                error_code=ErrorCode.VALIDATION_ERROR,
-            )
+        err = validate_int_range(value, label, 1, ceiling)
+        if err is not None:
+            return err
 
     conf_err = _validate_spark_conf(spark_conf)
     if conf_err is not None:

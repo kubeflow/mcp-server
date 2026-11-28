@@ -87,7 +87,7 @@ class TestListSessions:
         assert out["data"]["total"] == 1
         assert out["data"]["sessions"][0]["name"] == "b"
 
-    @pytest.mark.parametrize("state", ["Redy", "Complete", "   ", ""])
+    @pytest.mark.parametrize("state", ["Redy", "Complete", "   ", "", 123, True, ["Ready"]])
     def test_unsupported_state_is_rejected_before_sdk_call(self, mock_spark_client, state):
         """A filter no session can match used to read as "no sessions exist"."""
         out = discovery.list_spark_sessions(state=state)
@@ -106,10 +106,12 @@ class TestListSessions:
         assert out["success"] is True
         assert out["data"]["total"] == 2
 
-    def test_invalid_limit(self):
-        out = discovery.list_spark_sessions(limit=0)
+    @pytest.mark.parametrize("limit", [0, -1, True, False, 1.5, "10", None])
+    def test_invalid_limit(self, mock_spark_client, limit):
+        out = discovery.list_spark_sessions(limit=limit)
         assert out["success"] is False
         assert out["error_code"] == "VALIDATION_ERROR"
+        mock_spark_client.list_sessions.assert_not_called()
 
     def test_missing_extra_friendly_error(self):
         with patch.object(
