@@ -113,6 +113,37 @@ class TestPreview:
         assert result["config"]["existing_pipeline"]["pipeline_id"] == "p-1"
         assert "new version" in result["message"]
 
+    @pytest.mark.parametrize("confirmed", [False, True])
+    def test_existing_pipeline_in_another_namespace_is_refused(
+        self, kfp_client, no_compile, confirmed
+    ):
+        other = make_pipeline()
+        other.namespace = "team-b"
+        kfp_client.get_pipeline.return_value = other
+
+        result = create_pipeline("churn-prediction", PIPELINE_CODE, confirmed=confirmed)
+
+        assert result["error_code"] == "PERMISSION_DENIED"
+        assert "not in namespace 'team-a'" in result["error"]
+        kfp_client.upload_pipeline.assert_not_called()
+
+    @pytest.mark.parametrize("confirmed", [False, True])
+    def test_existing_shared_pipeline_is_refused_with_allowlist(
+        self, kfp_client, no_compile, monkeypatch, confirmed
+    ):
+        monkeypatch.setattr(
+            "kubeflow_mcp.pipelines.api._common.get_allowed_namespaces", lambda: ["team-a"]
+        )
+        shared = make_pipeline()
+        shared.namespace = ""
+        kfp_client.get_pipeline.return_value = shared
+
+        result = create_pipeline("churn-prediction", PIPELINE_CODE, confirmed=confirmed)
+
+        assert result["error_code"] == "PERMISSION_DENIED"
+        assert "no namespace" in result["error"]
+        kfp_client.upload_pipeline.assert_not_called()
+
     def test_preview_shows_safety_warnings(self, new_pipeline, no_compile):
         code = PIPELINE_CODE.replace(
             "import pandas as pd",
@@ -173,6 +204,34 @@ class TestValidation:
 
 
 class TestConfirm:
+    def test_existing_pipeline_in_allowed_namespace_uploads_new_version(
+        self, kfp_client, fake_compile, monkeypatch
+    ):
+        monkeypatch.setattr("kubeflow_mcp.core.policy.get_allowed_namespaces", lambda: ["team-a"])
+        monkeypatch.setattr(
+            "kubeflow_mcp.pipelines.api._common.get_allowed_namespaces", lambda: ["team-a"]
+        )
+        kfp_client.get_pipeline.return_value = make_pipeline()
+        kfp_client.upload_pipeline.return_value = UPLOADED
+
+        result = create_pipeline("churn-prediction", PIPELINE_CODE, version="v2", confirmed=True)
+
+        assert result["success"] is True
+        assert result["data"]["created_new_pipeline"] is False
+        kfp_client.upload_pipeline.assert_called_once()
+
+    def test_existing_shared_pipeline_allowed_without_allowlist(self, kfp_client, fake_compile):
+        shared = make_pipeline()
+        shared.namespace = ""
+        kfp_client.get_pipeline.return_value = shared
+        kfp_client.upload_pipeline.return_value = UPLOADED
+
+        result = create_pipeline("churn-prediction", PIPELINE_CODE, version="v2", confirmed=True)
+
+        assert result["success"] is True
+        assert result["data"]["created_new_pipeline"] is False
+        kfp_client.upload_pipeline.assert_called_once()
+
     def test_compiles_uploads_and_cleans_up(self, new_pipeline, fake_compile):
         seen = {}
 

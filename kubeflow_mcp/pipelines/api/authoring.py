@@ -214,6 +214,11 @@ def create_pipeline(
     except Exception as e:
         return pipelines_error(e, f"look up pipeline '{name}'").model_dump()
 
+    if existing is not None:
+        owner_err = check_resource_namespace(existing, ns, "Pipeline")
+        if owner_err is not None:
+            return owner_err.model_dump()
+
     if not confirmed:
         return _preview(name, ns, summary, existing, version, description, dataset)
 
