@@ -35,8 +35,25 @@ _log_buffer: deque[dict[str, Any]] = deque(maxlen=1000)
 # A key needs a real ``=`` or ``:`` after it, otherwise prose such as
 # ``bearer auth`` reads as a key and ordinary log lines get mangled.
 _REDACT_KEY = re.compile(r"(?<!\w)(\w+)\s*[=:]\s*")
-# Taking the scheme word too covers ``Authorization: Bearer <jwt>``.
-_REDACT_VALUE = re.compile(r"(?:(?:bearer|basic|digest|token)\s+)?\S+", re.IGNORECASE)
+# Taking the scheme word covers ``Authorization: Bearer <jwt>``.
+# Supports PEM blocks (BEGIN through END), quoted strings, and tokens with adjacent quoted segments.
+_REDACT_VALUE = re.compile(
+    r"""(?x)
+    -----BEGIN\ [A-Z0-9\ -]+-----[\s\S]{1,10000}?-----END\ [A-Z0-9\ -]+-----
+    | (?:(?:bearer|basic|digest|token)\s+)?
+      (?:
+          [^\s"']
+        | "(?:\\[\s\S]|[^"\\])*"
+        | '(?:\\[\s\S]|[^'\\])*'
+      )+
+    """,
+    re.IGNORECASE,
+)
+
+# Standalone private key PEM blocks must also be redacted even without a preceding key
+_STANDALONE_PEM = re.compile(
+    r"-----BEGIN [A-Z0-9 -]*PRIVATE KEY-----[\s\S]{1,10000}?-----END [A-Z0-9 -]*PRIVATE KEY-----"
+)
 
 
 def _redact_text(text: str) -> str:
@@ -46,6 +63,7 @@ def _redact_text(text: str) -> str:
     the same check ``mask_sensitive_data`` uses. A value that follows a harmless
     key is still scanned, which is how ``user: password=hunter2`` gets caught.
     """
+    text = _STANDALONE_PEM.sub("***", text)
     pieces: list[str] = []
     pos = 0
     for key in _REDACT_KEY.finditer(text):

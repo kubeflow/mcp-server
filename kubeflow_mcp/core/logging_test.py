@@ -241,6 +241,39 @@ class TestRedactText:
     def test_safe_key_not_redacted(self, text):
         assert _redact_text(text) == text
 
+    def test_redacts_multiline_pem_private_key_with_key(self):
+        pem = "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBg\nabc123\n-----END PRIVATE KEY-----"
+        assert _redact_text("private_key=" + pem) == "private_key=***"
+        assert _redact_text("private_key: " + pem) == "private_key: ***"
+        assert _redact_text(f"prefix private_key={pem} suffix") == "prefix private_key=*** suffix"
+
+    def test_redacts_standalone_pem_private_key_without_key(self):
+        pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIEogIBAAKCAQEA...\n-----END RSA PRIVATE KEY-----"
+        raw_log = f"Failed to load certificate: {pem} from secret"
+        assert _redact_text(raw_log) == "Failed to load certificate: *** from secret"
+
+        ec_pem = "-----BEGIN EC PRIVATE KEY-----\nMHcCAQEEI...\n-----END EC PRIVATE KEY-----"
+        assert _redact_text(ec_pem) == "***"
+
+    def test_redacts_quoted_sensitive_values_with_spaces(self):
+        assert _redact_text('password="hunter two" was used') == "password=*** was used"
+        assert _redact_text("api_key='secret token with spaces'") == "api_key=***"
+        assert _redact_text(r'secret="quoted \"escaped\" value"') == "secret=***"
+
+    def test_unquoted_single_token_preserves_trailing_prose(self):
+        assert _redact_text("password=hunter2 was used") == "password=*** was used"
+        assert _redact_text("token=xyz123 (temporary)") == "token=*** (temporary)"
+
+    def test_adjacent_quoted_and_unquoted_segments_fully_redacted(self):
+        # password="hunter"two: quoted "hunter" then unquoted suffix "two" — the whole value
+        # must be redacted so the suffix "two" does not leak into the log.
+        assert _redact_text('password="hunter"two was used') == "password=*** was used"
+        assert _redact_text("password='hunter'two was used") == "password=*** was used"
+        # Mixed: unquoted prefix + quoted suffix
+        assert _redact_text('password=part1"part2" was used') == "password=*** was used"
+        # Authorization with Bearer + quoted token + suffix
+        assert _redact_text('Authorization: Bearer "xyz"suffix rest') == "Authorization: *** rest"
+
 
 class TestLogPathsRedactConsistently:
     """Buffer, stderr JSON, and console must agree on the same line."""
