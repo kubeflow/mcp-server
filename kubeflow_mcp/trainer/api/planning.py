@@ -802,7 +802,15 @@ def pre_flight(
     tool_selection: dict[str, Any] = {}
     recommendations: list[str] = []
 
-    if has_torchtune and gpu_total > 0:
+    if runtimes_resp.get("success") is False:
+        # A failed list (e.g. an RBAC 403) says nothing about which runtimes exist,
+        # so do not tell the agent to install one.
+        tool_selection["recommended"] = None
+        tool_selection["reason"] = "Runtimes unknown — the runtime list could not be read"
+        next_steps.append(
+            "Could not list runtimes (see runtimes.error) — installed runtimes are unknown"
+        )
+    elif has_torchtune and gpu_total > 0:
         tool_selection["recommended"] = "fine_tune"
         tool_selection["reason"] = "torchtune runtime + GPU capacity detected"
         next_steps.append("torchtune runtime available — fine_tune() is supported")

@@ -1108,6 +1108,38 @@ class TestPreFlight:
         assert data["tool_selection"]["recommended"] is None
         assert "No runtimes installed" in data["tool_selection"]["reason"]
 
+    @pytest.mark.parametrize("gpu_total", [4, 0])
+    @patch("kubeflow_mcp.trainer.api.discovery.get_trainer_client")
+    @patch("kubeflow_mcp.trainer.api.planning.get_cluster_resources")
+    @patch("kubeflow_mcp.trainer.api.planning.check_compatibility")
+    def test_pre_flight_reports_unknown_runtimes_when_runtime_list_fails(
+        self, mock_compat, mock_cluster, mock_client, gpu_total
+    ):
+        # A failed runtime list (e.g. an RBAC 403) says nothing about which runtimes
+        # exist, so pre_flight must not tell the caller to install one.
+        mock_compat.return_value = {
+            "success": True,
+            "data": {"compatible": True, "blockers": [], "platform": "kubernetes"},
+        }
+        mock_cluster.return_value = {"success": True, "data": {"gpu_total": gpu_total}}
+        mock_client.return_value.list_runtimes.side_effect = RuntimeError(
+            "403 Forbidden: cannot list clustertrainingruntimes"
+        )
+
+        res = pre_flight()
+        data = res["data"]
+        assert data["runtimes"]["success"] is False
+        assert "403 Forbidden" in data["runtimes"]["error"]
+        assert data["tool_selection"]["recommended"] is None
+        assert data["tool_selection"]["reason"] == (
+            "Runtimes unknown — the runtime list could not be read"
+        )
+        assert not any("No runtimes installed" in step for step in data["next_steps"])
+        assert (
+            "Could not list runtimes (see runtimes.error) — installed runtimes are unknown"
+            in data["next_steps"]
+        )
+
     @patch("kubeflow_mcp.trainer.api.discovery.list_runtimes")
     @patch("kubeflow_mcp.trainer.api.planning.estimate_resources")
     @patch("kubeflow_mcp.trainer.api.planning.get_cluster_resources")
