@@ -190,8 +190,9 @@ def _load_yaml_config(path: Path) -> dict[str, Any]:
     """Load config from YAML file.
 
     An empty YAML document is treated as an empty configuration. Invalid YAML,
-    unreadable files, and non-mapping roots raise an error so startup cannot
-    silently proceed with defaults when a selected file is broken.
+    unreadable files, and non-mapping roots or sections raise an error so startup
+    cannot silently proceed with defaults when a selected file is broken. A section
+    with no keys is treated as empty.
     """
     try:
         import yaml
@@ -218,6 +219,16 @@ def _load_yaml_config(path: Path) -> dict[str, Any]:
             f"Invalid configuration file '{path}': root must be a mapping, "
             f"got {type(data).__name__}"
         )
+    for section in Config.model_fields:
+        value = data.get(section)
+        # A section whose keys are all commented out loads as None.
+        if value is None:
+            data[section] = {}
+        elif not isinstance(value, dict):
+            raise ValueError(
+                f"Invalid configuration file '{path}': '{section}' must be a mapping, "
+                f"got {type(value).__name__}"
+            )
     return data
 
 

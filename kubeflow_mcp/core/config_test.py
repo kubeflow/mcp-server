@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -24,6 +25,7 @@ from pydantic import ValidationError
 from tests.common import TestCase
 
 from kubeflow_mcp.core.config import (
+    Config,
     ResilienceConfig,
     ServerConfig,
     _find_config_file,
@@ -169,6 +171,25 @@ def test_load_config_rejects_invalid_yaml_and_non_mapping_roots(tmp_path, conten
     config_file.write_text(contents)
 
     with pytest.raises(ValueError, match=message):
+        load_config(config_path=config_file)
+
+
+@pytest.mark.parametrize("section", list(Config.model_fields))
+def test_load_config_treats_section_with_no_keys_as_empty(tmp_path: Path, section: str) -> None:
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(f"{section}:\n  # level: DEBUG\n")
+
+    cfg = load_config(config_path=config_file)
+
+    assert cfg.server.persona == "readonly"
+    assert cfg.resilience.rate_limit == 10.0
+
+
+def test_load_config_rejects_non_mapping_section(tmp_path: Path) -> None:
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("server: trainer\n")
+
+    with pytest.raises(ValueError, match="'server' must be a mapping, got str"):
         load_config(config_path=config_file)
 
 
