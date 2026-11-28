@@ -22,6 +22,7 @@ Structure mirrors kubeflow/optimizer/ and the trainer client module:
 """
 
 from kubeflow_mcp.common.constants import KUBEFLOW_SDK_VERSION_SPEC
+from kubeflow_mcp.common.types import ToolPermission
 from kubeflow_mcp.optimizer.api.discovery import (
     get_hpo_experiment,
     get_hpo_experiment_status,
@@ -382,11 +383,65 @@ OPTIMIZATION RULES:
 }
 
 
+# Kubernetes permissions each tool's requests need (#565). Katib's resources are in
+# the kubeflow.org group. Not declared: katib_pre_flight's controller Pod lookup, its
+# dry-run create that probes the admission webhooks, and its Trainer client check;
+# each only adds a warning when it is denied.
+_KATIB = "kubeflow.org"
+_EXPERIMENT_GET = ToolPermission("get", _KATIB, "experiments", name="name")
+_TRIALS_LIST = ToolPermission("list", _KATIB, "trials")
+_EXPERIMENT_CREATE = ToolPermission("create", _KATIB, "experiments")
+
+CLIENT_TOOL_PERMISSIONS: dict[str, tuple[ToolPermission, ...]] = {
+    "katib_pre_flight": (
+        ToolPermission(
+            "get", "apiextensions.k8s.io", "customresourcedefinitions", cluster_wide=True
+        ),
+    ),
+    "list_hpo_experiments": (ToolPermission("list", _KATIB, "experiments"),),
+    "get_hpo_experiment": (_EXPERIMENT_GET, _TRIALS_LIST),
+    "get_hpo_experiment_status": (_EXPERIMENT_GET,),
+    "get_trial": (_EXPERIMENT_GET, _TRIALS_LIST),
+    "get_successful_trials": (_EXPERIMENT_GET, _TRIALS_LIST),
+    "list_suggestions": (ToolPermission("list", _KATIB, "suggestions"),),
+    "get_hpo_experiment_trials": (_EXPERIMENT_GET, _TRIALS_LIST),
+    "get_best_trial": (_EXPERIMENT_GET,),
+    # The Suggestion shares the experiment's name.
+    "get_suggestion": (ToolPermission("get", _KATIB, "suggestions", name="name"),),
+    "wait_for_hpo_experiment": (_EXPERIMENT_GET,),
+    "get_hpo_experiment_trial_logs": (
+        _EXPERIMENT_GET,
+        _TRIALS_LIST,
+        ToolPermission("list", "", "pods"),
+        ToolPermission("get", "", "pods/log"),
+    ),
+    "get_hpo_experiment_events": (
+        _EXPERIMENT_GET,
+        _TRIALS_LIST,
+        ToolPermission("list", "", "pods"),
+        ToolPermission("list", "", "events"),
+    ),
+    "create_hpo_experiment": (_EXPERIMENT_CREATE,),
+    "create_hpo_experiment_from_spec": (_EXPERIMENT_CREATE,),
+    "delete_hpo_experiment": (
+        _EXPERIMENT_GET,  # ownership check
+        ToolPermission("delete", _KATIB, "experiments", name="name"),
+    ),
+    # Trials are listed only when parallel_trial_count is lowered, to warn which
+    # running trials Katib will delete; it is checked whenever the argument is set.
+    "update_hpo_experiment": (
+        _EXPERIMENT_GET,
+        ToolPermission("list", _KATIB, "trials", when="parallel_trial_count"),
+        ToolPermission("patch", _KATIB, "experiments", name="name"),
+    ),
+}
+
 __all__ = [
     "MODULE_INFO",
     "TOOLS",
     "CLIENT_TOOL_DESCRIPTIONS",
     "CLIENT_TOOL_ANNOTATIONS",
+    "CLIENT_TOOL_PERMISSIONS",
     "CLIENT_RESOURCES",
     "INSTRUCTION_SECTIONS",
     "PHASE_TO_SECTION",

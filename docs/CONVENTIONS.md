@@ -24,6 +24,7 @@ kubeflow_mcp/<client>/
 | `TOOLS` | Always (ordered callables; name = MCP tool name) |
 | `CLIENT_TOOL_DESCRIPTIONS` | First tool ships |
 | `CLIENT_TOOL_ANNOTATIONS` | First tool ships |
+| `CLIENT_TOOL_PERMISSIONS` | First tool ships: the Kubernetes permissions (`ToolPermission`) each tool's requests need, including the SDK's; `()` when it makes none |
 | `CLIENT_RESOURCES` | When guides exist |
 | `INSTRUCTION_SECTIONS` | When agent workflow text exists |
 | `PHASE_TO_SECTION` | When instructions map from `TOOL_PHASES` |
@@ -114,6 +115,7 @@ Copy trainer's persona matrix tests (`trainer/api/architecture_test.py`).
 
 - [ ] `CLIENT_MODULES`, exports, `TOOL_PHASES`, `TOOL_NEXT_HINTS`, personas, `DESTRUCTIVE_TOOLS`
 - [ ] Confirm gate, shared response types, namespace + ownership checks
+- [ ] `CLIENT_TOOL_PERMISSIONS` entry for every new tool (checked by `tests/conformance/tool_permissions_test.py`)
 - [ ] Architecture + unit tests; `SDK_COMPATIBILITY`; README; schema snapshot if schemas change
 - [ ] `make verify` + `make test-python`
 
