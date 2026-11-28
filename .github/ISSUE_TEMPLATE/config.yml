@@ -8,5 +8,5 @@ contact_links:
     url: https://www.kubeflow.org/docs/about/community/#kubeflow-slack-channels
     about: Ask the community on CNCF Slack — #kubeflow-mcp-server
   - name: Kubeflow WG Agents Community Meeting
-    url: https://bit.ly/kubeflow-mcp-wg-notes
+    url: https://bit.ly/kubeflow-wg-agents-meet-notes
     about: Join the Kubeflow WG Agents community meeting
