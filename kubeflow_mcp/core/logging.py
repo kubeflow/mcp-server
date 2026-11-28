@@ -36,20 +36,23 @@ _log_buffer: deque[dict[str, Any]] = deque(maxlen=1000)
 # ``bearer auth`` reads as a key and ordinary log lines get mangled.
 _REDACT_KEY = re.compile(r"(?<!\w)(\w+)\s*[=:]\s*")
 # Taking the scheme word covers ``Authorization: Bearer <jwt>``.
-# Supports PEM blocks (BEGIN through END), quoted strings, and single tokens.
+# Supports PEM blocks (BEGIN through END), quoted strings, and tokens with adjacent quoted segments.
 _REDACT_VALUE = re.compile(
     r"""(?x)
-    -----BEGIN\ [A-Z0-9\ -]+-----[\s\S]*?-----END\ [A-Z0-9\ -]+-----
-    | "(?:\\.|[^"\\])*"
-    | '(?:\\.|[^'\\])*'
-    | (?:(?:bearer|basic|digest|token)\s+)?\S+
+    -----BEGIN\ [A-Z0-9\ -]+-----[\s\S]{1,10000}?-----END\ [A-Z0-9\ -]+-----
+    | (?:(?:bearer|basic|digest|token)\s+)?
+      (?:
+          [^\s"']
+        | "(?:\\[\s\S]|[^"\\])*"
+        | '(?:\\[\s\S]|[^'\\])*'
+      )+
     """,
     re.IGNORECASE,
 )
 
 # Standalone private key PEM blocks must also be redacted even without a preceding key
 _STANDALONE_PEM = re.compile(
-    r"-----BEGIN [A-Z0-9 -]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 -]*PRIVATE KEY-----"
+    r"-----BEGIN [A-Z0-9 -]*PRIVATE KEY-----[\s\S]{1,10000}?-----END [A-Z0-9 -]*PRIVATE KEY-----"
 )
 
 

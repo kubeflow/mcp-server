@@ -264,6 +264,16 @@ class TestRedactText:
         assert _redact_text("password=hunter2 was used") == "password=*** was used"
         assert _redact_text("token=xyz123 (temporary)") == "token=*** (temporary)"
 
+    def test_adjacent_quoted_and_unquoted_segments_fully_redacted(self):
+        # password="hunter"two: quoted "hunter" then unquoted suffix "two" — the whole value
+        # must be redacted so the suffix "two" does not leak into the log.
+        assert _redact_text('password="hunter"two was used') == "password=*** was used"
+        assert _redact_text("password='hunter'two was used") == "password=*** was used"
+        # Mixed: unquoted prefix + quoted suffix
+        assert _redact_text('password=part1"part2" was used') == "password=*** was used"
+        # Authorization with Bearer + quoted token + suffix
+        assert _redact_text('Authorization: Bearer "xyz"suffix rest') == "Authorization: *** rest"
+
 
 class TestLogPathsRedactConsistently:
     """Buffer, stderr JSON, and console must agree on the same line."""
