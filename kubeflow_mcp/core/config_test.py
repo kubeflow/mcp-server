@@ -132,6 +132,71 @@ def test_load_config_rejects_all_empty_client_entries(monkeypatch):
         load_config()
 
 
+@pytest.mark.parametrize(
+    "clients",
+    [
+        "trainer",
+        123,
+        True,
+        None,
+        {"name": "trainer"},
+        ["trainer", 123],
+        ["trainer", None],
+        [["trainer"]],
+    ],
+    ids=[
+        "string",
+        "integer",
+        "boolean",
+        "null",
+        "mapping",
+        "mixed-list",
+        "null-item",
+        "nested-list",
+    ],
+)
+def test_load_config_rejects_invalid_server_clients_in_file(tmp_path, monkeypatch, clients):
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(yaml.safe_dump({"server": {"clients": clients}}))
+    monkeypatch.delenv("KUBEFLOW_MCP_CLIENTS", raising=False)
+
+    with pytest.raises(
+        ValueError,
+        match=r"server\.clients in configuration must be a list of strings",
+    ):
+        load_config(config_path=config_file)
+
+
+@pytest.mark.parametrize(
+    ("clients", "expected"),
+    [(["trainer"], ["trainer"]), (["trainer", "spark"], ["trainer", "spark"])],
+)
+def test_load_config_accepts_server_clients_list_in_file(tmp_path, monkeypatch, clients, expected):
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(yaml.safe_dump({"server": {"clients": clients}}))
+    monkeypatch.delenv("KUBEFLOW_MCP_CLIENTS", raising=False)
+
+    cfg = load_config(config_path=config_file)
+
+    assert cfg.server.clients == expected
+
+
+@pytest.mark.parametrize(
+    "clients",
+    ["trainer", None, {"name": "trainer"}, ["trainer", 123]],
+)
+def test_load_config_environment_clients_override_invalid_file_value(
+    tmp_path, monkeypatch, clients
+):
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(yaml.safe_dump({"server": {"clients": clients}}))
+    monkeypatch.setenv("KUBEFLOW_MCP_CLIENTS", "spark, trainer")
+
+    cfg = load_config(config_path=config_file)
+
+    assert cfg.server.clients == ["spark", "trainer"]
+
+
 def test_load_config_from_file(tmp_path):
     config_file = tmp_path / "config.yaml"
     config_file.write_text(
@@ -145,6 +210,7 @@ def test_load_config_from_file(tmp_path):
     cfg = load_config(config_path=config_file)
     assert cfg.server.persona == "data-scientist"
     assert cfg.trainer.default_runtime == "torchtune-llama"
+    assert cfg.server.clients == ["trainer"]
 
 
 def test_load_config_env_overrides_file(tmp_path):
