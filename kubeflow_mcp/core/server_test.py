@@ -568,9 +568,15 @@ async def test_full_mode_instructions_have_no_tool_access_block():
     assert "TOOL ACCESS" not in instructions
 
 
-def test_configure_resilience_rejects_sub_one_capacity():
+@pytest.mark.parametrize("rate_capacity", [0.0, 0.5, 0.99])
+def test_configure_resilience_rejects_sub_one_capacity(monkeypatch, rate_capacity):
+    import kubeflow_mcp.core.server as server_module
+
+    monkeypatch.setattr(server_module, "_rate_limiter", None)
     with pytest.raises(ValueError, match="rate_capacity must be at least 1"):
-        configure_resilience(rate_limit=10.0, rate_capacity=0.5)
+        configure_resilience(rate_limit=10.0, rate_capacity=rate_capacity)
+
+    assert server_module._rate_limiter is None
 
 
 def test_configure_resilience_accepts_fractional_rate(monkeypatch):
