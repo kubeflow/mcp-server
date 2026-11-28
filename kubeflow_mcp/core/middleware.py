@@ -92,7 +92,7 @@ class AuditIdentityMiddleware:
 
         # Extract user identity (from auth or transport metadata)
         try:
-            request_context = getattr(context, "request_context", None)
+            request_context = getattr(fastmcp_ctx, "request_context", None)
             if request_context is not None:
                 meta = getattr(request_context, "meta", None)
                 if meta is not None:
