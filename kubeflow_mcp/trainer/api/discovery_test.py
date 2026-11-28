@@ -636,6 +636,42 @@ def test_list_training_jobs_reports_truncation_metadata():
     assert [job["name"] for job in result["data"]["jobs"]] == ["job-a", "job-b"]
 
 
+def test_list_training_jobs_orders_newest_first_before_limit():
+    # Kubernetes returns custom objects in name order; here the newest job ("zzz-new")
+    # is name-last, so an unordered limit would drop it.
+    client = MagicMock()
+    client.list_jobs.return_value = [
+        _fake_job("aaa-old", created_at=datetime(2026, 1, 1, tzinfo=timezone.utc)),
+        _fake_job("mmm-mid", created_at=datetime(2026, 6, 1, tzinfo=timezone.utc)),
+        _fake_job("zzz-new", created_at=datetime(2026, 11, 1, tzinfo=timezone.utc)),
+    ]
+    with patch(
+        "kubeflow_mcp.trainer.api.discovery.get_trainer_client_for_namespace",
+        return_value=client,
+    ):
+        result = list_training_jobs(limit=2)
+
+    # The two newest come back, newest first — not the name-ordered first two.
+    assert [job["name"] for job in result["data"]["jobs"]] == ["zzz-new", "mmm-mid"]
+    assert result["data"]["total"] == 3
+    assert result["data"]["has_more"] is True
+
+
+def test_list_training_jobs_without_timestamps_sort_last():
+    client = MagicMock()
+    client.list_jobs.return_value = [
+        _fake_job("no-ts", created_at=None),
+        _fake_job("has-ts", created_at=datetime(2026, 5, 1, tzinfo=timezone.utc)),
+    ]
+    with patch(
+        "kubeflow_mcp.trainer.api.discovery.get_trainer_client_for_namespace",
+        return_value=client,
+    ):
+        result = list_training_jobs()
+
+    assert [job["name"] for job in result["data"]["jobs"]] == ["has-ts", "no-ts"]
+
+
 def test_list_training_jobs_sdk_error_wrapped_as_tool_error():
     client = MagicMock()
     client.list_jobs.side_effect = RuntimeError("cluster unreachable")
