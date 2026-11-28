@@ -1349,6 +1349,8 @@ def test_check_compatibility_namespace_failure_keeps_earlier_blockers():
     assert any("Could not resolve Trainer namespace" in b for b in data["blockers"])
     assert data["checks"]["rbac"]["namespace"]["status"] == "fail"
     mock_rbac.assert_not_called()
+
+
 @pytest.mark.parametrize("tool", [get_cluster_resources, check_compatibility])
 @pytest.mark.parametrize("status", [401, 403, 500])
 @pytest.mark.parametrize("wrapped", [False, True])
