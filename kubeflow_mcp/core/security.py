@@ -532,20 +532,38 @@ _SENSITIVE_SUBSTRINGS = {
 _SAFE_KEYS = {"public_key", "keyword", "key_format", "key_name"}
 
 
-def is_sensitive_key(key: str) -> bool:
-    """Return True when a key names a credential, e.g. ``api_key`` or ``accessToken``.
+# Split before a capital that follows a lowercase letter or digit (apiKey), and before the
+# last capital of an acronym that is followed by a word (APIKey, clientTLSKey).
+_CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
 
-    Shared with free-text log redaction so both paths agree on what is sensitive.
-    """
-    k = key.lower()
-    if k in _SAFE_KEYS:
-        return False
+
+def _to_snake_case(key: str) -> str:
+    """Spell ``apiKey`` and ``X-Api-Key`` as ``api_key`` and ``x_api_key``."""
+    return _CAMEL_BOUNDARY.sub("_", key).replace("-", "_").lower()
+
+
+def _names_credential(k: str) -> bool:
     return (
         k in _SENSITIVE_EXACT
         or any(s in k for s in _SENSITIVE_SUBSTRINGS)
         or k.endswith("_key")
         or k.endswith("token")
     )
+
+
+def is_sensitive_key(key: str) -> bool:
+    """Return True when a key names a credential, e.g. ``api_key`` or ``accessToken``.
+
+    Shared with free-text log redaction so both paths agree on what is sensitive.
+
+    The rules are written in snake_case, but callers pass whatever the client sent:
+    ``apiKey``, ``privateKey`` or an ``x-api-key`` header. A key is judged as spelled
+    and again folded to snake_case, so no spelling that matched before stops matching.
+    """
+    forms = {key.lower(), _to_snake_case(key)}
+    if forms & _SAFE_KEYS:
+        return False
+    return any(_names_credential(k) for k in forms)
 
 
 def mask_sensitive_data(data: dict[str, Any]) -> dict[str, Any]:
