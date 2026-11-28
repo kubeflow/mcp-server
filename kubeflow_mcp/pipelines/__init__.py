@@ -27,6 +27,7 @@ is lazy, so this module and its metadata load without it.
 """
 
 from kubeflow_mcp.common.constants import KUBEFLOW_SDK_VERSION_SPEC
+from kubeflow_mcp.common.types import ToolPermission
 from kubeflow_mcp.pipelines.api.authoring import create_pipeline, delete_pipeline
 from kubeflow_mcp.pipelines.api.discovery import get_pipeline, list_pipelines
 from kubeflow_mcp.pipelines.api.experiments import (
@@ -294,11 +295,35 @@ PIPELINE RUNS:
 }
 
 
+# Kubernetes permissions each tool's own requests need (#565). The other calls go
+# to the Pipelines API server, which authorizes them itself (in multi-user mode with
+# SubjectAccessReviews on pipelines.kubeflow.org), so they are not listed here.
+CLIENT_TOOL_PERMISSIONS: dict[str, tuple[ToolPermission, ...]] = {
+    "list_pipelines": (),
+    "get_pipeline": (),
+    "list_pipeline_runs": (),
+    "get_pipeline_run": (),
+    "get_pipeline_logs": (
+        ToolPermission("list", "", "pods"),
+        ToolPermission("get", "", "pods/log"),
+    ),
+    "create_pipeline_run": (),
+    "stop_pipeline_run": (),
+    "retry_pipeline_run": (),
+    "list_experiments": (),
+    "get_experiment": (),
+    "create_experiment": (),
+    "delete_experiment": (),
+    "create_pipeline": (),
+    "delete_pipeline": (),
+}
+
 __all__ = [
     "MODULE_INFO",
     "TOOLS",
     "CLIENT_TOOL_DESCRIPTIONS",
     "CLIENT_TOOL_ANNOTATIONS",
+    "CLIENT_TOOL_PERMISSIONS",
     "CLIENT_RESOURCES",
     "INSTRUCTION_SECTIONS",
     "SECTION_ORDER",

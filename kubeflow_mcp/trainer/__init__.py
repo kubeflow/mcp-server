@@ -21,6 +21,7 @@ Structure mirrors kubeflow/trainer/:
 """
 
 from kubeflow_mcp.common.constants import KUBEFLOW_SDK_VERSION_SPEC
+from kubeflow_mcp.common.types import ToolPermission
 from kubeflow_mcp.trainer.api.discovery import (
     get_runtime,
     get_training_job,
@@ -409,11 +410,110 @@ PLATFORM ADMINISTRATION:
 }
 
 
+# Kubernetes permissions each tool's requests need, including the SDK's (#565).
+# Not declared: the SDK's best-effort read of the kubeflow-trainer-public ConfigMap
+# and GET /version, which the tools tolerate being denied.
+_RUNTIME_READS = (
+    ToolPermission("get", "trainer.kubeflow.org", "trainingruntimes"),
+    ToolPermission("get", "trainer.kubeflow.org", "clustertrainingruntimes", cluster_wide=True),
+)
+_JOB_READS = (
+    ToolPermission("get", "trainer.kubeflow.org", "trainjobs", name="name"),
+    ToolPermission("list", "", "pods"),
+    *_RUNTIME_READS,
+)
+_JOB_CREATE = (*_RUNTIME_READS, ToolPermission("create", "trainer.kubeflow.org", "trainjobs"))
+_RUNTIME_LISTS = (
+    ToolPermission("list", "trainer.kubeflow.org", "trainingruntimes"),
+    ToolPermission("list", "trainer.kubeflow.org", "clustertrainingruntimes", cluster_wide=True),
+)
+_CRD_GET = ToolPermission(
+    "get", "apiextensions.k8s.io", "customresourcedefinitions", cluster_wide=True
+)
+_NODES_LIST = ToolPermission("list", "", "nodes", cluster_wide=True)
+# Read first to check the job is one this server manages.
+_OWNED_JOB_GET = ToolPermission("get", "trainer.kubeflow.org", "trainjobs", name="name")
+_CLUSTER_RUNTIME = ("trainer.kubeflow.org", "clustertrainingruntimes")
+
+CLIENT_TOOL_PERMISSIONS: dict[str, tuple[ToolPermission, ...]] = {
+    "pre_flight": (_CRD_GET, _NODES_LIST, *_RUNTIME_LISTS),
+    "check_compatibility": (_CRD_GET, _NODES_LIST),
+    "get_cluster_resources": (_NODES_LIST,),
+    "estimate_resources": (),  # reads model configs from Hugging Face only
+    "fine_tune": (_NODES_LIST, *_JOB_CREATE),  # nodes: the GPU check
+    "run_custom_training": _JOB_CREATE,
+    "run_container_training": _JOB_CREATE,
+    "list_training_jobs": (
+        ToolPermission("list", "trainer.kubeflow.org", "trainjobs"),
+        ToolPermission("list", "", "pods"),
+        *_RUNTIME_READS,
+    ),
+    "get_training_job": _JOB_READS,
+    "list_runtimes": _RUNTIME_LISTS,
+    # include_packages=True runs a short-lived Pod to list packages (#535).
+    "get_runtime": (
+        ToolPermission("get", "trainer.kubeflow.org", "trainingruntimes", name="name"),
+        ToolPermission("get", *_CLUSTER_RUNTIME, cluster_wide=True, name="name"),
+        ToolPermission("create", "", "pods", when="include_packages"),
+        ToolPermission("get", "", "pods", when="include_packages"),
+        ToolPermission("get", "", "pods/log", when="include_packages"),
+        ToolPermission("delete", "", "pods", when="include_packages"),
+    ),
+    "get_training_logs": (*_JOB_READS, ToolPermission("get", "", "pods/log")),
+    "get_training_events": (*_JOB_READS, ToolPermission("list", "", "events")),
+    "wait_for_training": _JOB_READS,
+    "delete_training_job": (
+        _OWNED_JOB_GET,
+        ToolPermission("delete", "trainer.kubeflow.org", "trainjobs", name="name"),
+    ),
+    "update_training_job": (
+        _OWNED_JOB_GET,
+        ToolPermission("patch", "trainer.kubeflow.org", "trainjobs", name="name"),
+    ),
+    # Without a name it lists every CRD; with one it reads only that CRD.
+    "inspect_crd": (
+        ToolPermission(
+            "list",
+            "apiextensions.k8s.io",
+            "customresourcedefinitions",
+            cluster_wide=True,
+            unless="name",
+        ),
+        ToolPermission(
+            "get",
+            "apiextensions.k8s.io",
+            "customresourcedefinitions",
+            cluster_wide=True,
+            when="name",
+            name="name",
+        ),
+    ),
+    # In the controller's namespace, not the caller's.
+    "inspect_controller": (
+        ToolPermission("list", "", "pods"),
+        ToolPermission("get", "", "pods/log"),
+        ToolPermission("list", "", "events"),
+    ),
+    "patch_runtime": (
+        ToolPermission("get", *_CLUSTER_RUNTIME, cluster_wide=True, name="name"),
+        ToolPermission("patch", *_CLUSTER_RUNTIME, cluster_wide=True, name="name"),
+    ),
+    "create_runtime": (ToolPermission("create", *_CLUSTER_RUNTIME, cluster_wide=True),),
+    "delete_runtime": (
+        # Lists the TrainJobs that still use the runtime. If that list fails, the
+        # preview says the check failed and a confirmed delete is refused, so the
+        # delete needs it.
+        ToolPermission("list", "trainer.kubeflow.org", "trainjobs", cluster_wide=True),
+        ToolPermission("delete", *_CLUSTER_RUNTIME, cluster_wide=True, name="name"),
+    ),
+}
+
 __all__ = [
     "MODULE_INFO",
     "TOOLS",
     "CLIENT_TOOL_DESCRIPTIONS",
     "CLIENT_TOOL_ANNOTATIONS",
+    "CLIENT_TOOL_PERMISSIONS",
     "CLIENT_RESOURCES",
     "INSTRUCTION_SECTIONS",
     "SECTION_ORDER",

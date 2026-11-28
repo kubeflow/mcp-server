@@ -104,7 +104,18 @@ class StructuredFormatter(logging.Formatter):
         if ctx is not None:
             log_dict["context"] = _redact_dict(ctx)
 
-        extra_keys = {"audit", "tool", "parameters", "success", "duration_ms", "tracing_enabled"}
+        extra_keys = {
+            "audit",
+            "tool",
+            "parameters",
+            "success",
+            "duration_ms",
+            "tracing_enabled",
+            # authz refusals (core/authz.py): who was refused and what they lacked
+            "user",
+            "missing_permissions",
+            "error",
+        }
         for key in extra_keys:
             if hasattr(record, key):
                 value = getattr(record, key)

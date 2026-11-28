@@ -39,6 +39,8 @@ from kubeflow_mcp.common.constants import (
     ErrorCode,
     record_tool_result,
 )
+from kubeflow_mcp.core.authz import build_authz_middleware
+from kubeflow_mcp.core.config import AuthzConfig
 from kubeflow_mcp.core.dynamic_tools import get_mode_tools, init_dynamic_tools
 from kubeflow_mcp.core.health import (
     HEALTH_TOOL_ANNOTATIONS,
@@ -449,6 +451,8 @@ def create_server(  # noqa: C901
     mode: str = "full",
     instruction_tier: str = "full",
     auth_provider: Any = None,
+    *,
+    authz: AuthzConfig | None = None,
 ) -> FastMCP:
     """Create MCP server with dynamic client loading.
 
@@ -462,6 +466,11 @@ def create_server(  # noqa: C901
               - "semantic": 2 meta-tools (find_tools, execute_tool)
         instruction_tier: Instruction verbosity — "full", "compact", or "minimal"
         auth_provider: Optional FastMCP auth provider for HTTP transport.
+        authz: Per-caller authorization. With ``mode="sar"`` each call is checked
+            as the caller with a SubjectAccessReview (#565); needs JWT auth.
+
+    Raises:
+        ValueError: ``authz.mode`` is ``"sar"`` without JWT auth.
 
     Returns:
         Configured FastMCP server instance
@@ -536,6 +545,13 @@ def create_server(  # noqa: C901
     instructions = _build_server_instructions(
         loaded_modules, persona, instruction_tier, final_allowed, mode
     )
+    # Only registered tools are checked: a hidden tool must answer "not available",
+    # not reveal what it would need. Raises here, at startup, without JWT auth.
+    authz_middleware = None
+    if authz is not None and authz.mode == "sar":
+        authz_middleware = build_authz_middleware(
+            authz, loaded_modules, auth_provider, final_allowed
+        )
     mcp_kwargs: dict[str, Any] = {"instructions": instructions}
     if auth_provider is not None:
         mcp_kwargs["auth"] = auth_provider
@@ -547,6 +563,9 @@ def create_server(  # noqa: C901
 
     mcp.add_middleware(AuditIdentityMiddleware())
     mcp.add_middleware(ToolErrorMiddleware())
+    if authz_middleware is not None:
+        mcp.add_middleware(authz_middleware)
+        logger.info("authz mode 'sar': tool calls are checked as the caller")
 
     # Filter tool funcs to only those allowed by persona + policy
     allowed_funcs = [f for f in all_tool_funcs if f.__name__ in final_allowed]
