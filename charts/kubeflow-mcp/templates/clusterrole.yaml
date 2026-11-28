@@ -1,0 +1,21 @@
+{{- if and .Values.rbac.create .Values.rbac.clusterRole -}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "kubeflow-mcp.fullname" . }}-cluster-read
+  labels:
+    {{- include "kubeflow-mcp.labels" . | nindent 4 }}
+rules:
+  # Cluster-scoped training runtimes read
+  - apiGroups: ["trainer.kubeflow.org"]
+    resources: ["clustertrainingruntimes"]
+    verbs: ["get", "list", "watch"]
+  # Platform discovery (nodes, namespaces, quotas)
+  - apiGroups: [""]
+    resources: ["nodes", "namespaces", "resourcequotas"]
+    verbs: ["get", "list"]
+  # CRD discovery and compatibility inspection
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get", "list"]
+{{- end }}

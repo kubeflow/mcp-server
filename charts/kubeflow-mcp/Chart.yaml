@@ -1,0 +1,25 @@
+apiVersion: v2
+name: kubeflow-mcp
+description: Official Helm chart for deploying the Kubeflow Model Context Protocol (MCP) Server in Kubernetes
+type: application
+version: 0.2.0
+appVersion: "0.2.0"
+keywords:
+  - kubeflow
+  - mcp
+  - model-context-protocol
+  - ai-agents
+  - llm
+  - machine-learning
+  - trainer
+  - spark
+  - pipelines
+home: https://github.com/kubeflow/mcp-server
+sources:
+  - https://github.com/kubeflow/mcp-server
+maintainers:
+  - name: Kubeflow Community
+    url: https://github.com/kubeflow
+annotations:
+  artifacthub.io/license: Apache-2.0
+  artifacthub.io/category: machine-learning

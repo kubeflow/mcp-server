@@ -1,0 +1,32 @@
+{{- if .Values.rbac.create -}}
+{{- $targetNs := default .Release.Namespace .Values.rbac.targetNamespace -}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "kubeflow-mcp.fullname" . }}-workloads
+  namespace: {{ $targetNs }}
+  labels:
+    {{- include "kubeflow-mcp.labels" . | nindent 4 }}
+rules:
+  # Trainer workloads and namespace-scoped runtimes
+  - apiGroups: ["trainer.kubeflow.org"]
+    resources: ["trainjobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["trainer.kubeflow.org"]
+    resources: ["trainingruntimes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["jobset.x-k8s.io"]
+    resources: ["jobsets"]
+    verbs: ["get", "list", "watch"]
+  # Spark client support
+  - apiGroups: ["sparkoperator.k8s.io"]
+    resources: ["sparkconnects", "sparkapplications"]
+    verbs: ["get", "list", "watch", "create", "delete", "update", "patch"]
+  # Pod execution, monitoring, logs, package discovery, and quota inspection
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/log", "events", "resourcequotas"]
+    verbs: ["get", "list", "watch"]
+{{- end }}

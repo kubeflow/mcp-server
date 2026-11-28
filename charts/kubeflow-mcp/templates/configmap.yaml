@@ -1,0 +1,26 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "kubeflow-mcp.fullname" . }}-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kubeflow-mcp.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    server:
+      transport: {{ .Values.server.transport | default "http" | quote }}
+      host: {{ .Values.server.host | default "0.0.0.0" | quote }}
+      port: {{ .Values.server.port | default 8000 }}
+      persona: {{ .Values.server.persona | default "ml-engineer" | quote }}
+      mode: {{ .Values.server.mode | default "full" | quote }}
+      instruction_tier: {{ .Values.server.instructionTier | default "full" | quote }}
+      clients:
+        {{- range .Values.server.clients }}
+        - {{ . | quote }}
+        {{- end }}
+    {{- if .Values.auth.oidc.enabled }}
+    auth:
+      issuer: {{ .Values.auth.oidc.issuer | quote }}
+      jwks_uri: {{ .Values.auth.oidc.jwksUri | quote }}
+      audience: {{ .Values.auth.oidc.audience | quote }}
+    {{- end }}

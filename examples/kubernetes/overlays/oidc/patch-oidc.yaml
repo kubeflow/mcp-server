@@ -1,0 +1,19 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kubeflow-mcp
+  namespace: kubeflow-user-example-com
+spec:
+  template:
+    spec:
+      containers:
+        - name: server
+          env:
+            - name: KUBEFLOW_MCP_OIDC_ISSUER
+              value: "https://accounts.google.com"
+            - name: KUBEFLOW_MCP_OIDC_AUDIENCE
+              value: "kubeflow-mcp"
+            - name: KUBEFLOW_MCP_JWKS_URI
+              value: "https://www.googleapis.com/oauth2/v3/certs"
+            - name: KUBEFLOW_MCP_JWT_ISSUER
+              value: "https://accounts.google.com"
