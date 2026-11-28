@@ -34,6 +34,7 @@ from kubeflow_mcp.common.constants import (
 )
 from kubeflow_mcp.trainer.api.planning import (
     _check_k8s_version,
+    _check_rbac_permissions,
     _check_sdk_version,
     _check_trainer_crd,
     _detect_platform,
@@ -702,6 +703,18 @@ class TestCheckSdkVersionEdgeCases:
 
 
 class TestCheckCompatibility:
+    @pytest.fixture(autouse=True)
+    def _isolate_rbac(self):
+        """Keep these tests off the live namespace lookup and RBAC API calls."""
+        with (
+            patch(
+                "kubeflow_mcp.common.utils.get_trainer_effective_namespace",
+                return_value="default",
+            ),
+            patch("kubeflow_mcp.trainer.api.planning._check_rbac_permissions") as mock_rbac,
+        ):
+            yield mock_rbac
+
     @patch("kubeflow_mcp.trainer.api.planning._detect_platform", return_value="kubernetes")
     @patch("kubeflow_mcp.trainer.api.planning._check_sdk_version")
     @patch("kubeflow_mcp.trainer.api.planning._check_trainer_crd", return_value=True)
@@ -1134,6 +1147,210 @@ class TestPreFlight:
         assert not any("consider QLoRA" in rec for rec in data["recommendations"])
 
 
+# ─── RBAC Permissions and check_compatibility Tests ────────────────────────
+
+
+def test_check_rbac_permissions_pass():
+    checks: dict[str, Any] = {}
+    blockers: list[str] = []
+    mock_auth_api = MagicMock()
+    mock_review_resp = MagicMock()
+    mock_review_resp.status.allowed = True
+    mock_auth_api.create_self_subject_access_review.return_value = mock_review_resp
+
+    _check_rbac_permissions(
+        checks,
+        blockers,
+        get_authorization_v1_api=lambda: mock_auth_api,
+        namespace="kubeflow-test",
+        timeout=5,
+    )
+
+    assert "rbac" in checks
+    assert checks["rbac"]["list_trainjobs"]["status"] == "pass"
+    assert checks["rbac"]["list_trainjobs"]["namespace"] == "kubeflow-test"
+    assert checks["rbac"]["create_trainjobs"]["status"] == "pass"
+    assert checks["rbac"]["list_clustertrainingruntimes"]["status"] == "pass"
+    assert checks["rbac"]["list_clustertrainingruntimes"]["namespace"] == ""
+    assert blockers == []
+
+
+def test_check_rbac_permissions_denied():
+    checks: dict[str, Any] = {}
+    blockers: list[str] = []
+    mock_auth_api = MagicMock()
+    mock_review_resp = MagicMock()
+    mock_review_resp.status.allowed = False
+    mock_review_resp.status.reason = "User cannot list trainjobs"
+    mock_auth_api.create_self_subject_access_review.return_value = mock_review_resp
+
+    _check_rbac_permissions(
+        checks,
+        blockers,
+        get_authorization_v1_api=lambda: mock_auth_api,
+        namespace="kubeflow-test",
+        timeout=5,
+    )
+
+    assert "rbac" in checks
+    assert checks["rbac"]["list_trainjobs"]["status"] == "fail"
+    assert checks["rbac"]["list_trainjobs"]["reason"] == "User cannot list trainjobs"
+    assert len(blockers) == 3
+    assert (
+        "Missing permission: list trainer.kubeflow.org/trainjobs in namespace 'kubeflow-test'"
+        in blockers
+    )
+    assert (
+        "Missing permission: create trainer.kubeflow.org/trainjobs in namespace 'kubeflow-test'"
+        in blockers
+    )
+    assert (
+        "Missing permission: list trainer.kubeflow.org/clustertrainingruntimes (cluster-scoped)"
+        in blockers
+    )
+
+
+def test_check_rbac_permissions_error_warns():
+    checks: dict[str, Any] = {}
+    blockers: list[str] = []
+    mock_auth_api = MagicMock()
+    mock_auth_api.create_self_subject_access_review.side_effect = RuntimeError("SSAR forbidden")
+
+    _check_rbac_permissions(
+        checks,
+        blockers,
+        get_authorization_v1_api=lambda: mock_auth_api,
+        namespace="kubeflow-test",
+        timeout=5,
+    )
+
+    assert "rbac" in checks
+    assert checks["rbac"]["list_trainjobs"]["status"] == "warn"
+    assert "SSAR forbidden" in checks["rbac"]["list_trainjobs"]["error"]
+    assert blockers == []
+
+
+def test_check_rbac_permissions_factory_failure_warns():
+    checks: dict[str, Any] = {}
+    blockers: list[str] = []
+
+    def _failing_factory():
+        raise RuntimeError("Cannot construct AuthorizationV1Api")
+
+    _check_rbac_permissions(
+        checks,
+        blockers,
+        get_authorization_v1_api=_failing_factory,
+        namespace="kubeflow-test",
+        timeout=5,
+    )
+
+    assert "rbac" in checks
+    assert checks["rbac"]["authorization_api"]["status"] == "warn"
+    assert "Cannot construct AuthorizationV1Api" in checks["rbac"]["authorization_api"]["error"]
+    assert blockers == []
+
+
+def test_check_compatibility_with_rbac_denial():
+    mock_auth_api = MagicMock()
+    mock_denied = MagicMock()
+    mock_denied.status.allowed = False
+    mock_denied.status.reason = "denied"
+    mock_auth_api.create_self_subject_access_review.return_value = mock_denied
+
+    with (
+        patch("kubeflow_mcp.trainer.api.planning._check_k8s_version"),
+        patch("kubeflow_mcp.trainer.api.planning._check_trainer_crd", return_value=True),
+        patch("kubeflow_mcp.trainer.api.planning._check_sdk_version"),
+        patch("kubeflow_mcp.trainer.api.planning._detect_platform", return_value="kubernetes"),
+        patch("kubeflow_mcp.common.utils.get_authorization_v1_api", return_value=mock_auth_api),
+        patch("kubeflow_mcp.common.utils.get_trainer_effective_namespace", return_value="test-ns"),
+    ):
+        result = check_compatibility()
+
+    assert result["success"] is True
+    data = result["data"]
+    assert data["compatible"] is False
+    assert any("Missing permission" in b for b in data["blockers"])
+    assert data["checks"]["rbac"]["list_trainjobs"]["status"] == "fail"
+
+
+def test_check_compatibility_with_rbac_success():
+    mock_auth_api = MagicMock()
+    mock_allowed = MagicMock()
+    mock_allowed.status.allowed = True
+    mock_auth_api.create_self_subject_access_review.return_value = mock_allowed
+
+    with (
+        patch("kubeflow_mcp.trainer.api.planning._check_k8s_version"),
+        patch("kubeflow_mcp.trainer.api.planning._check_trainer_crd", return_value=True),
+        patch("kubeflow_mcp.trainer.api.planning._check_sdk_version"),
+        patch("kubeflow_mcp.trainer.api.planning._detect_platform", return_value="kubernetes"),
+        patch("kubeflow_mcp.common.utils.get_authorization_v1_api", return_value=mock_auth_api),
+        patch("kubeflow_mcp.common.utils.get_trainer_effective_namespace", return_value="test-ns"),
+    ):
+        result = check_compatibility()
+
+    assert result["success"] is True
+    data = result["data"]
+    assert data["compatible"] is True
+    assert data["blockers"] == []
+    assert data["checks"]["rbac"]["list_trainjobs"]["status"] == "pass"
+
+
+def test_pre_flight_with_rbac_blockers():
+    mock_auth_api = MagicMock()
+    mock_denied = MagicMock()
+    mock_denied.status.allowed = False
+    mock_denied.status.reason = "denied by RBAC policy"
+    mock_auth_api.create_self_subject_access_review.return_value = mock_denied
+
+    with (
+        patch("kubeflow_mcp.trainer.api.planning._check_k8s_version"),
+        patch("kubeflow_mcp.trainer.api.planning._check_trainer_crd", return_value=True),
+        patch("kubeflow_mcp.trainer.api.planning._check_sdk_version"),
+        patch("kubeflow_mcp.trainer.api.planning._detect_platform", return_value="kubernetes"),
+        patch("kubeflow_mcp.common.utils.get_authorization_v1_api", return_value=mock_auth_api),
+        patch("kubeflow_mcp.common.utils.get_trainer_effective_namespace", return_value="test-ns"),
+    ):
+        result = pre_flight()
+
+    assert result["success"] is True
+    data = result["data"]
+    assert data["compatibility"]["compatible"] is False
+    assert any("Blocker: Missing permission" in step for step in data["next_steps"])
+
+
+def test_check_compatibility_namespace_failure_keeps_earlier_blockers():
+    def add_crd_blocker(checks, blockers, *args, **kwargs):
+        blockers.append("Trainer CRD missing")
+        return False
+
+    with (
+        patch("kubeflow_mcp.trainer.api.planning._check_k8s_version"),
+        patch(
+            "kubeflow_mcp.trainer.api.planning._check_trainer_crd",
+            side_effect=add_crd_blocker,
+        ),
+        patch("kubeflow_mcp.trainer.api.planning._check_sdk_version"),
+        patch("kubeflow_mcp.trainer.api.planning._detect_platform", return_value="kubernetes"),
+        patch(
+            "kubeflow_mcp.common.utils.get_trainer_effective_namespace",
+            side_effect=RuntimeError("no kubeconfig"),
+        ),
+        patch("kubeflow_mcp.trainer.api.planning._check_rbac_permissions") as mock_rbac,
+    ):
+        result = check_compatibility()
+
+    assert result["success"] is True
+    data = result["data"]
+    assert data["compatible"] is False
+    assert "Trainer CRD missing" in data["blockers"]
+    assert any("Could not resolve Trainer namespace" in b for b in data["blockers"])
+    assert data["checks"]["rbac"]["namespace"]["status"] == "fail"
+    mock_rbac.assert_not_called()
+
+
 @pytest.mark.parametrize("tool", [get_cluster_resources, check_compatibility])
 @pytest.mark.parametrize("status", [401, 403, 500])
 @pytest.mark.parametrize("wrapped", [False, True])
@@ -1233,3 +1450,128 @@ def test_pre_flight_propagates_failed_checks(step: int, code: str) -> None:
             later.assert_not_called()
     assert result == error
     assert "_meta" not in _inject_meta(result, "pre_flight")
+
+
+# ─── RBAC scoping to the persona and exposed tools ───────────────────────────
+
+
+@pytest.fixture
+def server_tool_state():
+    """Set the startup persona and registered tools that check_compatibility reads.
+
+    Both are process-global and set by create_server, so restore them afterwards.
+    """
+    from kubeflow_mcp.core import policy
+
+    previous_persona = policy.get_effective_persona()
+    previous_tools = policy.get_registered_tools()
+
+    def _set(persona: str, tools: set[str] | None) -> None:
+        policy.set_effective_persona(persona)
+        policy.set_registered_tools(tools)
+
+    yield _set
+    policy.set_effective_persona(previous_persona)
+    policy.set_registered_tools(previous_tools)
+
+
+def _denying_auth_api() -> MagicMock:
+    mock_auth_api = MagicMock()
+    mock_denied = MagicMock()
+    mock_denied.status.allowed = False
+    mock_denied.status.reason = "denied"
+    mock_auth_api.create_self_subject_access_review.return_value = mock_denied
+    return mock_auth_api
+
+
+def _run_check_compatibility(mock_auth_api: MagicMock) -> dict[str, Any]:
+    with (
+        patch("kubeflow_mcp.trainer.api.planning._check_k8s_version"),
+        patch("kubeflow_mcp.trainer.api.planning._check_trainer_crd", return_value=True),
+        patch("kubeflow_mcp.trainer.api.planning._check_sdk_version"),
+        patch("kubeflow_mcp.trainer.api.planning._detect_platform", return_value="kubernetes"),
+        patch("kubeflow_mcp.common.utils.get_authorization_v1_api", return_value=mock_auth_api),
+        patch("kubeflow_mcp.common.utils.get_trainer_effective_namespace", return_value="test-ns"),
+    ):
+        return check_compatibility()
+
+
+@pytest.mark.parametrize(
+    ("persona", "available_tools", "expect_create"),
+    [
+        ("readonly", None, False),
+        ("platform-admin", {"list_training_jobs", "get_training_logs"}, False),
+        ("readonly", {"list_training_jobs", "fine_tune"}, True),
+        (None, None, True),
+    ],
+    ids=["readonly-persona", "no-creation-tool", "creation-tool-exposed", "unscoped"],
+)
+def test_check_rbac_permissions_scopes_create_check(persona, available_tools, expect_create):
+    checks: dict[str, Any] = {}
+    blockers: list[str] = []
+
+    _check_rbac_permissions(
+        checks,
+        blockers,
+        get_authorization_v1_api=_denying_auth_api,
+        namespace="kubeflow-test",
+        timeout=5,
+        persona=persona,
+        available_tools=available_tools,
+    )
+
+    create_blocker = (
+        "Missing permission: create trainer.kubeflow.org/trainjobs in namespace 'kubeflow-test'"
+    )
+    assert ("create_trainjobs" in checks["rbac"]) is expect_create
+    assert (create_blocker in blockers) is expect_create
+    # The list checks are required regardless of persona or exposed tools.
+    assert checks["rbac"]["list_trainjobs"]["status"] == "fail"
+    assert checks["rbac"]["list_clustertrainingruntimes"]["status"] == "fail"
+
+
+def test_check_compatibility_skips_create_when_no_creation_tool_exposed(server_tool_state):
+    server_tool_state("platform-admin", {"check_compatibility", "list_training_jobs"})
+
+    result = _run_check_compatibility(_denying_auth_api())
+
+    data = result["data"]
+    assert "create_trainjobs" not in data["checks"]["rbac"]
+    assert not any("create trainer.kubeflow.org/trainjobs" in b for b in data["blockers"])
+    assert data["checks"]["rbac"]["list_trainjobs"]["status"] == "fail"
+
+
+def test_check_compatibility_requires_create_when_creation_tool_exposed(server_tool_state):
+    server_tool_state("data-scientist", {"check_compatibility", "fine_tune"})
+
+    result = _run_check_compatibility(_denying_auth_api())
+
+    data = result["data"]
+    assert data["compatible"] is False
+    assert data["checks"]["rbac"]["create_trainjobs"]["status"] == "fail"
+    assert any("create trainer.kubeflow.org/trainjobs" in b for b in data["blockers"])
+
+
+def test_check_compatibility_readonly_persona_without_registered_tools(server_tool_state):
+    """Outside create_server there is no tool set, so the persona allowlist decides."""
+    server_tool_state("readonly", None)
+
+    result = _run_check_compatibility(_denying_auth_api())
+
+    data = result["data"]
+    assert "create_trainjobs" not in data["checks"]["rbac"]
+    assert not any("create trainer.kubeflow.org/trainjobs" in b for b in data["blockers"])
+
+
+def test_check_compatibility_with_create_allowed_and_creation_tool(server_tool_state):
+    server_tool_state("ml-engineer", {"check_compatibility", "run_custom_training"})
+    mock_auth_api = MagicMock()
+    mock_allowed = MagicMock()
+    mock_allowed.status.allowed = True
+    mock_auth_api.create_self_subject_access_review.return_value = mock_allowed
+
+    result = _run_check_compatibility(mock_auth_api)
+
+    data = result["data"]
+    assert data["compatible"] is True
+    assert data["checks"]["rbac"]["create_trainjobs"]["status"] == "pass"

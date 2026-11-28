@@ -184,8 +184,16 @@ different namespace.
 the Trainer version Role and RoleBinding at the namespace where Trainer is
 installed, and update `KUBEFLOW_SYSTEM_NAMESPACE` to match.
 
-**The pod is `Ready` but calls still fail** — `/ready` does not re-check Kubernetes
-dependencies. Check the server logs and verify cluster connectivity separately.
+**The pod is not `Ready` (`/ready` returns 503)** — `/ready` dynamically checks
+Kubernetes API reachability, Trainer CRD existence/version, and essential RBAC permissions.
+`create trainjobs` is only checked when a job-creation tool is exposed, and a forbidden
+CRD read is logged as a warning rather than failing readiness. If the pod fails
+readiness, check `kubectl logs <pod>` to see the specific diagnostic failure.
+
+**The pod is `Ready` but calls still fail** — `/ready` re-checks Kubernetes API
+reachability, the Trainer CRD, and essential RBAC on each probe, but it does not cover
+every permission or dependency a tool may need. Check the server logs and run
+`check_compatibility()` for a full report.
 
 **A service mesh blocks traffic to the pod** — the Deployment disables automatic
 sidecar injection. If the mesh enforces strict mTLS, remove that annotation and

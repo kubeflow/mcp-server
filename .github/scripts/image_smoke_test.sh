@@ -188,15 +188,20 @@ else
 fi
 
 # Test 6: /ready endpoint
+# The container runs with KUBECONFIG=/nonexistent, so readiness diagnostics cannot
+# reach Kubernetes. /ready must report not_ready (503) without leaking diagnostic
+# details. The ready (200) path is covered by the e2e rollout on Kind.
 _log "Test 6: ready-endpoint"
 ready_exit=0
-ready_resp=$(curl -sf --max-time 5 "http://localhost:${HOST_PORT}/ready" 2>&1) \
+ready_out=$(curl -s --max-time 5 -w '\n%{http_code}' "http://localhost:${HOST_PORT}/ready" 2>&1) \
     || ready_exit=$?
-if [ "$ready_exit" -eq 0 ] && \
-   printf '%s\n' "$ready_resp" | jq -e '.status == "ready"' > /dev/null 2>&1; then
-    _pass "ready-endpoint: $(printf '%s\n' "$ready_resp" | jq -c .)"
+ready_code=$(printf '%s\n' "$ready_out" | tail -n1)
+ready_resp=$(printf '%s\n' "$ready_out" | sed '$d')
+if [ "$ready_exit" -eq 0 ] && [ "$ready_code" = "503" ] && \
+   printf '%s\n' "$ready_resp" | jq -e '. == {"status": "not_ready"}' > /dev/null 2>&1; then
+    _pass "ready-endpoint: HTTP ${ready_code} $(printf '%s\n' "$ready_resp" | jq -c .)"
 else
-    _fail "ready-endpoint" "exit=${ready_exit}, response: ${ready_resp}"
+    _fail "ready-endpoint" "exit=${ready_exit}, http=${ready_code}, response: ${ready_resp}"
 fi
 
 # Test 7: MCP initialize

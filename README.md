@@ -104,6 +104,16 @@ Connect your MCP client to `http://localhost:8000/mcp`:
 
 For local clusters (e.g., Kind/Minikube) whose kubeconfig points to `127.0.0.1`, use `--network host` (Linux) or a kubeconfig targeting `host.docker.internal` so the container can reach the host API server. For in-cluster Kubernetes deployments, omit the kubeconfig mount (the pod uses its ServiceAccount credentials) and set `KUBEFLOW_MCP_ALLOWED_HOSTS` when exposing behind a Service or Ingress. Unauthenticated container probes are exposed at `GET /health` (liveness) and `GET /ready` (readiness).
 
+`/ready` returns HTTP 200 `{"status": "ready"}` only when configured client modules are loaded,
+packaged resources are present, and readiness diagnostics (Kubernetes API reachability,
+Trainer CRD registration/version, and essential RBAC permissions scoped to the tools the
+server exposes) succeed. TrainJob `create` is only required when a job-creation tool is
+registered, and a ServiceAccount that cannot read CRDs gets a warning rather than a 503. These checks are refreshed on each probe, so the pod recovers once cluster
+dependencies become available. On failure it returns HTTP 503 `{"status": "not_ready"}` and
+logs the details (check, resource, verb, namespace, category) to the server logs rather than
+exposing cluster internals over unauthenticated HTTP. For authenticated, on-demand checks at
+runtime, use the `check_compatibility()` tool.
+
 </details>
 
 ### Example Workflow
@@ -117,7 +127,7 @@ kubeflow-mcp serve --persona data-scientist
 ```text
 User: "Fine-tune gemma-2b on the alpaca dataset"
 
-Agent → check_compatibility()                      # K8s + Trainer CRD verified
+Agent → check_compatibility()                      # K8s + Trainer CRD + RBAC verified
 Agent → get_cluster_resources()                    # 4x A100 GPUs available
 Agent → estimate_resources("google/gemma-2b")      # Needs ~16GB GPU, 1x A100
 Agent → list_runtimes()                            # torchtune-gemma-2b found

@@ -16,6 +16,7 @@
 
 import logging
 import re
+from collections.abc import Collection
 from typing import Any
 
 from kubernetes.utils.quantity import parse_quantity
@@ -359,6 +360,59 @@ def _detect_platform(
         return "unknown"
 
 
+def _check_rbac_permissions(
+    checks: dict[str, dict[str, Any]],
+    blockers: list[str],
+    get_authorization_v1_api: Any,
+    namespace: str,
+    timeout: int,
+    *,
+    persona: str | None = None,
+    available_tools: Collection[str] | None = None,
+) -> None:
+    """Check RBAC permissions for core operations via SelfSubjectAccessReview.
+
+    ``persona`` and ``available_tools`` scope the checks the same way readiness does, so
+    ``create trainjobs`` is only required when the server exposes a job-creation tool.
+    """
+    from kubeflow_mcp.core.health import _check_rbac_permission, get_trainer_rbac_checks
+
+    rbac_results: dict[str, dict[str, Any]] = {}
+    try:
+        auth_api = get_authorization_v1_api()
+        for resource, verb, group, ns in get_trainer_rbac_checks(
+            namespace, persona=persona, available_tools=available_tools
+        ):
+            key = f"{verb}_{resource}"
+            diag = _check_rbac_permission(auth_api, resource, verb, group, ns, timeout)
+            if diag.status == "pass":
+                rbac_results[key] = {
+                    "status": "pass",
+                    "resource": resource,
+                    "verb": verb,
+                    "namespace": ns,
+                }
+            elif diag.status == "fail":
+                rbac_results[key] = {
+                    "status": "fail",
+                    "resource": resource,
+                    "verb": verb,
+                    "namespace": ns,
+                    "reason": diag.reason or "denied by RBAC policy",
+                }
+                scope = f"in namespace '{ns}'" if ns else "(cluster-scoped)"
+                blockers.append(f"Missing permission: {verb} {group}/{resource} {scope}")
+            else:
+                rbac_results[key] = {
+                    "status": "warn",
+                    "error": diag.reason or diag.message,
+                }
+    except Exception as e:
+        rbac_results["authorization_api"] = {"status": "warn", "error": str(e)}
+
+    checks["rbac"] = rbac_results
+
+
 def check_compatibility() -> dict[str, Any]:
     """Pre-flight check: verify K8s version, Trainer CRD, installed packages, and platform.
 
@@ -372,6 +426,8 @@ def check_compatibility() -> dict[str, Any]:
         3. **CRD API version** — ``{crd_version}`` must be served
         4. **Kubeflow SDK** — ``{sdk_version}`` required
         5. **Platform detection** — identifies platform from node labels
+        6. **RBAC permissions** — verifies ServiceAccount can list TrainJobs and runtimes, and
+           create TrainJobs when the server exposes a job-creation tool
 
     Returns:
         dict: Response containing:
@@ -393,8 +449,10 @@ def check_compatibility() -> dict[str, Any]:
     try:
         from kubeflow_mcp.common.utils import (
             K8S_TIMEOUT,
+            get_authorization_v1_api,
             get_core_v1_api,
             get_custom_objects_api,
+            get_trainer_effective_namespace,
             get_version_api,
         )
 
@@ -406,6 +464,26 @@ def check_compatibility() -> dict[str, Any]:
         crd_installed = _check_trainer_crd(checks, blockers, get_custom_objects_api, K8S_TIMEOUT)
         _check_sdk_version(checks, blockers)
         platform = _detect_platform(checks, recommendations, get_core_v1_api, K8S_TIMEOUT)
+
+        # Resolve the namespace locally so a missing kubeconfig is reported as a blocker
+        # instead of escaping to the outer handler and discarding earlier results.
+        try:
+            effective_ns = get_trainer_effective_namespace()
+        except Exception as e:
+            checks["rbac"] = {"namespace": {"status": "fail", "error": str(e)}}
+            blockers.append(f"Could not resolve Trainer namespace for RBAC checks: {e}")
+        else:
+            from kubeflow_mcp.core.policy import get_effective_persona, get_registered_tools
+
+            _check_rbac_permissions(
+                checks,
+                blockers,
+                get_authorization_v1_api,
+                effective_ns,
+                K8S_TIMEOUT,
+                persona=get_effective_persona(),
+                available_tools=get_registered_tools(),
+            )
 
         if not blockers and crd_installed:
             recommendations.append("Environment compatible — proceed with get_cluster_resources()")

@@ -44,6 +44,8 @@ from kubeflow_mcp.core.health import (
     HEALTH_TOOL_ANNOTATIONS,
     HEALTH_TOOL_DESCRIPTIONS,
     HEALTH_TOOLS,
+    ReadinessDiagnostic,
+    run_readiness_diagnostics,
 )
 from kubeflow_mcp.core.http_edge import register_probe_routes
 from kubeflow_mcp.core.logging import with_correlation_id
@@ -469,9 +471,11 @@ def create_server(  # noqa: C901
     if clients is None:
         clients = ["trainer"]
 
-    from kubeflow_mcp.core.policy import set_effective_persona
+    from kubeflow_mcp.core.policy import set_effective_persona, set_registered_tools
 
     set_effective_persona(persona)
+    # Clear any tool set left by an earlier create_server until this one is resolved.
+    set_registered_tools(None)
 
     # Single import per client — cache module refs for reuse
     loaded_modules: dict[str, Any] = {}
@@ -600,6 +604,23 @@ def create_server(  # noqa: C901
 
     # Register MCP resources from client modules (all resources, always)
     resources_ready = register_resources(mcp, loaded_modules)
-    register_probe_routes(mcp, is_ready=clients_ready and resources_ready)
+
+    internal_ready = clients_ready and resources_ready
+
+    # Readiness RBAC must reflect the tools actually exposed after persona/policy filtering.
+    registered_tool_names = frozenset(f.__name__ for f in allowed_funcs)
+    # Publish the same set so tool-side RBAC checks (check_compatibility) agree with /ready.
+    set_registered_tools(registered_tool_names)
+
+    def _check_readiness() -> tuple[bool, list[ReadinessDiagnostic] | None]:
+        return run_readiness_diagnostics(
+            clients=clients, persona=persona, available_tools=registered_tool_names
+        )
+
+    register_probe_routes(
+        mcp,
+        is_ready=internal_ready,
+        readiness_check=_check_readiness if internal_ready else None,
+    )
 
     return mcp
