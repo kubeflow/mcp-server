@@ -34,7 +34,7 @@ jobs:
             - If you'd like to contribute to this issue, check out our [Contributing Guide](https://github.com/kubeflow/mcp-server/blob/main/CONTRIBUTING.md) for repo-specific guidelines and the [Kubeflow Contributor Guide](https://www.kubeflow.org/docs/about/contributing/) for general community standards
 
             **Join the community:**
-            - **Slack**: Join [#kubeflow-wg-agents](https://app.slack.com/client/T08PSQ7BQ/C0BQQRSPK6Z) and [#kubeflow-mcp-server](https://app.slack.com/client/T08PSQ7BQ/C0BSRBPNDHP) on [CNCF Slack](https://www.kubeflow.org/docs/about/community/#kubeflow-slack-channels)
+            - **Slack**: Join [#kubeflow-mcp-server](https://app.slack.com/client/T08PSQ7BQ/C0BSRBPNDHP) on [CNCF Slack](https://www.kubeflow.org/docs/about/community/#kubeflow-slack-channels)
             - **Meetings**: Check the [Kubeflow WG Agents Meeting Notes](https://bit.ly/kubeflow-mcp-wg-notes)
 
             Feel free to ask questions in the comments if you need any help or clarification!
@@ -51,7 +51,7 @@ jobs:
             - Our team will review your PR soon! cc @kubeflow/kubeflow-sdk-team
 
             **Join the community:**
-            - **Slack**: Join [#kubeflow-wg-agents](https://app.slack.com/client/T08PSQ7BQ/C0BQQRSPK6Z) and [#kubeflow-mcp-server](https://app.slack.com/client/T08PSQ7BQ/C0BSRBPNDHP) on [CNCF Slack](https://www.kubeflow.org/docs/about/community/#kubeflow-slack-channels)
+            - **Slack**: Join [#kubeflow-mcp-server](https://app.slack.com/client/T08PSQ7BQ/C0BSRBPNDHP) on [CNCF Slack](https://www.kubeflow.org/docs/about/community/#kubeflow-slack-channels)
             - **Meetings**: Check the [Kubeflow WG Agents Meeting Notes](https://bit.ly/kubeflow-mcp-wg-notes)
 
             Feel free to ask questions in the comments if you need any help or clarification!
