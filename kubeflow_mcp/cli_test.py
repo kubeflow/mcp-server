@@ -669,6 +669,19 @@ def test_serve_reports_invalid_clients_environment_cleanly(monkeypatch):
     assert "Traceback" not in result.output
 
 
+def test_serve_reports_invalid_yaml_clients_cleanly(tmp_path, monkeypatch):
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("server:\n  clients: trainer\n")
+    monkeypatch.setattr("kubeflow_mcp.core.config._find_config_file", lambda: config_file)
+    monkeypatch.delenv("KUBEFLOW_MCP_CLIENTS", raising=False)
+
+    result = CliRunner().invoke(cli, ["serve"])
+
+    assert result.exit_code == 1
+    assert "server.clients in configuration must be a list of strings" in result.output
+    assert "Traceback" not in result.output
+
+
 def test_clients_help_lists_pipelines_with_spacing():
     result = CliRunner().invoke(cli, ["serve", "--help"], terminal_width=200)
 
