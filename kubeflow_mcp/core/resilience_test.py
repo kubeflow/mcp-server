@@ -300,6 +300,16 @@ class TestRateLimiter:
         rl = RateLimiter(rate=100.0, capacity=10.0)
         assert rl.acquire() is True
 
+    def test_fractional_capacity_supports_fractional_token_costs(self, clock):
+        rl = RateLimiter(rate=0.5, capacity=0.5)
+
+        assert rl.acquire(tokens=0.25) is True
+        assert rl.acquire(tokens=0.25) is True
+        assert rl.acquire(tokens=0.25) is False
+
+        clock(0.5)
+        assert rl.acquire(tokens=0.25) is True
+
     @pytest.mark.parametrize(
         ("rate", "capacity"),
         [(0.0, 1.0), (-1.0, 1.0), (1.0, 0.0), (1.0, -1.0)],

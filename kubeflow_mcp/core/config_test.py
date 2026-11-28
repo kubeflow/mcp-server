@@ -55,11 +55,31 @@ def test_load_config_defaults_when_no_file():
 
 @pytest.mark.parametrize(
     ("rate_limit", "rate_capacity"),
-    [(0.0, 20.0), (-1.0, 20.0), (10.0, 0.0), (10.0, -1.0)],
+    [
+        (0.0, 20.0),
+        (-1.0, 20.0),
+        (10.0, 0.0),
+        (10.0, -1.0),
+        (10.0, 0.5),
+        (10.0, 0.99),
+    ],
 )
-def test_resilience_config_rejects_non_positive_values(rate_limit, rate_capacity):
+def test_resilience_config_rejects_invalid_rate_values(rate_limit, rate_capacity):
     with pytest.raises(ValidationError):
         ResilienceConfig(rate_limit=rate_limit, rate_capacity=rate_capacity)
+
+
+def test_resilience_config_allows_fractional_rate_limit():
+    cfg = ResilienceConfig(rate_limit=0.5, rate_capacity=1.0)
+    assert cfg.rate_limit == 0.5
+    assert cfg.rate_capacity == 1.0
+
+
+def test_load_config_rejects_sub_one_rate_capacity(monkeypatch):
+    monkeypatch.setenv("KUBEFLOW_MCP_RATE_CAPACITY", "0.5")
+    with patch("kubeflow_mcp.core.config._find_config_file", return_value=None):
+        with pytest.raises(ValidationError):
+            load_config()
 
 
 @pytest.mark.parametrize(
