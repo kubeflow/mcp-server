@@ -47,7 +47,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # FastMCP checks ``exp`` only when the token has one and never looks at ``nbf``,
-# so a token without ``exp`` would never expire. Allow a minute of clock skew.
+# so a token without ``exp`` would never expire. The minute of clock skew only
+# applies to ``nbf`` and ``iat``: FastMCP rejects a token whose ``exp`` has passed,
+# with no leeway, before this check runs.
 _TIME_CLAIMS = JWTClaimsRegistry(leeway=60, exp={"essential": True})
 
 
@@ -105,10 +107,22 @@ def build_auth_provider(auth_config: AuthConfig) -> TokenVerifier | None:
     """Build the appropriate auth provider from config, or None if auth is disabled.
 
     Raises:
-        ValueError: ``jwks_uri`` is set without both ``issuer`` and ``audience``.
+        ValueError: ``jwks_uri`` is only whitespace, or is set without both
+            ``issuer`` and ``audience`` (a value that is only whitespace counts
+            as missing).
     """
     if auth_config.jwks_uri:
-        if not (auth_config.issuer and auth_config.audience):
+        # A secret created with --from-file ends in a newline, which would make
+        # every JWKS fetch fail.
+        jwks_uri = auth_config.jwks_uri.strip()
+        if not jwks_uri:
+            raise ValueError(
+                "KUBEFLOW_MCP_JWKS_URI (auth.jwks_uri in the config file) is blank. "
+                "Set it to your identity provider's JWKS URL, or unset it."
+            )
+        issuer = (auth_config.issuer or "").strip()
+        audience = (auth_config.audience or "").strip()
+        if not (issuer and audience):
             raise ValueError(
                 "JWT auth needs an issuer and an audience: set KUBEFLOW_MCP_JWT_ISSUER and "
                 "KUBEFLOW_MCP_JWT_AUDIENCE (or auth.issuer and auth.audience in the config "
@@ -118,14 +132,14 @@ def build_auth_provider(auth_config: AuthConfig) -> TokenVerifier | None:
 
         logger.info(
             "HTTP auth: JWT verification via %s (issuer=%s, audience=%s)",
-            auth_config.jwks_uri,
-            auth_config.issuer,
-            auth_config.audience,
+            jwks_uri,
+            issuer,
+            audience,
         )
         return StrictJWTVerifier(
-            jwks_uri=auth_config.jwks_uri,
-            issuer=auth_config.issuer,
-            audience=auth_config.audience,
+            jwks_uri=jwks_uri,
+            issuer=issuer,
+            audience=audience,
         )
 
     if auth_config.auth_token:
