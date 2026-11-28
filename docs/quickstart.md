@@ -393,4 +393,4 @@ For GPU memory sizing, batch size guidance, and additional scheduling parameters
 - [ARCHITECTURE.md](../ARCHITECTURE.md) — security model, trust boundaries, RBAC YAML, hardening checklist
 - [examples/kubernetes/](../examples/kubernetes/) — complete in-cluster deployment with manifests
 - [CONTRIBUTING.md](../CONTRIBUTING.md) — development workflow, running tests, adding a new client module
-- [Kubeflow Slack](https://www.kubeflow.org/docs/about/community/#kubeflow-slack-channels) — `#kubeflow-ml-experience` for questions
+- [Kubeflow Slack](https://www.kubeflow.org/docs/about/community/#kubeflow-slack-channels) — [#kubeflow-mcp-server](https://app.slack.com/client/T08PSQ7BQ/C0BSRBPNDHP) for questions
