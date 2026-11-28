@@ -20,6 +20,12 @@ from starlette.testclient import TestClient
 
 from kubeflow_mcp.core.health import ReadinessDiagnostic
 from kubeflow_mcp.core.http_edge import register_probe_routes
+from kubeflow_mcp.core.policy import (
+    get_effective_persona,
+    get_registered_tools,
+    set_effective_persona,
+    set_registered_tools,
+)
 from kubeflow_mcp.core.server import create_server
 
 
@@ -135,6 +141,27 @@ def test_create_server_readiness_uses_registered_tools() -> None:
     available = mock_diag.call_args.kwargs["available_tools"]
     assert "list_training_jobs" in available
     assert "fine_tune" not in available
+
+
+def test_create_server_publishes_registered_tools_for_tool_side_rbac() -> None:
+    """check_compatibility reads the same tool set that readiness receives."""
+    previous_persona = get_effective_persona()
+    previous_tools = get_registered_tools()
+    try:
+        with patch(
+            "kubeflow_mcp.core.server.run_readiness_diagnostics",
+            return_value=(True, []),
+        ) as mock_diag:
+            mcp = create_server(persona="readonly")
+            with TestClient(mcp.http_app(transport="streamable-http")) as client:
+                client.get("/ready")
+
+        published = get_registered_tools()
+        assert published == mock_diag.call_args.kwargs["available_tools"]
+        assert "fine_tune" not in published
+    finally:
+        set_effective_persona(previous_persona)
+        set_registered_tools(previous_tools)
 
 
 def test_create_server_readiness_fails_without_leaking_diagnostics(

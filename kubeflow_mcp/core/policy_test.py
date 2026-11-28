@@ -30,9 +30,11 @@ from kubeflow_mcp.core.policy import (
     get_allowed_namespaces,
     get_allowed_tools,
     get_effective_persona,
+    get_registered_tools,
     is_read_only,
     reload_policy,
     set_effective_persona,
+    set_registered_tools,
 )
 
 # ─── Effective persona ──────────────────────────────────────────────────────
@@ -47,6 +49,17 @@ def test_set_and_get_persona():
     set_effective_persona("platform-admin")
     assert get_effective_persona() == "platform-admin"
     set_effective_persona("readonly")
+
+
+def test_set_and_get_registered_tools():
+    previous = get_registered_tools()
+    try:
+        set_registered_tools(["list_training_jobs", "fine_tune"])
+        assert get_registered_tools() == frozenset({"list_training_jobs", "fine_tune"})
+        set_registered_tools(None)
+        assert get_registered_tools() is None
+    finally:
+        set_registered_tools(previous)
 
 
 # ─── expand / matches helpers ────────────────────────────────────────────────

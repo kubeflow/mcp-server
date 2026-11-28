@@ -52,6 +52,7 @@ import functools
 import logging
 import reprlib
 import threading
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -190,6 +191,23 @@ def set_effective_persona(persona: str) -> None:
 def get_effective_persona() -> str:
     """Return the persona resolved at server startup."""
     return _effective_persona
+
+
+# Tools the server actually exposes after persona, policy and read_only filtering.
+# None means no server has published its tool set (e.g. a tool called outside create_server),
+# so callers fall back to the persona allowlist.
+_registered_tools: frozenset[str] | None = None
+
+
+def set_registered_tools(tools: Iterable[str] | None) -> None:
+    """Store the tool names registered by create_server (``None`` clears it)."""
+    global _registered_tools
+    _registered_tools = None if tools is None else frozenset(tools)
+
+
+def get_registered_tools() -> frozenset[str] | None:
+    """Return the tool names registered at server startup, or ``None`` if unknown."""
+    return _registered_tools
 
 
 def _find_policy_file() -> Path | None:
