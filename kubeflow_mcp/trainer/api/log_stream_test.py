@@ -90,7 +90,7 @@ def test_utf8_and_unicode_line_endings(chunk_size, monkeypatch):
         (b"one\ntwo\n", ["one", "two"], False),
         (b"one\ntwo\nx", ["one", "two"], True),
         (b"one\nlong-line-without-a-newline", ["one"], True),
-        (b"x" * 100000, [], True),
+        pytest.param(b"x" * 100000, [], True, id="oversized-line"),
         ("one\n🚀🚀".encode(), ["one"], True),
     ],
 )
