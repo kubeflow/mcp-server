@@ -623,6 +623,40 @@ def test_serve_otel_endpoint_cli_overrides_config():
     )
 
 
+def test_serve_otel_endpoint_cli_overrides_malformed_env():
+    from kubeflow_mcp.core.config import ObservabilityConfig
+
+    config = _make_default_config()
+    config.observability = ObservabilityConfig(otel_endpoint="http://[")
+    mock_server, _, modules_patch = _make_serve_mocks(config=config)
+    fake_telemetry_mod = modules_patch["kubeflow_mcp.core.telemetry"]
+
+    with patch.dict(sys.modules, modules_patch):
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            ["serve", "--otel-endpoint", "http://valid-endpoint:4318/v1/traces"],
+        )
+
+    assert result.exit_code == 0
+    fake_telemetry_mod.setup_tracing.assert_called_once_with(
+        endpoint="http://valid-endpoint:4318/v1/traces"
+    )
+
+
+def test_serve_reports_invalid_otel_endpoint_cleanly():
+    _, _, modules_patch = _make_serve_mocks()
+    setup_tracing = modules_patch["kubeflow_mcp.core.telemetry"].setup_tracing
+    setup_tracing.side_effect = ValueError("Invalid OpenTelemetry endpoint")
+
+    with patch.dict(sys.modules, modules_patch):
+        result = CliRunner().invoke(cli, ["serve"])
+
+    assert result.exit_code == 1
+    assert "Invalid OpenTelemetry endpoint" in result.output
+    assert "Traceback" not in result.output
+
+
 def test_serve_reports_invalid_log_level_cleanly():
     _, mock_create_server, modules_patch = _make_serve_mocks()
     setup_logging = modules_patch["kubeflow_mcp.core.logging"].setup_logging

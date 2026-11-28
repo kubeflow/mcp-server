@@ -64,6 +64,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from kubeflow_mcp.core.telemetry import otlp_endpoint_from_env
+
 logger = logging.getLogger(__name__)
 
 
@@ -163,6 +165,7 @@ class ObservabilityConfig(BaseModel):
     """Observability configuration."""
 
     otel_endpoint: str | None = Field(default=None)
+    is_traces_env: bool = Field(default=False)
 
 
 class Config(BaseModel):
@@ -283,11 +286,22 @@ def load_config(config_path: Path | None = None) -> Config:
     )
 
     observability_file = file_config.get("observability", {})
+    traces_env = os.getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "").strip()
+    is_traces_env = False
+    if traces_env:
+        otel_endpoint = traces_env
+        is_traces_env = True
+    else:
+        try:
+            otel_endpoint = otlp_endpoint_from_env("traces")
+        except ValueError:
+            otel_endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "").strip() or None
+        if not otel_endpoint:
+            otel_endpoint = observability_file.get("otel_endpoint")
+
     observability = ObservabilityConfig(
-        otel_endpoint=os.getenv(
-            "OTEL_EXPORTER_OTLP_ENDPOINT",
-            observability_file.get("otel_endpoint"),
-        )
+        otel_endpoint=otel_endpoint,
+        is_traces_env=is_traces_env,
     )
 
     trainer_file = file_config.get("trainer", {})
