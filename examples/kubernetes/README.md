@@ -13,8 +13,17 @@ clients with a shared bearer token; to use your identity provider instead, see
 
 Requires a cluster with Kubeflow Trainer installed, `kubectl`, and an existing
 namespace — the example uses `kubeflow-user-example-com`, the Profile namespace a
-standard Kubeflow install creates. The bearer token is not part of `manifests.yaml`,
-so create it first:
+standard Kubeflow install creates.
+
+The Spark session tools are optional. To use them, also install the
+[Spark Operator](https://github.com/kubeflow/spark-operator), which adds the `SparkConnect`
+CRD and provisions the sessions, and add `spark` to `KUBEFLOW_MCP_CLIENTS` in the
+Deployment (the example loads only `trainer`). The published image is built without the
+`spark` extra, so also use an image that has it, for example one built from this repo's
+`Dockerfile` with `--extra spark` added to its `uv sync` lines. The Role already grants
+`sparkconnects`. TrainJob tools need none of this.
+
+The bearer token is not part of `manifests.yaml`, so create it first:
 
 ```bash
 NAMESPACE=kubeflow-user-example-com
@@ -49,13 +58,16 @@ kubectl rollout restart deploy/kubeflow-mcp -n "$NAMESPACE"
 |---|---|
 | `ServiceAccount/kubeflow-mcp` | Identity the server uses against the Kubernetes API |
 | `ClusterRole/kubeflow-mcp-read` | Read-only: `ClusterTrainingRuntime`, nodes, namespaces, CRDs |
-| `Role/kubeflow-mcp-trainjobs` | Full TrainJob lifecycle, in this namespace only |
+| `Role/kubeflow-mcp-trainjobs` | Full TrainJob and Spark session (`SparkConnect`) lifecycle, in this namespace only |
 | `Role/kubeflow-mcp-trainer-version` | Read of the single `kubeflow-trainer-public` ConfigMap in `kubeflow-system`, so the SDK can report the Trainer control-plane version |
 | `Deployment/kubeflow-mcp` | The server, HTTP transport on port 8000 |
 | `Service/kubeflow-mcp` | ClusterIP, reachable at `kubeflow-mcp:8000` in-namespace |
 
-The server can create and delete TrainJobs in its own namespace, and can only read
-anything outside it.
+The server can create and delete TrainJobs and Spark sessions in its own namespace, and
+can only read anything outside it. `ClusterTrainingRuntime` stays read-only because the
+runtime write tools (`create_runtime`, `patch_runtime`, `delete_runtime`) are
+`platform-admin` only; see [RBAC Configuration](../../ARCHITECTURE.md#rbac-configuration)
+for that role.
 
 ## Verify
 

@@ -59,6 +59,10 @@ rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["create", "delete"]
+  # Spark: list_spark_sessions, get_spark_session, create_spark_session, delete_spark_session
+  - apiGroups: ["sparkoperator.k8s.io"]
+    resources: ["sparkconnects"]
+    verbs: ["get", "list", "create", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
