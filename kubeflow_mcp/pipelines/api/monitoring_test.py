@@ -571,3 +571,93 @@ class TestKfpV2LogsLiveShape:
         # Two pod-less DAG nodes take no share: each read pod gets a third, not a fifth.
         for pod in read:
             assert len(pod["logs"]) >= monitoring.MAX_LOG_CHARS // 3
+
+    def test_pod_log_reads_are_byte_bounded_and_streamed(self, kfp_client, core_api):
+        kfp_client.get_run.return_value = make_run(tasks=[make_task("t", pod="p1")])
+
+        released = []
+
+        class _RawResp:
+            def __init__(self, data: bytes) -> None:
+                self.data = data
+
+            def release_conn(self) -> None:
+                released.append(True)
+
+        # Include a truncated UTF-8 sequence at the boundary to verify lenient decode.
+        core_api.read_namespaced_pod_log.side_effect = [
+            ApiException(400),
+            _RawResp(b"tail line\n\xc3"),
+        ]
+
+        data = get_pipeline_logs(RUN_ID, tail_lines=10)["data"]
+
+        assert "tail line" in data["pods"][0]["logs"]
+        assert released == [True]
+        for call in core_api.read_namespaced_pod_log.call_args_list:
+            assert call.kwargs["limit_bytes"] == monitoring.MAX_LOG_BYTES
+            assert call.kwargs["_preload_content"] is False
+        assert "container" not in core_api.read_namespaced_pod_log.call_args_list[1].kwargs
+
+    def test_pod_log_read_shrinks_tail_window_to_keep_newest_lines(
+        self, kfp_client, core_api, monkeypatch
+    ):
+        kfp_client.get_run.return_value = make_run(tasks=[make_task("t", pod="p1")])
+        monkeypatch.setattr(monitoring, "MAX_LOG_BYTES", 25)
+        lines = [f"old line {i}" for i in range(10)] + ["ERROR: newest line"]
+        tails = []
+
+        class _RawResp:
+            def __init__(self, data: bytes) -> None:
+                self.data = data
+
+            def release_conn(self) -> None:
+                pass
+
+        def api_server(**kw):
+            tails.append(kw["tail_lines"])
+            payload = "\n".join(lines[-kw["tail_lines"] :]).encode("utf-8")[: kw["limit_bytes"]]
+            return _RawResp(payload)
+
+        core_api.read_namespaced_pod_log.side_effect = api_server
+
+        data = get_pipeline_logs(RUN_ID, tail_lines=10)["data"]
+
+        assert tails == [10, 2, 1]
+        assert data["pods"][0]["logs"] == "ERROR: newest line"
+
+    def test_pod_log_read_reports_incomplete_tail_when_single_line_exceeds_byte_cap(
+        self, kfp_client, core_api, monkeypatch
+    ):
+        kfp_client.get_run.return_value = make_run(tasks=[make_task("t", pod="p1")])
+        monkeypatch.setattr(monitoring, "MAX_LOG_BYTES", 32)
+        full_line = b"prefix-" + b"x" * 50 + b"-OOMKilled"
+        closed = []
+
+        class _StreamResp:
+            def __init__(self, payload: bytes) -> None:
+                self._buf = payload
+                self._pos = 0
+
+            def read(self, amt: int) -> bytes:
+                chunk = self._buf[self._pos : self._pos + amt]
+                self._pos += len(chunk)
+                return chunk
+
+            def close(self) -> None:
+                closed.append("close")
+
+            def release_conn(self) -> None:
+                closed.append("release")
+
+        core_api.read_namespaced_pod_log.side_effect = lambda **kw: _StreamResp(
+            full_line[: kw["limit_bytes"]]
+        )
+
+        data = get_pipeline_logs(RUN_ID, tail_lines=1)["data"]
+
+        logs = data["pods"][0]["logs"]
+        assert "incomplete tail" in logs
+        assert "32 byte read limit" in logs
+        assert "OOMKilled" not in logs
+        assert closed == ["close", "release"]

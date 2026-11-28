@@ -42,6 +42,9 @@ MAX_TAIL_LINES = 1000
 MAX_LOG_PODS = 10
 # Total characters of log text across all pods in one response.
 MAX_LOG_CHARS = 10_000
+# Server-side byte cap per pod log read so a single long line cannot load an
+# unbounded payload into memory before truncate_log_output() runs.
+MAX_LOG_BYTES = 1024 * 1024
 # Argo, which runs KFP tasks, puts the user's step in the "main" container.
 _STEP_CONTAINER = "main"
 # KFP annotates launcher (user step executor) pods with this runtime role.
@@ -258,15 +261,76 @@ def get_pipeline_run(run_id: str, namespace: str | None = None) -> dict[str, Any
         return pipelines_error(e, f"get pipeline run '{run_id}'").model_dump()
 
 
+def _decode_pod_log_response(response: Any, limit_bytes: int) -> tuple[str, int]:
+    """Decode a K8s pod log response (string mock, stream, or raw HTTPResponse)."""
+    if response is None:
+        return "", 0
+    if isinstance(response, str):
+        return response, len(response.encode("utf-8"))
+    if isinstance(response, bytes):
+        return response.decode("utf-8", errors="replace"), len(response)
+    try:
+        read_fn = getattr(response, "read", None)
+        if callable(read_fn):
+            chunks: list[bytes] = []
+            total = 0
+            while total < limit_bytes:
+                chunk = read_fn(min(8192, limit_bytes - total))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+            body = b"".join(chunks)
+        else:
+            body = response.data or b""
+    finally:
+        close = getattr(response, "close", None)
+        if callable(close):
+            close()
+        release_conn = getattr(response, "release_conn", None)
+        if callable(release_conn):
+            release_conn()
+    return body.decode("utf-8", errors="replace"), len(body)
+
+
+def _read_container_log(
+    api: Any,
+    pod: str,
+    namespace: str,
+    tail_lines: int,
+    limit_bytes: int,
+    container: str | None = None,
+) -> str:
+    """Read the end of one container's log, bounded server-side by ``limit_bytes``."""
+    lines = tail_lines
+    while True:
+        kwargs: dict[str, Any] = {
+            "name": pod,
+            "namespace": namespace,
+            "tail_lines": lines,
+            "limit_bytes": limit_bytes,
+            "_preload_content": False,
+            "_request_timeout": K8S_TIMEOUT,
+        }
+        if container is not None:
+            kwargs["container"] = container
+        response = api.read_namespaced_pod_log(**kwargs)
+        text, byte_len = _decode_pod_log_response(response, limit_bytes)
+        if byte_len < limit_bytes:
+            return text
+        if lines == 1:
+            return (
+                f"{text}\n... (incomplete tail: single log line reached "
+                f"{limit_bytes} byte read limit; suffix omitted)"
+            )
+        lines = max(1, lines // 4)
+
+
 def _read_pod_log(pod: str, namespace: str, tail_lines: int) -> str:
     api = get_core_v1_api()
     try:
-        return api.read_namespaced_pod_log(
-            name=pod,
-            namespace=namespace,
-            container=_STEP_CONTAINER,
-            tail_lines=tail_lines,
-            _request_timeout=K8S_TIMEOUT,
+        return _read_container_log(
+            api, pod, namespace, tail_lines, MAX_LOG_BYTES, container=_STEP_CONTAINER
         )
     except Exception as e:
         # Pods without a "main" container (e.g. KFP driver pods) answer 400; read the
@@ -278,9 +342,7 @@ def _read_pod_log(pod: str, namespace: str, tail_lines: int) -> str:
             pod,
             _STEP_CONTAINER,
         )
-        return api.read_namespaced_pod_log(
-            name=pod, namespace=namespace, tail_lines=tail_lines, _request_timeout=K8S_TIMEOUT
-        )
+        return _read_container_log(api, pod, namespace, tail_lines, MAX_LOG_BYTES)
 
 
 def _read_pod_logs(
